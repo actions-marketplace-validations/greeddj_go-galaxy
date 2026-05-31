@@ -9,9 +9,9 @@ import (
 
 // ArtifactFile describes a cached artifact file on disk.
 type ArtifactFile struct {
-	Path    string
 	Cleanup func()
 	Meta    map[string]string
+	Path    string
 }
 
 // ArtifactStore provides access to cached collection artifacts.

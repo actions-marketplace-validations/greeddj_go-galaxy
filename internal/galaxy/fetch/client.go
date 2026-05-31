@@ -1,6 +1,7 @@
 package fetch
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"time"
@@ -10,6 +11,20 @@ import (
 
 // New creates a configured HTTP client with reasonable defaults.
 func New(timeout time.Duration) *http.Client {
+	return newClient(timeout, false)
+}
+
+// NewOffline creates an HTTP client whose transport rejects every request
+// with helpers.ErrOfflineMode. Cache reads that don't go through the client
+// continue to work; any code path that actually needs the network fails fast.
+func NewOffline(timeout time.Duration) *http.Client {
+	return newClient(timeout, true)
+}
+
+func newClient(timeout time.Duration, offline bool) *http.Client {
+	if offline {
+		return &http.Client{Timeout: timeout, Transport: offlineTransport{}}
+	}
 	return &http.Client{
 		Timeout: timeout,
 		Transport: &http.Transport{
@@ -26,4 +41,11 @@ func New(timeout time.Duration) *http.Client {
 			ExpectContinueTimeout: helpers.FetchExpectContinueTimeout,
 		},
 	}
+}
+
+type offlineTransport struct{}
+
+// RoundTrip rejects every request with ErrOfflineMode.
+func (offlineTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("%w: %s %s", helpers.ErrOfflineMode, req.Method, req.URL)
 }

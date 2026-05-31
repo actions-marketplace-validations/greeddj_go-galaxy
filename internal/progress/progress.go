@@ -2,6 +2,7 @@ package progress
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -21,14 +22,16 @@ const (
 
 // Progress renders CLI progress output with optional spinner.
 type Progress struct {
+	s *spinner.Spinner
 	v bool
 	q bool
-	s *spinner.Spinner
 }
 
 // New creates a Progress printer configured for verbose/quiet output.
+// The spinner is also suppressed when stdout is not a TTY (typical in CI),
+// otherwise raw ANSI escapes would clutter logs.
 func New(verbose, quiet bool) *Progress {
-	if quiet || verbose {
+	if quiet || verbose || !isStdoutTerminal() {
 		return &Progress{
 			v: verbose,
 			q: quiet,
@@ -46,6 +49,15 @@ func New(verbose, quiet bool) *Progress {
 	}
 	p.s.Start()
 	return p
+}
+
+// isStdoutTerminal reports whether stdout is connected to a terminal.
+func isStdoutTerminal() bool {
+	fi, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
 }
 
 // Okf prints a success message with a colored marker. For standalone use.

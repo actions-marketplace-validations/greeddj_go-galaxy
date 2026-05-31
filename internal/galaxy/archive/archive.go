@@ -34,7 +34,13 @@ func ExtractTarGz(tarGzFile, dstDir string) error {
 		_ = file.Close()
 	}()
 
-	uncompressedStream, err := pgzip.NewReader(file)
+	return ExtractTarGzStream(file, dstDir)
+}
+
+// ExtractTarGzStream extracts a tar.gz stream into dstDir with safety checks.
+// It does not close r.
+func ExtractTarGzStream(r io.Reader, dstDir string) error {
+	uncompressedStream, err := pgzip.NewReader(r)
 	if err != nil {
 		return fmt.Errorf("failed to create gzip reader: %w", err)
 	}

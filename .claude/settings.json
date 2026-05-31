@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go test *)",
+      "Bash(go build *)",
+      "Bash(go vet *)",
+      "Bash(go tool staticcheck *)",
+      "Bash(go tool govulncheck *)",
+      "Bash(go tool fieldalignment *)",
+      "Bash(go tool cover *)",
+      "Bash(go version)",
+      "Bash(just lint)",
+      "Bash(just check)",
+      "Bash(just test)",
+      "Bash(just deps)",
+      "Bash(just fix)",
+      "Bash(just build)",
+      "Bash(just build_linux)",
+      "Read(//Users/das/.cache/go-galaxy/**)",
+      "Bash(./dist/go-galaxy install *)",
+      "Bash(echo \"---exit: $?\")",
+      "Bash(echo \"exit: $?\")",
+      "Bash(./dist/go-galaxy outdated *)",
+      "Bash(sed 's/community.general\\\\n version: 12.6.0/community.general\\\\n version: 9.0.0/' /tmp/test-lock-10.yml)",
+      "Read(//tmp/**)"
+    ],
+    "deny": [
+      "Bash(rm *)",
+      "Bash(git push *)"
+    ]
+  }
+}

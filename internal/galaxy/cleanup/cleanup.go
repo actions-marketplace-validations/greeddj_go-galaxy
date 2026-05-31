@@ -13,6 +13,7 @@ import (
 	cacheBackend "github.com/greeddj/go-galaxy/internal/cache"
 	cacheManager "github.com/greeddj/go-galaxy/internal/galaxy/cache"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
+	"github.com/greeddj/go-galaxy/internal/galaxy/extracted"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
@@ -71,6 +72,7 @@ func Start(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error 
 	if err != nil {
 		return err
 	}
+	sweepExtractedStore(cfg, state.store, reachable, installedByKey)
 	return finalizeCleanup(ctx, cfg, runtime, state.backend, state.store, removed)
 }
 
@@ -155,13 +157,13 @@ func removeUnused(
 		}
 		removed++
 		if cfg.DryRun {
-			runtime.Output.Printf("🧹 remove %s", key)
+			runtime.Output.Printf("🧹 would remove %s", key)
 			continue
 		}
 		if err := removeInstalled(ctx, inst, backend.Artifacts()); err != nil {
 			return removed, err
 		}
-		runtime.Output.Printf("🧹 remove %s", key)
+		runtime.Output.Printf("🧹 removed %s", key)
 		if st != nil {
 			st.DeleteInstalled(key)
 			st.DeleteGraph(key)
@@ -380,4 +382,33 @@ func removeInstalled(ctx context.Context, inst installedCollection, artifacts ca
 func artifactKey(namespace, name, version string) string {
 	filename := fmt.Sprintf("%s-%s-%s.tar.gz", namespace, name, version)
 	return url.QueryEscape(filename)
+}
+
+// sweepExtractedStore drops content-addressable extracted entries whose
+// SHA is no longer referenced by any reachable installed collection.
+func sweepExtractedStore(
+	cfg *config.Config,
+	st *store.Store,
+	reachable map[string]bool,
+	installedByKey map[string]installedCollection,
+) {
+	if cfg == nil || cfg.DryRun || cfg.CacheDir == "" {
+		return
+	}
+	store := extracted.NewStore(cfg.CacheDir)
+	if store == nil {
+		return
+	}
+	keep := make(map[string]bool)
+	for key := range installedByKey {
+		if !reachable[key] {
+			continue
+		}
+		entry, ok := st.GetInstalled(key)
+		if !ok || entry.ArtifactSHA256 == "" {
+			continue
+		}
+		keep[entry.ArtifactSHA256] = true
+	}
+	_ = store.Sweep(keep)
 }

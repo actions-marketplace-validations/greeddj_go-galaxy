@@ -10,22 +10,26 @@ import (
 	cacheBackend "github.com/greeddj/go-galaxy/internal/cache"
 	cacheManager "github.com/greeddj/go-galaxy/internal/galaxy/cache"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
+	"github.com/greeddj/go-galaxy/internal/galaxy/extracted"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
+	"github.com/greeddj/go-galaxy/internal/galaxy/lockfile"
+	"github.com/greeddj/go-galaxy/internal/galaxy/metrics"
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
 )
 
 type installState struct {
-	backend cacheManager.Backend
-	store   *store.Store
-	release func() error
+	backend      cacheManager.Backend
+	store        *store.Store
+	release      func() error
+	extractStore *extracted.Store
 }
 
 type installPlan struct {
 	collections map[string]collection
 	graph       map[string][]string
-	levels      [][]string
 	prefetch    *prefetcher
+	levels      [][]string
 }
 
 // Start installs collections according to the provided configuration.
@@ -35,6 +39,154 @@ func Start(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error 
 		runtime.Output.Errorf("Error: %s", err.Error())
 	}
 	return err
+}
+
+// Warm resolves dependencies and ensures every artifact is downloaded into
+// the cache and extracted into the content-addressable extracted store.
+// It does not write anything to the install path — useful for baking CI
+// images so subsequent installs hardlink instantly.
+func Warm(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
+	err := runWarm(ctx, cfg, runtime)
+	if err != nil {
+		runtime.Output.Errorf("Error: %s", err.Error())
+	}
+	return err
+}
+
+func runWarm(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
+	runtime.Output.Printf("🔥 Warming caches")
+	start := time.Now()
+	state, err := initInstall(ctx, cfg, runtime)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if state.release != nil {
+			_ = state.release()
+		}
+	}()
+	defer func() {
+		_ = state.backend.Close(ctx)
+	}()
+
+	prep, err := loadRoots(cfg, runtime)
+	if err != nil {
+		return err
+	}
+	resolved, _, err := resolveOrLoadLockfile(ctx, cfg, runtime, state, prep)
+	if err != nil {
+		return err
+	}
+	collections, err := buildCollectionsMap(resolved)
+	if err != nil {
+		return err
+	}
+
+	failures := warmCollections(ctx, cfg, runtime, state, collections)
+	if err := state.backend.SaveStore(ctx, state.store); err != nil {
+		return err
+	}
+	writeRunMetrics(cfg, runtime, "warm", start, len(collections), int(failures))
+	if failures > 0 {
+		return fmt.Errorf("%w: warm failed for %d collections", helpers.ErrInstallationFailed, failures)
+	}
+	runtime.Output.PersistentPrintf("🔥 Warm complete: %d collections cached", len(collections))
+	return nil
+}
+
+func warmCollections(
+	ctx context.Context,
+	cfg *config.Config,
+	runtime *infra.Infra,
+	state *installState,
+	collections map[string]collection,
+) int32 {
+	var failures atomic.Int32
+	depsCtx := newInstallDeps(cfg, runtime, state.store, state.backend.Artifacts(), nil, state.extractStore)
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, cfg.Workers)
+	for _, col := range collections {
+		sem <- struct{}{}
+		wg.Go(func() {
+			defer func() { <-sem }()
+			if err := warmOne(ctx, depsCtx, col); err != nil {
+				runtime.Output.Errorf("Failed: %s.%s error: %s", col.Namespace, col.Name, err)
+				failures.Add(1)
+			} else {
+				runtime.Output.Okf("Cached: %s.%s@%s", col.Namespace, col.Name, col.Version)
+			}
+		})
+	}
+	wg.Wait()
+	return failures.Load()
+}
+
+func warmOne(ctx context.Context, deps installDeps, col collection) error {
+	payload, err := prepareInstall(ctx, deps, col, nil, fmt.Sprintf("%s-%s-%s.tar.gz", col.Namespace, col.Name, col.Version))
+	if err != nil {
+		return err
+	}
+	if payload.artifact.Cleanup != nil {
+		defer payload.artifact.Cleanup()
+	}
+	if deps.extractStore != nil {
+		if _, err := deps.extractStore.Ensure(payload.artifactSHA, payload.artifact.Path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Lock resolves dependencies and writes a lockfile to disk. It is intended
+// for the `lock` command and never installs anything; it does mutate the
+// snapshot cache so that subsequent installs benefit from the work done.
+func Lock(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
+	err := runLock(ctx, cfg, runtime)
+	if err != nil {
+		runtime.Output.Errorf("Error: %s", err.Error())
+	}
+	return err
+}
+
+func runLock(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
+	runtime.Output.Printf("🔒 Generating lockfile")
+	start := time.Now()
+	state, err := initInstall(ctx, cfg, runtime)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if state.release != nil {
+			_ = state.release()
+		}
+	}()
+	defer func() {
+		_ = state.backend.Close(ctx)
+	}()
+
+	prep, err := loadRoots(cfg, runtime)
+	if err != nil {
+		return err
+	}
+	deps := newCollectionDeps(cfg, runtime, state.store)
+	resolved, graph, err := resolveCollectionsInternal(ctx, deps, prep.AllRoots, true, true)
+	if err != nil {
+		return fmt.Errorf("failed to resolve dependencies: %w", err)
+	}
+	lf, err := buildLockfile(ctx, deps, resolved, graph)
+	if err != nil {
+		return err
+	}
+	path := lockfile.ResolveDefaultPath(cfg.RequirementsFile, cfg.LockFile)
+	if err := lockfile.Save(path, lf); err != nil {
+		return err
+	}
+	if err := state.backend.SaveStore(ctx, state.store); err != nil {
+		return err
+	}
+	writeRunMetrics(cfg, runtime, "lock", start, len(lf.Collections), 0)
+	runtime.Output.PersistentPrintf("✅ Lockfile written to %s (%d collections)", path, len(lf.Collections))
+	return nil
 }
 
 func runInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
@@ -63,6 +215,7 @@ func runInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) e
 		runtime,
 		state.store,
 		state.backend.Artifacts(),
+		state.extractStore,
 		plan.collections,
 		plan.graph,
 		plan.levels,
@@ -72,7 +225,9 @@ func runInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) e
 		return err
 	}
 
-	return finalizeInstall(ctx, runtime, state.backend, state.store, failures, start)
+	finalErr := finalizeInstall(ctx, runtime, state.backend, state.store, failures, start)
+	writeRunMetrics(cfg, runtime, "install", start, len(plan.collections), int(failures))
+	return finalErr
 }
 
 func prepareInstallPlan(ctx context.Context, cfg *config.Config, runtime *infra.Infra, state *installState) (*installPlan, error) {
@@ -81,19 +236,10 @@ func prepareInstallPlan(ctx context.Context, cfg *config.Config, runtime *infra.
 		return nil, err
 	}
 
-	resolveStart := time.Now()
-	runtime.Output.Printf("🧩 resolve dependencies")
-	resolved, graph, err := resolveCollectionsInternal(
-		ctx,
-		newCollectionDeps(cfg, runtime, state.store),
-		prep.AllRoots,
-		true,
-		true,
-	)
+	resolved, graph, err := resolveOrLoadLockfile(ctx, cfg, runtime, state, prep)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve dependencies: %w", err)
+		return nil, err
 	}
-	runtime.Output.DebugSincef(resolveStart, "%s", "resolve dependencies")
 
 	collections, err := buildCollectionsMap(resolved)
 	if err != nil {
@@ -166,10 +312,98 @@ func initInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) 
 	}
 
 	return &installState{
-		backend: backend,
-		store:   st,
-		release: releaseLock,
+		backend:      backend,
+		store:        st,
+		release:      releaseLock,
+		extractStore: newExtractStore(cfg),
 	}, nil
+}
+
+// newExtractStore returns a content-addressable extraction store, or nil
+// when caching is disabled or no cache directory is configured.
+func newExtractStore(cfg *config.Config) *extracted.Store {
+	if cfg == nil || cfg.NoCache {
+		return nil
+	}
+	return extracted.NewStore(cfg.CacheDir)
+}
+
+// writeRunMetrics persists a JSON metrics report when cfg.MetricsFile is set.
+// Best-effort: failures are logged but never fail the run.
+func writeRunMetrics(cfg *config.Config, runtime *infra.Infra, command string, start time.Time, collections, failures int) {
+	if cfg == nil || cfg.MetricsFile == "" {
+		return
+	}
+	now := time.Now()
+	report := metrics.Report{
+		Command:      command,
+		StartedAt:    start.UTC(),
+		FinishedAt:   now.UTC(),
+		Duration:     now.Sub(start),
+		Collections:  collections,
+		Failures:     failures,
+		Server:       cfg.Server,
+		Frozen:       cfg.Frozen,
+		Offline:      cfg.Offline,
+		LockfilePath: lockfile.ResolveDefaultPath(cfg.RequirementsFile, cfg.LockFile),
+		LockfileHash: tryLockfileHash(cfg),
+	}
+	if err := metrics.Write(cfg.MetricsFile, report); err != nil {
+		runtime.Output.Printf("⚠️ Failed to write metrics %s: %v", cfg.MetricsFile, err)
+	}
+}
+
+func tryLockfileHash(cfg *config.Config) string {
+	path := lockfile.ResolveDefaultPath(cfg.RequirementsFile, cfg.LockFile)
+	lf, err := lockfile.Load(path)
+	if err != nil {
+		return ""
+	}
+	hash, err := lf.Hash()
+	if err != nil {
+		return ""
+	}
+	return hash
+}
+
+// resolveOrLoadLockfile chooses between lockfile-driven resolution (when
+// --frozen is set) and the regular API-based resolver. With --frozen, the
+// lockfile is the source of truth: resolved/graph are built from its
+// entries with no network calls.
+func resolveOrLoadLockfile(
+	ctx context.Context,
+	cfg *config.Config,
+	runtime *infra.Infra,
+	state *installState,
+	prep *rootPreparation,
+) (map[string]collection, map[string][]string, error) {
+	if cfg.Frozen {
+		path := lockfile.ResolveDefaultPath(cfg.RequirementsFile, cfg.LockFile)
+		runtime.Output.Printf("🔒 frozen: using lockfile %s", path)
+		lf, err := lockfile.Load(path)
+		if err != nil {
+			if lockfile.IsNotExist(err) {
+				return nil, nil, fmt.Errorf("%w: %s", helpers.ErrLockfileMissing, path)
+			}
+			return nil, nil, err
+		}
+		return resolveFromLockfile(cfg, lf, prep)
+	}
+
+	resolveStart := time.Now()
+	runtime.Output.Printf("🧩 resolve dependencies")
+	resolved, graph, err := resolveCollectionsInternal(
+		ctx,
+		newCollectionDeps(cfg, runtime, state.store),
+		prep.AllRoots,
+		true,
+		true,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to resolve dependencies: %w", err)
+	}
+	runtime.Output.DebugSincef(resolveStart, "%s", "resolve dependencies")
+	return resolved, graph, nil
 }
 
 func loadRoots(cfg *config.Config, runtime *infra.Infra) (*rootPreparation, error) {
@@ -220,12 +454,13 @@ func installLevels(
 	runtime *infra.Infra,
 	st *store.Store,
 	artifacts cacheManager.ArtifactStore,
+	extractStore *extracted.Store,
 	collections map[string]collection,
 	graph map[string][]string,
 	levels [][]string,
 	prefetch *prefetcher,
 ) (int32, error) {
-	depsCtx := newInstallDeps(cfg, runtime, st, artifacts, nil)
+	depsCtx := newInstallDeps(cfg, runtime, st, artifacts, nil, extractStore)
 	var failures int32
 	for _, level := range levels {
 		var wg sync.WaitGroup

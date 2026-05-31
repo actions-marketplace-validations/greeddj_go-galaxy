@@ -11,10 +11,10 @@ import (
 func TestSanitizeArchivePath(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
+		wantErr error
 		name    string
 		input   string
 		want    string
-		wantErr error
 	}{
 		{name: "empty", input: "", wantErr: helpers.ErrArchiveEntryHasEmptyName},
 		{name: "abs", input: "/etc/passwd", wantErr: helpers.ErrArchiveEntryIsAbsolutePath},

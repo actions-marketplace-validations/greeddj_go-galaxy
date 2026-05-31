@@ -9,26 +9,32 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 )
 
 // Config holds runtime settings for collection operations.
 type Config struct {
-	Verbose                    bool
-	Quiet                      bool
+	AnsibleConfigPath          string
 	RequirementsFile           string
+	LockFile                   string
+	MetricsFile                string
 	CacheDir                   string
 	DownloadPath               string
 	Server                     string
+	Resolution                 string
 	S3Cache                    S3CacheConfig
-	ClearCache                 bool
-	NoCache                    bool
-	Refresh                    bool
-	NoDeps                     bool
-	DryRun                     bool
 	Timeout                    time.Duration
 	Workers                    int
-	AnsibleConfigPath          string
+	Refresh                    bool
+	NoCache                    bool
+	NoDeps                     bool
+	DryRun                     bool
+	Verbose                    bool
+	Quiet                      bool
+	ClearCache                 bool
+	Offline                    bool
+	Frozen                     bool
+	WarmOnly                   bool
 	AnsibleCollectionsPathUsed bool
 	AnsibleCacheDirUsed        bool
 	AnsibleServerUsed          bool
@@ -50,25 +56,56 @@ func (c *Config) IsRefresh() bool {
 	return c.Refresh
 }
 
+// IsOffline reports whether network access is forbidden.
+func (c *Config) IsOffline() bool {
+	if c == nil {
+		return false
+	}
+	return c.Offline
+}
+
+// IsLenient reports whether the resolver should fall back to best-effort
+// version selection when strict constraint satisfaction is impossible.
+func (c *Config) IsLenient() bool {
+	if c == nil {
+		return false
+	}
+	return c.Resolution == "lenient" || c.Resolution == "backtrack"
+}
+
+// IsBacktrack reports whether the resolver should attempt single-constraint
+// backtracking before falling back to max-satisfaction.
+func (c *Config) IsBacktrack() bool {
+	if c == nil {
+		return false
+	}
+	return c.Resolution == "backtrack"
+}
+
 // CollectionOptions captures collection install options before normalization.
 type CollectionOptions struct {
-	Verbose             bool
-	Quiet               bool
+	CacheDir            string
 	RequirementsFile    string
-	RequirementsFileSet bool
+	LockFile            string
+	MetricsFile         string
+	Server              string
 	DownloadPath        string
-	DownloadPathSet     bool
+	Timeout             time.Duration
 	ClearCache          bool
+	Verbose             bool
 	NoCache             bool
 	Refresh             bool
 	NoDeps              bool
-	Timeout             time.Duration
-	Server              string
-	CacheDir            string
+	Offline             bool
+	Frozen              bool
+	WarmOnly            bool
+	DownloadPathSet     bool
+	RequirementsFileSet bool
+	Quiet               bool
 }
 
 // BuildCollectionConfig builds Config from CLI flags and ansible.cfg.
-func BuildCollectionConfig(c *cli.Context) (*Config, error) {
+func BuildCollectionConfig(c *cli.Command) (*Config, error) {
 	cfg := newConfigFromCLI(c)
 	applyTimeout(cfg, c)
 
@@ -87,15 +124,20 @@ func BuildCollectionConfig(c *cli.Context) (*Config, error) {
 	return cfg, nil
 }
 
-func newConfigFromCLI(c *cli.Context) *Config {
+func newConfigFromCLI(c *cli.Command) *Config {
 	cfg := &Config{
 		Workers:          c.Int("workers"),
 		RequirementsFile: c.String("requirements-file"),
+		LockFile:         c.String("lock-file"),
+		MetricsFile:      c.String("metrics-file"),
 		ClearCache:       c.Bool("clear-cache"),
 		NoCache:          c.Bool("no-cache"),
 		Refresh:          c.Bool("refresh"),
 		NoDeps:           c.Bool("no-deps"),
 		DryRun:           c.Bool("dry-run"),
+		Offline:          c.Bool("offline"),
+		Frozen:           c.Bool("frozen"),
+		Resolution:       c.String("resolution"),
 		DownloadPath:     c.String("download-path"),
 	}
 
@@ -107,12 +149,12 @@ func newConfigFromCLI(c *cli.Context) *Config {
 	return cfg
 }
 
-func applyTimeout(cfg *Config, c *cli.Context) {
+func applyTimeout(cfg *Config, c *cli.Command) {
 	cfg.Timeout = c.Duration("timeout")
 	cfg.Timeout = max(cfg.Timeout, helpers.FetchDefaultTimeout)
 }
 
-func loadAnsibleConfigFromCLI(c *cli.Context) (ansibleConfig, string, error) {
+func loadAnsibleConfigFromCLI(c *cli.Command) (ansibleConfig, string, error) {
 	ansibleConfig, ansiblePath, err := loadAnsibleConfig(c.String("ansible-config"))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return ansibleConfig, "", fmt.Errorf("failed to load ansible config: %w", err)
@@ -120,28 +162,26 @@ func loadAnsibleConfigFromCLI(c *cli.Context) (ansibleConfig, string, error) {
 	return ansibleConfig, ansiblePath, nil
 }
 
-func applyAnsibleConfig(cfg *Config, c *cli.Context, ansibleConfig ansibleConfig, ansiblePath string) {
+func applyAnsibleConfig(cfg *Config, c *cli.Command, ansibleConfig ansibleConfig, ansiblePath string) {
 	if ansiblePath != "" {
 		cfg.AnsibleConfigPath = ansiblePath
 	}
-	if ansibleConfig.Defaults.CollectionsPath != "" {
-		cfg.DownloadPath = ansibleConfig.Defaults.CollectionsPath
-		cfg.AnsibleCollectionsPathUsed = true
-	} else {
-		cfg.DownloadPath = c.String("download-path")
+	cfg.DownloadPath, cfg.AnsibleCollectionsPathUsed = pickConfigValue(c, "download-path", ansibleConfig.Defaults.CollectionsPath)
+	cfg.CacheDir, cfg.AnsibleCacheDirUsed = pickConfigValue(c, "cache-dir", ansibleConfig.Galaxy.CacheDir)
+	cfg.Server, cfg.AnsibleServerUsed = pickConfigValue(c, "server", ansibleConfig.Galaxy.Server)
+}
+
+// pickConfigValue picks a string config value with precedence:
+// explicit CLI/ENV (IsSet) > ansible.cfg > CLI default. The bool reports
+// whether the value came from ansible.cfg.
+func pickConfigValue(c *cli.Command, flag, ansibleValue string) (string, bool) {
+	if c.IsSet(flag) {
+		return c.String(flag), false
 	}
-	if ansibleConfig.Galaxy.CacheDir != "" {
-		cfg.CacheDir = ansibleConfig.Galaxy.CacheDir
-		cfg.AnsibleCacheDirUsed = true
-	} else {
-		cfg.CacheDir = c.String("cache-dir")
+	if ansibleValue != "" {
+		return ansibleValue, true
 	}
-	if ansibleConfig.Galaxy.Server != "" {
-		cfg.Server = ansibleConfig.Galaxy.Server
-		cfg.AnsibleServerUsed = true
-	} else {
-		cfg.Server = c.String("server")
-	}
+	return c.String(flag), false
 }
 
 /*

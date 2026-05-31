@@ -6,13 +6,9 @@ import (
 	"path/filepath"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
+	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/psvmcc/hub/pkg/types"
 	"gopkg.in/yaml.v3"
-)
-
-const (
-	dirMod  = 0o755
-	fileMod = 0o644
 )
 
 // GalaxyYAML represents the GALAXY.yml metadata file.
@@ -27,21 +23,37 @@ type GalaxyYAML struct {
 	VersionURL  string `yaml:"version_url"`
 }
 
-// writeGalaxyInfo writes GALAXY.yml for the installed collection.
-func writeGalaxyInfo(cfg *config.Config, meta *types.GalaxyCollectionVersionInfo) error {
-	if meta == nil {
-		return nil
-	}
+// writeGalaxyInfo writes GALAXY.yml for the installed collection. When meta
+// is nil (artifact-cache-hit fast path), a minimal GALAXY.yml is written
+// using fields available from the collection identity.
+func writeGalaxyInfo(cfg *config.Config, col collection, meta *types.GalaxyCollectionVersionInfo) error {
+	g := buildGalaxyYAML(cfg, col, meta)
 	infoDir := filepath.Join(
 		cfg.DownloadPath,
 		"ansible_collections",
-		fmt.Sprintf("%s.%s-%s.info", meta.Namespace.Name, meta.Name, meta.Version),
+		fmt.Sprintf("%s.%s-%s.info", g.Namespace, g.Name, g.Version),
 	)
-	if err := os.MkdirAll(infoDir, dirMod); err != nil {
+	if err := os.MkdirAll(infoDir, helpers.DirMod); err != nil {
 		return err
 	}
+	data, err := yaml.Marshal(&g)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(infoDir, "GALAXY.yml"), data, helpers.FileMod)
+}
 
-	g := GalaxyYAML{
+func buildGalaxyYAML(cfg *config.Config, col collection, meta *types.GalaxyCollectionVersionInfo) GalaxyYAML {
+	if meta == nil {
+		return GalaxyYAML{
+			FormatVer: "1.0.0",
+			Name:      col.Name,
+			Namespace: col.Namespace,
+			Server:    cfg.Server,
+			Version:   col.Version,
+		}
+	}
+	return GalaxyYAML{
 		DownloadURL: meta.DownloadURL,
 		FormatVer:   "1.0.0",
 		Name:        meta.Name,
@@ -51,11 +63,4 @@ func writeGalaxyInfo(cfg *config.Config, meta *types.GalaxyCollectionVersionInfo
 		Version:     meta.Version,
 		VersionURL:  meta.Href,
 	}
-
-	data, err := yaml.Marshal(&g)
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(filepath.Join(infoDir, "GALAXY.yml"), data, fileMod)
 }

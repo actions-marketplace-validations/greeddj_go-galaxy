@@ -5,14 +5,15 @@ import (
 	"os"
 
 	cacheManager "github.com/greeddj/go-galaxy/internal/galaxy/cache"
+	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
 )
 
 // Backend provides a filesystem-backed cache backend.
 type Backend struct {
-	cacheDir  string
 	dbs       *store.DBs
 	artifacts *Artifacts
+	cacheDir  string
 }
 
 // New creates a Backend rooted at cacheDir.
@@ -99,7 +100,7 @@ func (b *Backend) ensureOpen() error {
 	if b.cacheDir == "" {
 		return errCacheDirEmpty
 	}
-	if err := os.MkdirAll(b.cacheDir, dirMod); err != nil {
+	if err := os.MkdirAll(b.cacheDir, helpers.DirMod); err != nil {
 		return err
 	}
 	dbs, err := store.OpenDBs(b.cacheDir)

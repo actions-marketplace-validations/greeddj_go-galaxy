@@ -11,9 +11,9 @@ import (
 
 // ProjectRecord describes a project and its last run metadata.
 type ProjectRecord struct {
+	LastRun          time.Time `json:"last_run"`
 	RequirementsFile string    `json:"requirements_file"`
 	CollectionsPath  string    `json:"collections_path"`
-	LastRun          time.Time `json:"last_run"`
 }
 
 // ProjectRegistry stores known projects keyed by path.

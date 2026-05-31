@@ -1,22 +1,19 @@
 package commands
 
 import (
-	"io"
-	"log"
+	"context"
+	"net/http"
 
 	"github.com/greeddj/go-galaxy/cmd/go-galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/collections"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/fetch"
-	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
-	"github.com/greeddj/go-galaxy/internal/progress"
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 )
 
 // Install returns the CLI command that installs collections from requirements.
 func Install() *cli.Command {
-	flags := helpers.CommonFlags()
-	flags = append(flags, helpers.CollectionFlags()...)
+	flags := helpers.CollectionFlags()
 	flags = append(flags, helpers.S3Flags()...)
 
 	return &cli.Command{
@@ -24,22 +21,16 @@ func Install() *cli.Command {
 		Aliases: []string{"i"},
 		Usage:   "Install collections from requirements file",
 		Flags:   flags,
-		Action: func(c *cli.Context) error {
-			cfg, err := config.BuildCollectionConfig(c)
-			if err != nil {
-				progress.Errorf("%s", err.Error())
-				return err
-			}
-			p := progress.New(cfg.Verbose, cfg.Quiet)
-			if cfg.Verbose {
-				log.SetOutput(p)
-			} else {
-				log.SetOutput(io.Discard)
-			}
-			defer p.Close()
-			runtime := infra.New(p, fetch.New(cfg.Timeout))
-			runtime.DebugAnsibleConfig(cfg)
-			return collections.Start(c.Context, cfg, runtime)
+		Action: func(ctx context.Context, c *cli.Command) error {
+			return runCollectionCommand(ctx, c, collections.Start)
 		},
 	}
+}
+
+// newHTTPClient builds an HTTP client honoring offline mode.
+func newHTTPClient(cfg *config.Config) *http.Client {
+	if cfg != nil && cfg.Offline {
+		return fetch.NewOffline(cfg.Timeout)
+	}
+	return fetch.New(cfg.Timeout)
 }

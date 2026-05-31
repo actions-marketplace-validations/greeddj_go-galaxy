@@ -2,12 +2,11 @@ package config
 
 import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 )
 
 // S3CacheConfig defines configuration for S3 cache backend.
 type S3CacheConfig struct {
-	Enabled      bool
 	Endpoint     string
 	Region       string
 	Bucket       string
@@ -15,11 +14,12 @@ type S3CacheConfig struct {
 	AccessKey    string
 	SecretKey    string
 	SessionToken string
+	Enabled      bool
 	PathStyle    bool
 }
 
 // loadS3CacheConfig builds S3 cache config from CLI flags.
-func loadS3CacheConfig(c *cli.Context) (S3CacheConfig, error) {
+func loadS3CacheConfig(c *cli.Command) (S3CacheConfig, error) {
 	cfg := S3CacheConfig{
 		Bucket:       c.String("s3-bucket"),
 		Prefix:       c.String("s3-prefix"),
@@ -39,11 +39,7 @@ func loadS3CacheConfig(c *cli.Context) (S3CacheConfig, error) {
 		return cfg, helpers.ErrS3EmptyCreds
 	}
 
-	if c.Bool("s3-path-style-disabled") {
-		cfg.PathStyle = false
-	} else {
-		cfg.PathStyle = true
-	}
+	cfg.PathStyle = !c.Bool("s3-path-style-disabled")
 
 	return cfg, nil
 }

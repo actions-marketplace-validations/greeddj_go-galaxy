@@ -113,4 +113,13 @@ var (
 	ErrStoreNil = errors.New("store is nil")
 	// ErrUnsupportedSchemaVersion indicates the snapshot schema version is unsupported.
 	ErrUnsupportedSchemaVersion = errors.New("unsupported snapshot schema version")
+
+	// ErrOfflineMode indicates a network operation was attempted in offline mode.
+	ErrOfflineMode = errors.New("offline mode is enabled, network access is forbidden")
+	// ErrLockfileMismatch indicates the lockfile content does not match the resolution.
+	ErrLockfileMismatch = errors.New("lockfile does not match resolved requirements")
+	// ErrLockfileMissing indicates a lockfile was required but not found.
+	ErrLockfileMissing = errors.New("lockfile is required by --frozen but not found")
+	// ErrLockfileInvalid indicates the lockfile is malformed or unsupported.
+	ErrLockfileInvalid = errors.New("lockfile is invalid")
 )

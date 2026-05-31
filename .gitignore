@@ -25,6 +25,9 @@ go.work.sum
 # env file
 .env
 
+# python venv (for benchmarking with ansible-galaxy)
+.venv/
+
 # data files
 /dist/
 /vendor/
@@ -33,6 +36,7 @@ go.work.sum
 /testing/*
 !/testing/docker-compose.yaml
 !/testing/requirements-*.yml
+!/testing/bench.sh
 
 
 # IDEs and editors

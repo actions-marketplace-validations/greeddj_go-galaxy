@@ -5,11 +5,22 @@ import (
 	"path/filepath"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/archive"
+	"github.com/greeddj/go-galaxy/internal/galaxy/extracted"
+	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 )
 
-// extractCollection unpacks a collection tarball into the install path.
-func extractCollection(col collection, tarPath, installPath string, runtime *infra.Infra, artifactSHA string) error {
+// extractCollection materializes a collection tarball into the install path.
+// When extractStore is provided, the tarball is unpacked once into the
+// content-addressable store and linked via hard links into installPath.
+// Otherwise the tarball is unpacked directly into installPath.
+func extractCollection(
+	col collection,
+	tarPath, installPath string,
+	runtime *infra.Infra,
+	extractStore *extracted.Store,
+	artifactSHA string,
+) error {
 	if artifactSHA == "" {
 		hash, err := archive.FileHashSHA256(tarPath)
 		if err != nil {
@@ -25,17 +36,24 @@ func extractCollection(col collection, tarPath, installPath string, runtime *inf
 	}
 
 	_ = os.RemoveAll(installPath)
-	if err := os.MkdirAll(installPath, dirMod); err != nil {
+	if err := os.MkdirAll(installPath, helpers.DirMod); err != nil {
 		return err
 	}
 
-	if err := archive.ExtractTarGz(tarPath, installPath); err != nil {
+	if err := unpack(tarPath, installPath, extractStore, artifactSHA); err != nil {
 		return err
 	}
 
-	if err := os.WriteFile(cacheTag, []byte("ok"), fileMod); err != nil {
+	return os.WriteFile(cacheTag, []byte("ok"), helpers.FileMod)
+}
+
+func unpack(tarPath, installPath string, extractStore *extracted.Store, artifactSHA string) error {
+	if extractStore == nil {
+		return archive.ExtractTarGz(tarPath, installPath)
+	}
+	src, err := extractStore.Ensure(artifactSHA, tarPath)
+	if err != nil {
 		return err
 	}
-
-	return nil
+	return extracted.Materialize(src, installPath)
 }

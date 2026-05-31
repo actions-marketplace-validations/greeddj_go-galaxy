@@ -1,0 +1,122 @@
+// Package lockfile reads and writes go-galaxy lockfiles. The lockfile pins
+// every transitive collection to an exact version with a SHA256 so CI runs
+// are reproducible and hermetic — once a lockfile exists, install only
+// reads the cache, never the Galaxy API.
+package lockfile
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
+
+	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
+	"gopkg.in/yaml.v3"
+)
+
+var errNilFile = errors.New("lockfile: nil File")
+
+// SchemaVersion is the current lockfile schema. Bumping requires migration.
+const SchemaVersion = 1
+
+// DefaultName is the conventional lockfile name beside requirements.yml.
+const DefaultName = "requirements.lock.yml"
+
+// Entry is a single pinned collection in the lockfile.
+type Entry struct {
+	Name    string   `yaml:"name"`
+	Version string   `yaml:"version"`
+	Source  string   `yaml:"source"`
+	SHA256  string   `yaml:"sha256,omitempty"`
+	Deps    []string `yaml:"deps,omitempty"`
+}
+
+// File is the on-disk lockfile structure.
+type File struct {
+	Server        string  `yaml:"server,omitempty"`
+	Collections   []Entry `yaml:"collections"`
+	SchemaVersion int     `yaml:"schema_version"`
+}
+
+// ResolveDefaultPath returns the lockfile path. If override is set, that
+// path is used. Otherwise DefaultName is placed next to the requirements
+// file (or in cwd if requirements path is empty).
+func ResolveDefaultPath(requirementsFile, override string) string {
+	if override != "" {
+		return override
+	}
+	if requirementsFile == "" {
+		return DefaultName
+	}
+	return filepath.Join(filepath.Dir(requirementsFile), DefaultName)
+}
+
+// Load parses a lockfile from disk. Returns (nil, fs.ErrNotExist) if the
+// file does not exist so callers can branch on absence.
+func Load(path string) (*File, error) {
+	//nolint:gosec // path is user-provided lockfile location.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var f File
+	if err := yaml.Unmarshal(data, &f); err != nil {
+		return nil, fmt.Errorf("%w: %s", helpers.ErrLockfileInvalid, err.Error())
+	}
+	if f.SchemaVersion == 0 {
+		return nil, fmt.Errorf("%w: missing schema_version", helpers.ErrLockfileInvalid)
+	}
+	if f.SchemaVersion != SchemaVersion {
+		return nil, fmt.Errorf("%w: schema_version=%d, supported=%d", helpers.ErrLockfileInvalid, f.SchemaVersion, SchemaVersion)
+	}
+	return &f, nil
+}
+
+// Save writes the lockfile to disk in canonical form.
+func Save(path string, f *File) error {
+	if f == nil {
+		return errNilFile
+	}
+	canonicalize(f)
+	data, err := yaml.Marshal(f)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), helpers.DirMod); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, helpers.FileMod)
+}
+
+// Hash returns a stable SHA256 hex of the canonical lockfile bytes.
+func (f *File) Hash() (string, error) {
+	clone := *f
+	canonicalize(&clone)
+	data, err := yaml.Marshal(&clone)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// IsNotExist reports whether err indicates the lockfile is missing.
+func IsNotExist(err error) bool {
+	return errors.Is(err, fs.ErrNotExist)
+}
+
+func canonicalize(f *File) {
+	if f.SchemaVersion == 0 {
+		f.SchemaVersion = SchemaVersion
+	}
+	sort.Slice(f.Collections, func(i, j int) bool {
+		return f.Collections[i].Name < f.Collections[j].Name
+	})
+	for i := range f.Collections {
+		sort.Strings(f.Collections[i].Deps)
+	}
+}

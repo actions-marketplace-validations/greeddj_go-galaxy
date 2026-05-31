@@ -22,8 +22,8 @@ import (
 
 // Client implements minimal S3 operations with SigV4 signing.
 type Client struct {
-	cfg    config.S3CacheConfig
 	client *http.Client
+	cfg    config.S3CacheConfig
 }
 
 // newClient constructs an S3 client from configuration.
@@ -340,17 +340,17 @@ func (c *Client) bucketRequest(ctx context.Context, method string, query url.Val
 
 // listBucketResult represents the S3 ListBucket XML response.
 type listBucketResult struct {
-	Contents               []listBucketContent `xml:"Contents"`
-	IsTruncated            bool                `xml:"IsTruncated"`
 	NextContinuationToken  string              `xml:"NextContinuationToken"`
 	ContinuationToken      string              `xml:"ContinuationToken"`
-	KeyCount               int                 `xml:"KeyCount"`
-	MaxKeys                int                 `xml:"MaxKeys"`
 	Prefix                 string              `xml:"Prefix"`
 	Delimiter              string              `xml:"Delimiter"`
-	CommonPrefixes         []listBucketPrefix  `xml:"CommonPrefixes"`
 	StartAfter             string              `xml:"StartAfter"`
 	ContinuationTokenStart string              `xml:"ContinuationTokenStart"`
+	Contents               []listBucketContent `xml:"Contents"`
+	CommonPrefixes         []listBucketPrefix  `xml:"CommonPrefixes"`
+	KeyCount               int                 `xml:"KeyCount"`
+	MaxKeys                int                 `xml:"MaxKeys"`
+	IsTruncated            bool                `xml:"IsTruncated"`
 }
 
 // listBucketContent represents an object entry in a ListBucket response.

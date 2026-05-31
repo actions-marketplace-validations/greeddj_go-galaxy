@@ -26,7 +26,7 @@ linters:
             - github.com/briandowns/spinner
             - github.com/klauspost/pgzip
             - github.com/psvmcc/hub
-            - github.com/urfave/cli/v2
+            - github.com/urfave/cli/v3
             - go.etcd.io/bbolt
             - gopkg.in/yaml.v3
     lll:

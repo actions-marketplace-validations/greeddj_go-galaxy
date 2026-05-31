@@ -14,28 +14,30 @@ import (
 	cacheManager "github.com/greeddj/go-galaxy/internal/galaxy/cache"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
+	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
 	"github.com/psvmcc/hub/pkg/types"
 )
 
 // resolveTask describes a dependency resolution task.
 type resolveTask struct {
-	FQDN        string
-	Namespace   string
-	Name        string
-	Constraints []string
-	Source      string
+	FQDN              string
+	Namespace         string
+	Name              string
+	Source            string
+	Constraints       []string
+	ConstraintSources []constraintSource
 }
 
 // resolveResult captures the outcome of resolving one collection.
 type resolveResult struct {
+	Err       error
+	Deps      map[string]string
 	FQDN      string
 	Namespace string
 	Name      string
 	Source    string
 	Version   string
-	Deps      map[string]string
-	Err       error
 }
 
 // resolveCollectionsInternal resolves versions and dependencies for roots.
@@ -104,8 +106,8 @@ type resolverState struct {
 	depsByParent   map[string]map[string]string
 	depConstraints map[string]map[string]string
 	sourceByFQDN   map[string]string
-	queue          []string
 	queued         map[string]bool
+	queue          []string
 }
 
 func resolveWithoutDeps(cfg *config.Config, st *store.Store, roots []collection, record bool) (map[string]collection, map[string][]string) {
@@ -196,19 +198,100 @@ func (r *resolverState) enqueueRoots(roots []collection) error {
 	return nil
 }
 
+// resolveQueue drives the resolver in a pipelined fashion: tasks are
+// dispatched to a worker pool as soon as new fqdns are discovered, and
+// results are folded back into state by a single owner goroutine. This
+// removes the wave barrier that the previous wave-based loop imposed —
+// deeper dependency chains no longer wait for the slowest task in the
+// current wave to finish before starting the next level.
 func (r *resolverState) resolveQueue(ctx context.Context, deps collectionDeps) error {
-	for len(r.queue) > 0 {
-		tasks, err := r.buildTasks()
-		if err != nil {
-			return err
-		}
-		r.resetQueue()
-		results := resolveBatch(ctx, deps, tasks)
-		if err := r.applyResults(results); err != nil {
-			return err
+	workers := max(deps.cfg.Workers, 1)
+	workCh := make(chan resolveTask)
+	resultCh := make(chan resolveResult)
+
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() { runResolveWorker(ctx, deps, workCh, resultCh) })
+	}
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
+
+	closeOnce := sync.Once{}
+	closeWork := func() { closeOnce.Do(func() { close(workCh) }) }
+	drain := func() {
+		//nolint:revive // intentional drain to let workers complete pending sends.
+		for range resultCh {
 		}
 	}
-	return nil
+
+	seed, err := r.drainQueueToTasks()
+	if err != nil {
+		closeWork()
+		drain()
+		return err
+	}
+	return r.pumpResolveLoop(workCh, resultCh, seed, closeWork, drain)
+}
+
+func runResolveWorker(ctx context.Context, deps collectionDeps, in <-chan resolveTask, out chan<- resolveResult) {
+	for task := range in {
+		out <- resolveOne(ctx, deps, task)
+	}
+}
+
+func (r *resolverState) drainQueueToTasks() ([]resolveTask, error) {
+	tasks, err := r.buildTasks()
+	if err != nil {
+		return nil, err
+	}
+	r.resetQueue()
+	return tasks, nil
+}
+
+func (r *resolverState) pumpResolveLoop(
+	workCh chan<- resolveTask,
+	resultCh <-chan resolveResult,
+	seed []resolveTask,
+	closeWork func(),
+	drain func(),
+) error {
+	pending := 0
+	queued := seed
+	for {
+		if pending == 0 && len(queued) == 0 {
+			closeWork()
+			drain()
+			return nil
+		}
+		var sendCh chan<- resolveTask
+		var next resolveTask
+		if len(queued) > 0 {
+			sendCh = workCh
+			next = queued[0]
+		}
+		select {
+		case sendCh <- next:
+			queued = queued[1:]
+			pending++
+		case res := <-resultCh:
+			pending--
+			if res.Err != nil {
+				closeWork()
+				drain()
+				return res.Err
+			}
+			r.applyResult(res)
+			more, err := r.drainQueueToTasks()
+			if err != nil {
+				closeWork()
+				drain()
+				return err
+			}
+			queued = append(queued, more...)
+		}
+	}
 }
 
 func (r *resolverState) buildTasks() ([]resolveTask, error) {
@@ -218,17 +301,19 @@ func (r *resolverState) buildTasks() ([]resolveTask, error) {
 		if !ok {
 			return nil, fmt.Errorf("%w: %q", helpers.ErrInvalidCollectionName, fqdn)
 		}
-		constraints := constraintsFor(r.depConstraints, fqdn)
+		sources := constraintSourcesFor(r.depConstraints, fqdn)
+		constraints := constraintStringsFromSources(sources)
 		source := r.sourceByFQDN[fqdn]
 		if source == "" {
 			source = r.cfg.Server
 		}
 		tasks = append(tasks, resolveTask{
-			FQDN:        fqdn,
-			Namespace:   namespace,
-			Name:        name,
-			Constraints: constraints,
-			Source:      source,
+			FQDN:              fqdn,
+			Namespace:         namespace,
+			Name:              name,
+			Constraints:       constraints,
+			ConstraintSources: sources,
+			Source:            source,
 		})
 	}
 	return tasks, nil
@@ -237,16 +322,6 @@ func (r *resolverState) buildTasks() ([]resolveTask, error) {
 func (r *resolverState) resetQueue() {
 	r.queue = r.queue[:0]
 	r.queued = make(map[string]bool)
-}
-
-func (r *resolverState) applyResults(results []resolveResult) error {
-	for _, res := range results {
-		if res.Err != nil {
-			return res.Err
-		}
-		r.applyResult(res)
-	}
-	return nil
 }
 
 func (r *resolverState) applyResult(res resolveResult) {
@@ -337,32 +412,6 @@ func ensureGraphNodes(resolved map[string]collection, graph map[string][]string)
 			graph[key] = nil
 		}
 	}
-}
-
-// resolveBatch resolves a batch of tasks concurrently.
-func resolveBatch(ctx context.Context, deps collectionDeps, tasks []resolveTask) []resolveResult {
-	results := make([]resolveResult, 0, len(tasks))
-	if len(tasks) == 0 {
-		return results
-	}
-
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, deps.cfg.Workers)
-
-	for _, task := range tasks {
-		sem <- struct{}{}
-		wg.Go(func() {
-			defer func() { <-sem }()
-			res := resolveOne(ctx, deps, task)
-			mu.Lock()
-			results = append(results, res)
-			mu.Unlock()
-		})
-	}
-
-	wg.Wait()
-	return results
 }
 
 // resolveOne resolves a single collection version and dependencies.
@@ -510,50 +559,194 @@ func parseDependencies(deps map[string]string, baseErr error) (map[string]string
 	return parsedDeps, nil
 }
 
+type versionCandidate struct {
+	Semver  *semver.Version
+	Version string
+}
+
+// selectionMode describes how selectVersion should behave on conflict.
+type selectionMode struct {
+	Lenient   bool
+	Backtrack bool
+}
+
 // selectVersion picks the highest version that satisfies constraints.
-func selectVersion(versions, constraints []string) (string, error) {
-	type candidate struct {
-		version string
-		semver  *semver.Version
+//
+// Strict mode (default): returns conflictError when no version matches.
+//
+// Backtrack mode: tries to drop exactly one constraint (the "blamed" one)
+// and re-check satisfiability; if a single-blame solution exists, return
+// it. Otherwise fall through to lenient.
+//
+// Lenient mode: pick the highest version satisfying the largest subset of
+// constraints, log which constraints were ignored.
+func selectVersion(
+	runtime *infra.Infra,
+	fqdn string,
+	versions []string,
+	sources []constraintSource,
+	mode selectionMode,
+) (string, error) {
+	candidates := buildCandidates(versions)
+	if len(candidates) == 0 {
+		return "", helpers.ErrNoSemverCandidates
 	}
-	candidates := make([]candidate, 0, len(versions))
+	parsedConstraints, err := parseConstraints(constraintStringsFromSources(sources))
+	if err != nil {
+		return "", err
+	}
+	if v, ok := selectStrict(candidates, parsedConstraints); ok {
+		return v, nil
+	}
+	if mode.Backtrack {
+		if v, blamed, ok := selectBacktrackOne(candidates, parsedConstraints, sources); ok {
+			logBlamed(runtime, fqdn, v, blamed)
+			return v, nil
+		}
+	}
+	if mode.Lenient {
+		return selectLenient(runtime, fqdn, candidates, parsedConstraints, sources)
+	}
+	return "", &conflictError{FQDN: fqdn, Sources: sources}
+}
+
+// selectBacktrackOne tries every (constraints − one) subset and returns the
+// highest version satisfying any such subset, plus the dropped constraint
+// (the single "blamed" source). If multiple subsets succeed, the result
+// with the highest version wins.
+func selectBacktrackOne(
+	candidates []versionCandidate,
+	parsed []*semver.Constraints,
+	sources []constraintSource,
+) (string, constraintSource, bool) {
+	if len(parsed) != len(sources) || len(parsed) < 2 {
+		return "", constraintSource{}, false
+	}
+	bestIdx := -1
+	var bestVersion string
+	var bestBlamed constraintSource
+	for skip := range parsed {
+		subset := make([]*semver.Constraints, 0, len(parsed)-1)
+		for i, c := range parsed {
+			if i == skip {
+				continue
+			}
+			subset = append(subset, c)
+		}
+		v, ok := selectStrict(candidates, subset)
+		if !ok {
+			continue
+		}
+		idx := candidateIndex(candidates, v)
+		if bestIdx < 0 || idx < bestIdx {
+			bestIdx = idx
+			bestVersion = v
+			bestBlamed = sources[skip]
+		}
+	}
+	if bestIdx < 0 {
+		return "", constraintSource{}, false
+	}
+	return bestVersion, bestBlamed, true
+}
+
+func candidateIndex(candidates []versionCandidate, version string) int {
+	for i, c := range candidates {
+		if c.Version == version {
+			return i
+		}
+	}
+	return -1
+}
+
+func logBlamed(runtime *infra.Infra, fqdn, version string, blamed constraintSource) {
+	if runtime == nil || runtime.Output == nil {
+		return
+	}
+	runtime.Output.Printf("⚠️ backtrack: %s @ %s — ignored constraint %s (required by %s)",
+		fqdn, version, blamed.Constraint, prettySource(blamed.Source))
+}
+
+func buildCandidates(versions []string) []versionCandidate {
+	candidates := make([]versionCandidate, 0, len(versions))
 	for _, v := range versions {
 		parsed, err := semver.NewVersion(v)
 		if err != nil {
 			continue
 		}
-		candidates = append(candidates, candidate{
-			version: v,
-			semver:  parsed,
-		})
+		candidates = append(candidates, versionCandidate{Version: v, Semver: parsed})
 	}
-	if len(candidates) == 0 {
-		return "", helpers.ErrNoSemverCandidates
-	}
-
 	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].semver.GreaterThan(candidates[j].semver)
+		return candidates[i].Semver.GreaterThan(candidates[j].Semver)
 	})
+	return candidates
+}
 
-	parsedConstraints, err := parseConstraints(constraints)
-	if err != nil {
-		return "", err
-	}
-
+func selectStrict(candidates []versionCandidate, constraints []*semver.Constraints) (string, bool) {
 	for _, c := range candidates {
 		ok := true
-		for _, constraint := range parsedConstraints {
-			if !constraint.Check(c.semver) {
+		for _, constraint := range constraints {
+			if !constraint.Check(c.Semver) {
 				ok = false
 				break
 			}
 		}
 		if ok {
-			return c.version, nil
+			return c.Version, true
 		}
 	}
+	return "", false
+}
 
-	return "", fmt.Errorf("%w: %v", helpers.ErrNoVersionSatisfiesConstraints, constraints)
+// selectLenient picks the candidate satisfying the largest number of
+// constraints (tie-break: highest version, since candidates are sorted desc).
+// It reports which constraints were ignored via the runtime printer.
+func selectLenient(
+	runtime *infra.Infra,
+	fqdn string,
+	candidates []versionCandidate,
+	parsed []*semver.Constraints,
+	sources []constraintSource,
+) (string, error) {
+	bestIdx := -1
+	bestSatisfied := -1
+	for i, c := range candidates {
+		satisfied := 0
+		for _, constraint := range parsed {
+			if constraint.Check(c.Semver) {
+				satisfied++
+			}
+		}
+		if satisfied > bestSatisfied {
+			bestSatisfied = satisfied
+			bestIdx = i
+		}
+	}
+	if bestIdx < 0 {
+		return "", &conflictError{FQDN: fqdn, Sources: sources}
+	}
+	chosen := candidates[bestIdx]
+	if runtime != nil && runtime.Output != nil {
+		ignored := ignoredConstraints(chosen.Semver, parsed, sources)
+		runtime.Output.Printf("⚠️ lenient: %s @ %s (ignored %d constraints)", fqdn, chosen.Version, len(ignored))
+		for _, s := range ignored {
+			runtime.Output.Printf("    · %s (required by %s)", s.Constraint, prettySource(s.Source))
+		}
+	}
+	return chosen.Version, nil
+}
+
+func ignoredConstraints(version *semver.Version, parsed []*semver.Constraints, sources []constraintSource) []constraintSource {
+	if len(parsed) != len(sources) {
+		return nil
+	}
+	out := make([]constraintSource, 0, len(sources))
+	for i, c := range parsed {
+		if !c.Check(version) {
+			out = append(out, sources[i])
+		}
+	}
+	return out
 }
 
 // constraintsSatisfiedByVersion reports whether version matches constraints.
@@ -665,7 +858,8 @@ func resolveNonExactVersion(
 	if err != nil {
 		return "", err
 	}
-	return selectVersion(versionsMeta, task.Constraints)
+	mode := selectionMode{Lenient: deps.cfg.IsLenient(), Backtrack: deps.cfg.IsBacktrack()}
+	return selectVersion(deps.runtime, task.FQDN, versionsMeta, task.ConstraintSources, mode)
 }
 
 // parseConstraints parses version constraints into semver constraints.
@@ -759,23 +953,6 @@ func removeConstraint(depConstraints map[string]map[string]string, dep, source s
 		delete(depConstraints, dep)
 	}
 	return true
-}
-
-// constraintsFor returns the normalized constraints for a collection.
-func constraintsFor(depConstraints map[string]map[string]string, fqdn string) []string {
-	sources := depConstraints[fqdn]
-	if len(sources) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(sources))
-	for _, c := range sources {
-		normalized := normalizeConstraint(c)
-		if normalized == "" {
-			continue
-		}
-		out = append(out, normalized)
-	}
-	return out
 }
 
 // collectionVersionsURL builds the versions API URL for a collection.

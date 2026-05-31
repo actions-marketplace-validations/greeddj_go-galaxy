@@ -1,0 +1,49 @@
+---
+name: go-galaxy-check
+description: Run static-analysis quality gates for the go-galaxy Go repo via Justfile — golangci-lint, vet, staticcheck, govulncheck, fieldalignment. Use when the user asks to lint the code, run quality gates, diagnose a failing analyzer, or verify changes before commit/PR. Do NOT use for running tests (see go-galaxy-test) or builds (see go-galaxy-build).
+---
+
+# go-galaxy — Quality Gates
+
+## When to use
+
+- "прогони линтер" / "lint" / "golangci"
+- "проверь код" / "запусти проверки" / "quality gates"
+- Diagnose a single analyzer: vet, staticcheck, govulncheck, fieldalignment
+- Pre-commit / pre-PR validation of static checks (без тестов)
+
+## Commands
+
+| Intent | Command |
+|---|---|
+| Full lint pass | `just lint` |
+| All gates in one go (vet + staticcheck + govulncheck + fieldalignment) | `just check` |
+| Lint + check + tests + run | `just run` |
+
+`just check` runs the four analyzers sequentially and **depends on `just deps`** — invoking it mutates `vendor/`, `go.mod`, `go.sum` before the analyzers run. If you only want analysis without dep churn, call the Go equivalents directly (below).
+
+## Direct Go equivalents (tight loop)
+
+When iterating on a fix, prefer the single failing gate over the full chain:
+
+```sh
+go vet ./...
+go tool staticcheck ./...
+go tool govulncheck ./...
+go tool fieldalignment ./...
+```
+
+The analyzers are wired through `go tool` directives in `go.mod` — no separate install step needed.
+
+## Repo-specific gotchas
+
+- **`golangci-lint` v2 with `default: all`** minus a small disable list (see [.golangci.yml](.golangci.yml)). Common offenders: `lll` (140 cols), `fieldalignment` (struct field ordering), `revive`/`staticcheck` package-comment rules (already excluded for the latter).
+- **Depguard allowlist is enforced.** Adding any new direct dependency requires adding the import path to `linters.settings.depguard.rules.main.allow` in `.golangci.yml`. Otherwise `just lint` fails. Stdlib (`$gostd`) and the existing modules (`BurntSushi/toml`, `Masterminds/semver`, `briandowns/spinner`, `klauspost/pgzip`, `psvmcc/hub`, `urfave/cli/v3`, `bbolt`, `yaml.v3`) are the entire palette.
+- **`fieldalignment`** can suggest reordering fields of public structs. Don't blindly apply `-fix` to types in `internal/galaxy/store` (snapshot-serialized) or `internal/galaxy/config` (env/CLI-bound) without checking. Use the `go-galaxy-deps` skill when fixing is intentional.
+- **`govulncheck`** in `just check` runs at full strictness (no exit-code masking). Findings will fail the gate.
+
+## Workflow
+
+1. Classify scope: single analyzer failure → run that subtarget directly via `go tool …`; broad change → `just check`.
+2. Iterate on the failing gate only; expand to `just check` once it passes.
+3. After code changes, run `just lint` separately — it's not part of `just check`.

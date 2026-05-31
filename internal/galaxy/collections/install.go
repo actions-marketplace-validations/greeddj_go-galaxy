@@ -60,7 +60,7 @@ func installCollection(
 	}
 
 	extractStart := time.Now()
-	err = extractCollection(col, payload.artifact.Path, installPath, runtime, payload.artifactSHA)
+	err = extractCollection(col, payload.artifact.Path, installPath, runtime, deps.extractStore, payload.artifactSHA)
 	if err != nil {
 		return fmt.Errorf("failed to extract %s: %w", filename, err)
 	}
@@ -69,7 +69,7 @@ func installCollection(
 	if err != nil {
 		return err
 	}
-	writeGalaxyInfoIfPresent(runtime, cfg, payload.meta)
+	writeGalaxyInfoIfPresent(runtime, cfg, col, payload.meta)
 	recordInstall(st, col, installPath, payload.artifactSHA, depsList)
 	return nil
 }
@@ -81,10 +81,10 @@ type installPayload struct {
 }
 
 type artifactData struct {
-	Path    string
-	SHA     string
 	Meta    map[string]string
 	Cleanup func()
+	Path    string
+	SHA     string
 }
 
 func prepareInstall(
@@ -102,8 +102,13 @@ func prepareInstall(
 	useCache := !cfg.NoCache
 	cacheHit := useCache && artifacts != nil && artifactExists(ctx, artifacts, col)
 
+	// Fast path: artifact is already in cache and the caller did not push
+	// metadata. We have everything required to install — namespace/name/version
+	// from col, SHA from a sidecar (S3) or by hashing the file (local) — so we
+	// can skip the metadata roundtrip entirely.
 	if cacheHit && meta == nil {
 		runtime.Output.Printf("📦 Using cached %s", filename)
+		return prepareFromCache(ctx, deps, col)
 	}
 
 	meta, err := resolveMetadata(ctx, deps.collectionDeps, col, meta, cacheHit)
@@ -123,6 +128,21 @@ func prepareInstall(
 		return installPayload{}, err
 	}
 	return installPayload{meta: meta, artifact: artifact, artifactSHA: artifactSHA}, nil
+}
+
+func prepareFromCache(ctx context.Context, deps installDeps, col collection) (installPayload, error) {
+	artifact, err := fetchArtifact(ctx, deps, col, nil, true, true)
+	if err != nil {
+		return installPayload{}, err
+	}
+	artifactSHA, err := resolveArtifactSHA(artifact.Path, nil, artifact.Meta, artifact.SHA)
+	if err != nil {
+		if artifact.Cleanup != nil {
+			artifact.Cleanup()
+		}
+		return installPayload{}, err
+	}
+	return installPayload{meta: nil, artifact: artifact, artifactSHA: artifactSHA}, nil
 }
 
 func resolveDependencies(
@@ -148,8 +168,13 @@ func resolveDependencies(
 	return depsList, nil
 }
 
-func writeGalaxyInfoIfPresent(runtime *infra.Infra, cfg *config.Config, meta *types.GalaxyCollectionVersionInfo) {
-	if err := writeGalaxyInfo(cfg, meta); err != nil {
+func writeGalaxyInfoIfPresent(
+	runtime *infra.Infra,
+	cfg *config.Config,
+	col collection,
+	meta *types.GalaxyCollectionVersionInfo,
+) {
+	if err := writeGalaxyInfo(cfg, col, meta); err != nil {
 		runtime.Output.Printf("⚠️ Failed to write GALAXY.yml: %v", err)
 	}
 }
@@ -187,6 +212,9 @@ func fetchArtifact(
 	artifacts := deps.artifacts
 
 	if !cacheHit {
+		if deps.cfg != nil && deps.cfg.Offline {
+			return artifactData{}, fmt.Errorf("%w: artifact %s not in cache", helpers.ErrOfflineMode, col.key())
+		}
 		downloadStart := time.Now()
 		result, err := downloadCollectionToCache(ctx, deps, artifactKey(col), meta, useCache)
 		if err != nil {
@@ -279,12 +307,15 @@ func downloadCollection(ctx context.Context, runtime *infra.Infra, collectionURL
 
 // downloadResult describes a downloaded artifact file and metadata.
 type downloadResult struct {
+	Cleanup func()
 	Path    string
 	SHA     string
-	Cleanup func()
 }
 
 // downloadCollectionToCache downloads an artifact and optionally stores it.
+// When deps.extractStore is configured, the body is teed into a sha256
+// hasher, the artifact tmp file, and a tar.gz extraction pipeline that
+// populates the content-addressable extracted store, all in a single pass.
 func downloadCollectionToCache(
 	ctx context.Context,
 	deps installDeps,
@@ -303,6 +334,10 @@ func downloadCollectionToCache(
 		_ = resp.Body.Close()
 	}()
 
+	if deps.extractStore != nil {
+		return streamDownloadAndExtract(ctx, deps, key, meta, resp.Body, useCache)
+	}
+
 	tmpPath, cleanup, sha, err := writeDownloadToTemp(ctx, deps.artifacts, resp.Body)
 	if err != nil {
 		cleanupIfNeeded(cleanup)
@@ -316,6 +351,77 @@ func downloadCollectionToCache(
 		return commitDownload(ctx, deps.artifacts, key, tmpPath, sha, cleanup)
 	}
 	return downloadResult{Path: tmpPath, SHA: sha, Cleanup: cleanup}, nil
+}
+
+// streamDownloadAndExtract reads the artifact body once, tee-ing it into the
+// sha256 hasher, the artifact tmp file, and a pipe consumed by the extracted
+// store's gzip+tar pipeline. On success the extracted tree is promoted to
+// <root>/<sha> atomically, so subsequent installs hardlink from there.
+func streamDownloadAndExtract(
+	ctx context.Context,
+	deps installDeps,
+	key string,
+	meta *types.GalaxyCollectionVersionInfo,
+	body io.Reader,
+	useCache bool,
+) (downloadResult, error) {
+	tmpFile, tmpCleanup, err := deps.artifacts.TempFile(ctx, ".download-")
+	if err != nil {
+		return downloadResult{}, err
+	}
+
+	pr, pw := io.Pipe()
+	type ingestOutcome struct {
+		err error
+		tmp string
+	}
+	ingestCh := make(chan ingestOutcome, 1)
+	go func() {
+		tmp, ingestErr := deps.extractStore.IngestReader(pr)
+		ingestCh <- ingestOutcome{tmp: tmp, err: ingestErr}
+	}()
+
+	hasher := sha256.New()
+	_, copyErr := io.Copy(io.MultiWriter(tmpFile, hasher, pw), body)
+	if copyErr != nil {
+		_ = pw.CloseWithError(copyErr)
+	} else {
+		_ = pw.Close()
+	}
+	closeErr := tmpFile.Close()
+	out := <-ingestCh
+
+	if err := firstNonNil(copyErr, closeErr, out.err); err != nil {
+		if out.tmp != "" {
+			_ = os.RemoveAll(out.tmp)
+		}
+		cleanupIfNeeded(tmpCleanup)
+		return downloadResult{}, err
+	}
+
+	sha := hex.EncodeToString(hasher.Sum(nil))
+	if err := verifyDownloadSHA(meta, sha); err != nil {
+		_ = os.RemoveAll(out.tmp)
+		cleanupIfNeeded(tmpCleanup)
+		return downloadResult{}, err
+	}
+	if _, err := deps.extractStore.Promote(out.tmp, sha); err != nil {
+		cleanupIfNeeded(tmpCleanup)
+		return downloadResult{}, err
+	}
+	if useCache {
+		return commitDownload(ctx, deps.artifacts, key, tmpFile.Name(), sha, tmpCleanup)
+	}
+	return downloadResult{Path: tmpFile.Name(), SHA: sha, Cleanup: tmpCleanup}, nil
+}
+
+func firstNonNil(errs ...error) error {
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func validateDownloadInputs(cfg *config.Config, artifacts cacheManager.ArtifactStore, meta *types.GalaxyCollectionVersionInfo) error {
@@ -437,7 +543,7 @@ func installDependencies(ctx context.Context, installPath string, depsCtx instal
 		deps = append(deps, depCol.key())
 		runtime.Output.Printf("🔁 Installing dependency: %s %s", fqdn, version)
 		if err := installCollection(ctx, depCol, depsCtx, nil, nil); err != nil {
-			runtime.Output.Printf("⚠️ Failed to install dependency: %s: %v", fqdn, err)
+			return nil, fmt.Errorf("failed to install dependency %s: %w", fqdn, err)
 		}
 	}
 	return deps, nil

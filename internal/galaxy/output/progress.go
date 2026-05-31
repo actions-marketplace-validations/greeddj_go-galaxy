@@ -11,23 +11,3 @@ type Printer interface {
 	Debugf(format string, args ...any)
 	DebugSincef(startTime time.Time, format string, args ...any)
 }
-
-// Printf proxies formatted output to the printer.
-func Printf(printer Printer, format string, args ...any) {
-	printer.Printf(format, args...)
-}
-
-// PersistentPrintf proxies persistent output to the printer.
-func PersistentPrintf(printer Printer, format string, args ...any) {
-	printer.PersistentPrintf(format, args...)
-}
-
-// Okf proxies a success message to the printer.
-func Okf(printer Printer, format string, args ...any) {
-	printer.Okf(format, args...)
-}
-
-// Errorf proxies an error message to the printer.
-func Errorf(printer Printer, format string, args ...any) {
-	printer.Errorf(format, args...)
-}

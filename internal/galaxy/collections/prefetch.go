@@ -10,10 +10,10 @@ import (
 
 // prefetcher coordinates background metadata and artifact downloads.
 type prefetcher struct {
-	mu   sync.Mutex
 	meta map[string]*types.GalaxyCollectionVersionInfo
 	errs map[string]error
 	done map[string]chan struct{}
+	mu   sync.Mutex
 }
 
 // startPrefetcher schedules prefetch tasks for collections.
@@ -109,7 +109,7 @@ func prefetchOne(
 	if ok {
 		return meta, nil
 	}
-	_, err = downloadCollectionToCache(ctx, newInstallDeps(deps.cfg, deps.runtime, deps.st, deps.artifacts, nil), key, meta, true)
+	_, err = downloadCollectionToCache(ctx, newInstallDeps(deps.cfg, deps.runtime, deps.st, deps.artifacts, nil, nil), key, meta, true)
 	return meta, err
 }
 

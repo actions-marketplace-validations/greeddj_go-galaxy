@@ -8,9 +8,9 @@ type collection struct {
 	Name       string   `yaml:"name"`
 	Version    string   `yaml:"version"`
 	Source     string   `yaml:"source"`
-	Signatures []string `yaml:"signatures"`
 	Constraint string   `yaml:"-"`
 	Type       string   `yaml:"-"`
+	Signatures []string `yaml:"signatures"`
 }
 
 // key returns the unique key for the collection.

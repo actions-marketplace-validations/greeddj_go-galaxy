@@ -24,12 +24,12 @@ import (
 
 // Backend provides an S3-backed cache backend.
 type Backend struct {
-	cfg        config.S3CacheConfig
 	client     *Client
 	httpClient *http.Client
-	prefix     string
 	artifacts  *Artifacts
+	prefix     string
 	tempDir    string
+	cfg        config.S3CacheConfig
 }
 
 // New creates an S3-backed cache backend for the given config.

@@ -28,9 +28,11 @@ const (
 	// FetchForceAttemptHTTP2 enables HTTP/2 attempts when possible.
 	FetchForceAttemptHTTP2 = true
 	// FetchMaxIdleConns is the maximum number of idle connections.
-	FetchMaxIdleConns = 100
+	FetchMaxIdleConns = 256
 	// FetchMaxIdleConnsPerHost limits idle connections per host.
-	FetchMaxIdleConnsPerHost = 10
+	// Single Galaxy server is the common case, so keep it generous to match
+	// worker concurrency and avoid TCP churn under high parallelism.
+	FetchMaxIdleConnsPerHost = 64
 	// FetchIdleConnTimeout is the idle connection timeout.
 	FetchIdleConnTimeout = 30 * time.Second
 	// FetchTLSHandshakeTimeout is the TLS handshake timeout.

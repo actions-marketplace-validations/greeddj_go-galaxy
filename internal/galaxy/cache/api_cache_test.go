@@ -20,13 +20,13 @@ func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func TestFetchJSONWithCachePolicyCacheHit(t *testing.T) {
 	t.Parallel()
-	var hits int32
+	var hits atomic.Int32
 	etag := "v1"
 	payload := []byte(`{"ok":true}`)
 
 	client := &http.Client{
 		Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-			atomic.AddInt32(&hits, 1)
+			hits.Add(1)
 			header := make(http.Header)
 			header.Set("ETag", etag)
 			header.Set("Content-Type", "application/json")
@@ -50,21 +50,21 @@ func TestFetchJSONWithCachePolicyCacheHit(t *testing.T) {
 	if err := FetchJSONWithCachePolicy(context.Background(), client, url, st, &out, policy); err != nil {
 		t.Fatalf("FetchJSONWithCachePolicy error: %v", err)
 	}
-	if got := atomic.LoadInt32(&hits); got != 1 {
+	if got := hits.Load(); got != 1 {
 		t.Fatalf("expected 1 request, got %d", got)
 	}
 }
 
 func TestFetchJSONWithCachePolicyRevalidate(t *testing.T) {
 	t.Parallel()
-	var hits int32
+	var hits atomic.Int32
 	etag := "v2"
 	payload := []byte(`{"ok":true}`)
 	var sawIfNoneMatch atomic.Bool
 
 	client := &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			atomic.AddInt32(&hits, 1)
+			hits.Add(1)
 			header := make(http.Header)
 			if req.Header.Get("If-None-Match") == etag {
 				sawIfNoneMatch.Store(true)
@@ -105,7 +105,7 @@ func TestFetchJSONWithCachePolicyRevalidate(t *testing.T) {
 	if err := FetchJSONWithCachePolicy(context.Background(), client, url, st, &out, policy); err != nil {
 		t.Fatalf("FetchJSONWithCachePolicy error: %v", err)
 	}
-	if got := atomic.LoadInt32(&hits); got != 2 {
+	if got := hits.Load(); got != 2 {
 		t.Fatalf("expected 2 requests, got %d", got)
 	}
 	if !sawIfNoneMatch.Load() {

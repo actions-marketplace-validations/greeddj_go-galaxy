@@ -14,20 +14,20 @@ import (
 
 // SnapshotMeta holds metadata about the cached snapshot.
 type SnapshotMeta struct {
-	SchemaVersion    int       `json:"schema_version"`
 	LastSnapshot     time.Time `json:"last_snapshot"`
 	RequirementsHash string    `json:"requirements_hash"`
 	Server           string    `json:"server"`
+	SchemaVersion    int       `json:"schema_version"`
 }
 
 // APICacheEntry stores a cached API response and validation data.
 type APICacheEntry struct {
+	FetchedAt    time.Time     `json:"fetched_at"`
 	URL          string        `json:"url"`
 	ETag         string        `json:"etag"`
 	LastModified string        `json:"last_modified"`
-	FetchedAt    time.Time     `json:"fetched_at"`
-	TTL          time.Duration `json:"ttl"`
 	Body         []byte        `json:"body"`
+	TTL          time.Duration `json:"ttl"`
 }
 
 // InstalledEntry records an installed collection entry.
@@ -41,8 +41,6 @@ type InstalledEntry struct {
 
 // Store holds cached state for collections and metadata.
 type Store struct {
-	mu           sync.RWMutex                 `json:"-"`
-	Meta         SnapshotMeta                 `json:"meta"`
 	APICache     map[string]APICacheEntry     `json:"api_cache"`
 	DepsCache    map[string]map[string]string `json:"deps_cache"`
 	Installed    map[string]InstalledEntry    `json:"installed"`
@@ -51,6 +49,8 @@ type Store struct {
 	Roots        map[string][]string          `json:"roots"`
 	Resolved     map[string]ResolvedEntry     `json:"resolved"`
 	Versions     map[string][]string          `json:"versions_cache"`
+	Meta         SnapshotMeta                 `json:"meta"`
+	mu           sync.RWMutex                 `json:"-"`
 }
 
 // New creates an initialized Store with empty maps.
@@ -219,9 +219,11 @@ func (m *Store) SetResolvedAll(resolved map[string]ResolvedEntry) {
 	if m == nil {
 		return
 	}
+	clone := make(map[string]ResolvedEntry, len(resolved))
+	maps.Copy(clone, resolved)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Resolved = resolved
+	m.Resolved = clone
 }
 
 // ResolvedSnapshot returns a copy of resolved entries.
@@ -345,7 +347,6 @@ func (m *Store) SetMetaRequirements(hash, server string) {
 
 // snapshotData is a serialized view of Store contents.
 type snapshotData struct {
-	Meta         SnapshotMeta
 	APICache     map[string]APICacheEntry
 	DepsCache    map[string]map[string]string
 	Installed    map[string]InstalledEntry
@@ -354,6 +355,7 @@ type snapshotData struct {
 	Roots        map[string][]string
 	Resolved     map[string]ResolvedEntry
 	Versions     map[string][]string
+	Meta         SnapshotMeta
 }
 
 // snapshotData builds a snapshot payload from the store.
@@ -430,9 +432,6 @@ func Save(dbs *DBs, store *Store) error {
 	}
 
 	data := store.snapshotData()
-	if data.Meta.SchemaVersion == 0 {
-		data.Meta.SchemaVersion = helpers.StoreSnapshotSchemaVersion
-	}
 	data.Meta.SchemaVersion = helpers.StoreSnapshotSchemaVersion
 	data.Meta.LastSnapshot = time.Now().UTC()
 

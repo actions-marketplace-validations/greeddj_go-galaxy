@@ -17,12 +17,19 @@ type Policy struct {
 type Options interface {
 	IsNoCache() bool
 	IsRefresh() bool
+	IsOffline() bool
 }
 
 // PolicyForConstraint builds a cache policy based on options and constraints.
+// In offline mode the cache is the only source of truth: TTL is dropped and
+// writes are disabled, so any cache miss surfaces as an error rather than a
+// network attempt.
 func PolicyForConstraint(opts Options, exact bool) Policy {
 	if opts == nil {
 		return Policy{Read: true, Write: true}
+	}
+	if opts.IsOffline() {
+		return Policy{Read: true, Write: false}
 	}
 	if opts.IsNoCache() {
 		return Policy{}
