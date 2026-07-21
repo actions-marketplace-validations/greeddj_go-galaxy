@@ -69,17 +69,38 @@ Walks every project recorded in the registry, scans `<collections_path>/ansible_
 - **Bolt buckets and snapshot file names** are constants in `internal/galaxy/helpers`. Reuse them rather than string-literaling.
 - The `Justfile`'s `LDFLAGS` injects `Version`, `Commit`, `Date`, `BuiltBy` into `cmd/go-galaxy/main.go`. Don't add module-time fallbacks elsewhere.
 
-## Skills & agents
+## Skills, commands & agents
 
-Project-local skills live under [.claude/skills](.claude/skills) and a code-reviewer agent under [.claude/agents](.claude/agents). Use them rather than re-deriving the workflow from this file:
+Project tooling lives under [.claude/skills](.claude/skills) (lazy reference procedures), [.claude/commands](.claude/commands) (quick slash commands), [.claude/agents](.claude/agents) (role specialists), and [.claude/workflows](.claude/workflows) (orchestration). Use them rather than re-deriving the workflow from this file.
 
-- **[go-galaxy-build](.claude/skills/go-galaxy-build/SKILL.md)** — host build, Linux amd64 build, OCI image. Pre-build chains and `dist/` artifact paths.
-- **[go-galaxy-check](.claude/skills/go-galaxy-check/SKILL.md)** — `just lint` / `just check` quality gates, individual analyzer commands, depguard allowlist gotchas.
-- **[go-galaxy-deps](.claude/skills/go-galaxy-deps/SKILL.md)** — mutating ops only: `just deps`, `just fix`. Adding a new direct dependency.
-- **[go-galaxy-test](.claude/skills/go-galaxy-test/SKILL.md)** — full and per-package test runs, `-race` policy, where suites live.
-- **[go-galaxy-reviewer](.claude/agents/go-galaxy-reviewer.md)** — agent that audits non-trivial diffs against layer discipline and the hard rules below before commit/PR.
+**Skills:**
+
+- **[go-galaxy-build](.claude/skills/go-galaxy-build/SKILL.md)** - host build, Linux amd64 build, OCI image. Pre-build chains and `dist/` artifact paths.
+- **[go-galaxy-check](.claude/skills/go-galaxy-check/SKILL.md)** - `just lint` / `just check` quality gates, individual analyzer commands, depguard allowlist gotchas.
+- **[go-galaxy-deps](.claude/skills/go-galaxy-deps/SKILL.md)** - mutating ops only: `just deps`, `just fix`. Adding a new direct dependency.
+- **[go-galaxy-test](.claude/skills/go-galaxy-test/SKILL.md)** - full and per-package test runs, `-race` policy, where suites live.
+- **[go-galaxy-coverage](.claude/skills/go-galaxy-coverage/SKILL.md)** - coverage profiling and gap analysis (the tester's main tool).
+
+**Commands (Just-based, run on demand):** `/gg-check`, `/gg-lint`, `/gg-test [scope]` run the matching `just` target and summarize; `/gg-pipeline <task>` launches the architect-gated delivery pipeline.
+
+**Agents (the main thread delegates to these):**
+
+- **[go-architect](.claude/agents/go-architect.md)** (opus, `effort: xhigh`) - lead engineer and design authority, the brain of the fleet. Delegate non-trivial work here first; it designs, gates every stage, and may reject a weak plan outright.
+- **[go-developer](.claude/agents/go-developer.md)** (sonnet) - implements approved designs: code, English comments, unit tests, targeted gate runs.
+- **[go-tester](.claude/agents/go-tester.md)** (sonnet) - runs unit/integration/e2e tests and audits coverage; reports gaps to cover or to justify.
+- **[go-security](.claude/agents/go-security.md)** (opus, `effort: xhigh`) - audits for CVEs, dangerous code, external attack surface, and host harm, including cross-layer combinations.
+- **[go-techwriter](.claude/agents/go-techwriter.md)** (sonnet) - verifies comments and writes docs; enforces English-only prose.
 
 Permissions and a `gofmt` post-edit hook are pre-wired in [.claude/settings.json](.claude/settings.json).
+
+## Multi-agent workflow & rules
+
+- **Subagents cannot call each other.** Claude Code subagents are terminal: each returns a report and cannot invoke another agent. All routing goes through the main thread, or through the deterministic orchestrator in [.claude/workflows/architect-pipeline.js](.claude/workflows/architect-pipeline.js) (run via the `Workflow` tool or `/gg-pipeline`).
+- **The architect gates everything.** For a non-trivial change the order is: architect (design, approve/reject) -> developer (implement) -> architect (review) -> tester (tests + coverage) -> architect -> security (audit) -> architect -> tech-writer (docs) -> architect (sign-off back to the main thread). The architect loops work back to the developer on any `rework`, and only signs off when it is "written ideally, it will not get better than this".
+- **The architect defaults to NO.** Under-specified, architecturally wrong, unjustified-dependency, or low-value requests get rejected, not coded around.
+- **English only.** All code, comments, tests, docs, and other prose are in English; the tech-writer enforces it.
+- **Hyphen-minus only.** Never an em (U+2014) or en (U+2013) dash anywhere - prose, code, comments, or commit text.
+- **Efficiency is a first-class requirement,** not a nice-to-have: minimal allocations per tick, pre-sized buffers, no needless copies on hot paths.
 
 ## Things that look stale but aren't
 
