@@ -26,6 +26,7 @@ jobs:
           go vet ./...;
           go tool staticcheck ./...;
           go tool govulncheck ./...;
+          go tool fieldalignment ./...;
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9
@@ -34,11 +35,11 @@ jobs:
           install-mode: binary
 
       - name: Run tests
-        run: go test -v -race -coverprofile=coverage.out ./...
+        run: go test -v -race -coverprofile=coverage.txt ./...
 
       - name: Upload coverage
         uses: codecov/codecov-action@v5
         with:
-          file: ./coverage.out
+          file: ./coverage.txt
           flags: unittests
           fail_ci_if_error: false
