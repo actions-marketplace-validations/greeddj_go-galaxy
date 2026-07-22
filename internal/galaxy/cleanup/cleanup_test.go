@@ -759,3 +759,53 @@ func TestRemovesAllCopiesInOneRun(t *testing.T) {
 		t.Fatalf("expected project B's copy to be removed in this single run, stat error: %v", statErr)
 	}
 }
+
+// TestReportsCorruptManifest proves a MANIFEST.json that exists but fails to
+// parse as JSON is reported via a warning rather than silently disappearing,
+// while the fail-safe invariant holds: an unidentifiable install is neither
+// a reachability source nor a deletion candidate, so its on-disk tree
+// survives. A separate, valid installed collection alongside it is still
+// processed normally (it is unreferenced by requirements, so it is removed),
+// proving the corrupt manifest does not disrupt the rest of the scan, and
+// Start does not return an error - a corrupt manifest is reported, not
+// fatal.
+func TestReportsCorruptManifest(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+	validInstallDir := seedInstallTree(t, downloadPath)
+
+	corruptDir := filepath.Join(downloadPath, "ansible_collections", "corruptns", "corruptname")
+	if err := os.MkdirAll(corruptDir, helpers.DirMod); err != nil {
+		t.Fatalf("failed to create corrupt manifest dir: %v", err)
+	}
+	corruptManifestPath := filepath.Join(corruptDir, "MANIFEST.json")
+	if err := os.WriteFile(corruptManifestPath, []byte("{invalid"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write corrupt manifest: %v", err)
+	}
+
+	reqPath := filepath.Join(t.TempDir(), "requirements.yml")
+	if err := os.WriteFile(reqPath, []byte("collections: []\n"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write requirements file: %v", err)
+	}
+	registerCleanupProjectAt(t, cacheDir, downloadPath, reqPath)
+
+	printer := &recordingPrinter{}
+	runtime := infra.New(printer, http.DefaultClient)
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected a corrupt manifest to be reported rather than fatal, got error: %v", err)
+	}
+
+	if !printer.hasWarningContaining("corrupt manifest") {
+		t.Fatalf("expected a warning about a corrupt manifest, got: %v", printer.warnings)
+	}
+	if _, statErr := os.Stat(corruptManifestPath); statErr != nil {
+		t.Fatalf("expected the corrupt manifest's tree to survive, stat error: %v", statErr)
+	}
+	validManifestPath := filepath.Join(validInstallDir, "MANIFEST.json")
+	if _, statErr := os.Stat(validManifestPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the unreferenced valid collection to still be removed normally, stat error: %v", statErr)
+	}
+}

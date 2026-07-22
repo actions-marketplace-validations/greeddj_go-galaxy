@@ -161,4 +161,10 @@ var (
 	// since that would make every uniquely-installed collection under
 	// that project look unreachable and get deleted.
 	ErrProjectRequirementsUnreadable = errors.New("project requirements file is unreadable")
+	// ErrCorruptManifest indicates a MANIFEST.json file exists but could
+	// not be parsed as JSON. The install it describes cannot be
+	// identified, so it is reported rather than silently discarded, but is
+	// still treated as neither a reachability source nor a deletion
+	// candidate.
+	ErrCorruptManifest = errors.New("corrupt manifest")
 )

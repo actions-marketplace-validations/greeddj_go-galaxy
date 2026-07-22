@@ -3,6 +3,7 @@ package cleanup
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -329,17 +330,22 @@ func scanCollectionDir(
 	deps map[string]map[string]string,
 ) error {
 	manifestPath := filepath.Join(root, ns, name, "MANIFEST.json")
-	manifest, ok, err := readManifest(manifestPath)
+	manifest, err := readManifest(manifestPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// A <ns>/<name> directory without a MANIFEST.json is not an
 			// installed collection - skip it silently rather than aborting.
 			return nil
 		}
+		if errors.Is(err, helpers.ErrCorruptManifest) {
+			// A manifest that cannot be parsed identifies no collection at
+			// all: it is neither a reachability source nor a deletion
+			// candidate, so it is reported (visible warning) but its
+			// on-disk tree is left untouched rather than aborting the scan.
+			out.Warnf("skipping corrupt manifest at %s: %v", manifestPath, err)
+			return nil
+		}
 		return err
-	}
-	if !ok {
-		return nil
 	}
 	record, key, ok, err := buildInstalledRecord(collectionsPath, manifestPath, manifest)
 	if err != nil {
@@ -355,17 +361,22 @@ func scanCollectionDir(
 	return nil
 }
 
-func readManifest(path string) (types.GalaxyCollectionVersionInfoManifest, bool, error) {
+// readManifest reads and parses a MANIFEST.json. A read failure (including
+// os.IsNotExist for a missing file, which the caller checks for) is returned
+// as-is. A file that exists but fails to parse as JSON is reported as
+// helpers.ErrCorruptManifest wrapping the underlying decode error, rather
+// than silently discarding it: the caller decides how to surface that.
+func readManifest(path string) (types.GalaxyCollectionVersionInfoManifest, error) {
 	//nolint:gosec // path is built from a fixed <ansible_collections>/<ns>/<name>/MANIFEST.json probe.
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return types.GalaxyCollectionVersionInfoManifest{}, false, err
+		return types.GalaxyCollectionVersionInfoManifest{}, err
 	}
 	var manifest types.GalaxyCollectionVersionInfoManifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		return types.GalaxyCollectionVersionInfoManifest{}, false, nil
+		return types.GalaxyCollectionVersionInfoManifest{}, fmt.Errorf("%w at %s: %w", helpers.ErrCorruptManifest, path, err)
 	}
-	return manifest, true, nil
+	return manifest, nil
 }
 
 // buildInstalledRecord builds an installedCollection from a parsed manifest.
