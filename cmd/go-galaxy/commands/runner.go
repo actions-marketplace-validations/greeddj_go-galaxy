@@ -30,5 +30,6 @@ func runCollectionCommand(ctx context.Context, c *cli.Command, action collection
 	defer p.Close()
 	runtime := infra.New(p, newHTTPClient(cfg))
 	runtime.DebugAnsibleConfig(cfg)
+	runtime.WarnConfig(cfg)
 	return action(ctx, cfg, runtime)
 }

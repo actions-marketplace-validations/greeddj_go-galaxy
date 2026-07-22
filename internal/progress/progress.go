@@ -17,9 +17,11 @@ const (
 	spinnerColor   = "green"
 	ansiRed        = "\x1b[1m\x1b[31m"
 	ansiGreen      = "\x1b[1m\x1b[32m"
+	ansiYellow     = "\x1b[1m\x1b[33m"
 	ansiReset      = "\x1b[1m\x1b[0m"
 	ok             = ansiGreen + "✔" + ansiReset
 	fail           = ansiRed + "✗" + ansiReset
+	warn           = ansiYellow + "!" + ansiReset
 )
 
 // Progress renders CLI progress output with optional spinner. Regular output
@@ -122,6 +124,13 @@ func (p *Progress) Okf(format string, args ...any) {
 // do not contaminate stdout consumers.
 func (p *Progress) Errorf(format string, args ...any) {
 	p.persist(p.errOut, fail+" "+fmt.Sprintf(format, args...))
+}
+
+// Warnf prints a warning message with a colored marker to stderr. Like
+// Errorf, it always emits regardless of verbose/quiet mode and never
+// touches stdout, consistent with the stdout-purity rule.
+func (p *Progress) Warnf(format string, args ...any) {
+	p.persist(p.errOut, warn+" "+fmt.Sprintf(format, args...))
 }
 
 // Debugf prints a debug message when verbose mode is enabled.

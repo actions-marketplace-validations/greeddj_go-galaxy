@@ -8,6 +8,7 @@ type Printer interface {
 	PersistentPrintf(format string, args ...any)
 	Okf(format string, args ...any)
 	Errorf(format string, args ...any)
+	Warnf(format string, args ...any)
 	Debugf(format string, args ...any)
 	DebugSincef(startTime time.Time, format string, args ...any)
 }

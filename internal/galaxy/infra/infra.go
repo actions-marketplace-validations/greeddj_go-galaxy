@@ -42,3 +42,16 @@ func (i *Infra) DebugAnsibleConfig(cfg *config.Config) {
 		i.Output.Debugf("ansible.cfg %s: galaxy.server=%s", cfg.AnsibleConfigPath, cfg.Server)
 	}
 }
+
+// WarnConfig surfaces non-fatal configuration warnings collected while
+// building cfg (e.g. an ignored collections_path entry). Config is built
+// before the output printer exists, so these warnings are queued on cfg
+// and drained here once a printer is available.
+func (i *Infra) WarnConfig(cfg *config.Config) {
+	if i == nil || i.Output == nil || cfg == nil {
+		return
+	}
+	for _, w := range cfg.Warnings {
+		i.Output.Warnf("%s", w)
+	}
+}

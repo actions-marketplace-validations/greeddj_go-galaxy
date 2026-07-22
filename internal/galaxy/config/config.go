@@ -15,14 +15,19 @@ import (
 
 // Config holds runtime settings for collection operations.
 type Config struct {
-	AnsibleConfigPath          string
-	RequirementsFile           string
-	LockFile                   string
-	MetricsFile                string
-	CacheDir                   string
-	DownloadPath               string
-	Server                     string
-	Resolution                 string
+	AnsibleConfigPath string
+	RequirementsFile  string
+	LockFile          string
+	MetricsFile       string
+	CacheDir          string
+	DownloadPath      string
+	Server            string
+	Resolution        string
+	// Warnings collects non-fatal configuration warnings (e.g. a
+	// colon-separated collections_path with entries this tool ignores).
+	// BuildCollectionConfig runs before the output printer exists, so
+	// warnings are carried here and drained later through Infra.WarnConfig.
+	Warnings                   []string
 	S3Cache                    S3CacheConfig
 	Timeout                    time.Duration
 	Workers                    int
@@ -209,6 +214,40 @@ func applyAnsibleConfig(cfg *Config, c *cli.Command, ansibleConfig ansibleConfig
 	cfg.DownloadPath, cfg.AnsibleCollectionsPathUsed = pickConfigValue(c, "download-path", ansibleConfig.Defaults.CollectionsPath)
 	cfg.CacheDir, cfg.AnsibleCacheDirUsed = pickConfigValue(c, "cache-dir", ansibleConfig.Galaxy.CacheDir)
 	cfg.Server, cfg.AnsibleServerUsed = pickConfigValue(c, "server", ansibleConfig.Galaxy.Server)
+
+	// ansible accepts a POSIX ":"-separated list for collections_path (both
+	// the [defaults] collections_path ansible.cfg key and the
+	// ANSIBLE_COLLECTIONS_PATH env var), using only the first entry and
+	// treating the rest as additional search roots this tool does not
+	// support. Apply the split to the already-resolved value so both
+	// sources are covered uniformly, matching ansible's own behavior for
+	// an explicit --download-path a:b as well. first is assigned
+	// unconditionally (a no-op when there was nothing to split, including a
+	// bare trailing separator with no further entries); only a genuinely
+	// ignored entry produces a warning.
+	first, rest := firstCollectionsPath(cfg.DownloadPath)
+	cfg.DownloadPath = first
+	if len(rest) > 0 {
+		cfg.Warnings = append(cfg.Warnings,
+			fmt.Sprintf("collections_path lists multiple paths; using %q and ignoring the rest: %v", first, rest))
+	}
+}
+
+// firstCollectionsPath splits a POSIX ":"-separated collections_path value
+// into its first entry and the remaining non-empty entries. It is not
+// aware of Windows drive letters (e.g. "C:\path"), consistent with this
+// tool's CI/Linux target.
+func firstCollectionsPath(value string) (string, []string) {
+	parts := strings.Split(value, ":")
+	first := parts[0]
+
+	var rest []string
+	for _, p := range parts[1:] {
+		if p != "" {
+			rest = append(rest, p)
+		}
+	}
+	return first, rest
 }
 
 // pickConfigValue picks a string config value with precedence:

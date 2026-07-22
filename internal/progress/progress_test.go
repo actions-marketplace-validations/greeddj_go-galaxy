@@ -108,7 +108,7 @@ func TestStateATransient(t *testing.T) {
 }
 
 // TestStateAResult covers the result tier for state A: PersistentPrintf and Okf
-// emit to stdout, Errorf emits to stderr, all despite an active spinner.
+// emit to stdout, Errorf and Warnf emit to stderr, all despite an active spinner.
 func TestStateAResult(t *testing.T) {
 	t.Run("PersistentPrintf", func(t *testing.T) {
 		p, out, errOut := stateA()
@@ -131,6 +131,14 @@ func TestStateAResult(t *testing.T) {
 		defer p.Close()
 		p.Errorf("x")
 		assertBuf(t, errOut, fail+" x\n")
+		assertEmpty(t, out)
+	})
+
+	t.Run("Warnf", func(t *testing.T) {
+		p, out, errOut := stateA()
+		defer p.Close()
+		p.Warnf("x")
+		assertBuf(t, errOut, warn+" x\n")
 		assertEmpty(t, out)
 	})
 }

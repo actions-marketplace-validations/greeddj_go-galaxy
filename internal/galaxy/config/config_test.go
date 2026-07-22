@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -130,6 +131,66 @@ func TestApplyAnsibleConfigDownloadPath(t *testing.T) {
 			downloadPath: testDefaultDownloadPath,
 			cacheDir:     testDefaultCacheDir, server: testDefaultServer, ansibleConfigPath: testAnsibleConfigPath,
 		})
+	})
+}
+
+// assertCollectionsPathSplit checks got's DownloadPath and Warnings count
+// against want, for TestCollectionsPathSplit's cases.
+func assertCollectionsPathSplit(t *testing.T, got *Config, wantDownloadPath string, wantWarnings int) {
+	t.Helper()
+	if got.DownloadPath != wantDownloadPath {
+		t.Errorf("DownloadPath = %q, want %q", got.DownloadPath, wantDownloadPath)
+	}
+	if len(got.Warnings) != wantWarnings {
+		t.Errorf("Warnings = %v, want %d entries", got.Warnings, wantWarnings)
+	}
+}
+
+// assertWarningMentions checks that got's sole warning mentions substr (the
+// ignored collections_path entries).
+func assertWarningMentions(t *testing.T, got *Config, substr string) {
+	t.Helper()
+	if len(got.Warnings) != 1 {
+		t.Fatalf("len(Warnings) = %d, want 1 (Warnings = %v)", len(got.Warnings), got.Warnings)
+	}
+	if !strings.Contains(got.Warnings[0], substr) {
+		t.Errorf("Warnings[0] = %q, want it to mention %q", got.Warnings[0], substr)
+	}
+}
+
+// TestCollectionsPathSplit checks that applyAnsibleConfig honors ansible's
+// POSIX ":"-separated collections_path list: only the first entry is used,
+// and a warning naming the ignored entries is recorded exactly once. A
+// single entry, a single entry with a trailing separator (an empty
+// segment), and an empty value must all leave Warnings untouched.
+func TestCollectionsPathSplit(t *testing.T) {
+	t.Run("multiple entries: first wins, rest warned about", func(t *testing.T) {
+		ansCfg := ansibleConfig{Defaults: ansibleDefaultsConfig{CollectionsPath: "a:b:c"}}
+		got := runApplyAnsibleConfig(t, nil, ansCfg)
+		assertCollectionsPathSplit(t, got, "a", 1)
+		assertWarningMentions(t, got, "[b c]")
+	})
+
+	t.Run("single entry: no split, no warning", func(t *testing.T) {
+		ansCfg := ansibleConfig{Defaults: ansibleDefaultsConfig{CollectionsPath: "a"}}
+		got := runApplyAnsibleConfig(t, nil, ansCfg)
+		assertCollectionsPathSplit(t, got, "a", 0)
+	})
+
+	t.Run("trailing separator: empty segment filtered, no warning", func(t *testing.T) {
+		ansCfg := ansibleConfig{Defaults: ansibleDefaultsConfig{CollectionsPath: "a:"}}
+		got := runApplyAnsibleConfig(t, nil, ansCfg)
+		assertCollectionsPathSplit(t, got, "a", 0)
+	})
+
+	t.Run("empty ansible.cfg value: falls back to flag default, no warning", func(t *testing.T) {
+		got := runApplyAnsibleConfig(t, nil, ansibleConfig{})
+		assertCollectionsPathSplit(t, got, testDefaultDownloadPath, 0)
+	})
+
+	t.Run("explicit flag value also splits, matching ansible", func(t *testing.T) {
+		got := runApplyAnsibleConfig(t, []string{"--download-path=a:b"}, ansibleConfig{})
+		assertCollectionsPathSplit(t, got, "a", 1)
 	})
 }
 
