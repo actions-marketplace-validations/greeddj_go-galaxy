@@ -18,6 +18,7 @@ import (
 
 	cacheManager "github.com/greeddj/go-galaxy/internal/galaxy/cache"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
+	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
 	gzip "github.com/klauspost/pgzip"
 )
@@ -87,7 +88,12 @@ func (b *Backend) Lock(ctx context.Context) (func() error, error) {
 	return b.acquireLock(ctx, lockKey)
 }
 
-// LoadStore loads the snapshot store from S3.
+// LoadStore loads the snapshot store from S3. It applies the same schema
+// policy as the local backend's Load: a newer-than-current schema version
+// is reported as an error since this binary cannot safely interpret it, an
+// older-than-current version causes the snapshot to be dropped and rebuilt
+// (a fresh empty Store, nil error) rather than partially trusted, and a
+// matching version returns the loaded data as-is.
 func (b *Backend) LoadStore(ctx context.Context) (*store.Store, error) {
 	if err := b.Open(ctx); err != nil {
 		return nil, err
@@ -103,6 +109,12 @@ func (b *Backend) LoadStore(ctx context.Context) (*store.Store, error) {
 	st := store.New()
 	if err := json.Unmarshal(data, st); err != nil {
 		return nil, err
+	}
+	switch verr := store.ValidateSchema(st.Meta.SchemaVersion); {
+	case errors.Is(verr, helpers.ErrOutdatedSchemaVersion):
+		return store.New(), nil
+	case verr != nil:
+		return nil, verr
 	}
 	return st, nil
 }
