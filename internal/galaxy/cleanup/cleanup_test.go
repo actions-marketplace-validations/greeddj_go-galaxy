@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	cacheBackend "github.com/greeddj/go-galaxy/internal/cache"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
@@ -121,11 +122,10 @@ func TestStartAbortsOnCorruptRegistryBeforeDeletion(t *testing.T) {
 // As with the corrupt-registry case, zero recorded projects means
 // buildReachable/removeUnused never run regardless of what is on disk, so
 // this proves the guard fires rather than that a specific collection was
-// individually preserved by reachability logic. Per the architect's
-// instruction, this test intentionally does not assert anything about lock
-// or backend release: Start's early no-op return does not currently release
-// the lock or close the backend (tracked separately), and asserting on that
-// here would either fail today or bake the leak in as expected behavior.
+// individually preserved by reachability logic. It additionally asserts that
+// the no-op branch releases the instance lock: a fresh backend can acquire
+// the same cache dir's lock right after Start returns, which only holds if
+// the early return released it rather than leaking it.
 func TestStartTakesNoOpPathOnEmptyRegistry(t *testing.T) {
 	t.Parallel()
 	cacheDir := t.TempDir()
@@ -139,6 +139,33 @@ func TestStartTakesNoOpPathOnEmptyRegistry(t *testing.T) {
 		t.Fatalf("expected nil error for an empty registry, got %v", err)
 	}
 	assertManifestSurvives(t, installDir)
+	assertLockIsFree(t, cfg, runtime)
+}
+
+// assertLockIsFree proves the cache dir's instance lock is acquirable, which
+// it is only if a prior Start released it. It opens a fresh backend, acquires
+// the lock, and releases it again.
+func assertLockIsFree(t *testing.T, cfg *config.Config, runtime *infra.Infra) {
+	t.Helper()
+	backend, err := cacheBackend.New(cfg, runtime)
+	if err != nil {
+		t.Fatalf("failed to build a fresh backend: %v", err)
+	}
+	if err := backend.Open(t.Context()); err != nil {
+		t.Fatalf("failed to open a fresh backend: %v", err)
+	}
+	defer func() {
+		if err := backend.Close(t.Context()); err != nil {
+			t.Errorf("failed to close the fresh backend: %v", err)
+		}
+	}()
+	release, err := backend.Lock(t.Context())
+	if err != nil {
+		t.Fatalf("expected the lock to be free after an empty-registry cleanup, got %v", err)
+	}
+	if err := release(); err != nil {
+		t.Errorf("failed to release the re-acquired lock: %v", err)
+	}
 }
 
 // newTestRuntime builds an Infra wired with a no-op printer and the default

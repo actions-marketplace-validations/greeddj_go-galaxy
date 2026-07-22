@@ -50,10 +50,15 @@ func Start(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error 
 	if err != nil {
 		return err
 	}
-	if state == nil || state.registry == nil || len(state.registry.Projects) == 0 {
-		runtime.Output.Printf("ℹ️ No projects recorded for GC.")
+	if state == nil {
+		// initCleanup returns a non-nil state on success; this guard is
+		// defensive and has nothing acquired to release.
 		return nil
 	}
+	// Register the lock release and backend close before the empty-registry
+	// check: initCleanup has already acquired the lock and opened the backend
+	// by this point, so the no-op branch below must still release both instead
+	// of leaking them.
 	defer func() {
 		if state.release != nil {
 			_ = state.release()
@@ -64,6 +69,11 @@ func Start(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error 
 			_ = state.backend.Close(ctx)
 		}
 	}()
+
+	if state.registry == nil || len(state.registry.Projects) == 0 {
+		runtime.Output.Printf("ℹ️ No projects recorded for GC.")
+		return nil
+	}
 
 	reachable, installedByKey, err := buildReachable(runtime, state.registry)
 	if err != nil {
