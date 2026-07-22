@@ -31,6 +31,10 @@ type lockTiming struct {
 	heartbeatInterval time.Duration
 	// heartbeatOpTimeout bounds each individual heartbeat HEAD/PUT pair.
 	heartbeatOpTimeout time.Duration
+	// releaseTimeout bounds the release path's own S3 calls, which run on a
+	// fresh context independent of the (possibly already-canceled) context
+	// the caller originally acquired the lock with.
+	releaseTimeout time.Duration
 	// waitCeiling bounds the total time acquireLock spends contending for
 	// the lock before giving up with errS3LockWaitTimeout.
 	waitCeiling time.Duration
@@ -57,9 +61,11 @@ type lockRecord struct {
 // If-None-Match: *, and an existing object is only ever reclaimed after its
 // writer-recorded deadline (via lockExpired) shows its holder's TTL has
 // elapsed. All attempts run against waitCtx, a fixed wait-ceiling derived
-// from ctx; the release closure returned on success instead uses ctx
-// directly, since it is invoked well after acquireLock (and its
-// wait-ceiling deadline) has already returned.
+// from ctx. The release closure returned on success does not use ctx (or
+// waitCtx) at all: it runs its own S3 calls on a fresh context, since it may
+// be invoked long after acquireLock returned and ctx may by then already be
+// canceled (e.g. the install run it belongs to was interrupted) - using it
+// would leak the lock object until its TTL elapses instead of releasing it.
 func (b *Backend) acquireLock(ctx context.Context, key string) (func() error, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, b.lock.waitCeiling)
 	defer cancel()
@@ -73,7 +79,7 @@ func (b *Backend) acquireLock(ctx context.Context, key string) (func() error, er
 	}
 
 	for attempt := 0; ; attempt++ {
-		release, retryNow, err := b.tryAcquireOnce(waitCtx, ctx, key, token)
+		release, retryNow, err := b.tryAcquireOnce(waitCtx, key, token)
 		switch {
 		case err != nil:
 			// An in-flight S3 call can fail with a raw transport error
@@ -99,17 +105,16 @@ func (b *Backend) acquireLock(ctx context.Context, key string) (func() error, er
 }
 
 // tryAcquireOnce performs a single create-or-reclaim step against the lock
-// object. opCtx bounds the S3 calls made during this step (the shared
-// wait-ceiling context); releaseCtx is threaded through to the eventual
-// release closure unchanged. It returns a non-nil release function on
-// success; retryNow=true when the object vanished between the failed
-// create and the follow-up HEAD, so the caller should retry immediately
-// without sleeping out a backoff interval; or an error.
-func (b *Backend) tryAcquireOnce(opCtx, releaseCtx context.Context, key, token string) (func() error, bool, error) {
+// object. opCtx bounds all the S3 calls made during this step (the shared
+// wait-ceiling context). It returns a non-nil release function on success;
+// retryNow=true when the object vanished between the failed create and the
+// follow-up HEAD, so the caller should retry immediately without sleeping
+// out a backoff interval; or an error.
+func (b *Backend) tryAcquireOnce(opCtx context.Context, key, token string) (func() error, bool, error) {
 	deadline := time.Now().UTC().Add(b.lock.ttl)
 	putErr := b.putLock(opCtx, key, token, deadline, true)
 	if putErr == nil {
-		release, ok, err := b.claim(opCtx, releaseCtx, key, token)
+		release, ok, err := b.claim(opCtx, key, token)
 		if err != nil || ok {
 			return release, false, err
 		}
@@ -120,13 +125,13 @@ func (b *Backend) tryAcquireOnce(opCtx, releaseCtx context.Context, key, token s
 	if !errors.Is(putErr, errS3PreconditionFailed) {
 		return nil, false, putErr
 	}
-	return b.reclaimIfExpired(opCtx, releaseCtx, key, token)
+	return b.reclaimIfExpired(opCtx, key, token)
 }
 
 // reclaimIfExpired runs after a failed create-if-absent PUT: it HEADs the
 // existing object and, if its TTL has elapsed, reclaims it (delete then
 // recreate under our token). See tryAcquireOnce for the return contract.
-func (b *Backend) reclaimIfExpired(opCtx, releaseCtx context.Context, key, token string) (func() error, bool, error) {
+func (b *Backend) reclaimIfExpired(opCtx context.Context, key, token string) (func() error, bool, error) {
 	headers, headErr := b.client.headObject(opCtx, key)
 	switch {
 	case errors.Is(headErr, errS3NotFound):
@@ -150,7 +155,7 @@ func (b *Backend) reclaimIfExpired(opCtx, releaseCtx context.Context, key, token
 	reclaimDeadline := time.Now().UTC().Add(b.lock.ttl)
 	putErr := b.putLock(opCtx, key, token, reclaimDeadline, true)
 	if putErr == nil {
-		return b.claim(opCtx, releaseCtx, key, token)
+		return b.claim(opCtx, key, token)
 	}
 	if !errors.Is(putErr, errS3PreconditionFailed) {
 		return nil, false, putErr
@@ -162,12 +167,14 @@ func (b *Backend) reclaimIfExpired(opCtx, releaseCtx context.Context, key, token
 // claim verifies that the lock object this call just wrote is still ours
 // (guarding against a concurrent writer racing in between the PUT and this
 // check) and, if so, starts the heartbeat and returns the release closure.
-func (b *Backend) claim(opCtx, releaseCtx context.Context, key, token string) (func() error, bool, error) {
+func (b *Backend) claim(opCtx context.Context, key, token string) (func() error, bool, error) {
 	ours, err := b.verifyOwner(opCtx, key, token)
 	if err != nil || !ours {
 		return nil, false, err
 	}
-	return b.startHeartbeat(releaseCtx, key, token), true, nil
+	//nolint:contextcheck // startHeartbeat's release closure deliberately builds its own fresh
+	// context instead of reusing opCtx: opCtx may already be canceled by the time release runs.
+	return b.startHeartbeat(key, token), true, nil
 }
 
 // verifyOwner reports whether the lock object's recorded token matches
@@ -284,16 +291,14 @@ func backoffDelay(base, backoffCap time.Duration, attempt int) time.Duration {
 // holder never needs to re-run the acquisition state machine; if it ever
 // observes a different token (meaning some other acquirer reclaimed the
 // lock, e.g. after this holder stalled past its TTL), it records the loss so
-// release refuses to delete a lock it no longer owns. releaseCtx is used
-// only by the release closure's own final HEAD/DELETE, never by the
-// heartbeat loop itself, which runs on an independent background context so
-// it keeps refreshing the deadline even if releaseCtx is later canceled by
-// its caller before release is invoked.
-//
-// must outlive releaseCtx so it keeps refreshing the deadline.
-//
-//nolint:contextcheck // hbCtx deliberately does not derive from releaseCtx: the heartbeat
-func (b *Backend) startHeartbeat(releaseCtx context.Context, key, token string) func() error {
+// release refuses to delete a lock it no longer owns. Neither the heartbeat
+// loop nor the release closure it returns depend on the context the caller
+// used to acquire the lock: the heartbeat runs on its own independent
+// background context so it keeps refreshing the deadline for as long as the
+// holder keeps the lock, and release builds its own fresh, timeout-bounded
+// context for its final HEAD/DELETE (see releaseLock) so a canceled caller
+// context can never prevent the lock from being released.
+func (b *Backend) startHeartbeat(key, token string) func() error {
 	hbCtx, hbCancel := context.WithCancel(context.Background())
 	var lost atomic.Bool
 	done := make(chan struct{})
@@ -320,7 +325,14 @@ func (b *Backend) startHeartbeat(releaseCtx context.Context, key, token string) 
 		if lost.Load() {
 			return errS3LockLost
 		}
-		return b.releaseLock(releaseCtx, key, token)
+		// A fresh, timeout-bounded context: the caller's original context
+		// (used throughout acquisition) may already be canceled by now -
+		// e.g. an interrupted or failed install run - and using it here
+		// would make releaseLock's HEAD/DELETE fail immediately, leaking
+		// the lock object until its TTL elapses instead of releasing it.
+		relCtx, cancel := context.WithTimeout(context.Background(), b.lock.releaseTimeout)
+		defer cancel()
+		return b.releaseLock(relCtx, key, token)
 	}
 }
 

@@ -52,6 +52,9 @@ const (
 	// heartbeatOpTimeout bounds each individual heartbeat HEAD/PUT pair so a
 	// stalled S3 call cannot delay the next tick indefinitely.
 	heartbeatOpTimeout = 30 * time.Second
+	// lockReleaseTimeout bounds the release path's own S3 calls on a fresh
+	// context.
+	lockReleaseTimeout = 30 * time.Second
 	// lockWaitCeiling bounds the total time acquireLock will spend
 	// contending for the lock before giving up with errS3LockWaitTimeout.
 	lockWaitCeiling = 5 * time.Minute

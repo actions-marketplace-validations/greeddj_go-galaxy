@@ -21,6 +21,7 @@ func testLockTiming(ttl time.Duration) lockTiming {
 		ttl:                ttl,
 		heartbeatInterval:  30 * time.Millisecond,
 		heartbeatOpTimeout: 200 * time.Millisecond,
+		releaseTimeout:     200 * time.Millisecond,
 		waitCeiling:        time.Second,
 		backoffBase:        10 * time.Millisecond,
 		backoffCap:         50 * time.Millisecond,
@@ -57,6 +58,18 @@ func newLockBackendAt(t *testing.T, endpoint string, client *http.Client, timing
 	}
 	b.lock = timing
 	return b
+}
+
+// newLockBackendWithFake starts a fresh fake S3 server and returns a Backend
+// pointed at it alongside the underlying fake, so a test can reach into the
+// fake's test-only knobs (e.g. deleteDelay) that Backend itself exposes no
+// way to set.
+func newLockBackendWithFake(t *testing.T, timing lockTiming) (*Backend, *fakeS3) {
+	t.Helper()
+	fake := newFakeS3("test")
+	srv := httptest.NewServer(fake)
+	t.Cleanup(srv.Close)
+	return newLockBackendAt(t, srv.URL, srv.Client(), timing), fake
 }
 
 // seedLockObject writes the lock object directly (bypassing acquireLock) to
@@ -370,6 +383,65 @@ func TestReleaseDeletesOwnedLock(t *testing.T) {
 	key := b.key(locksPrefix, lockObject)
 	if _, err := b.client.headObject(ctx, key); !errors.Is(err, errS3NotFound) {
 		t.Fatalf("expected the lock object to be deleted, headObject error = %v", err)
+	}
+}
+
+// TestReleaseUsesFreshContextAfterInstallCancel is the core regression test
+// for the lock-leak bug: it cancels the caller's context (simulating an
+// interrupted or failed install run) before calling release, then confirms
+// release still succeeds and the lock object is actually gone from the
+// fake - proving its DELETE ran on a fresh context, not the canceled one.
+func TestReleaseUsesFreshContextAfterInstallCancel(t *testing.T) {
+	t.Parallel()
+	b := newTestBackend(t)
+	b.lock = testLockTiming(time.Minute)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	release, err := b.Lock(ctx)
+	if err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+
+	cancel() // simulate the install run this lock belongs to being canceled
+
+	if err := release(); err != nil {
+		t.Fatalf("expected release to succeed despite the canceled caller context, got %v", err)
+	}
+
+	key := b.key(locksPrefix, lockObject)
+	if _, err := b.client.headObject(context.Background(), key); !errors.Is(err, errS3NotFound) {
+		t.Fatalf("expected the lock object to be deleted despite the canceled caller context, headObject error = %v", err)
+	}
+}
+
+// TestReleaseTimeoutIsBounded confirms release's fresh context is itself
+// bounded by releaseTimeout: a DELETE that hangs well past releaseTimeout
+// causes release to give up with a deadline error rather than block
+// indefinitely, and it does so comfortably before the hang would resolve
+// on its own.
+func TestReleaseTimeoutIsBounded(t *testing.T) {
+	t.Parallel()
+	timing := testLockTiming(time.Minute)
+	timing.releaseTimeout = 50 * time.Millisecond
+	b, fake := newLockBackendWithFake(t, timing)
+
+	release, err := b.Lock(context.Background())
+	if err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+
+	const hangDelay = 2 * time.Second
+	fake.deleteDelay = hangDelay // far above releaseTimeout
+
+	start := time.Now()
+	releaseErr := release()
+	elapsed := time.Since(start)
+
+	if !errors.Is(releaseErr, context.DeadlineExceeded) {
+		t.Fatalf("expected a deadline-related error, got %v", releaseErr)
+	}
+	if elapsed >= hangDelay {
+		t.Fatalf("expected release to return well before the %v DELETE hang, took %v", hangDelay, elapsed)
 	}
 }
 

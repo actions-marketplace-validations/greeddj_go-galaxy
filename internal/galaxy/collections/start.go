@@ -62,7 +62,9 @@ func runWarm(ctx context.Context, cfg *config.Config, runtime *infra.Infra) erro
 	}
 	defer func() {
 		if state.release != nil {
-			_ = state.release()
+			if err := state.release(); err != nil {
+				runtime.Output.Errorf("lock release: %v", err)
+			}
 		}
 	}()
 	defer func() {
@@ -157,7 +159,9 @@ func runLock(ctx context.Context, cfg *config.Config, runtime *infra.Infra) erro
 	}
 	defer func() {
 		if state.release != nil {
-			_ = state.release()
+			if err := state.release(); err != nil {
+				runtime.Output.Errorf("lock release: %v", err)
+			}
 		}
 	}()
 	defer func() {
@@ -198,7 +202,9 @@ func runInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) e
 	}
 	defer func() {
 		if state.release != nil {
-			_ = state.release()
+			if err := state.release(); err != nil {
+				runtime.Output.Errorf("lock release: %v", err)
+			}
 		}
 	}()
 	defer func() {

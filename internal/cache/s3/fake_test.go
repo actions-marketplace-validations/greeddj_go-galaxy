@@ -30,6 +30,15 @@ type fakeS3 struct {
 	objects map[string]fakeObject
 	bucket  string
 	mu      sync.Mutex
+	// deleteDelay, when non-zero, makes handleDelete wait that long (or
+	// until the request's context is done, whichever comes first) before
+	// acting. It lets a test simulate a slow/hanging DELETE so a caller's
+	// bounded context can be observed timing it out. Zero (the default)
+	// preserves the original immediate-delete behavior for every other
+	// test. It must be set before the fake starts handling requests that
+	// exercise it: this test double does not synchronize concurrent
+	// writes to it against concurrent reads from handler goroutines.
+	deleteDelay time.Duration
 }
 
 // newFakeS3 constructs an empty fake bucket store. One instance must be
@@ -116,7 +125,7 @@ func (f *fakeS3) handleObject(w http.ResponseWriter, r *http.Request, key string
 	case http.MethodPut:
 		f.handlePut(w, r, key)
 	case http.MethodDelete:
-		f.handleDelete(w, key)
+		f.handleDelete(w, r, key)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
@@ -204,8 +213,25 @@ func writeObjectHeaders(header http.Header, obj fakeObject) {
 }
 
 // handleDelete removes the object, always reporting success like S3 does
-// even when the key is already absent.
-func (f *fakeS3) handleDelete(w http.ResponseWriter, key string) {
+// even when the key is already absent. If deleteDelay is set, it first
+// waits that long - or until the request's context is done, whichever
+// comes first - so a test can make DELETE outlast a caller's bounded
+// context and observe the resulting timeout.
+func (f *fakeS3) handleDelete(w http.ResponseWriter, r *http.Request, key string) {
+	f.mu.Lock()
+	delay := f.deleteDelay
+	f.mu.Unlock()
+	if delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-r.Context().Done():
+			http.Error(w, r.Context().Err().Error(), http.StatusGatewayTimeout)
+			return
+		case <-timer.C:
+		}
+	}
+
 	f.mu.Lock()
 	delete(f.objects, key)
 	f.mu.Unlock()
