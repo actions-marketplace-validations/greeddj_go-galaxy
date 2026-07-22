@@ -2,6 +2,7 @@ package lockfile
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -73,15 +74,32 @@ func TestLoadInvalidSchema(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsDuplicateNames(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dup.yml")
+	yamlContent := fmt.Sprintf(
+		"schema_version: %d\ncollections:\n  - name: a.a\n    version: 1.0.0\n  - name: a.a\n    version: 2.0.0\n",
+		SchemaVersion,
+	)
+	if err := os.WriteFile(path, []byte(yamlContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if !errors.Is(err, helpers.ErrLockfileInvalid) {
+		t.Fatalf("expected ErrLockfileInvalid, got %v", err)
+	}
+}
+
 func TestHashIsStable(t *testing.T) {
 	t.Parallel()
 	a := &File{Collections: []Entry{
-		{Name: "b.b", Version: "1.0.0"},
+		{Name: "b.b", Version: "1.0.0", Deps: []string{"z.z", "a.a"}},
 		{Name: "a.a", Version: "1.0.0"},
 	}}
 	b := &File{Collections: []Entry{
 		{Name: "a.a", Version: "1.0.0"},
-		{Name: "b.b", Version: "1.0.0"},
+		{Name: "b.b", Version: "1.0.0", Deps: []string{"a.a", "z.z"}},
 	}}
 	ah, err := a.Hash()
 	if err != nil {
@@ -92,8 +110,77 @@ func TestHashIsStable(t *testing.T) {
 		t.Fatal(err)
 	}
 	if ah != bh {
-		t.Fatalf("expected stable hash regardless of input order, got %q vs %q", ah, bh)
+		t.Fatalf("expected stable hash regardless of collection/deps order, got %q vs %q", ah, bh)
 	}
+}
+
+func TestHashPureNoMutation(t *testing.T) {
+	t.Parallel()
+	f := &File{Collections: []Entry{
+		{Name: "b.b", Version: "1.0.0", Deps: []string{"z.z", "a.a"}},
+		{Name: "a.a", Version: "1.0.0", Deps: []string{"y.y", "b.b"}},
+	}}
+	origNames := collectionNames(f)
+	origDeps := collectionDeps(f)
+
+	h1, err := f.Hash()
+	if err != nil {
+		t.Fatalf("Hash (1st call): %v", err)
+	}
+	h2, err := f.Hash()
+	if err != nil {
+		t.Fatalf("Hash (2nd call): %v", err)
+	}
+	if h1 != h2 {
+		t.Fatalf("expected repeated Hash calls to agree, got %q vs %q", h1, h2)
+	}
+
+	if got := collectionNames(f); !equalStrings(got, origNames) {
+		t.Fatalf("Hash mutated Collections order: got %v, want %v", got, origNames)
+	}
+	if got := collectionDeps(f); !equalDeps(got, origDeps) {
+		t.Fatalf("Hash mutated Deps order: got %v, want %v", got, origDeps)
+	}
+}
+
+func collectionNames(f *File) []string {
+	names := make([]string, len(f.Collections))
+	for i, e := range f.Collections {
+		names[i] = e.Name
+	}
+	return names
+}
+
+func collectionDeps(f *File) [][]string {
+	deps := make([][]string, len(f.Collections))
+	for i, e := range f.Collections {
+		deps[i] = append([]string(nil), e.Deps...)
+	}
+	return deps
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalDeps(a, b [][]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !equalStrings(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func TestSaveLeavesNoTempFiles(t *testing.T) {

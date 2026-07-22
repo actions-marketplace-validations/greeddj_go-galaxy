@@ -73,6 +73,9 @@ func Load(path string) (*File, error) {
 	if f.SchemaVersion != SchemaVersion {
 		return nil, fmt.Errorf("%w: schema_version=%d, supported=%d", helpers.ErrLockfileInvalid, f.SchemaVersion, SchemaVersion)
 	}
+	if err := f.validate(); err != nil {
+		return nil, err
+	}
 	return &f, nil
 }
 
@@ -134,14 +137,48 @@ func writeFileAtomic(dir, path string, data []byte) (err error) {
 
 // Hash returns a stable SHA256 hex of the canonical lockfile bytes.
 func (f *File) Hash() (string, error) {
-	clone := *f
-	canonicalize(&clone)
-	data, err := yaml.Marshal(&clone)
+	clone := f.canonicalClone()
+	data, err := yaml.Marshal(clone)
 	if err != nil {
 		return "", err
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+// canonicalClone returns a canonicalized deep copy of f. Only the slices that
+// canonicalize sorts are copied - the Collections slice and each entry's Deps
+// slice - so Hash stays allocation-light while never mutating the receiver.
+func (f *File) canonicalClone() *File {
+	clone := *f
+	clone.Collections = make([]Entry, len(f.Collections))
+	copy(clone.Collections, f.Collections)
+	for i := range clone.Collections {
+		src := f.Collections[i].Deps
+		if len(src) == 0 {
+			continue
+		}
+		deps := make([]string, len(src))
+		copy(deps, src)
+		clone.Collections[i].Deps = deps
+	}
+	canonicalize(&clone)
+	return &clone
+}
+
+// validate rejects lockfiles that are internally inconsistent. Duplicate
+// collection names would otherwise let indexLockfile silently drop an entry
+// and make a frozen install ambiguous. Save does not call this: buildLockfile
+// derives entries from an fqdn-keyed map, so it cannot produce duplicates.
+func (f *File) validate() error {
+	seen := make(map[string]struct{}, len(f.Collections))
+	for _, e := range f.Collections {
+		if _, dup := seen[e.Name]; dup {
+			return fmt.Errorf("%w: duplicate collection name %q", helpers.ErrLockfileInvalid, e.Name)
+		}
+		seen[e.Name] = struct{}{}
+	}
+	return nil
 }
 
 // IsNotExist reports whether err indicates the lockfile is missing.
