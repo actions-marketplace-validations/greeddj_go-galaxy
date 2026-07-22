@@ -83,9 +83,11 @@ func Errorf(format string, args ...any) {
 // prints a log line unless quiet mode is enabled.
 func (p *Progress) Printf(format string, args ...any) {
 	if p.s != nil {
-		// Plain assignment: the spinner goroutine reads Suffix concurrently,
-		// but closing that race is deferred to a later commit.
+		// The spinner render goroutine reads Suffix under the spinner's own
+		// lock, so the update must take that same lock to avoid a data race.
+		p.s.Lock()
 		p.s.Suffix = fmt.Sprintf(" "+format, args...)
+		p.s.Unlock()
 		return
 	}
 	if p.q {

@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -379,6 +380,38 @@ func TestClose(*testing.T) {
 
 	withoutSpinner := newProgress(true, false, true, &buf)
 	withoutSpinner.Close()
+}
+
+// TestPrintfSuffixRace drives concurrent spinner-suffix updates through Printf
+// against concurrent reads that hold the spinner lock, mirroring how the render
+// goroutine reads Suffix. It must stay clean under the race detector.
+func TestPrintfSuffixRace(t *testing.T) {
+	p := newProgress(false, false, true, io.Discard)
+	if p.s == nil {
+		t.Fatal("expected active spinner for the race scenario")
+	}
+	defer p.Close()
+
+	const (
+		workers    = 8
+		iterations = 200
+	)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			for range iterations {
+				p.s.Lock()
+				_ = p.s.Suffix
+				p.s.Unlock()
+			}
+		})
+		wg.Go(func() {
+			for i := range iterations {
+				p.Printf("tick %d", i)
+			}
+		})
+	}
+	wg.Wait()
 }
 
 // TestPackageLevelOkfErrorf verifies the standalone package-level Okf/Errorf
