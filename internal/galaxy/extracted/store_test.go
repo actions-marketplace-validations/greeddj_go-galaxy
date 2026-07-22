@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 )
 
 func TestStoreEnsureExtractsOnce(t *testing.T) {
@@ -198,6 +200,35 @@ func TestStoreSweepPlanMissingRoot(t *testing.T) {
 	}
 	if planned != nil {
 		t.Fatalf("expected nil plan for a missing root, got %v", planned)
+	}
+}
+
+// TestStoreSweepPlanPropagatesRealReadDirError proves SweepPlan surfaces a
+// genuine (non-not-exist) ReadDir error - e.g. a permission error - rather
+// than treating it the same as a missing root. Skipped when running as
+// root, since root bypasses the permission bits this test relies on to
+// force the read failure.
+func TestStoreSweepPlanPropagatesRealReadDirError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; permission-based read guard cannot be tested")
+	}
+	t.Parallel()
+	dir := t.TempDir()
+	store := NewStore(filepath.Join(dir, "cache"))
+	if err := os.MkdirAll(store.Root(), helpers.DirMod); err != nil {
+		t.Fatalf("failed to create store root: %v", err)
+	}
+	if err := os.Chmod(store.Root(), 0o000); err != nil {
+		t.Fatalf("failed to chmod store root unreadable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(store.Root(), helpers.DirMod); err != nil {
+			t.Errorf("failed to restore store root perms: %v", err)
+		}
+	})
+
+	if _, err := store.SweepPlan(map[string]bool{}); err == nil {
+		t.Fatalf("expected a non-nil error reading an unreadable store root")
 	}
 }
 

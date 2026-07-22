@@ -19,6 +19,8 @@ func IsPathElement(name string) bool {
 	if strings.ContainsRune(name, '/') {
 		return false
 	}
+	// Covers the Windows backslash separator; unreachable on POSIX, where
+	// os.PathSeparator is '/' and the check above already handles it.
 	if os.PathSeparator != '/' && strings.ContainsRune(name, os.PathSeparator) {
 		return false
 	}

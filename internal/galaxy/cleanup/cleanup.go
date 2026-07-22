@@ -539,6 +539,11 @@ func removeInstalled(ctx context.Context, inst installedCollection, artifacts ca
 	}
 
 	infoDir := filepath.Join(acRoot, fmt.Sprintf("%s.%s-%s.info", namespace, name, inst.Version))
+	// Unreachable by construction (belt-and-suspenders): namespace, name, and
+	// inst.Version were already IsPathElement-checked above, so infoDir is
+	// always a clean single element under acRoot; kept because a future
+	// refactor breaking that containment right before os.RemoveAll would be
+	// catastrophic.
 	if !helpers.WithinDir(acRoot, infoDir) {
 		return fmt.Errorf("%w: info dir %q escapes %q", helpers.ErrUnsafeRemovalPath, infoDir, acRoot)
 	}

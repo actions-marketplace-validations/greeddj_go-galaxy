@@ -39,17 +39,20 @@ func (noopPrinter) Warnf(string, ...any)                  {}
 func (noopPrinter) Debugf(string, ...any)                 {}
 func (noopPrinter) DebugSincef(time.Time, string, ...any) {}
 
-// recordingPrinter is an output.Printer stub that records Warnf and Printf
-// calls so tests can assert that a rejection surfaced a warning, or that a
-// dry-run reported a transient-tier line, rather than either being silently
-// swallowed. It embeds noopPrinter for the other Printer methods and is safe
-// for concurrent use since scanInstalledCollections may be called from
-// goroutines in other packages, though cleanup itself scans serially.
+// recordingPrinter is an output.Printer stub that records Warnf, Printf, and
+// Errorf calls so tests can assert that a rejection surfaced a warning, that
+// a dry-run reported a transient-tier line, or that a non-fatal failure was
+// still surfaced as an error-tier line, rather than any of these being
+// silently swallowed. It embeds noopPrinter for the other Printer methods
+// and is safe for concurrent use since scanInstalledCollections may be
+// called from goroutines in other packages, though cleanup itself scans
+// serially.
 type recordingPrinter struct {
 	noopPrinter
 
 	warnings []string
 	prints   []string
+	errs     []string
 	mu       sync.Mutex
 }
 
@@ -63,6 +66,12 @@ func (p *recordingPrinter) Printf(format string, args ...any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.prints = append(p.prints, fmt.Sprintf(format, args...))
+}
+
+func (p *recordingPrinter) Errorf(format string, args ...any) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.errs = append(p.errs, fmt.Sprintf(format, args...))
 }
 
 // hasWarningContaining reports whether any recorded warning contains substr.
@@ -82,6 +91,18 @@ func (p *recordingPrinter) hasPrintContaining(substr string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, line := range p.prints {
+		if strings.Contains(line, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasErrorContaining reports whether any recorded Errorf line contains substr.
+func (p *recordingPrinter) hasErrorContaining(substr string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, line := range p.errs {
 		if strings.Contains(line, substr) {
 			return true
 		}
@@ -356,11 +377,16 @@ func TestRemoveInstalledRejectsTraversalVersion(t *testing.T) {
 }
 
 // TestRemoveInstalledContainmentGuard exercises removeInstalled directly
-// with a crafted installedCollection whose Version is a traversal payload,
-// proving the removal-time guard rejects it with ErrUnsafeRemovalPath
-// (defense in depth, independent of the ingestion-time rejection covered by
-// TestRemoveInstalledRejectsTraversalVersion) and never calls os.RemoveAll
-// on anything, so an unrelated outside sentinel survives.
+// with a crafted installedCollection whose Version is a traversal payload
+// containing "/". This trips the IsPathElement check on Version - the
+// first guard in removeInstalled - not the WithinDir containment check
+// further down: a Version containing "/" can never reach WithinDir at all,
+// since removeInstalled rejects it before computing any path to check for
+// containment. See TestRemoveInstalledRejectsInstallPathEscape below for a
+// test that actually exercises the WithinDir install-path guard, with
+// ns/name/Version all valid path elements but InstallPath itself pointing
+// outside CollectionsDir. Both guards return ErrUnsafeRemovalPath and never
+// call os.RemoveAll on anything, so an unrelated outside sentinel survives.
 func TestRemoveInstalledContainmentGuard(t *testing.T) {
 	t.Parallel()
 	collectionsDir := t.TempDir()
@@ -371,6 +397,35 @@ func TestRemoveInstalledContainmentGuard(t *testing.T) {
 		FQDN:           "ns.name",
 		Version:        "../../evil",
 		InstallPath:    filepath.Join(collectionsDir, "ansible_collections", "ns", "name"),
+		CollectionsDir: collectionsDir,
+	}
+
+	err := removeInstalled(t.Context(), inst, nil)
+	if !errors.Is(err, helpers.ErrUnsafeRemovalPath) {
+		t.Fatalf("expected ErrUnsafeRemovalPath, got %v", err)
+	}
+	if _, statErr := os.Stat(sentinelFile); statErr != nil {
+		t.Fatalf("expected outside sentinel to survive, stat error: %v", statErr)
+	}
+}
+
+// TestRemoveInstalledRejectsInstallPathEscape proves the WithinDir
+// install-path containment guard fires independently: ns, name, and
+// Version are all valid, safe path elements (they pass IsPathElement), but
+// InstallPath itself points entirely outside CollectionsDir - as it might
+// for a stale or corrupted in-memory record rather than one built by the
+// normal scan. removeInstalled must still refuse to call os.RemoveAll on
+// it, so the unrelated outside sentinel survives.
+func TestRemoveInstalledRejectsInstallPathEscape(t *testing.T) {
+	t.Parallel()
+	collectionsDir := t.TempDir()
+	sentinelFile := writeOutsideSentinel(t, t.TempDir(), "victim")
+
+	inst := installedCollection{
+		Key:            "ns.name@1.0.0",
+		FQDN:           "ns.name",
+		Version:        "1.0.0",
+		InstallPath:    filepath.Dir(sentinelFile),
 		CollectionsDir: collectionsDir,
 	}
 
@@ -837,20 +892,120 @@ func TestReportsCorruptManifest(t *testing.T) {
 // distinct installed collection under the same collections root.
 func seedManifestAt(t *testing.T, root, ns, name, version string) {
 	t.Helper()
+	seedManifestWithDeps(t, root, ns, name, version, nil)
+}
+
+// manifestJSON builds a MANIFEST.json body for ns.name@version. A non-empty
+// deps map is rendered as collection_info.dependencies (raw FQDN -> raw
+// constraint string, exactly the shape extractDeps reads), matching a real
+// manifest's declared dependencies; a nil/empty map omits the field
+// entirely, matching a manifest with no declared dependencies.
+func manifestJSON(ns, name, version string, deps map[string]string) string {
+	fields := fmt.Sprintf(`"namespace": %q, "name": %q, "version": %q`, ns, name, version)
+	if len(deps) > 0 {
+		keys := make([]string, 0, len(deps))
+		for depFQDN := range deps {
+			keys = append(keys, depFQDN)
+		}
+		sort.Strings(keys)
+		pairs := make([]string, 0, len(deps))
+		for _, depFQDN := range keys {
+			pairs = append(pairs, fmt.Sprintf("%q: %q", depFQDN, deps[depFQDN]))
+		}
+		fields += fmt.Sprintf(`, "dependencies": {%s}`, strings.Join(pairs, ", "))
+	}
+	return fmt.Sprintf(`{"collection_info": {%s}}`, fields)
+}
+
+// seedManifestWithDeps writes a MANIFEST.json for ns.name@version, with an
+// optional declared dependencies map, under
+// <root>/ansible_collections/<ns>/<name>.
+func seedManifestWithDeps(t *testing.T, root, ns, name, version string, deps map[string]string) {
+	t.Helper()
 	installDir := filepath.Join(root, "ansible_collections", ns, name)
 	if err := os.MkdirAll(installDir, helpers.DirMod); err != nil {
 		t.Fatalf("failed to create install dir for %s.%s: %v", ns, name, err)
 	}
-	manifest := fmt.Sprintf(`{
-		"collection_info": {
-			"namespace": %q,
-			"name": %q,
-			"version": %q
-		}
-	}`, ns, name, version)
+	manifest := manifestJSON(ns, name, version, deps)
 	if err := os.WriteFile(filepath.Join(installDir, "MANIFEST.json"), []byte(manifest), helpers.FileMod); err != nil {
 		t.Fatalf("failed to write manifest for %s.%s: %v", ns, name, err)
 	}
+}
+
+// assertManifestPresentAt fails the test unless the MANIFEST.json for
+// ns.name still exists under root/ansible_collections.
+func assertManifestPresentAt(t *testing.T, root, ns, name string) {
+	t.Helper()
+	path := filepath.Join(root, "ansible_collections", ns, name, "MANIFEST.json")
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Fatalf("expected manifest for %s.%s to survive, stat error: %v", ns, name, statErr)
+	}
+}
+
+// assertManifestAbsentAt fails the test unless the MANIFEST.json for
+// ns.name has been removed from under root/ansible_collections.
+func assertManifestAbsentAt(t *testing.T, root, ns, name string) {
+	t.Helper()
+	path := filepath.Join(root, "ansible_collections", ns, name, "MANIFEST.json")
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("expected manifest for %s.%s to be removed, stat error: %v", ns, name, statErr)
+	}
+}
+
+// assertExtractedDirGone fails the test unless the named extracted entry
+// under cacheDir/extracted has been removed from disk.
+func assertExtractedDirGone(t *testing.T, cacheDir, sha string) {
+	t.Helper()
+	dir := filepath.Join(cacheDir, extracted.RootDirName, sha)
+	if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
+		t.Fatalf("expected extracted dir %s to be swept, stat error: %v", sha, statErr)
+	}
+}
+
+// TestMarkReachableFollowsTransitiveDependency proves the core reachability
+// safety guarantee: a collection that is not itself a root requirement, but
+// is a declared dependency of one, must survive cleanup, and this
+// reachability must also drive C08.3's snapshot-derived extracted-store
+// sweep. ns.a is the sole root (via requirements.yml); ns.a declares
+// ns.b as a dependency in its manifest (exercising extractDeps's non-nil
+// branch and markReachable's deps[current] walk with a real, parsed
+// constraint via selectInstalled); ns.c is undeclared and unreferenced,
+// serving as the control that proves the run still removes what is
+// genuinely unreachable rather than becoming a blanket keep-everything.
+func TestMarkReachableFollowsTransitiveDependency(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+
+	seedManifestWithDeps(t, downloadPath, "ns", "a", "1.0.0", map[string]string{"ns.b": ">=1.0.0"})
+	seedManifestWithDeps(t, downloadPath, "ns", "b", "1.0.0", nil)
+	seedManifestWithDeps(t, downloadPath, "ns", "c", "1.0.0", nil)
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	seedSnapshotInstalled(t, cfg, newTestRuntime(), map[string]store.InstalledEntry{
+		"ns.b@1.0.0": {ArtifactSHA256: "sha-b"},
+		"ns.c@1.0.0": {ArtifactSHA256: "sha-c"},
+	})
+	seedExtractedDir(t, cacheDir, "sha-b")
+	seedExtractedDir(t, cacheDir, "sha-c")
+
+	reqPath := filepath.Join(t.TempDir(), "requirements.yml")
+	if err := os.WriteFile(reqPath, []byte("collections:\n  - ns.a\n"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write requirements file: %v", err)
+	}
+	registerCleanupProjectAt(t, cacheDir, downloadPath, reqPath)
+
+	runtime := newTestRuntime()
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+
+	assertManifestPresentAt(t, downloadPath, "ns", "a")
+	assertManifestPresentAt(t, downloadPath, "ns", "b")
+	assertManifestAbsentAt(t, downloadPath, "ns", "c")
+
+	assertExtractedDirsSurvive(t, cacheDir, "sha-b")
+	assertExtractedDirGone(t, cacheDir, "sha-c")
 }
 
 // assertExtractedDirsSurvive fails the test unless every named extracted
@@ -1003,4 +1158,221 @@ func TestSelectInstalledConstraintCache(t *testing.T) {
 	if !ok || c != nil {
 		t.Fatalf("expected the unparseable constraint to be cached as nil, got ok=%v c=%v", ok, c)
 	}
+}
+
+// TestRemoveUnusedAbortsOnRemoveAllError proves an os.RemoveAll failure
+// while removing an unreferenced install's on-disk tree propagates as a
+// real error out of Start (via removeUnused's mid-loop abort) instead of
+// being swallowed. Removing the "name" directory itself requires write
+// permission on its parent ("ns"), which this test strips, so os.RemoveAll
+// can still delete MANIFEST.json inside "name" (write permission on "name"
+// itself is untouched) but fails on the final rmdir of "name" against its
+// now-read-only parent: the install is left partially, not fully, removed,
+// and the failed removal must not report success. Skipped when running as
+// root, since root bypasses the permission bits this test relies on to
+// force the failure.
+func TestRemoveUnusedAbortsOnRemoveAllError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; permission-based removal guard cannot be tested")
+	}
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+	installDir := seedInstallTree(t, downloadPath)
+
+	namespaceDir := filepath.Join(downloadPath, "ansible_collections", "ns")
+	//nolint:gosec // G302: intentionally read-only (no write bit) to force os.RemoveAll to fail with a permission error.
+	if err := os.Chmod(namespaceDir, 0o555); err != nil {
+		t.Fatalf("failed to chmod namespace dir read-only: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(namespaceDir, helpers.DirMod); err != nil {
+			t.Errorf("failed to restore namespace dir perms: %v", err)
+		}
+	})
+
+	registerCleanupProject(t, cacheDir, downloadPath)
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	if err := Start(t.Context(), cfg, runtime); err == nil {
+		t.Fatalf("expected a non-nil error when os.RemoveAll fails, got nil")
+	}
+	// The "name" directory entry itself is still present under its
+	// now-read-only parent, since the final rmdir is exactly what failed -
+	// even though its MANIFEST.json content was already removed as part of
+	// the same (failed) os.RemoveAll call.
+	if _, statErr := os.Stat(installDir); statErr != nil {
+		t.Fatalf("expected the install directory to still be present after a failed removal, stat error: %v", statErr)
+	}
+}
+
+// TestRemoveInstalledRemovesInfoDir proves the happy-path .info directory
+// removal actually deletes it, rather than the WithinDir guard change
+// leaving it as a silent no-op. The .info directory name mirrors exactly
+// what removeInstalled itself constructs: fmt.Sprintf("%s.%s-%s.info", ns,
+// name, version) joined under <collectionsDir>/ansible_collections.
+func TestRemoveInstalledRemovesInfoDir(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+	seedInstallTree(t, downloadPath) // ns.name@1.0.0, unreferenced below
+
+	infoDir := filepath.Join(downloadPath, "ansible_collections", "ns.name-1.0.0.info")
+	if err := os.MkdirAll(filepath.Join(infoDir, "marker"), helpers.DirMod); err != nil {
+		t.Fatalf("failed to create .info dir: %v", err)
+	}
+
+	registerCleanupProject(t, cacheDir, downloadPath)
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+	if _, statErr := os.Stat(infoDir); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the .info directory to be removed, stat error: %v", statErr)
+	}
+}
+
+// TestScanAbortsOnRealIOErrorReadingManifest proves a genuine (non-
+// os.IsNotExist) IO error reading a MANIFEST.json - e.g. a permission
+// error - propagates as an abort out of Start rather than being treated as
+// a benign skip or a corrupt-manifest warning, and that nothing is deleted
+// before the abort. Skipped when running as root, since root bypasses the
+// permission bits this test relies on to force the read failure.
+func TestScanAbortsOnRealIOErrorReadingManifest(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; permission-based read guard cannot be tested")
+	}
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+	installDir := seedInstallTree(t, downloadPath)
+
+	manifestPath := filepath.Join(installDir, "MANIFEST.json")
+	if err := os.Chmod(manifestPath, 0o000); err != nil {
+		t.Fatalf("failed to chmod manifest unreadable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(manifestPath, helpers.FileMod); err != nil {
+			t.Errorf("failed to restore manifest perms: %v", err)
+		}
+	})
+
+	registerCleanupProject(t, cacheDir, downloadPath)
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	if err := Start(t.Context(), cfg, runtime); err == nil {
+		t.Fatalf("expected Start to abort with a non-nil error on a real manifest read error, got nil")
+	}
+	// os.Stat only needs traversal permission on parent directories, not
+	// read permission on the file itself, so this still proves the entry
+	// survives untouched despite the file being unreadable.
+	assertManifestSurvives(t, installDir)
+}
+
+// TestDryRunReportsSweepPlanError proves reportExtractedSweepPlan's error
+// branch: when SweepPlan itself fails (e.g. a real IO error reading the
+// extracted store root), a dry run still completes successfully rather
+// than aborting the whole cleanup over a read-only reporting step, but the
+// failure is surfaced via Errorf rather than silently dropped. Skipped when
+// running as root, since root bypasses the permission bits this test
+// relies on to force the read failure.
+func TestDryRunReportsSweepPlanError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; permission-based read guard cannot be tested")
+	}
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+	seedManifestAt(t, downloadPath, "ns", "name", "1.0.0")
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: true}
+	seedSnapshotInstalled(t, cfg, newTestRuntime(), map[string]store.InstalledEntry{
+		"ns.name@1.0.0": {ArtifactSHA256: "sha-keep"},
+	})
+
+	extractedRoot := filepath.Join(cacheDir, extracted.RootDirName)
+	if err := os.MkdirAll(extractedRoot, helpers.DirMod); err != nil {
+		t.Fatalf("failed to create extracted root: %v", err)
+	}
+	if err := os.Chmod(extractedRoot, 0o000); err != nil {
+		t.Fatalf("failed to chmod extracted root unreadable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(extractedRoot, helpers.DirMod); err != nil {
+			t.Errorf("failed to restore extracted root perms: %v", err)
+		}
+	})
+
+	reqPath := filepath.Join(t.TempDir(), "requirements.yml")
+	if err := os.WriteFile(reqPath, []byte("collections:\n  - ns.name\n"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write requirements file: %v", err)
+	}
+	registerCleanupProjectAt(t, cacheDir, downloadPath, reqPath)
+
+	printer := &recordingPrinter{}
+	runtime := infra.New(printer, http.DefaultClient)
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected dry-run Start to still succeed despite a sweep-plan error, got %v", err)
+	}
+	if !printer.hasErrorContaining("failed to plan extracted cache sweep") {
+		t.Fatalf("expected an Errorf about the failed sweep plan, got: %v", printer.errs)
+	}
+}
+
+// TestScanInstalledCollectionsMissingRootIsNotAnError proves
+// scanInstalledCollections treats a missing ansible_collections root as a
+// benign no-op (nil error, no entries added) rather than an error, called
+// directly rather than only indirectly through Start.
+func TestScanInstalledCollectionsMissingRootIsNotAnError(t *testing.T) {
+	t.Parallel()
+	collectionsPath := t.TempDir() // no ansible_collections subdirectory created
+	index := make(map[string][]installedCollection)
+	byKey := make(map[string][]installedCollection)
+	deps := make(map[string]map[string]string)
+
+	if err := scanInstalledCollections(noopPrinter{}, collectionsPath, index, byKey, deps); err != nil {
+		t.Fatalf("expected nil error for a missing ansible_collections root, got %v", err)
+	}
+	if len(index) != 0 || len(byKey) != 0 || len(deps) != 0 {
+		t.Fatalf("expected no entries to be added, got index=%v byKey=%v deps=%v", index, byKey, deps)
+	}
+}
+
+// TestScanNamespaceDirVanishedIsNotAnError proves scanNamespaceDir treats a
+// vanished namespace directory (present root, missing ns subdirectory) as a
+// benign no-op (nil error, no entries added), called directly rather than
+// only indirectly through Start.
+func TestScanNamespaceDirVanishedIsNotAnError(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir() // root exists; the "does-not-exist" ns subdir under it does not
+	index := make(map[string][]installedCollection)
+	byKey := make(map[string][]installedCollection)
+	deps := make(map[string]map[string]string)
+
+	if err := scanNamespaceDir(noopPrinter{}, "/collections", root, "does-not-exist", index, byKey, deps); err != nil {
+		t.Fatalf("expected nil error for a vanished namespace dir, got %v", err)
+	}
+	if len(index) != 0 || len(byKey) != 0 || len(deps) != 0 {
+		t.Fatalf("expected no entries to be added, got index=%v byKey=%v deps=%v", index, byKey, deps)
+	}
+}
+
+// TestSweepExtractedStoreNoopWhenCacheDirEmpty proves sweepExtractedStore's
+// empty-CacheDir guard returns immediately without panicking or touching
+// anything, called directly with an empty cfg.CacheDir.
+func TestSweepExtractedStoreNoopWhenCacheDirEmpty(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{CacheDir: "", DryRun: false}
+	runtime := newTestRuntime()
+	st := store.New()
+
+	sweepExtractedStore(cfg, runtime, st, map[string]bool{}, map[string][]installedCollection{})
 }

@@ -57,3 +57,14 @@ func TestWithinDir(t *testing.T) {
 		})
 	}
 }
+
+// TestWithinDirRelError proves WithinDir returns false when filepath.Rel
+// itself cannot relate base and target - here a relative base against an
+// absolute target, which filepath.Rel rejects since it cannot make one
+// relative to the other - rather than panicking or matching by accident.
+func TestWithinDirRelError(t *testing.T) {
+	t.Parallel()
+	if got := WithinDir("relative/dir", "/abs/other"); got {
+		t.Errorf("WithinDir(%q, %q) = true, want false (filepath.Rel error)", "relative/dir", "/abs/other")
+	}
+}

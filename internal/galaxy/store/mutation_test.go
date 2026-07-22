@@ -130,6 +130,29 @@ func TestGetInstalledClonesDepsOnRead(t *testing.T) {
 	}
 }
 
+// TestInstalledArtifactSHAByKeyOmitsEmptySHA proves InstalledArtifactSHAByKey
+// omits any installed key whose ArtifactSHA256 is empty: an empty SHA is
+// not a real content-addressable identifier, so keeping it in the returned
+// map would make the extracted-store sweep treat "" as something to keep
+// forever.
+func TestInstalledArtifactSHAByKeyOmitsEmptySHA(t *testing.T) {
+	t.Parallel()
+	st := New()
+	st.SetInstalled("a.b@1.0.0", InstalledEntry{ArtifactSHA256: "sha-a"})
+	st.SetInstalled("c.d@2.0.0", InstalledEntry{ArtifactSHA256: ""})
+
+	got := st.InstalledArtifactSHAByKey()
+	if len(got) != 1 {
+		t.Fatalf("expected exactly one entry, got %d: %#v", len(got), got)
+	}
+	if got["a.b@1.0.0"] != "sha-a" {
+		t.Fatalf("expected a.b@1.0.0 -> sha-a, got %#v", got)
+	}
+	if _, ok := got["c.d@2.0.0"]; ok {
+		t.Fatalf("expected c.d@2.0.0 with an empty SHA to be omitted, got %#v", got)
+	}
+}
+
 // TestRequirementsSnapshotIsIndependentDeepCopy proves RequirementsSnapshot
 // returns a fully independent deep copy: mutating one snapshot's Signatures
 // slice cannot leak into a later, independently taken snapshot.
