@@ -681,14 +681,17 @@ func loadRoots(tx *bolt.Tx, store *Store) error {
 	})
 }
 
+// loadResolved decodes the resolved bucket. Every current-schema value is
+// written by saveResolved as a JSON-encoded ResolvedEntry, so an unmarshal
+// failure means the value is genuinely corrupt: it is reported as an error
+// rather than silently coerced into a garbage version string.
 func loadResolved(tx *bolt.Tx, store *Store) error {
 	return loadBucket(tx, helpers.StoreBucketResolved, func(k, v []byte) error {
 		var entry ResolvedEntry
-		if err := json.Unmarshal(v, &entry); err == nil && entry.Version != "" {
-			store.Resolved[string(k)] = entry
-			return nil
+		if err := json.Unmarshal(v, &entry); err != nil {
+			return fmt.Errorf("invalid resolved entry %q: %w", string(k), err)
 		}
-		store.Resolved[string(k)] = ResolvedEntry{Version: string(v)}
+		store.Resolved[string(k)] = entry
 		return nil
 	})
 }

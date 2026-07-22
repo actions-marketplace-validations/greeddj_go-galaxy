@@ -12,6 +12,10 @@ import (
 	bolterrors "go.etcd.io/bbolt/errors"
 )
 
+// errTestResolvedBucketMissing is a static test-only error used when the
+// resolved bucket is unexpectedly absent while corrupting a test fixture.
+var errTestResolvedBucketMissing = errors.New("resolved bucket missing")
+
 func TestSaveLoadRoundTrip(t *testing.T) {
 	t.Parallel()
 	dbs := openTestDBs(t)
@@ -265,5 +269,39 @@ func stampSchemaVersion(t *testing.T, dbs *DBs, version int) {
 	})
 	if err != nil {
 		t.Fatalf("failed to stamp schema version: %v", err)
+	}
+}
+
+// TestLoadRejectsCorruptResolvedEntry proves loadResolved reports an error
+// instead of silently coercing a genuinely corrupt resolved value into a
+// garbage version string. Every current-schema value is written as valid
+// JSON by saveResolved, so an unmarshal failure here can only mean the
+// stored bytes are corrupt.
+func TestLoadRejectsCorruptResolvedEntry(t *testing.T) {
+	t.Parallel()
+	dbs := openTestDBs(t)
+	st := New()
+	st.SetResolvedAll(map[string]ResolvedEntry{
+		"a.b": {Version: "1.0.0"},
+	})
+	mustSave(t, dbs, st)
+
+	err := dbs.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte(helpers.StoreBucketResolved))
+		if bucket == nil {
+			return errTestResolvedBucketMissing
+		}
+		return bucket.Put([]byte("a.b"), []byte("{not-json"))
+	})
+	if err != nil {
+		t.Fatalf("failed to corrupt resolved entry: %v", err)
+	}
+
+	_, err = Load(dbs)
+	if err == nil {
+		t.Fatalf("expected Load to reject a corrupt resolved entry")
+	}
+	if !strings.Contains(err.Error(), "a.b") {
+		t.Fatalf("expected error to mention the corrupt key, got %v", err)
 	}
 }
