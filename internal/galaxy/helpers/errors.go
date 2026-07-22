@@ -58,6 +58,9 @@ var (
 	ErrCacheDirEmpty = errors.New("cache directory is empty")
 	// ErrAnotherInstanceIsRunning indicates another instance is already running.
 	ErrAnotherInstanceIsRunning = errors.New("another instance is running")
+	// ErrCacheBusy indicates the cache is held by another process and could
+	// not be opened within the allotted timeout.
+	ErrCacheBusy = errors.New("another process holds the cache")
 	// ErrNoSemverCandidates indicates no semver candidates are available.
 	ErrNoSemverCandidates = errors.New("no semver candidates available")
 	// ErrMissingResolvedParent indicates a resolved parent is missing.

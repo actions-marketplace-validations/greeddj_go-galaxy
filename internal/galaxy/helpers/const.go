@@ -46,6 +46,12 @@ const (
 	// StoreDBLock is the cache lock file name.
 	StoreDBLock = ".go-galaxy.lock"
 
+	// BoltOpenTimeout bounds how long opening a Bolt file waits for its
+	// flock. It is long enough to tolerate brief filesystem latency or a
+	// concurrent process that is just about to release the lock, but short
+	// enough to fail fast in CI instead of hanging indefinitely.
+	BoltOpenTimeout = 5 * time.Second
+
 	// StoreDBProjects is the project registry filename.
 	StoreDBProjects = "projects.json"
 

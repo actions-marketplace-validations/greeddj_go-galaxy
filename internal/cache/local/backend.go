@@ -24,9 +24,11 @@ func New(cacheDir string) *Backend {
 	}
 }
 
-// Open initializes local backend storage.
+// Open ensures the cache directory exists. Bolt files are opened lazily by
+// ensureOpen so the instance lock can be taken first, keeping a second
+// process from hanging on an unbounded Bolt file lock.
 func (b *Backend) Open(_ context.Context) error {
-	return b.ensureOpen()
+	return b.ensureDir()
 }
 
 // Close releases any open resources.
@@ -39,10 +41,12 @@ func (b *Backend) Close(_ context.Context) error {
 	return err
 }
 
-// Lock obtains an exclusive lock for the cache directory.
+// Lock obtains an exclusive lock for the cache directory. It ensures the
+// directory exists first so the lock file has a parent even if Open was
+// never called, then acquires the lock before any Bolt file is opened.
 func (b *Backend) Lock(_ context.Context) (func() error, error) {
-	if b.cacheDir == "" {
-		return nil, errCacheDirEmpty
+	if err := b.ensureDir(); err != nil {
+		return nil, err
 	}
 	return store.AcquireLock(b.cacheDir)
 }
@@ -92,21 +96,30 @@ func (b *Backend) Artifacts() cacheManager.ArtifactStore {
 	return b.artifacts
 }
 
-// ensureOpen initializes storage if it is not yet opened.
+// ensureOpen lazily opens the Bolt snapshot files. Deferring this past
+// directory creation lets callers take the instance lock first, so a
+// second process on the same cache dir fails fast via BoltOpenTimeout
+// instead of blocking forever on Bolt's own file lock.
 func (b *Backend) ensureOpen() error {
 	if b.dbs != nil {
 		return nil
 	}
-	if b.cacheDir == "" {
-		return errCacheDirEmpty
-	}
-	if err := os.MkdirAll(b.cacheDir, helpers.DirMod); err != nil {
+	if err := b.ensureDir(); err != nil {
 		return err
 	}
-	dbs, err := store.OpenDBs(b.cacheDir)
+	dbs, err := store.OpenDBs(b.cacheDir, helpers.BoltOpenTimeout)
 	if err != nil {
 		return err
 	}
 	b.dbs = dbs
 	return nil
+}
+
+// ensureDir validates the cache directory is configured and creates it if
+// missing, without touching any Bolt file.
+func (b *Backend) ensureDir() error {
+	if b.cacheDir == "" {
+		return errCacheDirEmpty
+	}
+	return os.MkdirAll(b.cacheDir, helpers.DirMod)
 }

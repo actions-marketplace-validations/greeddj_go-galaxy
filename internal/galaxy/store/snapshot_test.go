@@ -28,7 +28,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 func openTestDBs(t *testing.T) *DBs {
 	t.Helper()
 	dir := t.TempDir()
-	dbs, err := OpenDBs(dir)
+	dbs, err := OpenDBs(dir, helpers.BoltOpenTimeout)
 	if err != nil {
 		t.Fatalf("OpenDBs error: %v", err)
 	}

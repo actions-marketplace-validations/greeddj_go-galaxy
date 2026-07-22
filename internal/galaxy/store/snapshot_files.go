@@ -1,10 +1,14 @@
 package store
 
 import (
+	"errors"
+	"fmt"
 	"path/filepath"
+	"time"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	bolt "go.etcd.io/bbolt"
+	bolterrors "go.etcd.io/bbolt/errors"
 )
 
 // DBs holds BoltDB handles for snapshot storage buckets.
@@ -20,51 +24,53 @@ type DBs struct {
 	versions     *bolt.DB
 }
 
-// OpenDBs opens all snapshot BoltDB files under cacheDir.
-func OpenDBs(cacheDir string) (*DBs, error) {
+// OpenDBs opens all snapshot BoltDB files under cacheDir. Each file is
+// opened with timeout bounding how long it waits on another process's
+// flock, so a busy cache fails fast instead of hanging forever.
+func OpenDBs(cacheDir string, timeout time.Duration) (*DBs, error) {
 	dbs := &DBs{}
 	var err error
 
-	dbs.meta, err = openBolt(filepath.Join(cacheDir, helpers.StoreSnapshotMeta))
+	dbs.meta, err = openBolt(filepath.Join(cacheDir, helpers.StoreSnapshotMeta), timeout)
 	if err != nil {
 		return nil, err
 	}
-	dbs.apiCache, err = openBolt(filepath.Join(cacheDir, helpers.StoreSnapshotAPICache))
-	if err != nil {
-		_ = dbs.Close()
-		return nil, err
-	}
-	dbs.depsCache, err = openBolt(filepath.Join(cacheDir, helpers.StoreSnapshotDepsCache))
+	dbs.apiCache, err = openBolt(filepath.Join(cacheDir, helpers.StoreSnapshotAPICache), timeout)
 	if err != nil {
 		_ = dbs.Close()
 		return nil, err
 	}
-	dbs.installed, err = openBolt(filepath.Join(cacheDir, helpers.StoreSnapshotInstalled))
+	dbs.depsCache, err = openBolt(filepath.Join(cacheDir, helpers.StoreSnapshotDepsCache), timeout)
 	if err != nil {
 		_ = dbs.Close()
 		return nil, err
 	}
-	dbs.graph, err = openBolt(filepath.Join(cacheDir, helpers.StoreSnapshotGraph))
+	dbs.installed, err = openBolt(filepath.Join(cacheDir, helpers.StoreSnapshotInstalled), timeout)
 	if err != nil {
 		_ = dbs.Close()
 		return nil, err
 	}
-	dbs.requirements, err = openBolt(filepath.Join(cacheDir, helpers.StoreSnapshotRequirements))
+	dbs.graph, err = openBolt(filepath.Join(cacheDir, helpers.StoreSnapshotGraph), timeout)
 	if err != nil {
 		_ = dbs.Close()
 		return nil, err
 	}
-	dbs.roots, err = openBolt(filepath.Join(cacheDir, helpers.StoreSnapshotRoots))
+	dbs.requirements, err = openBolt(filepath.Join(cacheDir, helpers.StoreSnapshotRequirements), timeout)
 	if err != nil {
 		_ = dbs.Close()
 		return nil, err
 	}
-	dbs.resolved, err = openBolt(filepath.Join(cacheDir, helpers.StoreSnapshotResolved))
+	dbs.roots, err = openBolt(filepath.Join(cacheDir, helpers.StoreSnapshotRoots), timeout)
 	if err != nil {
 		_ = dbs.Close()
 		return nil, err
 	}
-	dbs.versions, err = openBolt(filepath.Join(cacheDir, helpers.StoreSnapshotVersions))
+	dbs.resolved, err = openBolt(filepath.Join(cacheDir, helpers.StoreSnapshotResolved), timeout)
+	if err != nil {
+		_ = dbs.Close()
+		return nil, err
+	}
+	dbs.versions, err = openBolt(filepath.Join(cacheDir, helpers.StoreSnapshotVersions), timeout)
 	if err != nil {
 		_ = dbs.Close()
 		return nil, err
@@ -99,7 +105,17 @@ func (s *DBs) Close() error {
 	return firstErr
 }
 
-// openBolt opens a Bolt database at the given path.
-func openBolt(path string) (*bolt.DB, error) {
-	return bolt.Open(path, helpers.FileMod, nil)
+// openBolt opens a Bolt database at the given path, bounding how long it
+// waits to acquire the file's flock. A timeout means another process
+// currently holds the file, so it is reported as a busy cache rather than
+// left to hang.
+func openBolt(path string, timeout time.Duration) (*bolt.DB, error) {
+	db, err := bolt.Open(path, helpers.FileMod, &bolt.Options{Timeout: timeout})
+	if err != nil {
+		if errors.Is(err, bolterrors.ErrTimeout) {
+			return nil, fmt.Errorf("%w: %w", helpers.ErrCacheBusy, err)
+		}
+		return nil, err
+	}
+	return db, nil
 }
