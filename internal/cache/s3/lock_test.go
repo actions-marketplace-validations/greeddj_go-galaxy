@@ -372,3 +372,75 @@ func TestReleaseDeletesOwnedLock(t *testing.T) {
 		t.Fatalf("expected the lock object to be deleted, headObject error = %v", err)
 	}
 }
+
+// TestLockExpiredUsesDeadline confirms the writer-recorded X-Amz-Meta-Deadline
+// header is authoritative: a past deadline is reclaimable regardless of when
+// the object was actually written, and a future deadline is not.
+func TestLockExpiredUsesDeadline(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		deadline time.Time
+		name     string
+		want     bool
+	}{
+		{name: "past deadline is expired", deadline: time.Now().Add(-time.Hour), want: true},
+		{name: "future deadline is not expired", deadline: time.Now().Add(time.Hour), want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			headers := http.Header{}
+			headers.Set("X-Amz-Meta-Deadline", tt.deadline.UTC().Format(time.RFC3339))
+
+			if got := lockExpired(headers, time.Minute); got != tt.want {
+				t.Fatalf("lockExpired() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestLockExpiredMalformedDeadlineFallsBackToAge confirms a deadline header
+// that fails to parse does not hard-fail the check: it falls back to
+// age-based staleness judged by Last-Modified against ttl, exactly as if no
+// deadline had been recorded at all.
+func TestLockExpiredMalformedDeadlineFallsBackToAge(t *testing.T) {
+	t.Parallel()
+
+	const ttl = time.Minute
+
+	tests := []struct {
+		lastModified time.Time
+		name         string
+		want         bool
+	}{
+		{name: "recent Last-Modified is not expired", lastModified: time.Now(), want: false},
+		{name: "old Last-Modified is expired", lastModified: time.Now().Add(-2 * ttl), want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			headers := http.Header{}
+			headers.Set("X-Amz-Meta-Deadline", "not-a-valid-timestamp")
+			headers.Set("Last-Modified", tt.lastModified.UTC().Format(http.TimeFormat))
+
+			if got := lockExpired(headers, ttl); got != tt.want {
+				t.Fatalf("lockExpired() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestLockExpiredNoTimingIsReclaimable confirms that a lock object carrying
+// neither a deadline nor a Last-Modified header is treated as reclaimable
+// rather than as an unresolvable error: uninterpretable timing must never
+// permanently block acquisition.
+func TestLockExpiredNoTimingIsReclaimable(t *testing.T) {
+	t.Parallel()
+
+	if got := lockExpired(http.Header{}, time.Minute); !got {
+		t.Fatalf("lockExpired() = %v, want true (reclaimable) for headers with no timing information", got)
+	}
+}

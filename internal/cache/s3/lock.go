@@ -55,12 +55,11 @@ type lockRecord struct {
 // acquireLock creates or reclaims the lock object at key using a
 // token-verified, create-if-absent protocol: acquirers race to PUT with
 // If-None-Match: *, and an existing object is only ever reclaimed after its
-// recorded deadline (via lockExpired, checked against the object's
-// Last-Modified time) shows its holder's TTL has elapsed. All attempts run
-// against waitCtx, a fixed wait-ceiling derived from ctx; the release
-// closure returned on success instead uses ctx directly, since it is
-// invoked well after acquireLock (and its wait-ceiling deadline) has
-// already returned.
+// writer-recorded deadline (via lockExpired) shows its holder's TTL has
+// elapsed. All attempts run against waitCtx, a fixed wait-ceiling derived
+// from ctx; the release closure returned on success instead uses ctx
+// directly, since it is invoked well after acquireLock (and its
+// wait-ceiling deadline) has already returned.
 func (b *Backend) acquireLock(ctx context.Context, key string) (func() error, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, b.lock.waitCeiling)
 	defer cancel()
@@ -138,10 +137,8 @@ func (b *Backend) reclaimIfExpired(opCtx, releaseCtx context.Context, key, token
 		return nil, false, headErr
 	}
 
-	expired, expErr := lockExpired(headers, b.lock.ttl)
-	if expErr != nil || !expired {
-		// Liveness could not be determined, or the holder is still live:
-		// be conservative in both cases and back off before retrying.
+	if !lockExpired(headers, b.lock.ttl) {
+		// The holder is still live: back off and retry later.
 		return nil, false, nil
 	}
 
@@ -368,40 +365,23 @@ func (b *Backend) releaseLock(ctx context.Context, key, token string) error {
 	return b.client.deleteObject(ctx, key)
 }
 
-// lockExpired reports whether the lock is older than ttl, judged by the
-// object's Last-Modified time (or its legacy X-Amz-Meta-Time header, kept
-// here for compatibility with objects written before this wire format).
-func lockExpired(headers http.Header, ttl time.Duration) (bool, error) {
-	if ttl <= 0 {
-		return false, errS3LockTTLIsInvalid
-	}
-	timestamp, err := lockTimestamp(headers)
-	if err != nil {
-		return false, err
-	}
-	return time.Since(timestamp) > ttl, nil
-}
-
-// lockTimestamp extracts the lock object's effective creation/refresh time
-// from its metadata: the legacy X-Amz-Meta-Time header if present, else the
-// object's Last-Modified time.
-func lockTimestamp(headers http.Header) (time.Time, error) {
-	if headers == nil {
-		return time.Time{}, errS3LockHeaderIsMissing
-	}
-	if value := strings.TrimSpace(headers.Get("X-Amz-Meta-Time")); value != "" {
-		parsed, err := time.Parse(time.RFC3339, value)
-		if err != nil {
-			return time.Time{}, err
+// lockExpired reports whether the lock described by headers may be reclaimed.
+// The writer-recorded deadline is authoritative; a malformed or absent deadline
+// falls back to age-based staleness against ttl, and uninterpretable timing is
+// treated as reclaimable so a corrupt lock object can never permanently block
+// acquisition.
+func lockExpired(headers http.Header, ttl time.Duration) bool {
+	now := time.Now().UTC()
+	if dl := strings.TrimSpace(headers.Get("X-Amz-Meta-Deadline")); dl != "" {
+		if t, err := time.Parse(time.RFC3339, dl); err == nil {
+			return now.After(t)
 		}
-		return parsed, nil
+		// malformed deadline -> do not hard-fail; fall back to age-based staleness
 	}
-	if value := strings.TrimSpace(headers.Get("Last-Modified")); value != "" {
-		parsed, err := http.ParseTime(value)
-		if err != nil {
-			return time.Time{}, err
+	if lm := strings.TrimSpace(headers.Get("Last-Modified")); lm != "" {
+		if t, err := http.ParseTime(lm); err == nil {
+			return now.Sub(t) > ttl
 		}
-		return parsed, nil
 	}
-	return time.Time{}, errS3LockTimestampIsMissing
+	return true // uninterpretable timing -> reclaimable, never a permanent block
 }
