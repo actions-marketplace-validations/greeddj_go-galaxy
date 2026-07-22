@@ -185,6 +185,62 @@ func TestSaveStoreRoundTripsDataShape(t *testing.T) {
 	}
 }
 
+// TestLoadProjectRegistryRejectsCorruptObject confirms a project registry
+// object that fails to decode is reported as an error rather than silently
+// replaced by an empty registry. Cleanup relies on the registry to compute
+// which installed collections are still reachable, so an empty registry
+// would make it believe nothing is reachable and delete everything.
+func TestLoadProjectRegistryRejectsCorruptObject(t *testing.T) {
+	t.Parallel()
+	b := newTestBackend(t)
+	ctx := t.Context()
+
+	putProjectsObject(ctx, t, b, []byte("{invalid"))
+
+	_, err := b.LoadProjectRegistry(ctx)
+	if !errors.Is(err, helpers.ErrCorruptProjectRegistry) {
+		t.Fatalf("expected ErrCorruptProjectRegistry, got %v", err)
+	}
+}
+
+// TestLoadProjectRegistryMissingObjectReturnsEmpty is a regression guard: a
+// bucket that has never recorded a project must still return an empty,
+// initialized registry with a nil error.
+func TestLoadProjectRegistryMissingObjectReturnsEmpty(t *testing.T) {
+	t.Parallel()
+	b := newTestBackend(t)
+	ctx := t.Context()
+
+	registry, err := b.LoadProjectRegistry(ctx)
+	if err != nil {
+		t.Fatalf("expected nil error for a missing registry object, got %v", err)
+	}
+	if registry == nil || registry.Projects == nil {
+		t.Fatalf("expected an initialized empty registry, got %#v", registry)
+	}
+	if len(registry.Projects) != 0 {
+		t.Fatalf("expected no projects, got %#v", registry.Projects)
+	}
+}
+
+// putProjectsObject seeds the state/projects.json object with raw bytes,
+// mirroring saveProjectRegistry's plain (non-gzipped) JSON encoding so
+// LoadProjectRegistry's decoding path is exercised the same way it would be
+// against a real registry object.
+func putProjectsObject(ctx context.Context, t *testing.T, b *Backend, data []byte) {
+	t.Helper()
+
+	if err := b.Open(ctx); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	key := b.key(statePrefix, projectsObject)
+	reader := bytes.NewReader(data)
+	if err := b.client.putObject(ctx, key, reader, int64(len(data)), "application/json", "", nil, false, ""); err != nil {
+		t.Fatalf("putObject: %v", err)
+	}
+}
+
 // putStoreObject seeds the state/store.json.gz object with a store stamped
 // at schemaVersion, mirroring exactly what SaveStore produces (marshal the
 // store JSON, gzip it) so LoadStore's decoding path is exercised the same

@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -48,7 +49,13 @@ func RecordProject(cacheDir, requirementsFile, downloadPath string) error {
 	return saveProjectRegistry(cacheDir, registry)
 }
 
-// LoadProjectRegistry loads the project registry from cacheDir.
+// LoadProjectRegistry loads the project registry from cacheDir. A missing
+// file is treated as an empty, freshly-initialized registry, but a file
+// that exists and fails to decode is reported as an error rather than
+// silently replaced by an empty registry: cleanup relies on the registry to
+// compute which installed collections are still reachable, so an empty
+// registry would make it believe nothing is reachable and delete
+// everything.
 func LoadProjectRegistry(cacheDir string) (*ProjectRegistry, error) {
 	path := projectRegistryPath(cacheDir)
 	//nolint:gosec // path is derived from cacheDir and is intended for project registry IO.
@@ -61,7 +68,8 @@ func LoadProjectRegistry(cacheDir string) (*ProjectRegistry, error) {
 	}
 	var registry ProjectRegistry
 	if err := json.Unmarshal(data, &registry); err != nil {
-		return &ProjectRegistry{Projects: make(map[string]ProjectRecord)}, nil
+		return nil, fmt.Errorf("%w at %s: %w (remove the file or clear the cache to rebuild the registry)",
+			helpers.ErrCorruptProjectRegistry, path, err)
 	}
 	if registry.Projects == nil {
 		registry.Projects = make(map[string]ProjectRecord)

@@ -123,6 +123,12 @@ var (
 	// ErrOutdatedSchemaVersion indicates the snapshot schema version is older
 	// than the current one and the snapshot should be dropped and rebuilt.
 	ErrOutdatedSchemaVersion = errors.New("outdated snapshot schema version")
+	// ErrCorruptProjectRegistry indicates the project registry file or
+	// object could not be decoded. It must never be treated as an empty
+	// registry: cleanup computes reachability from every recorded project,
+	// so silently substituting an empty registry would make it believe
+	// nothing is reachable and delete every installed collection.
+	ErrCorruptProjectRegistry = errors.New("corrupt project registry")
 
 	// ErrOfflineMode indicates a network operation was attempted in offline mode.
 	ErrOfflineMode = errors.New("offline mode is enabled, network access is forbidden")

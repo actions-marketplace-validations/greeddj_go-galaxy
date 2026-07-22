@@ -193,7 +193,12 @@ func (b *Backend) RecordProject(ctx context.Context, requirementsFile, downloadP
 	return b.saveProjectRegistry(ctx, registry)
 }
 
-// LoadProjectRegistry loads the project registry from S3.
+// LoadProjectRegistry loads the project registry from S3. A missing object
+// is treated as an empty, freshly-initialized registry, but an object that
+// exists and fails to decode is reported as an error rather than silently
+// replaced by an empty registry: cleanup relies on the registry to compute
+// which installed collections are still reachable, so an empty registry
+// would make it believe nothing is reachable and delete everything.
 func (b *Backend) LoadProjectRegistry(ctx context.Context) (*store.ProjectRegistry, error) {
 	if err := b.Open(ctx); err != nil {
 		return nil, err
@@ -208,7 +213,8 @@ func (b *Backend) LoadProjectRegistry(ctx context.Context) (*store.ProjectRegist
 	}
 	var registry store.ProjectRegistry
 	if err := json.Unmarshal(data, &registry); err != nil {
-		return &store.ProjectRegistry{Projects: make(map[string]store.ProjectRecord)}, nil
+		return nil, fmt.Errorf("%w at %s: %w (remove the object or clear the cache to rebuild the registry)",
+			helpers.ErrCorruptProjectRegistry, key, err)
 	}
 	if registry.Projects == nil {
 		registry.Projects = make(map[string]store.ProjectRecord)
