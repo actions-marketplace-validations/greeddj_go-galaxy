@@ -109,7 +109,9 @@ func (m *Store) DeleteInstalled(key string) {
 	delete(m.Installed, key)
 }
 
-// GetInstalled returns an installed entry by key.
+// GetInstalled returns an installed entry by key. Deps is cloned before
+// returning, so a caller mutation of the returned slice cannot corrupt the
+// stored snapshot state.
 func (m *Store) GetInstalled(key string) (InstalledEntry, bool) {
 	if m == nil {
 		return InstalledEntry{}, false
@@ -117,6 +119,7 @@ func (m *Store) GetInstalled(key string) (InstalledEntry, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	entry, ok := m.Installed[key]
+	entry.Deps = slices.Clone(entry.Deps)
 	return entry, ok
 }
 
@@ -158,7 +161,11 @@ func (m *Store) DeleteDepsCache(key string) {
 	delete(m.DepsCache, key)
 }
 
-// GetAPICache returns a cached API entry by key.
+// GetAPICache returns a cached API entry by key. The returned entry shares
+// its Body backing array with the stored snapshot: callers must treat Body
+// as read-only and must not mutate it. Body is deliberately not cloned on
+// read because this is the warm-cache hot path and Body can be a large
+// response payload; the only caller unmarshals it without mutating.
 func (m *Store) GetAPICache(key string) (APICacheEntry, bool) {
 	if m == nil {
 		return APICacheEntry{}, false
@@ -319,7 +326,10 @@ func (m *Store) SetRequirements(spec map[string]RequirementSpec) {
 	m.Requirements = clone
 }
 
-// RequirementsSnapshot returns a copy of requirement specs.
+// RequirementsSnapshot returns a fully independent deep copy of requirement
+// specs: each entry's Signatures slice is cloned too, so mutating the
+// returned map or any of its Signatures slices cannot corrupt the stored
+// snapshot state.
 func (m *Store) RequirementsSnapshot() map[string]RequirementSpec {
 	if m == nil {
 		return nil
@@ -327,7 +337,10 @@ func (m *Store) RequirementsSnapshot() map[string]RequirementSpec {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	clone := make(map[string]RequirementSpec, len(m.Requirements))
-	maps.Copy(clone, m.Requirements)
+	for key, value := range m.Requirements {
+		value.Signatures = slices.Clone(value.Signatures)
+		clone[key] = value
+	}
 	return clone
 }
 

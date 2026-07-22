@@ -109,3 +109,43 @@ func TestSetRequirementsClonesSignatures(t *testing.T) {
 		t.Fatalf("expected stored requirement signatures to be unaffected by caller mutation, got %#v", stored.Signatures)
 	}
 }
+
+// TestGetInstalledClonesDepsOnRead proves GetInstalled clones Deps before
+// returning, so mutating the returned entry's slice cannot corrupt the
+// stored snapshot state observed by a later caller.
+func TestGetInstalledClonesDepsOnRead(t *testing.T) {
+	t.Parallel()
+	st := New()
+	st.SetInstalled("k", InstalledEntry{Deps: []string{"a"}})
+
+	e1, ok := st.GetInstalled("k")
+	if !ok {
+		t.Fatalf("expected installed entry to exist")
+	}
+	e1.Deps[0] = mutatedMarker
+
+	e2, ok := st.GetInstalled("k")
+	if !ok || e2.Deps[0] != "a" {
+		t.Fatalf("expected a later GetInstalled to be unaffected by the first caller's mutation, got %#v (ok=%v)", e2, ok)
+	}
+}
+
+// TestRequirementsSnapshotIsIndependentDeepCopy proves RequirementsSnapshot
+// returns a fully independent deep copy: mutating one snapshot's Signatures
+// slice cannot leak into a later, independently taken snapshot.
+func TestRequirementsSnapshotIsIndependentDeepCopy(t *testing.T) {
+	t.Parallel()
+	st := New()
+	st.SetRequirements(map[string]RequirementSpec{
+		"k": {Constraint: "1.0.0", Signatures: []string{"s1"}},
+	})
+
+	snap1 := st.RequirementsSnapshot()
+	sig := snap1["k"].Signatures
+	sig[0] = mutatedMarker
+
+	snap2 := st.RequirementsSnapshot()
+	if snap2["k"].Signatures[0] != "s1" {
+		t.Fatalf("expected an independently taken snapshot to be unaffected, got %#v", snap2["k"])
+	}
+}
