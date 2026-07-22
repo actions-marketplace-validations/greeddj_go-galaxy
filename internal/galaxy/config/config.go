@@ -7,7 +7,6 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/BurntSushi/toml"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/urfave/cli/v3"
 )
@@ -196,31 +195,19 @@ cache_dir // env:ANSIBLE_GALAXY_CACHE_DIR // default {{ ANSIBLE_HOME ~ "/galaxy_
 server // env:ANSIBLE_GALAXY_SERVER // default https://galaxy.ansible.com
 */
 
-// ansibleGalaxyConfig maps the [galaxy] section from ansible.cfg.
-type ansibleGalaxyConfig struct {
-	CacheDir string `toml:"cache_dir"`
-	Server   string `toml:"server"`
-}
-
-// ansibleDefaultsConfig maps the [defaults] section from ansible.cfg.
-type ansibleDefaultsConfig struct {
-	CollectionsPath string `toml:"collections_path"`
-}
-
-// ansibleConfig represents the parsed ansible.cfg structure.
-type ansibleConfig struct {
-	Defaults ansibleDefaultsConfig `toml:"defaults"`
-	Galaxy   ansibleGalaxyConfig   `toml:"galaxy"`
-}
-
-// loadAnsibleConfig loads ansible.cfg if it exists.
+// loadAnsibleConfig loads and parses ansible.cfg if it exists.
 func loadAnsibleConfig(configPath string) (ansibleConfig, string, error) {
 	config := ansibleConfig{}
-	if _, err := os.Stat(configPath); err != nil {
+
+	f, err := os.Open(configPath) // #nosec G304 -- user-provided path
+	if err != nil {
 		return config, "", err
 	}
-	if _, err := toml.DecodeFile(configPath, &config); err != nil {
-		return config, "", fmt.Errorf("failed parse ansible.cfg: %w", err)
+	defer func() { _ = f.Close() }()
+
+	config, err = parseAnsibleConfig(f)
+	if err != nil {
+		return config, "", fmt.Errorf("failed to parse ansible.cfg: %w", err)
 	}
 	return config, configPath, nil
 }

@@ -3,7 +3,6 @@ module github.com/greeddj/go-galaxy
 go 1.26.5
 
 require (
-	github.com/BurntSushi/toml v1.6.0
 	github.com/Masterminds/semver v1.5.0
 	github.com/briandowns/spinner v1.23.2
 	github.com/klauspost/pgzip v1.2.6
@@ -14,6 +13,7 @@ require (
 )
 
 require (
+	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/fatih/color v1.19.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/klauspost/compress v1.19.1 // indirect

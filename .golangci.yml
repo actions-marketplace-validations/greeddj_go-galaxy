@@ -21,7 +21,6 @@ linters:
           allow:
             - $gostd
             - github.com/greeddj/go-galaxy
-            - github.com/BurntSushi/toml
             - github.com/Masterminds/semver
             - github.com/briandowns/spinner
             - github.com/klauspost/pgzip
