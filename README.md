@@ -192,6 +192,8 @@ S3 cache options (if `--s3-bucket` is set, S3 backend is used):
 - `--s3-session-token` (`$GO_GALAXY_S3_SESSION_TOKEN`, `$AWS_SESSION_TOKEN`)
 - `--s3-path-style-disabled` (`$GO_GALAXY_S3_PATH_STYLE_DISABLED`)
 
+`cleanup` aborts with a non-zero exit and deletes nothing if a recorded project's `requirements.yml` is present but cannot be read or parsed.
+
 ## requirements.yml
 
 ```yaml
