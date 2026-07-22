@@ -89,8 +89,19 @@ func lookupOutdated(ctx context.Context, deps collectionDeps, e lockfile.Entry) 
 	if latest == "" {
 		return outdatedEntry{Name: e.Name, Locked: e.Version, Failed: true, Message: "no highest_version in metadata"}
 	}
-	newer, _ := isNewerVersion(latest, e.Version)
-	return outdatedEntry{Name: e.Name, Locked: e.Version, Latest: latest, Newer: newer}
+	return classifyOutdated(e.Name, e.Version, latest)
+}
+
+// classifyOutdated compares locked against latest and builds the resulting
+// entry. A version that fails to parse as semver is reported as a failure
+// (not silently treated as up-to-date), so the command still exits non-zero
+// and the operator sees which entry needs attention.
+func classifyOutdated(name, locked, latest string) outdatedEntry {
+	newer, err := isNewerVersion(latest, locked)
+	if err != nil {
+		return outdatedEntry{Name: name, Locked: locked, Latest: latest, Failed: true, Message: "version parse: " + err.Error()}
+	}
+	return outdatedEntry{Name: name, Locked: locked, Latest: latest, Newer: newer}
 }
 
 func isNewerVersion(latest, locked string) (bool, error) {
