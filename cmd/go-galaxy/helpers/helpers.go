@@ -1,26 +1,38 @@
 package helpers
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
-	"time"
+	"runtime/debug"
 )
 
-// Version returns the formatted version string for the application.
+// Version returns the formatted version string for the application. version,
+// commit, and date are normally injected by the Justfile's ldflags; on a
+// plain `go build`/`go run` (dev build) they are empty, and fillFromBuildInfo
+// recovers what it can from the Go module/VCS build info instead of making a
+// network call.
 func Version(version, commit, date, builtBy string) string {
+	if version == "" || commit == "" || date == "" {
+		version, commit, date = fillFromBuildInfo(version, commit, date)
+	}
 	if version == "" {
-		version = latestTag()
+		version = defaultVersion
 	}
 
 	if builtBy == "" {
 		builtBy = defaultBuilder
 	}
 
+	return formatVersion(version, commit, date, builtBy)
+}
+
+// formatVersion renders the already-resolved version fields into the final
+// display string. Split out from Version so the four format branches can be
+// exercised deterministically in tests, independent of fillFromBuildInfo's
+// environment-dependent fallback.
+func formatVersion(version, commit, date, builtBy string) string {
 	switch {
 	case date != "" && commit != "":
 		return fmt.Sprintf("%s (commit %s, built by %s @ %s) // %s", version, commit, builtBy, date, runtime.Version())
@@ -33,38 +45,33 @@ func Version(version, commit, date, builtBy string) string {
 	}
 }
 
-// latestTag fetches the latest release tag from GitHub.
-func latestTag() string {
-	client := &http.Client{Timeout: time.Second}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, latestVersionURL, http.NoBody)
-	if err != nil {
-		return defaultVersion
+// fillFromBuildInfo fills any of version, commit, date that are empty from
+// runtime/debug.ReadBuildInfo, leaving already-set (ldflags-provided) values
+// untouched. It is a pure, network-free fallback for dev builds.
+func fillFromBuildInfo(version, commit, date string) (string, string, string) {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return version, commit, date
 	}
 
-	req.Header.Set("User-Agent", userAgent)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return defaultVersion
+	if version == "" {
+		version = info.Main.Version
 	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	if resp.StatusCode != http.StatusOK {
-		return defaultVersion
+	if commit == "" || date == "" {
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				if commit == "" {
+					commit = setting.Value
+				}
+			case "vcs.time":
+				if date == "" {
+					date = setting.Value
+				}
+			}
+		}
 	}
-
-	var payload struct {
-		Tag string `json:"tag_name"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return defaultVersion
-	}
-	if payload.Tag == "" {
-		return defaultVersion
-	}
-	return payload.Tag
+	return version, commit, date
 }
 
 // defaultCacheDir returns the default cache directory path.

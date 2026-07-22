@@ -10,8 +10,8 @@ const (
 	defaultCollectionsPath      = ".collections"
 	defaultRequirementsFilePath = "requirements.yml"
 	defaultAnsibleConfigPath    = "ansible.cfg"
-	defaultVersion              = "latest"
-	defaultBuilder              = "go"
-	userAgent                   = "go-galaxy"
-	latestVersionURL            = "https://api.github.com/repos/greeddj/go-galaxy/releases/latest"
+	// defaultVersion is used only when neither ldflags nor build info supply
+	// a version (e.g. a build without module/VCS info embedded).
+	defaultVersion = "unknown"
+	defaultBuilder = "go"
 )

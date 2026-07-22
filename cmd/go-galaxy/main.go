@@ -30,9 +30,11 @@ func main() {
 
 // run configures and executes the CLI, returning the exit code.
 func run() int {
-	// Customize the version printer to show only the version.
+	// Customize the version printer to show only the formatted version
+	// string (c.Root().Version, set below via helpers.Version). The raw
+	// Version global can be empty on dev builds; the formatted string never is.
 	cli.VersionPrinter = func(c *cli.Command) {
-		_, _ = fmt.Fprintln(c.Writer, Version)
+		_, _ = fmt.Fprintln(c.Writer, c.Root().Version)
 	}
 
 	// cmdErr captures action/before/after/flag-action errors via ExitErrHandler.

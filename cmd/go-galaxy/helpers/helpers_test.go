@@ -1,0 +1,94 @@
+package helpers
+
+import (
+	"runtime"
+	"strings"
+	"testing"
+)
+
+// TestFormatVersion exercises all four format branches of formatVersion with
+// explicit, already-resolved (ldflags-style) inputs, so the expected output
+// is deterministic regardless of the environment's build info.
+func TestFormatVersion(t *testing.T) {
+	tests := []struct {
+		version string
+		commit  string
+		date    string
+		builtBy string
+		want    string
+		name    string
+	}{
+		{
+			name:    "commit and date both set",
+			version: "v1.2.3",
+			commit:  "abc123",
+			date:    "2026-07-22T00:00:00Z",
+			builtBy: "goreleaser",
+			want: "v1.2.3 (commit abc123, built by goreleaser @ 2026-07-22T00:00:00Z) // " + runtime.Version(),
+		},
+		{
+			name:    "commit set, date empty",
+			version: "v1.2.3",
+			commit:  "abc123",
+			date:    "",
+			builtBy: "goreleaser",
+			want:    "v1.2.3 (commit abc123, built by goreleaser) // " + runtime.Version(),
+		},
+		{
+			name:    "commit empty, date set",
+			version: "v1.2.3",
+			commit:  "",
+			date:    "2026-07-22T00:00:00Z",
+			builtBy: "goreleaser",
+			want:    "v1.2.3 (built by goreleaser @ 2026-07-22T00:00:00Z) // " + runtime.Version(),
+		},
+		{
+			name:    "commit and date both empty",
+			version: "v1.2.3",
+			commit:  "",
+			date:    "",
+			builtBy: "goreleaser",
+			want:    "v1.2.3 (built by goreleaser) // " + runtime.Version(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatVersion(tt.version, tt.commit, tt.date, tt.builtBy)
+			if got != tt.want {
+				t.Errorf("formatVersion(%q, %q, %q, %q) = %q, want %q",
+					tt.version, tt.commit, tt.date, tt.builtBy, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestVersion checks the public entry point with full, explicit ldflags-style
+// inputs (the real-world Justfile case), which must pass through unchanged
+// and produce a deterministic string.
+func TestVersion(t *testing.T) {
+	got := Version("v1.2.3", "abc123", "2026-07-22T00:00:00Z", "goreleaser")
+	want := "v1.2.3 (commit abc123, built by goreleaser @ 2026-07-22T00:00:00Z) // " + runtime.Version()
+	if got != want {
+		t.Errorf("Version() = %q, want %q", got, want)
+	}
+}
+
+// TestVersionDevBuildFallback checks the ldflags-less (dev build) path: all
+// four inputs empty. The exact version string is environment-dependent (it
+// depends on runtime/debug.ReadBuildInfo, which varies with how the test
+// binary itself was built), so this only asserts the invariants that matter:
+// the result is never empty, it still reports the Go runtime version, and -
+// crucially - it never reintroduces the deleted GitHub network fetch.
+func TestVersionDevBuildFallback(t *testing.T) {
+	got := Version("", "", "", "")
+	if got == "" {
+		t.Fatal("Version(\"\", \"\", \"\", \"\") = \"\", want non-empty")
+	}
+	if !strings.Contains(got, runtime.Version()) {
+		t.Errorf("Version() = %q, want it to contain runtime.Version() = %q", got, runtime.Version())
+	}
+	if strings.Contains(got, "http") {
+		t.Errorf("Version() = %q, must not contain \"http\" (no network fetch should remain)", got)
+	}
+}
