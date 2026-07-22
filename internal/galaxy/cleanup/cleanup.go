@@ -24,6 +24,7 @@ import (
 
 // installedCollection tracks an installed collection discovered on disk.
 type installedCollection struct {
+	Parsed         *semver.Version
 	Key            string
 	FQDN           string
 	Version        string
@@ -134,6 +135,11 @@ func buildReachable(runtime *infra.Infra, registry *store.ProjectRegistry) (map[
 	// removeUnused can remove all of them in a single run rather than
 	// overwriting earlier copies and only shedding one per run.
 	installedByKey := make(map[string][]installedCollection)
+	// constraints caches each raw requirement constraint string's parsed
+	// *semver.Constraints (or nil for an unparseable one) across the whole
+	// BFS below, so the same constraint evaluated on many edges is parsed
+	// at most once instead of once per edge.
+	constraints := make(map[string]*semver.Constraints)
 
 	for projectPath, project := range registry.Projects {
 		collectionsPath := pickCollectionsPath(projectPath, project)
@@ -156,8 +162,8 @@ func buildReachable(runtime *infra.Infra, registry *store.ProjectRegistry) (map[
 		}
 		for _, root := range roots {
 			fqdn := fmt.Sprintf("%s.%s", root.Namespace, root.Name)
-			for _, inst := range selectInstalled(installedIndex, fqdn, root.Version) {
-				markReachable(inst.Key, reachable, depsByKey, installedIndex)
+			for _, inst := range selectInstalled(installedIndex, constraints, fqdn, root.Version) {
+				markReachable(inst.Key, reachable, depsByKey, installedIndex, constraints)
 			}
 		}
 	}
@@ -406,12 +412,19 @@ func buildInstalledRecord(
 	installPath := filepath.Dir(manifestPath)
 	key := fmt.Sprintf("%s.%s@%s", ns, name, version)
 	fqdn := fmt.Sprintf("%s.%s", ns, name)
+	// A parse failure here is not this function's concern to reject: an
+	// identifier that passed the path-element safety check above can still
+	// be non-semver (e.g. a git ref), and selectInstalled's existing
+	// unparseable-version handling (skip the item under a real constraint)
+	// is preserved by simply caching nil in that case.
+	parsed, _ := semver.NewVersion(version)
 	return installedCollection{
 		Key:            key,
 		FQDN:           fqdn,
 		Version:        version,
 		InstallPath:    installPath,
 		CollectionsDir: collectionsPath,
+		Parsed:         parsed,
 	}, key, true, nil
 }
 
@@ -431,8 +444,17 @@ func normalizeConstraint(value string) string {
 	return trimmed
 }
 
-// selectInstalled filters installed collections by constraint.
-func selectInstalled(index map[string][]installedCollection, fqdn, constraint string) []installedCollection {
+// selectInstalled filters installed collections by constraint. constraints
+// caches each raw constraint string's parsed *semver.Constraints (or nil for
+// an unparseable one) across the whole BFS, so the same requirement string
+// evaluated against many edges is parsed at most once. A cache miss is
+// distinguished from a cached-nil (parse failure) via the two-value map
+// read, so an unparseable constraint is itself parsed only once too.
+func selectInstalled(
+	index map[string][]installedCollection,
+	constraints map[string]*semver.Constraints,
+	fqdn, constraint string,
+) []installedCollection {
 	items := index[fqdn]
 	if len(items) == 0 {
 		return nil
@@ -441,17 +463,20 @@ func selectInstalled(index map[string][]installedCollection, fqdn, constraint st
 	if normalized == "" {
 		return items
 	}
-	c, err := semver.NewConstraint(normalized)
-	if err != nil {
+	c, ok := constraints[normalized]
+	if !ok {
+		c, _ = semver.NewConstraint(normalized)
+		constraints[normalized] = c
+	}
+	if c == nil {
 		return items
 	}
 	out := make([]installedCollection, 0, len(items))
 	for _, item := range items {
-		v, err := semver.NewVersion(item.Version)
-		if err != nil {
+		if item.Parsed == nil {
 			continue
 		}
-		if c.Check(v) {
+		if c.Check(item.Parsed) {
 			out = append(out, item)
 		}
 	}
@@ -459,7 +484,13 @@ func selectInstalled(index map[string][]installedCollection, fqdn, constraint st
 }
 
 // markReachable marks all reachable dependencies starting at key.
-func markReachable(key string, reachable map[string]bool, deps map[string]map[string]string, index map[string][]installedCollection) {
+func markReachable(
+	key string,
+	reachable map[string]bool,
+	deps map[string]map[string]string,
+	index map[string][]installedCollection,
+	constraints map[string]*semver.Constraints,
+) {
 	queue := []string{key}
 	for len(queue) > 0 {
 		current := queue[0]
@@ -469,7 +500,7 @@ func markReachable(key string, reachable map[string]bool, deps map[string]map[st
 		}
 		reachable[current] = true
 		for depFQDN, constraint := range deps[current] {
-			for _, inst := range selectInstalled(index, depFQDN, constraint) {
+			for _, inst := range selectInstalled(index, constraints, depFQDN, constraint) {
 				if !reachable[inst.Key] {
 					queue = append(queue, inst.Key)
 				}

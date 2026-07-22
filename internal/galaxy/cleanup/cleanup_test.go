@@ -7,11 +7,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/Masterminds/semver"
 	cacheBackend "github.com/greeddj/go-galaxy/internal/cache"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/extracted"
@@ -916,5 +918,89 @@ func TestDryRunReportsExtractedSweep(t *testing.T) {
 	}
 	if printer.hasPrintContaining("sha-keep") {
 		t.Fatalf("expected no would-sweep report for the reachable, kept sha-keep, got prints: %v", printer.prints)
+	}
+}
+
+// assertSelectedKeys fails the test unless the Key of every item in got is
+// exactly the set of want, ignoring order.
+func assertSelectedKeys(t *testing.T, got []installedCollection, want ...string) {
+	t.Helper()
+	gotKeys := make([]string, 0, len(got))
+	for _, item := range got {
+		gotKeys = append(gotKeys, item.Key)
+	}
+	sort.Strings(gotKeys)
+	wantSorted := append([]string(nil), want...)
+	sort.Strings(wantSorted)
+	if len(gotKeys) != len(wantSorted) {
+		t.Fatalf("selected keys = %v, want %v", gotKeys, wantSorted)
+	}
+	for i, k := range gotKeys {
+		if k != wantSorted[i] {
+			t.Fatalf("selected keys = %v, want %v", gotKeys, wantSorted)
+		}
+	}
+}
+
+// TestSelectInstalledConstraintCache proves the constraint cache introduced
+// to hoist semver parsing out of the BFS edge loop preserves selectInstalled's
+// exact prior behavior: a valid constraint filters correctly (including
+// skipping an item whose version failed to parse), an unparseable or empty
+// constraint is match-all, and repeated calls with the same constraint string
+// hit the cache and still yield identical results.
+func TestSelectInstalledConstraintCache(t *testing.T) {
+	t.Parallel()
+	v15, err := semver.NewVersion("1.5.0")
+	if err != nil {
+		t.Fatalf("failed to parse 1.5.0: %v", err)
+	}
+	v20, err := semver.NewVersion("2.0.0")
+	if err != nil {
+		t.Fatalf("failed to parse 2.0.0: %v", err)
+	}
+	index := map[string][]installedCollection{
+		"ns.name": {
+			{Key: "ns.name@1.5.0", Version: "1.5.0", Parsed: v15},
+			{Key: "ns.name@2.0.0", Version: "2.0.0", Parsed: v20},
+			// An item whose version failed to parse (e.g. a git ref that
+			// still passed the path-element safety check): Parsed is nil,
+			// exactly as buildInstalledRecord would leave it.
+			{Key: "ns.name@git-ref", Version: "git-ref", Parsed: nil},
+		},
+	}
+	constraints := make(map[string]*semver.Constraints)
+
+	// A valid constraint selects the matching parsed version and skips
+	// both the out-of-range version and the unparseable-version item.
+	selected := selectInstalled(index, constraints, "ns.name", ">=1.0.0,<2.0.0")
+	assertSelectedKeys(t, selected, "ns.name@1.5.0")
+	if len(constraints) != 1 {
+		t.Fatalf("expected the constraint to be cached after first use, got %d entries", len(constraints))
+	}
+
+	// Calling again with the identical constraint string must hit the
+	// cache (no new entry) and still yield the identical result set.
+	selectedAgain := selectInstalled(index, constraints, "ns.name", ">=1.0.0,<2.0.0")
+	assertSelectedKeys(t, selectedAgain, "ns.name@1.5.0")
+	if len(constraints) != 1 {
+		t.Fatalf("expected no new cache entry on a repeated constraint, got %d entries", len(constraints))
+	}
+
+	// An empty/"*" constraint is match-all without ever touching the cache.
+	all := selectInstalled(index, constraints, "ns.name", "")
+	assertSelectedKeys(t, all, "ns.name@1.5.0", "ns.name@2.0.0", "ns.name@git-ref")
+	if len(constraints) != 1 {
+		t.Fatalf("expected the match-all fast path not to populate the cache, got %d entries", len(constraints))
+	}
+
+	// An unparseable constraint is also match-all (matching
+	// semver.NewConstraint's existing failure behavior), and gets cached as
+	// nil so a repeated use of the same unparseable string costs only one
+	// parse attempt.
+	unparseable := selectInstalled(index, constraints, "ns.name", "not a constraint !!")
+	assertSelectedKeys(t, unparseable, "ns.name@1.5.0", "ns.name@2.0.0", "ns.name@git-ref")
+	c, ok := constraints["not a constraint !!"]
+	if !ok || c != nil {
+		t.Fatalf("expected the unparseable constraint to be cached as nil, got ok=%v c=%v", ok, c)
 	}
 }
