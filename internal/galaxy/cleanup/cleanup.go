@@ -241,6 +241,13 @@ func dirExists(path string) bool {
 }
 
 // scanInstalledCollections indexes installed collections under collectionsPath.
+// Installed collections only ever live at the fixed
+// <collectionsPath>/ansible_collections/<ns>/<name>/MANIFEST.json depth, so
+// this walks exactly those two directory levels rather than the whole tree:
+// a MANIFEST.json nested deeper (e.g. inside a collection's own test
+// fixtures) is never mistaken for an installed collection, and the scan does
+// not pay for descending into every file of every installed collection.
+//
 // Manifests whose namespace/name/version cannot be safely used as filesystem
 // path elements are rejected at ingestion (see buildInstalledRecord): a
 // warning is emitted via out and the scan continues rather than aborting the
@@ -253,37 +260,92 @@ func scanInstalledCollections(
 	deps map[string]map[string]string,
 ) error {
 	root := filepath.Join(collectionsPath, "ansible_collections")
-	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil
-			}
+	nsEntries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, nsEntry := range nsEntries {
+		if !nsEntry.IsDir() {
+			continue
+		}
+		if err := scanNamespaceDir(out, collectionsPath, root, nsEntry.Name(), index, byKey, deps); err != nil {
 			return err
 		}
-		if d.IsDir() || d.Name() != "MANIFEST.json" {
+	}
+	return nil
+}
+
+// scanNamespaceDir scans every <root>/<ns>/<name> directory for a
+// MANIFEST.json, one namespace at a time.
+func scanNamespaceDir(
+	out output.Printer,
+	collectionsPath, root, ns string,
+	index map[string][]installedCollection,
+	byKey map[string]installedCollection,
+	deps map[string]map[string]string,
+) error {
+	nameEntries, err := os.ReadDir(filepath.Join(root, ns))
+	if err != nil {
+		if os.IsNotExist(err) {
+			// The namespace directory vanished between the parent ReadDir
+			// and this one (e.g. a concurrent cleanup or install run) -
+			// skip it rather than aborting the whole scan.
 			return nil
 		}
-		manifest, ok, err := readManifest(path)
-		if err != nil || !ok {
+		return err
+	}
+	for _, nameEntry := range nameEntries {
+		if !nameEntry.IsDir() {
+			continue
+		}
+		if err := scanCollectionDir(out, collectionsPath, root, ns, nameEntry.Name(), index, byKey, deps); err != nil {
 			return err
 		}
-		record, key, ok, err := buildInstalledRecord(collectionsPath, path, manifest)
-		if err != nil {
-			out.Warnf("skipping install with unsafe identifier at %s: %v", path, err)
+	}
+	return nil
+}
+
+// scanCollectionDir probes <root>/<ns>/<name>/MANIFEST.json and, if present
+// and parseable, indexes the installed collection it describes.
+func scanCollectionDir(
+	out output.Printer,
+	collectionsPath, root, ns, name string,
+	index map[string][]installedCollection,
+	byKey map[string]installedCollection,
+	deps map[string]map[string]string,
+) error {
+	manifestPath := filepath.Join(root, ns, name, "MANIFEST.json")
+	manifest, ok, err := readManifest(manifestPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// A <ns>/<name> directory without a MANIFEST.json is not an
+			// installed collection - skip it silently rather than aborting.
 			return nil
 		}
-		if !ok {
-			return nil
-		}
-		index[record.FQDN] = append(index[record.FQDN], record)
-		byKey[key] = record
-		deps[key] = extractDeps(manifest)
+		return err
+	}
+	if !ok {
 		return nil
-	})
+	}
+	record, key, ok, err := buildInstalledRecord(collectionsPath, manifestPath, manifest)
+	if err != nil {
+		out.Warnf("skipping install with unsafe identifier at %s: %v", manifestPath, err)
+		return nil
+	}
+	if !ok {
+		return nil
+	}
+	index[record.FQDN] = append(index[record.FQDN], record)
+	byKey[key] = record
+	deps[key] = extractDeps(manifest)
+	return nil
 }
 
 func readManifest(path string) (types.GalaxyCollectionVersionInfoManifest, bool, error) {
-	//nolint:gosec // path comes from WalkDir rooted at collectionsPath.
+	//nolint:gosec // path is built from a fixed <ansible_collections>/<ns>/<name>/MANIFEST.json probe.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return types.GalaxyCollectionVersionInfoManifest{}, false, err

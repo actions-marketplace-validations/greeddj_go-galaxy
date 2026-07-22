@@ -626,3 +626,76 @@ func TestSweepDropsUnreferencedSha(t *testing.T) {
 		t.Fatalf("expected unreferenced orphan sha dir to be removed, stat error: %v", statErr)
 	}
 }
+
+// TestScanIgnoresNestedManifest proves scanInstalledCollections only ever
+// looks at the fixed <ansible_collections>/<ns>/<name>/MANIFEST.json depth:
+// a MANIFEST.json nested deeper - as a collection's own test fixtures might
+// ship one - must never be mistaken for an installed collection. The nested
+// manifest here declares a different, unreferenced collection identity, so
+// under the old full-tree walk it would have been discovered as its own
+// installedCollection and, being unreferenced, deleted by removeUnused. The
+// top-level collection is kept reachable via requirements.yml so its
+// directory is never a deletion candidate either way, isolating the
+// assertion to whether the nested manifest alone was (wrongly) discovered.
+func TestScanIgnoresNestedManifest(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+	installDir := seedInstallTree(t, downloadPath)
+
+	nestedDir := filepath.Join(installDir, "tests", "fixtures")
+	if err := os.MkdirAll(nestedDir, helpers.DirMod); err != nil {
+		t.Fatalf("failed to create nested fixture dir: %v", err)
+	}
+	nestedManifest := `{
+		"collection_info": {
+			"namespace": "phantom",
+			"name": "fixture",
+			"version": "9.9.9"
+		}
+	}`
+	nestedManifestPath := filepath.Join(nestedDir, "MANIFEST.json")
+	if err := os.WriteFile(nestedManifestPath, []byte(nestedManifest), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write nested manifest: %v", err)
+	}
+
+	reqPath := filepath.Join(t.TempDir(), "requirements.yml")
+	if err := os.WriteFile(reqPath, []byte("collections:\n  - ns.name\n"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write requirements file: %v", err)
+	}
+	registerCleanupProjectAt(t, cacheDir, downloadPath, reqPath)
+
+	runtime := newTestRuntime()
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+
+	assertManifestSurvives(t, installDir)
+	if _, statErr := os.Stat(nestedManifestPath); statErr != nil {
+		t.Fatalf("expected the nested phantom manifest to survive since it is never scanned, stat error: %v", statErr)
+	}
+}
+
+// TestScanSkipsDirWithoutManifest proves a <ns>/<name> directory with no
+// MANIFEST.json at all (e.g. a partially cleaned or interrupted install) is
+// silently skipped rather than treated as an IO error that aborts the scan.
+func TestScanSkipsDirWithoutManifest(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+
+	emptyDir := filepath.Join(downloadPath, "ansible_collections", "ns", "empty")
+	if err := os.MkdirAll(emptyDir, helpers.DirMod); err != nil {
+		t.Fatalf("failed to create manifest-less dir: %v", err)
+	}
+	registerCleanupProject(t, cacheDir, downloadPath)
+
+	runtime := newTestRuntime()
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed with a manifest-less directory present, got %v", err)
+	}
+}
