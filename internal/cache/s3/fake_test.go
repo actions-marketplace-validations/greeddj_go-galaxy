@@ -8,16 +8,26 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 )
+
+// fakeObject is one stored object: its body, the X-Amz-Meta-* headers it was
+// last written with (captured verbatim, keyed by canonical header name), and
+// the time it was last written, which stands in for S3's Last-Modified.
+type fakeObject struct {
+	modified time.Time
+	meta     map[string]string
+	data     []byte
+}
 
 // fakeS3 is a minimal in-memory, path-style S3 fake used to exercise Backend
 // and Client against real HTTP round trips without a network dependency or
 // SigV4 verification (the client always signs requests, but this fake never
 // checks the Authorization header).
 type fakeS3 struct {
-	objects map[string][]byte
+	objects map[string]fakeObject
 	bucket  string
 	mu      sync.Mutex
 }
@@ -26,7 +36,7 @@ type fakeS3 struct {
 // created per test so state never leaks between parallel tests.
 func newFakeS3(bucket string) *fakeS3 {
 	return &fakeS3{
-		objects: make(map[string][]byte),
+		objects: make(map[string]fakeObject),
 		bucket:  bucket,
 	}
 }
@@ -96,9 +106,11 @@ func (f *fakeS3) handleList(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(w, body.String())
 }
 
-// handleObject answers object-level requests: GET, PUT, and DELETE.
+// handleObject answers object-level requests: HEAD, GET, PUT, and DELETE.
 func (f *fakeS3) handleObject(w http.ResponseWriter, r *http.Request, key string) {
 	switch r.Method {
+	case http.MethodHead:
+		f.handleHead(w, key)
 	case http.MethodGet:
 		f.handleGet(w, key)
 	case http.MethodPut:
@@ -110,22 +122,40 @@ func (f *fakeS3) handleObject(w http.ResponseWriter, r *http.Request, key string
 	}
 }
 
-// handleGet returns the stored object bytes verbatim, or 404 if absent.
-func (f *fakeS3) handleGet(w http.ResponseWriter, key string) {
+// handleHead reports the stored object's metadata headers and Last-Modified
+// verbatim, or 404 if absent. This backs the lock protocol's HEAD-only reads
+// (token/deadline verification never needs to transfer the body).
+func (f *fakeS3) handleHead(w http.ResponseWriter, key string) {
 	f.mu.Lock()
-	body, ok := f.objects[key]
+	obj, ok := f.objects[key]
 	f.mu.Unlock()
 	if !ok {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
+	writeObjectHeaders(w.Header(), obj)
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(body)
 }
 
-// handlePut stores the request body under key, honoring the conditional
-// If-None-Match: * header used by the distributed lock's "create if absent"
-// semantics: it fails with 412 when the key already exists.
+// handleGet returns the stored object's metadata headers and body verbatim,
+// or 404 if absent.
+func (f *fakeS3) handleGet(w http.ResponseWriter, key string) {
+	f.mu.Lock()
+	obj, ok := f.objects[key]
+	f.mu.Unlock()
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	writeObjectHeaders(w.Header(), obj)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(obj.data)
+}
+
+// handlePut stores the request body and its X-Amz-Meta-* headers under key,
+// honoring the conditional If-None-Match: * header used by the distributed
+// lock's "create if absent" semantics: it fails with 412 when the key
+// already exists.
 func (f *fakeS3) handlePut(w http.ResponseWriter, r *http.Request, key string) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -141,8 +171,36 @@ func (f *fakeS3) handlePut(w http.ResponseWriter, r *http.Request, key string) {
 			return
 		}
 	}
-	f.objects[key] = body
+	f.objects[key] = fakeObject{
+		data:     body,
+		meta:     captureMeta(r.Header),
+		modified: time.Now(),
+	}
 	w.WriteHeader(http.StatusOK)
+}
+
+// captureMeta extracts the X-Amz-Meta-* headers from an incoming request,
+// keyed by their canonical header name, so handleHead/handleGet can echo
+// them back verbatim on later reads.
+func captureMeta(header http.Header) map[string]string {
+	meta := make(map[string]string, len(header))
+	for name, values := range header {
+		if len(values) == 0 || !strings.HasPrefix(strings.ToLower(name), "x-amz-meta-") {
+			continue
+		}
+		meta[name] = values[0]
+	}
+	return meta
+}
+
+// writeObjectHeaders sets obj's captured metadata headers plus a
+// Last-Modified timestamp on the response, mirroring what a real S3 HEAD or
+// GET response carries.
+func writeObjectHeaders(header http.Header, obj fakeObject) {
+	for name, value := range obj.meta {
+		header.Set(name, value)
+	}
+	header.Set("Last-Modified", obj.modified.UTC().Format(http.TimeFormat))
 }
 
 // handleDelete removes the object, always reporting success like S3 does

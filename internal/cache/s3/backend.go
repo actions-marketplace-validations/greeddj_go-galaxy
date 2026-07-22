@@ -12,7 +12,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -31,6 +30,7 @@ type Backend struct {
 	prefix     string
 	tempDir    string
 	cfg        config.S3CacheConfig
+	lock       lockTiming
 }
 
 // New creates an S3-backed cache backend for the given config.
@@ -49,6 +49,14 @@ func New(cfg config.S3CacheConfig, httpClient *http.Client, tempDir string) (*Ba
 		httpClient: httpClient,
 		prefix:     strings.Trim(cfg.Prefix, "/"),
 		tempDir:    tempDir,
+		lock: lockTiming{
+			ttl:                lockTTL,
+			heartbeatInterval:  heartbeatInterval,
+			heartbeatOpTimeout: heartbeatOpTimeout,
+			waitCeiling:        lockWaitCeiling,
+			backoffBase:        lockBackoffBase,
+			backoffCap:         lockBackoffCap,
+		},
 	}, nil
 }
 
@@ -227,66 +235,6 @@ func (b *Backend) Artifacts() cacheManager.ArtifactStore {
 	return b.artifacts
 }
 
-// acquireLock creates or steals an expired lock in S3.
-func (b *Backend) acquireLock(ctx context.Context, lockKey string) (func() error, error) {
-	release := func() error {
-		return b.client.deleteObject(ctx, lockKey)
-	}
-	if err := b.putLock(ctx, lockKey); err == nil {
-		return release, nil
-	} else if !errors.Is(err, errS3PreconditionFailed) {
-		return nil, err
-	}
-	return b.handleExistingLock(ctx, lockKey, release)
-}
-
-// handleExistingLock resolves lock contention after precondition failure.
-func (b *Backend) handleExistingLock(ctx context.Context, lockKey string, release func() error) (func() error, error) {
-	headers, headErr := b.client.headObject(ctx, lockKey)
-	if errors.Is(headErr, errS3NotFound) {
-		if err := b.putLock(ctx, lockKey); err != nil {
-			if errors.Is(err, errS3PreconditionFailed) {
-				return nil, fmt.Errorf("%w: %s", errS3LockAlreadyIsExists, lockKey)
-			}
-			return nil, err
-		}
-		return release, nil
-	}
-	if headErr != nil {
-		return nil, headErr
-	}
-	expired, err := lockExpired(headers, lockTTL)
-	if err != nil {
-		return nil, err
-	}
-	if !expired {
-		return nil, fmt.Errorf("%w: %s", errS3LockAlreadyIsExists, lockKey)
-	}
-	if err := release(); err != nil {
-		return nil, err
-	}
-	if err := b.putLock(ctx, lockKey); err != nil {
-		if errors.Is(err, errS3PreconditionFailed) {
-			return nil, fmt.Errorf("%w: %s", errS3LockAlreadyIsExists, lockKey)
-		}
-		return nil, err
-	}
-	return release, nil
-}
-
-// putLock writes a lock object with metadata for this process.
-func (b *Backend) putLock(ctx context.Context, lockKey string) error {
-	host, _ := os.Hostname()
-	payload := fmt.Sprintf("pid=%d host=%s time=%s\n", os.Getpid(), host, time.Now().UTC().Format(time.RFC3339))
-	meta := map[string]string{
-		"pid":  strconv.Itoa(os.Getpid()),
-		"host": host,
-		"time": time.Now().UTC().Format(time.RFC3339),
-	}
-	reader := strings.NewReader(payload)
-	return b.client.putObject(ctx, lockKey, reader, int64(len(payload)), "text/plain", "", meta, true, "")
-}
-
 // readObject downloads an object and transparently inflates gzip data if needed.
 func (b *Backend) readObject(ctx context.Context, key string) ([]byte, error) {
 	resp, err := b.client.getObject(ctx, key)
@@ -366,38 +314,4 @@ func isGzipStream(reader *bufio.Reader) bool {
 		return false
 	}
 	return header[0] == 0x1f && header[1] == 0x8b
-}
-
-// lockExpired reports whether the lock is older than ttl.
-func lockExpired(headers http.Header, ttl time.Duration) (bool, error) {
-	if ttl <= 0 {
-		return false, errS3LockTTLIsInvalid
-	}
-	timestamp, err := lockTimestamp(headers)
-	if err != nil {
-		return false, err
-	}
-	return time.Since(timestamp) > ttl, nil
-}
-
-// lockTimestamp extracts lock creation time from object metadata.
-func lockTimestamp(headers http.Header) (time.Time, error) {
-	if headers == nil {
-		return time.Time{}, errS3LockHeaderIsMissing
-	}
-	if value := strings.TrimSpace(headers.Get("X-Amz-Meta-Time")); value != "" {
-		parsed, err := time.Parse(time.RFC3339, value)
-		if err != nil {
-			return time.Time{}, err
-		}
-		return parsed, nil
-	}
-	if value := strings.TrimSpace(headers.Get("Last-Modified")); value != "" {
-		parsed, err := http.ParseTime(value)
-		if err != nil {
-			return time.Time{}, err
-		}
-		return parsed, nil
-	}
-	return time.Time{}, errS3LockTimestampIsMissing
 }

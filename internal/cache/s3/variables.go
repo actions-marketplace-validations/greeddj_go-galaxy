@@ -8,10 +8,12 @@ import (
 var (
 	errS3BucketIsEmpty          = errors.New("s3 bucket is empty")
 	errS3HttpClientIsNil        = errors.New("s3 http client is nil")
-	errS3LockAlreadyIsExists    = errors.New("s3 lock is already exists")
 	errS3LockTTLIsInvalid       = errors.New("s3 lock TTL is invalid")
 	errS3LockHeaderIsMissing    = errors.New("s3 lock header is missing")
 	errS3LockTimestampIsMissing = errors.New("s3 lock timestamp is missing")
+	errS3LockLost               = errors.New("s3 lock ownership was lost to another holder")
+	errS3LockWaitTimeout        = errors.New("s3 lock wait ceiling exceeded")
+	errS3TokenGeneration        = errors.New("s3 lock token generation failed")
 	errS3NotFound               = errors.New("s3 object not found")
 	errS3BucketNotFound         = errors.New("s3 bucket not found")
 	errS3BucketEmpty            = errors.New("s3 bucket is empty")
@@ -37,7 +39,27 @@ const (
 	storeObject     = "store.json.gz"
 	projectsObject  = "projects.json"
 	lockObject      = "cache.lock"
-	lockTTL         = 10 * time.Minute
 	peekBytes       = 2
 	headerLength    = 2
+
+	// lockTokenBytes is the number of random bytes read from crypto/rand to
+	// build a lock token; hex-encoded, this yields a 32-character token.
+	lockTokenBytes = 16
+
+	// lockTTL is the lifetime a lock holder is granted before another
+	// acquirer is allowed to consider it dead and reclaim it.
+	lockTTL = 10 * time.Minute
+	// heartbeatInterval is how often a live holder refreshes the lock
+	// object's deadline in the background.
+	heartbeatInterval = 3 * time.Minute
+	// heartbeatOpTimeout bounds each individual heartbeat HEAD/PUT pair so a
+	// stalled S3 call cannot delay the next tick indefinitely.
+	heartbeatOpTimeout = 30 * time.Second
+	// lockWaitCeiling bounds the total time acquireLock will spend
+	// contending for the lock before giving up with errS3LockWaitTimeout.
+	lockWaitCeiling = 5 * time.Minute
+	// lockBackoffBase and lockBackoffCap bound the full-jitter exponential
+	// backoff between failed acquisition attempts.
+	lockBackoffBase = 250 * time.Millisecond
+	lockBackoffCap  = 5 * time.Second
 )
