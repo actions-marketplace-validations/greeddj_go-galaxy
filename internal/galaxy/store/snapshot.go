@@ -359,6 +359,34 @@ type snapshotData struct {
 	Meta         SnapshotMeta
 }
 
+// MarshalSnapshot returns a schema-stamped JSON encoding of the store,
+// suitable for writing to a remote snapshot backend. It builds the payload
+// from snapshotData's RLock-protected deep copy rather than marshaling the
+// live store directly, so a concurrent writer goroutine cannot trip the
+// race detector or produce a torn payload. The schema version and
+// last-snapshot timestamp are stamped exactly as Save does.
+func (m *Store) MarshalSnapshot() ([]byte, error) {
+	data := m.snapshotData()
+	data.Meta.SchemaVersion = helpers.StoreSnapshotSchemaVersion
+	data.Meta.LastSnapshot = time.Now().UTC()
+
+	// snapshotData has no json tags of its own; assign its fields onto a
+	// throwaway Store so the encoding reuses Store's existing json tags and
+	// the wire shape stays byte-identical to marshaling a *Store directly.
+	snapshot := &Store{
+		APICache:     data.APICache,
+		DepsCache:    data.DepsCache,
+		Installed:    data.Installed,
+		Graph:        data.Graph,
+		Requirements: data.Requirements,
+		Roots:        data.Roots,
+		Resolved:     data.Resolved,
+		Versions:     data.Versions,
+		Meta:         data.Meta,
+	}
+	return json.Marshal(snapshot)
+}
+
 // snapshotData builds a snapshot payload from the store.
 func (m *Store) snapshotData() snapshotData {
 	m.mu.RLock()

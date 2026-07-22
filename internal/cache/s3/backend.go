@@ -119,7 +119,11 @@ func (b *Backend) LoadStore(ctx context.Context) (*store.Store, error) {
 	return st, nil
 }
 
-// SaveStore persists the snapshot store to S3.
+// SaveStore persists the snapshot store to S3. It marshals via
+// Store.MarshalSnapshot rather than json.Marshal directly, since st may
+// still be concurrently mutated by other goroutines: MarshalSnapshot takes
+// the store's RLock and deep-copies before encoding, so this never races on
+// the live maps.
 func (b *Backend) SaveStore(ctx context.Context, st *store.Store) error {
 	if st == nil {
 		return nil
@@ -127,7 +131,7 @@ func (b *Backend) SaveStore(ctx context.Context, st *store.Store) error {
 	if err := b.Open(ctx); err != nil {
 		return err
 	}
-	payload, err := json.Marshal(st)
+	payload, err := st.MarshalSnapshot()
 	if err != nil {
 		return err
 	}

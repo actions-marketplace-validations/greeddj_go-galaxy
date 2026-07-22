@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
@@ -76,6 +78,110 @@ func TestLoadStoreLoadsCurrentSchema(t *testing.T) {
 	installed, ok := loaded.GetInstalled("a.b@1.0.0")
 	if !ok || installed.ArtifactSHA256 != "abc" {
 		t.Fatalf("unexpected installed entry: %#v (ok=%v)", installed, ok)
+	}
+}
+
+// TestSaveStoreConcurrentMutationIsRaceFree proves SaveStore never touches
+// the live store's maps directly: a goroutine hammers SetInstalled and
+// SetAPICache in a tight loop while SaveStore runs repeatedly on the same
+// *store.Store from the test goroutine. Before MarshalSnapshot existed,
+// SaveStore's json.Marshal(st) read the live maps without a lock and this
+// tripped -race; MarshalSnapshot's RLock deep-copy must be clean.
+func TestSaveStoreConcurrentMutationIsRaceFree(t *testing.T) {
+	b := newTestBackend(t)
+	ctx := t.Context()
+	st := store.New()
+
+	// Reuse a small, fixed set of keys so the store's maps stay bounded:
+	// an ever-growing key set would make each SaveStore's deep copy
+	// progressively more expensive, snowballing into a runaway loop.
+	const mutatorKeys = 8
+
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for i := 0; ; i++ {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			key := fmt.Sprintf("mutator.key%d", i%mutatorKeys)
+			st.SetInstalled(key, store.InstalledEntry{ArtifactSHA256: "sha"})
+			st.SetAPICache("api", store.APICacheEntry{URL: fmt.Sprintf("https://example.com/%d", i)})
+		}
+	})
+
+	const saveCount = 20
+	var lastErr error
+	for range saveCount {
+		lastErr = b.SaveStore(ctx, st)
+		if lastErr != nil {
+			break
+		}
+	}
+	close(done)
+	wg.Wait()
+
+	if lastErr != nil {
+		t.Fatalf("expected SaveStore to succeed under concurrent mutation, got %v", lastErr)
+	}
+}
+
+// TestSaveStoreStampsSchemaAndTimestamp confirms SaveStore stamps the
+// current schema version and a non-zero last-snapshot time via
+// MarshalSnapshot, exactly as the local backend's Save does.
+func TestSaveStoreStampsSchemaAndTimestamp(t *testing.T) {
+	t.Parallel()
+	b := newTestBackend(t)
+	ctx := t.Context()
+
+	st := store.New()
+	st.SetAPICache("api", store.APICacheEntry{URL: "https://example.com/api"})
+
+	if err := b.SaveStore(ctx, st); err != nil {
+		t.Fatalf("SaveStore error: %v", err)
+	}
+
+	loaded, err := b.LoadStore(ctx)
+	if err != nil {
+		t.Fatalf("LoadStore error: %v", err)
+	}
+	if loaded.Meta.SchemaVersion != helpers.StoreSnapshotSchemaVersion {
+		t.Fatalf("expected schema version %d, got %d", helpers.StoreSnapshotSchemaVersion, loaded.Meta.SchemaVersion)
+	}
+	if loaded.Meta.LastSnapshot.IsZero() {
+		t.Fatalf("expected a non-zero last_snapshot timestamp")
+	}
+}
+
+// TestSaveStoreRoundTripsDataShape confirms MarshalSnapshot's JSON shape is
+// unchanged from a direct json.Marshal(st): a populated store saved through
+// SaveStore and read back through LoadStore preserves its data exactly.
+func TestSaveStoreRoundTripsDataShape(t *testing.T) {
+	t.Parallel()
+	b := newTestBackend(t)
+	ctx := t.Context()
+
+	st := store.New()
+	st.SetAPICache("api", store.APICacheEntry{URL: "https://example.com/api", ETag: "etag"})
+	st.SetInstalled("a.b@1.0.0", store.InstalledEntry{ArtifactSHA256: "abc"})
+
+	if err := b.SaveStore(ctx, st); err != nil {
+		t.Fatalf("SaveStore error: %v", err)
+	}
+
+	loaded, err := b.LoadStore(ctx)
+	if err != nil {
+		t.Fatalf("LoadStore error: %v", err)
+	}
+	entry, ok := loaded.GetAPICache("api")
+	if !ok || entry.URL != "https://example.com/api" || entry.ETag != "etag" {
+		t.Fatalf("unexpected api cache entry after round trip: %#v (ok=%v)", entry, ok)
+	}
+	installed, ok := loaded.GetInstalled("a.b@1.0.0")
+	if !ok || installed.ArtifactSHA256 != "abc" {
+		t.Fatalf("unexpected installed entry after round trip: %#v (ok=%v)", installed, ok)
 	}
 }
 
