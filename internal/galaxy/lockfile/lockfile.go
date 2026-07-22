@@ -79,13 +79,13 @@ func Load(path string) (*File, error) {
 	return &f, nil
 }
 
-// Save writes the lockfile to disk in canonical form.
+// Save writes the lockfile to disk in canonical form. It canonicalizes a copy
+// so a caller that keeps using f after Save never sees its entries reordered.
 func Save(path string, f *File) error {
 	if f == nil {
 		return errNilFile
 	}
-	canonicalize(f)
-	data, err := yaml.Marshal(f)
+	data, err := yaml.Marshal(f.canonicalClone())
 	if err != nil {
 		return err
 	}

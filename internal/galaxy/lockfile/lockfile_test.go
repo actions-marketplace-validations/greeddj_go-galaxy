@@ -143,6 +143,38 @@ func TestHashPureNoMutation(t *testing.T) {
 	}
 }
 
+func TestSaveDoesNotMutate(t *testing.T) {
+	t.Parallel()
+	f := &File{SchemaVersion: SchemaVersion, Collections: []Entry{
+		{Name: "b.b", Version: "1.0.0", Deps: []string{"z.z", "a.a"}},
+		{Name: "a.a", Version: "1.0.0", Deps: []string{"y.y", "b.b"}},
+	}}
+	origNames := collectionNames(f)
+	origDeps := collectionDeps(f)
+
+	path := filepath.Join(t.TempDir(), DefaultName)
+	if err := Save(path, f); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	if got := collectionNames(f); !equalStrings(got, origNames) {
+		t.Fatalf("Save mutated Collections order: got %v, want %v", got, origNames)
+	}
+	if got := collectionDeps(f); !equalDeps(got, origDeps) {
+		t.Fatalf("Save mutated Deps order: got %v, want %v", got, origDeps)
+	}
+
+	// The file on disk is still canonical (sorted by name) regardless of the
+	// in-memory order Save was handed.
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := collectionNames(loaded); !equalStrings(got, []string{"a.a", "b.b"}) {
+		t.Fatalf("saved lockfile is not canonical: got %v", got)
+	}
+}
+
 func collectionNames(f *File) []string {
 	names := make([]string, len(f.Collections))
 	for i, e := range f.Collections {
