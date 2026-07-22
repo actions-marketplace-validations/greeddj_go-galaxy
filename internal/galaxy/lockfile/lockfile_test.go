@@ -96,6 +96,66 @@ func TestHashIsStable(t *testing.T) {
 	}
 }
 
+func TestSaveLeavesNoTempFiles(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "requirements.lock.yml")
+
+	f := &File{Collections: []Entry{{Name: "a.a", Version: "1.0.0"}}}
+	if err := Save(path, f); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	matches, err := filepath.Glob(filepath.Join(dir, "*.tmp"))
+	if err != nil {
+		t.Fatalf("Glob: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("expected no leftover temp files, found %v", matches)
+	}
+}
+
+func TestSaveDoesNotClobberOnFailure(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("running as root bypasses directory permission checks")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "requirements.lock.yml")
+
+	original := &File{Collections: []Entry{
+		{Name: "a.a", Version: "1.0.0", SHA256: "original"},
+	}}
+	if err := Save(path, original); err != nil {
+		t.Fatalf("Save (seed): %v", err)
+	}
+
+	//nolint:gosec // G302: 0o500 is a directory mode (read+traverse, no write), needed to force Save to fail.
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("Chmod dir: %v", err)
+	}
+	defer func() {
+		if err := os.Chmod(dir, helpers.DirMod); err != nil {
+			t.Fatalf("restore dir mode: %v", err)
+		}
+	}()
+
+	updated := &File{Collections: []Entry{
+		{Name: "a.a", Version: "2.0.0", SHA256: "updated"},
+	}}
+	if err := Save(path, updated); err == nil {
+		t.Fatalf("expected Save to fail against a read-only directory")
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load after failed Save: %v", err)
+	}
+	if len(got.Collections) != 1 || got.Collections[0].SHA256 != "original" {
+		t.Fatalf("expected original content to survive the failed Save, got %+v", got.Collections)
+	}
+}
+
 func TestResolveDefaultPath(t *testing.T) {
 	t.Parallel()
 	if got := ResolveDefaultPath("/proj/requirements.yml", ""); got != "/proj/"+DefaultName {
