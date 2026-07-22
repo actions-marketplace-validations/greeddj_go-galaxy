@@ -33,7 +33,7 @@ func testLockTiming(ttl time.Duration) lockTiming {
 // exercise cross-backend lock contention.
 func newLockFake(t *testing.T) (string, *http.Client) {
 	t.Helper()
-	fake := newFakeS3("test")
+	fake := newFakeS3()
 	srv := httptest.NewServer(fake)
 	t.Cleanup(srv.Close)
 	return srv.URL, srv.Client()
@@ -66,7 +66,7 @@ func newLockBackendAt(t *testing.T, endpoint string, client *http.Client, timing
 // way to set.
 func newLockBackendWithFake(t *testing.T, timing lockTiming) (*Backend, *fakeS3) {
 	t.Helper()
-	fake := newFakeS3("test")
+	fake := newFakeS3()
 	srv := httptest.NewServer(fake)
 	t.Cleanup(srv.Close)
 	return newLockBackendAt(t, srv.URL, srv.Client(), timing), fake

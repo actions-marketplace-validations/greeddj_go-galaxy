@@ -39,14 +39,22 @@ type fakeS3 struct {
 	// exercise it: this test double does not synchronize concurrent
 	// writes to it against concurrent reads from handler goroutines.
 	deleteDelay time.Duration
+	// ignoreIfNoneMatch, when true, makes handlePut always overwrite and
+	// report success regardless of the If-None-Match header, simulating a
+	// non-conforming backend that does not enforce conditional PUT. False
+	// (the default) preserves the original 412-on-existing behavior every
+	// other test relies on. Like deleteDelay, it must be set before the
+	// fake starts handling requests that exercise it.
+	ignoreIfNoneMatch bool
 }
 
-// newFakeS3 constructs an empty fake bucket store. One instance must be
-// created per test so state never leaks between parallel tests.
-func newFakeS3(bucket string) *fakeS3 {
+// newFakeS3 constructs an empty fake bucket store named "test". One
+// instance must be created per test so state never leaks between parallel
+// tests.
+func newFakeS3() *fakeS3 {
 	return &fakeS3{
 		objects: make(map[string]fakeObject),
-		bucket:  bucket,
+		bucket:  "test",
 	}
 }
 
@@ -164,7 +172,8 @@ func (f *fakeS3) handleGet(w http.ResponseWriter, key string) {
 // handlePut stores the request body and its X-Amz-Meta-* headers under key,
 // honoring the conditional If-None-Match: * header used by the distributed
 // lock's "create if absent" semantics: it fails with 412 when the key
-// already exists.
+// already exists - unless ignoreIfNoneMatch simulates a non-conforming
+// backend that always overwrites regardless of the header.
 func (f *fakeS3) handlePut(w http.ResponseWriter, r *http.Request, key string) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -174,7 +183,7 @@ func (f *fakeS3) handlePut(w http.ResponseWriter, r *http.Request, key string) {
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if r.Header.Get("If-None-Match") == "*" {
+	if !f.ignoreIfNoneMatch && r.Header.Get("If-None-Match") == "*" {
 		if _, exists := f.objects[key]; exists {
 			w.WriteHeader(http.StatusPreconditionFailed)
 			return
@@ -243,14 +252,31 @@ func (f *fakeS3) handleDelete(w http.ResponseWriter, r *http.Request, key string
 // real client but never verified by the fake.
 func newTestBackend(t *testing.T) *Backend {
 	t.Helper()
+	return newTestBackendWithFake(t, newFakeS3())
+}
 
-	fake := newFakeS3("test")
+// newNonConformingTestBackend starts a fake S3 server with
+// ignoreIfNoneMatch set, simulating a backend that does not enforce
+// conditional PUT, and returns a Backend pointed at it.
+func newNonConformingTestBackend(t *testing.T) *Backend {
+	t.Helper()
+	fake := newFakeS3()
+	fake.ignoreIfNoneMatch = true
+	return newTestBackendWithFake(t, fake)
+}
+
+// newTestBackendWithFake starts fake as an httptest server and returns a
+// Backend configured to talk to it in path-style mode. SigV4 signatures are
+// computed by the real client but never verified by the fake.
+func newTestBackendWithFake(t *testing.T, fake *fakeS3) *Backend {
+	t.Helper()
+
 	srv := httptest.NewServer(fake)
 	t.Cleanup(srv.Close)
 
 	cfg := config.S3CacheConfig{
 		Endpoint:  srv.URL,
-		Bucket:    "test",
+		Bucket:    fake.bucket,
 		Region:    "us-east-1",
 		AccessKey: "x",
 		SecretKey: "y",

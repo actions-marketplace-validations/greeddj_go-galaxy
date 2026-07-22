@@ -6,26 +6,29 @@ import (
 )
 
 var (
-	errS3BucketIsEmpty        = errors.New("s3 bucket is empty")
-	errS3HttpClientIsNil      = errors.New("s3 http client is nil")
-	errS3LockLost             = errors.New("s3 lock ownership was lost to another holder")
-	errS3LockWaitTimeout      = errors.New("s3 lock wait ceiling exceeded")
-	errS3TokenGeneration      = errors.New("s3 lock token generation failed")
-	errS3NotFound             = errors.New("s3 object not found")
-	errS3BucketNotFound       = errors.New("s3 bucket not found")
-	errS3BucketEmpty          = errors.New("s3 bucket is empty")
-	errS3BucketHeadFailed     = errors.New("s3 bucket head is failed")
-	errS3CreateBucketFailed   = errors.New("s3 create bucket failed")
-	errS3BucketRequestFailed  = errors.New("s3 bucket request failed")
-	errS3PreconditionFailed   = errors.New("s3 precondition failed")
-	errS3HTTPClientNil        = errors.New("s3 http client is nil")
-	errS3InvalidEndpoint      = errors.New("s3 invalid endpoint")
-	errS3GetFailed            = errors.New("s3 get object failed")
-	errS3HeadFailed           = errors.New("s3 head object failed")
-	errS3PutFailed            = errors.New("s3 put object failed")
-	errS3DeleteFailed         = errors.New("s3 delete object failed")
-	errS3ClientNil            = errors.New("s3 client is nil")
-	errArtifactSHA256Mismatch = errors.New("s3 artifact sha256 mismatch")
+	errS3BucketIsEmpty             = errors.New("s3 bucket is empty")
+	errS3HttpClientIsNil           = errors.New("s3 http client is nil")
+	errS3LockLost                  = errors.New("s3 lock ownership was lost to another holder")
+	errS3LockWaitTimeout           = errors.New("s3 lock wait ceiling exceeded")
+	errS3TokenGeneration           = errors.New("s3 lock token generation failed")
+	errS3NotFound                  = errors.New("s3 object not found")
+	errS3BucketNotFound            = errors.New("s3 bucket not found")
+	errS3BucketEmpty               = errors.New("s3 bucket is empty")
+	errS3BucketHeadFailed          = errors.New("s3 bucket head is failed")
+	errS3CreateBucketFailed        = errors.New("s3 create bucket failed")
+	errS3BucketRequestFailed       = errors.New("s3 bucket request failed")
+	errS3PreconditionFailed        = errors.New("s3 precondition failed")
+	errS3HTTPClientNil             = errors.New("s3 http client is nil")
+	errS3InvalidEndpoint           = errors.New("s3 invalid endpoint")
+	errS3GetFailed                 = errors.New("s3 get object failed")
+	errS3HeadFailed                = errors.New("s3 head object failed")
+	errS3PutFailed                 = errors.New("s3 put object failed")
+	errS3DeleteFailed              = errors.New("s3 delete object failed")
+	errS3ClientNil                 = errors.New("s3 client is nil")
+	errArtifactSHA256Mismatch      = errors.New("s3 artifact sha256 mismatch")
+	errS3ConditionalPutUnsupported = errors.New(
+		"s3 backend does not enforce conditional PUT (If-None-Match); distributed locking cannot guarantee mutual exclusion",
+	)
 )
 
 const (
@@ -38,6 +41,13 @@ const (
 	lockObject      = "cache.lock"
 	peekBytes       = 2
 	headerLength    = 2
+
+	// conditionalProbeObject is the base name of the probe object written
+	// under the locks prefix at Open to verify the backend enforces
+	// conditional PUT (If-None-Match); a per-process random suffix is
+	// appended to avoid colliding with a stale probe left behind by a
+	// crashed prior run.
+	conditionalProbeObject = ".conditional-probe"
 
 	// lockTokenBytes is the number of random bytes read from crypto/rand to
 	// build a lock token; hex-encoded, this yields a 32-character token.

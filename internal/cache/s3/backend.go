@@ -61,7 +61,12 @@ func New(cfg config.S3CacheConfig, httpClient *http.Client, tempDir string) (*Ba
 	}, nil
 }
 
-// Open initializes the S3 client and ensures the bucket exists.
+// Open initializes the S3 client, ensures the bucket exists, and verifies
+// once that the backend actually enforces conditional PUT (If-None-Match) -
+// the distributed lock's whole mutual-exclusion guarantee rests on that
+// being true, so a backend that silently ignores it and overwrites must
+// fail loudly here rather than let two processes both believe they hold
+// the lock later.
 func (b *Backend) Open(ctx context.Context) error {
 	if b.client != nil {
 		return nil
@@ -72,6 +77,10 @@ func (b *Backend) Open(ctx context.Context) error {
 	}
 	b.client = client
 	if err := b.client.ensureBucket(ctx); err != nil {
+		b.client = nil
+		return err
+	}
+	if err := b.probeConditionalPut(ctx); err != nil {
 		b.client = nil
 		return err
 	}
@@ -234,6 +243,46 @@ func (b *Backend) LoadProjectRegistry(ctx context.Context) (*store.ProjectRegist
 // Artifacts returns the S3-backed artifact store.
 func (b *Backend) Artifacts() cacheManager.ArtifactStore {
 	return b.artifacts
+}
+
+// probeConditionalPut verifies that the configured backend actually enforces
+// If-None-Match: * before the lock protocol is allowed to rely on it. It
+// writes a small, per-process-unique probe object under the locks prefix
+// with a create-if-absent PUT (which must succeed since the key is new),
+// then repeats the same create-if-absent PUT against the same now-existing
+// key: a conforming backend must reject the second write with a
+// precondition-failed error. If it instead reports success, the backend
+// silently overwrote the object despite If-None-Match, meaning it cannot be
+// trusted to enforce the create-if-absent semantics the lock depends on.
+func (b *Backend) probeConditionalPut(ctx context.Context) error {
+	suffix, err := generateLockToken()
+	if err != nil {
+		return err
+	}
+	key := b.key(locksPrefix, conditionalProbeObject+"-"+suffix)
+	body := []byte("probe")
+
+	if err := b.client.putObject(ctx, key, bytes.NewReader(body), int64(len(body)), "text/plain", "", nil, true, ""); err != nil {
+		return err
+	}
+	//nolint:contextcheck // best-effort cleanup deliberately uses a fresh context, not ctx:
+	// ctx may be near its own deadline by the time Open runs the probe, but a leftover probe
+	// object is harmless (its random suffix avoids colliding with the next Open) so it is not
+	// worth failing Open over.
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), lockReleaseTimeout)
+		defer cancel()
+		_ = b.client.deleteObject(cleanupCtx, key)
+	}()
+
+	switch putErr := b.client.putObject(ctx, key, bytes.NewReader(body), int64(len(body)), "text/plain", "", nil, true, ""); {
+	case putErr == nil:
+		return errS3ConditionalPutUnsupported
+	case errors.Is(putErr, errS3PreconditionFailed):
+		return nil
+	default:
+		return putErr
+	}
 }
 
 // readObject downloads an object and transparently inflates gzip data if needed.
