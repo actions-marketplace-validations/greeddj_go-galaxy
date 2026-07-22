@@ -24,7 +24,7 @@ func TestFormatVersion(t *testing.T) {
 			commit:  "abc123",
 			date:    "2026-07-22T00:00:00Z",
 			builtBy: "goreleaser",
-			want: "v1.2.3 (commit abc123, built by goreleaser @ 2026-07-22T00:00:00Z) // " + runtime.Version(),
+			want:    "v1.2.3 (commit abc123, built by goreleaser @ 2026-07-22T00:00:00Z) // " + runtime.Version(),
 		},
 		{
 			name:    "commit set, date empty",
