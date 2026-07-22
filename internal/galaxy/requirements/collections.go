@@ -65,8 +65,14 @@ func parseCollectionsRaw(raw any, defaultSource string) (Collections, bool, erro
 	}
 }
 
-// parseCollectionList parses a list of collection items.
+// parseCollectionList parses a list of collection items. A nil raw value
+// (ansible accepts a bare "collections:" or "collections: ~" as an empty
+// list) yields an empty result rather than an error; any other non-list
+// value (e.g. a scalar) is still rejected.
 func parseCollectionList(raw any, defaultSource string) (Collections, error) {
+	if raw == nil {
+		return nil, nil
+	}
 	list, ok := raw.([]any)
 	if !ok {
 		return nil, helpers.ErrInvalidCollectionsList
