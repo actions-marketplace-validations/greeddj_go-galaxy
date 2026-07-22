@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -85,11 +86,14 @@ type RequirementSpec struct {
 	Signatures []string `json:"signatures,omitempty"`
 }
 
-// SetInstalled records an installed collection entry.
+// SetInstalled records an installed collection entry. The entry's Deps
+// slice is cloned before storing, so a later caller mutation of its
+// backing array cannot corrupt the stored snapshot state.
 func (m *Store) SetInstalled(key string, entry InstalledEntry) {
 	if m == nil {
 		return
 	}
+	entry.Deps = slices.Clone(entry.Deps)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.Installed[key] = entry
@@ -165,11 +169,14 @@ func (m *Store) GetAPICache(key string) (APICacheEntry, bool) {
 	return entry, ok
 }
 
-// SetAPICache stores a cached API entry.
+// SetAPICache stores a cached API entry. The entry's Body is cloned before
+// storing, so a later caller mutation (or reuse) of its backing buffer
+// cannot corrupt the stored snapshot state.
 func (m *Store) SetAPICache(key string, entry APICacheEntry) {
 	if m == nil {
 		return
 	}
+	entry.Body = slices.Clone(entry.Body)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.APICache[key] = entry
@@ -239,14 +246,17 @@ func (m *Store) ResolvedSnapshot() map[string]ResolvedEntry {
 	return clone
 }
 
-// SetGraph records dependencies for a collection key.
+// SetGraph records dependencies for a collection key. deps is cloned before
+// storing, so a later caller mutation of its backing array cannot corrupt
+// the stored snapshot state.
 func (m *Store) SetGraph(key string, deps []string) {
 	if m == nil {
 		return
 	}
+	clone := slices.Clone(deps)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Graph[key] = deps
+	m.Graph[key] = clone
 }
 
 // DeleteGraph removes dependency data for a key.
@@ -291,13 +301,19 @@ func (m *Store) GraphSnapshot() map[string][]string {
 	return clone
 }
 
-// SetRequirements stores a snapshot of requirement specs.
+// SetRequirements stores a snapshot of requirement specs. maps.Copy alone
+// would only shallow-copy each RequirementSpec, leaving its Signatures
+// slice aliasing the caller's backing array, so each entry's Signatures is
+// cloned individually before storing.
 func (m *Store) SetRequirements(spec map[string]RequirementSpec) {
 	if m == nil {
 		return
 	}
 	clone := make(map[string]RequirementSpec, len(spec))
-	maps.Copy(clone, spec)
+	for key, value := range spec {
+		value.Signatures = slices.Clone(value.Signatures)
+		clone[key] = value
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.Requirements = clone
@@ -315,14 +331,17 @@ func (m *Store) RequirementsSnapshot() map[string]RequirementSpec {
 	return clone
 }
 
-// SetRoots stores root collection keys under a label.
+// SetRoots stores root collection keys under a label. roots is cloned
+// before storing, so a later caller mutation of its backing array cannot
+// corrupt the stored snapshot state.
 func (m *Store) SetRoots(key string, roots []string) {
 	if m == nil {
 		return
 	}
+	clone := slices.Clone(roots)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Roots[key] = roots
+	m.Roots[key] = clone
 }
 
 // MetaSnapshot returns the current snapshot metadata.
