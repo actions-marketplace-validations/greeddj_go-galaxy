@@ -58,6 +58,9 @@ func installCollection(
 	if payload.artifact.Cleanup != nil {
 		defer payload.artifact.Cleanup()
 	}
+	if err := verifyPinnedSHA(col, payload.artifactSHA); err != nil {
+		return err
+	}
 
 	extractStart := time.Now()
 	err = extractCollection(col, payload.artifact.Path, installPath, runtime, deps.extractStore, payload.artifactSHA)
@@ -72,6 +75,23 @@ func installCollection(
 	writeGalaxyInfoIfPresent(runtime, cfg, col, payload.meta)
 	recordInstall(st, col, installPath, payload.artifactSHA, depsList)
 	return nil
+}
+
+// verifyPinnedSHA enforces a lockfile SHA256 pin against the resolved
+// artifact hash. An empty pin means the lockfile recorded no checksum for
+// this collection, so the check is a no-op, keeping older lockfiles usable.
+// A non-empty pin that does not match the actual artifact hash fails the
+// install so a frozen run can never install drifted bytes.
+func verifyPinnedSHA(col collection, actual string) error {
+	expected := strings.TrimSpace(col.SHA256)
+	if expected == "" {
+		return nil
+	}
+	got := strings.TrimSpace(actual)
+	if expected == got {
+		return nil
+	}
+	return fmt.Errorf("%w: %s: locked %s != actual %s", helpers.ErrSHA256Mismatch, col.key(), expected, got)
 }
 
 type installPayload struct {
@@ -258,19 +278,30 @@ func artifactKey(col collection) string {
 	return url.QueryEscape(filename)
 }
 
+// installEntryMatches reports whether a recorded install entry still points
+// at installPath with a known artifact hash consistent with any lockfile pin
+// on col. An empty pin allows any recorded hash, so non-frozen installs keep
+// their prior skip behavior unchanged.
+func installEntryMatches(col collection, entry store.InstalledEntry, installPath string) bool {
+	if entry.InstallPath == "" || entry.InstallPath != installPath {
+		return false
+	}
+	if entry.ArtifactSHA256 == "" {
+		return false
+	}
+	if col.SHA256 != "" && strings.TrimSpace(entry.ArtifactSHA256) != strings.TrimSpace(col.SHA256) {
+		return false
+	}
+	return true
+}
+
 // canSkipInstall reports whether a collection is already installed.
 func canSkipInstall(cfg *config.Config, col collection, installPath string, st *store.Store) bool {
 	if cfg == nil || st == nil {
 		return false
 	}
 	entry, ok := st.GetInstalled(col.key())
-	if !ok {
-		return false
-	}
-	if entry.InstallPath == "" || entry.InstallPath != installPath {
-		return false
-	}
-	if entry.ArtifactSHA256 == "" {
+	if !ok || !installEntryMatches(col, entry, installPath) {
 		return false
 	}
 

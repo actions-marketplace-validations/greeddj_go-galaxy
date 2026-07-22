@@ -4,12 +4,16 @@ import "fmt"
 
 // collection represents a resolved collection with metadata.
 type collection struct {
-	Namespace  string   `yaml:"namespace"`
-	Name       string   `yaml:"name"`
-	Version    string   `yaml:"version"`
-	Source     string   `yaml:"source"`
-	Constraint string   `yaml:"-"`
-	Type       string   `yaml:"-"`
+	Namespace  string `yaml:"namespace"`
+	Name       string `yaml:"name"`
+	Version    string `yaml:"version"`
+	Source     string `yaml:"source"`
+	Constraint string `yaml:"-"`
+	Type       string `yaml:"-"`
+	// SHA256 is the frozen-lockfile artifact pin, populated only when
+	// resolving from a lockfile (see materializeLockfile). It is a runtime-only
+	// value used to enforce --frozen integrity and is never (de)serialized.
+	SHA256     string   `yaml:"-"`
 	Signatures []string `yaml:"signatures"`
 }
 

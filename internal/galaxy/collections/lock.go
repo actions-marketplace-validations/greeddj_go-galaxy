@@ -125,7 +125,7 @@ func materializeLockfile(byFQDN map[string]lockfile.Entry) (map[string]collectio
 		if !ok {
 			return nil, nil, fmt.Errorf("%w: %s", helpers.ErrLockfileInvalid, fqdn)
 		}
-		col := collection{Namespace: ns, Name: name, Version: e.Version, Source: e.Source}
+		col := collection{Namespace: ns, Name: name, Version: e.Version, Source: e.Source, SHA256: e.SHA256}
 		resolved[fqdn] = col
 		graph[col.key()] = lockfileDepsToKeys(e.Deps, byFQDN)
 	}
