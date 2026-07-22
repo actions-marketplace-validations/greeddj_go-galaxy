@@ -9,7 +9,6 @@ const (
 	defaultServerURL            = "https://galaxy.ansible.com"
 	defaultCollectionsPath      = ".collections"
 	defaultRequirementsFilePath = "requirements.yml"
-	defaultAnsibleConfigPath    = "ansible.cfg"
 	// defaultVersion is used only when neither ldflags nor build info supply
 	// a version (e.g. a build without module/VCS info embedded).
 	defaultVersion = "unknown"

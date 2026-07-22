@@ -3,6 +3,8 @@ package config
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -394,4 +396,182 @@ func TestApplyAnsibleConfigServer(t *testing.T) {
 			server: testDefaultServer, ansibleConfigPath: testAnsibleConfigPath,
 		})
 	})
+}
+
+// newAnsibleConfigCmd builds a *cli.Command exposing only the "ansible-config"
+// flag as it is really defined in cmd/go-galaxy/helpers/flags.go: no default
+// value, sourced only from GO_GALAXY_ANSIBLE_CONFIG (ANSIBLE_CONFIG is
+// handled by discovery, not by the flag itself). Matching that shape matters
+// here because c.IsSet("ansible-config") is exactly what distinguishes
+// "explicitly requested" from "let discovery decide".
+func newAnsibleConfigCmd(t *testing.T, args []string) *cli.Command {
+	t.Helper()
+
+	var captured *cli.Command
+	cmd := &cli.Command{
+		Name: "go-galaxy",
+		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "ansible-config", Sources: cli.EnvVars("GO_GALAXY_ANSIBLE_CONFIG")},
+		},
+		Action: func(_ context.Context, c *cli.Command) error {
+			captured = c
+			return nil
+		},
+	}
+
+	fullArgs := append([]string{"go-galaxy"}, args...)
+	if err := cmd.Run(context.Background(), fullArgs); err != nil {
+		t.Fatalf("cmd.Run() error = %v, want nil", err)
+	}
+	return captured
+}
+
+// writeAnsibleCfg writes a minimal, distinguishable ansible.cfg to path so
+// tests can assert it was the one actually loaded.
+func writeAnsibleCfg(t *testing.T, path, server string) {
+	t.Helper()
+	content := "[galaxy]\nserver = " + server + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v, want nil", path, err)
+	}
+}
+
+// TestLoadAnsibleConfigFromCLIExplicit checks the strict handling of an
+// explicitly requested --ansible-config: an existing file is loaded and its
+// path returned, and a missing file is an error (helpers.ErrAnsibleConfigNotFound),
+// unlike ansible.cfg discovery which tolerates a missing candidate.
+func TestLoadAnsibleConfigFromCLIExplicit(t *testing.T) {
+	t.Run("existing path is loaded", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "custom.cfg")
+		writeAnsibleCfg(t, path, "https://explicit.example")
+
+		c := newAnsibleConfigCmd(t, []string{"--ansible-config=" + path})
+		cfg, gotPath, err := loadAnsibleConfigFromCLI(c)
+		if err != nil {
+			t.Fatalf("loadAnsibleConfigFromCLI() error = %v, want nil", err)
+		}
+		if gotPath != path {
+			t.Errorf("path = %q, want %q", gotPath, path)
+		}
+		if cfg.Galaxy.Server != "https://explicit.example" {
+			t.Errorf("Galaxy.Server = %q, want %q", cfg.Galaxy.Server, "https://explicit.example")
+		}
+	})
+
+	t.Run("missing path is an error", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "missing.cfg")
+
+		c := newAnsibleConfigCmd(t, []string{"--ansible-config=" + path})
+		_, _, err := loadAnsibleConfigFromCLI(c)
+		if !errors.Is(err, helpers.ErrAnsibleConfigNotFound) {
+			t.Errorf("error = %v, want helpers.ErrAnsibleConfigNotFound", err)
+		}
+	})
+}
+
+// TestLoadAnsibleConfigFromCLIDiscovery checks ansible.cfg discovery when
+// --ansible-config is not explicitly set: ./ansible.cfg in the current
+// directory is found, $ANSIBLE_CONFIG is preferred over it when both exist,
+// and a missing $ANSIBLE_CONFIG target falls through to the next candidate
+// instead of erroring (unlike the explicit-flag case above).
+//
+// These subtests mutate the working directory and environment (t.Chdir,
+// t.Setenv), so they cannot run in parallel with each other or anything
+// else that depends on cwd/env.
+func TestLoadAnsibleConfigFromCLIDiscovery(t *testing.T) {
+	t.Run("cwd ansible.cfg is discovered", func(t *testing.T) {
+		dir := t.TempDir()
+		writeAnsibleCfg(t, filepath.Join(dir, "ansible.cfg"), "https://cwd.example")
+		t.Chdir(dir)
+
+		c := newAnsibleConfigCmd(t, nil)
+		cfg, gotPath, err := loadAnsibleConfigFromCLI(c)
+		// discoverAnsibleConfigPath checks the literal relative candidate
+		// "ansible.cfg", not an absolute path, since it relies on the
+		// process's current directory the same way ansible's own discovery
+		// does.
+		assertAnsibleConfigLoaded(t, cfg, gotPath, err, "ansible.cfg", "https://cwd.example")
+	})
+
+	t.Run("ANSIBLE_CONFIG is discovered ahead of cwd", func(t *testing.T) {
+		envDir := t.TempDir()
+		envPath := filepath.Join(envDir, "env.cfg")
+		writeAnsibleCfg(t, envPath, "https://env.example")
+		t.Setenv("ANSIBLE_CONFIG", envPath)
+
+		cwdDir := t.TempDir()
+		writeAnsibleCfg(t, filepath.Join(cwdDir, "ansible.cfg"), "https://cwd.example")
+		t.Chdir(cwdDir)
+
+		c := newAnsibleConfigCmd(t, nil)
+		cfg, gotPath, err := loadAnsibleConfigFromCLI(c)
+		assertAnsibleConfigLoaded(t, cfg, gotPath, err, envPath, "https://env.example")
+	})
+
+	t.Run("missing ANSIBLE_CONFIG falls through to cwd, no error", func(t *testing.T) {
+		t.Setenv("ANSIBLE_CONFIG", filepath.Join(t.TempDir(), "missing.cfg"))
+
+		cwdDir := t.TempDir()
+		writeAnsibleCfg(t, filepath.Join(cwdDir, "ansible.cfg"), "https://cwd.example")
+		t.Chdir(cwdDir)
+
+		c := newAnsibleConfigCmd(t, nil)
+		cfg, gotPath, err := loadAnsibleConfigFromCLI(c)
+		assertAnsibleConfigLoaded(t, cfg, gotPath, err, "ansible.cfg", "https://cwd.example")
+	})
+
+	t.Run("nothing found in cwd or ANSIBLE_CONFIG: falls through cleanly", func(t *testing.T) {
+		// ANSIBLE_CONFIG points at a missing file and the cwd has no
+		// ansible.cfg, so discovery must fall through to ~/.ansible.cfg and
+		// then /etc/ansible/ansible.cfg without erroring. This test cannot
+		// control whether those two machine-level files exist, so it only
+		// asserts the one thing that must hold regardless of the host: no
+		// error, and if a path was found, it is one of those two candidates
+		// (production discovery order is not weakened to make this
+		// assertion pass).
+		t.Setenv("ANSIBLE_CONFIG", filepath.Join(t.TempDir(), "missing.cfg"))
+		t.Chdir(t.TempDir())
+
+		c := newAnsibleConfigCmd(t, nil)
+		_, gotPath, err := loadAnsibleConfigFromCLI(c)
+		assertDiscoveryFallsThroughCleanly(t, gotPath, err)
+	})
+}
+
+// assertAnsibleConfigLoaded checks that loadAnsibleConfigFromCLI succeeded
+// and returned the expected path and Galaxy.Server value.
+func assertAnsibleConfigLoaded(t *testing.T, cfg ansibleConfig, gotPath string, err error, wantPath, wantServer string) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("loadAnsibleConfigFromCLI() error = %v, want nil", err)
+	}
+	if gotPath != wantPath {
+		t.Errorf("path = %q, want %q", gotPath, wantPath)
+	}
+	if cfg.Galaxy.Server != wantServer {
+		t.Errorf("Galaxy.Server = %q, want %q", cfg.Galaxy.Server, wantServer)
+	}
+}
+
+// assertDiscoveryFallsThroughCleanly checks that discovery produced no
+// error, and that any discovered path is one of the two machine-level
+// candidates (~/.ansible.cfg, /etc/ansible/ansible.cfg) this test cannot
+// control the presence of; see the caller for why.
+func assertDiscoveryFallsThroughCleanly(t *testing.T, gotPath string, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("loadAnsibleConfigFromCLI() error = %v, want nil", err)
+	}
+	if gotPath == "" {
+		return
+	}
+	home, homeErr := os.UserHomeDir()
+	wantHomePath := ""
+	if homeErr == nil {
+		wantHomePath = filepath.Join(home, ".ansible.cfg")
+	}
+	if gotPath != wantHomePath && gotPath != "/etc/ansible/ansible.cfg" {
+		t.Errorf("path = %q, want %q, %q, or empty", gotPath, wantHomePath, "/etc/ansible/ansible.cfg")
+	}
 }

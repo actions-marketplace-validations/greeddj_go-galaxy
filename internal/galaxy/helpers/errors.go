@@ -126,4 +126,8 @@ var (
 	// ErrInvalidTimeout indicates the --timeout value is neither a positive
 	// integer number of seconds nor a valid positive Go duration string.
 	ErrInvalidTimeout = errors.New("invalid timeout")
+
+	// ErrAnsibleConfigNotFound indicates an explicitly requested ansible.cfg
+	// path does not exist.
+	ErrAnsibleConfigNotFound = errors.New("ansible config file not found")
 )

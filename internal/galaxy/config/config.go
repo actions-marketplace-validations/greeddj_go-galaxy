@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -199,12 +200,76 @@ func parseTimeout(raw string) (time.Duration, error) {
 	return d, nil
 }
 
+// loadAnsibleConfigFromCLI resolves and loads ansible.cfg. An explicitly
+// requested path (--ansible-config or GO_GALAXY_ANSIBLE_CONFIG) is treated
+// strictly: a missing file is an error. Otherwise the path is discovered
+// following ansible's own search order, where a missing candidate simply
+// falls through to the next one rather than erroring.
 func loadAnsibleConfigFromCLI(c *cli.Command) (ansibleConfig, string, error) {
-	ansibleConfig, ansiblePath, err := loadAnsibleConfig(c.String("ansible-config"))
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return ansibleConfig, "", fmt.Errorf("failed to load ansible config: %w", err)
+	if c.IsSet("ansible-config") {
+		path := c.String("ansible-config")
+		cfg, loadedPath, err := loadAnsibleConfig(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return ansibleConfig{}, "", fmt.Errorf("%w: %s", helpers.ErrAnsibleConfigNotFound, path)
+			}
+			return ansibleConfig{}, "", fmt.Errorf("failed to load ansible config: %w", err)
+		}
+		return cfg, loadedPath, nil
 	}
-	return ansibleConfig, ansiblePath, nil
+
+	path := discoverAnsibleConfigPath()
+	if path == "" {
+		return ansibleConfig{}, "", nil
+	}
+	cfg, loadedPath, err := loadAnsibleConfig(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// The candidate existed during discovery but vanished before we
+			// could open it (e.g. a concurrent process removed it); treat
+			// this exactly like "no config found" rather than erroring.
+			return ansibleConfig{}, "", nil
+		}
+		return ansibleConfig{}, "", fmt.Errorf("failed to load ansible config: %w", err)
+	}
+	return cfg, loadedPath, nil
+}
+
+// maxAnsibleConfigCandidates bounds the discovery candidate list: env var,
+// cwd, home, and the system-wide path.
+const maxAnsibleConfigCandidates = 4
+
+// discoverAnsibleConfigPath returns the first existing candidate in
+// ansible's documented config-file search order: $ANSIBLE_CONFIG, then
+// ./ansible.cfg, then ~/.ansible.cfg, then /etc/ansible/ansible.cfg. It
+// returns "" if none of the candidates exist.
+func discoverAnsibleConfigPath() string {
+	candidates := make([]string, 0, maxAnsibleConfigCandidates)
+	if envPath := os.Getenv("ANSIBLE_CONFIG"); envPath != "" {
+		candidates = append(candidates, envPath)
+	}
+	candidates = append(candidates, "ansible.cfg")
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, filepath.Join(home, ".ansible.cfg"))
+	}
+	candidates = append(candidates, "/etc/ansible/ansible.cfg")
+
+	for _, path := range candidates {
+		if fileExists(path) {
+			return path
+		}
+	}
+	return ""
+}
+
+// fileExists reports whether path can be stat'd successfully. path is
+// read-only here (existence check only, never opened or written), and it
+// only ever comes from this file's own fixed candidate list (cwd, home,
+// /etc/ansible) or from a user-supplied env var/flag value that is later
+// opened the same way any explicit --ansible-config path already is.
+func fileExists(path string) bool {
+	_, err := os.Stat(path) // #nosec G703 -- read-only existence check, see comment above
+	return err == nil
 }
 
 func applyAnsibleConfig(cfg *Config, c *cli.Command, ansibleConfig ansibleConfig, ansiblePath string) {
@@ -264,11 +329,15 @@ func pickConfigValue(c *cli.Command, flag, ansibleValue string) (string, bool) {
 }
 
 /*
-env: ANSIBLE_CONFIG (environment variable if set)
-ansible.cfg (in the current directory)
-~/.ansible.cfg (in the home directory)
-/etc/ansible/ansible.cfg
+Discovery order used by discoverAnsibleConfigPath when neither
+--ansible-config nor GO_GALAXY_ANSIBLE_CONFIG is explicitly set, matching
+ansible's own find_ini_config_file search (first existing file wins; a
+missing $ANSIBLE_CONFIG target simply falls through to the next candidate):
 
+  $ANSIBLE_CONFIG (environment variable, if set)
+  ansible.cfg (in the current directory)
+  ~/.ansible.cfg (in the home directory)
+  /etc/ansible/ansible.cfg
 
 [galaxy]
 cache_dir // env:ANSIBLE_GALAXY_CACHE_DIR // default {{ ANSIBLE_HOME ~ "/galaxy_cache" }}

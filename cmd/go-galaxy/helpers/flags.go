@@ -71,10 +71,10 @@ func collectionPathFlags() []cli.Flag {
 			Sources: cli.EnvVars("GO_GALAXY_REQUIREMENTS_FILE", "ANSIBLE_GALAXY_REQUIREMENTS_FILE"),
 		},
 		&cli.StringFlag{
-			Name:    "ansible-config",
-			Usage:   "Path to ansible.cfg file",
-			Value:   defaultAnsibleConfigPath,
-			Sources: cli.EnvVars("GO_GALAXY_ANSIBLE_CONFIG", "ANSIBLE_CONFIG"),
+			Name: "ansible-config",
+			Usage: "Path to ansible.cfg file; if unset, discovered in ansible's order " +
+				"($ANSIBLE_CONFIG, ./ansible.cfg, ~/.ansible.cfg, /etc/ansible/ansible.cfg)",
+			Sources: cli.EnvVars("GO_GALAXY_ANSIBLE_CONFIG"),
 		},
 	}
 }
