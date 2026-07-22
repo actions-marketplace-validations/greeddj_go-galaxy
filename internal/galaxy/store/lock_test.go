@@ -10,6 +10,34 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 )
 
+func TestAcquireLockRejectsSymlinkedLockFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("x"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to create symlink target: %v", err)
+	}
+	// Plant a symlink where the lock file would be, as a poisoned cache
+	// archive might. O_NOFOLLOW must make the open fail rather than redirect
+	// it to the target.
+	lockPath := filepath.Join(dir, helpers.StoreDBLock)
+	if err := os.Symlink(target, lockPath); err != nil {
+		t.Fatalf("failed to plant symlink: %v", err)
+	}
+
+	release, err := AcquireLock(dir)
+	if err == nil {
+		if release != nil {
+			_ = release()
+		}
+		t.Fatal("expected AcquireLock to reject a symlinked lock path, got nil error")
+	}
+	if errors.Is(err, helpers.ErrAnotherInstanceIsRunning) {
+		t.Fatalf("expected an open error for the symlink, got contention error: %v", err)
+	}
+}
+
 func TestAcquireLockEmptyCacheDir(t *testing.T) {
 	t.Parallel()
 
