@@ -122,4 +122,8 @@ var (
 	ErrLockfileMissing = errors.New("lockfile is required by --frozen but not found")
 	// ErrLockfileInvalid indicates the lockfile is malformed or unsupported.
 	ErrLockfileInvalid = errors.New("lockfile is invalid")
+
+	// ErrInvalidTimeout indicates the --timeout value is neither a positive
+	// integer number of seconds nor a valid positive Go duration string.
+	ErrInvalidTimeout = errors.New("invalid timeout")
 )

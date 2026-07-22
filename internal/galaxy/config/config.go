@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
@@ -106,7 +108,9 @@ type CollectionOptions struct {
 // BuildCollectionConfig builds Config from CLI flags and ansible.cfg.
 func BuildCollectionConfig(c *cli.Command) (*Config, error) {
 	cfg := newConfigFromCLI(c)
-	applyTimeout(cfg, c)
+	if err := applyTimeout(cfg, c); err != nil {
+		return nil, err
+	}
 
 	ansibleConfig, ansiblePath, err := loadAnsibleConfigFromCLI(c)
 	if err != nil {
@@ -148,15 +152,46 @@ func newConfigFromCLI(c *cli.Command) *Config {
 	return cfg
 }
 
-// applyTimeout sets cfg.Timeout from the --timeout flag. Only the
-// absent/zero case (the flag not registered for this command, or an
-// explicit zero) falls back to the default; any positive value the user
-// supplies, however small, is honored as-is rather than silently floored.
-func applyTimeout(cfg *Config, c *cli.Command) {
-	cfg.Timeout = c.Duration("timeout")
-	if cfg.Timeout <= 0 {
-		cfg.Timeout = helpers.FetchDefaultTimeout
+// applyTimeout sets cfg.Timeout by parsing the --timeout flag with
+// parseTimeout. Commands that do not register the flag (e.g. cleanup) read
+// it as an empty string, which parseTimeout maps to the default, so they
+// never end up with an unbounded-timeout HTTP client.
+func applyTimeout(cfg *Config, c *cli.Command) error {
+	timeout, err := parseTimeout(c.String("timeout"))
+	if err != nil {
+		return err
 	}
+	cfg.Timeout = timeout
+	return nil
+}
+
+// parseTimeout parses a --timeout value in either of the two forms ansible
+// and go-galaxy both need to support: a bare integer number of seconds
+// (ansible's GALAXY_SERVER_TIMEOUT is an int, default 60) or a Go duration
+// string (e.g. "90s", "1m30s"). An empty string yields the default timeout.
+// Zero and negative values in either form are rejected as invalid, since a
+// non-positive HTTP client timeout means "never time out".
+func parseTimeout(raw string) (time.Duration, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return helpers.FetchDefaultTimeout, nil
+	}
+
+	if n, err := strconv.Atoi(s); err == nil {
+		if n <= 0 {
+			return 0, fmt.Errorf("%w: %q", helpers.ErrInvalidTimeout, raw)
+		}
+		return time.Duration(n) * time.Second, nil
+	}
+
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("%w: %q", helpers.ErrInvalidTimeout, raw)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("%w: %q", helpers.ErrInvalidTimeout, raw)
+	}
+	return d, nil
 }
 
 func loadAnsibleConfigFromCLI(c *cli.Command) (ansibleConfig, string, error) {

@@ -50,10 +50,10 @@ func collectionPathFlags() []cli.Flag {
 			Value:   defaultServerURL,
 			Sources: cli.EnvVars("GO_GALAXY_SERVER", "ANSIBLE_GALAXY_SERVER"),
 		},
-		&cli.DurationFlag{
+		&cli.StringFlag{
 			Name:    "timeout",
-			Usage:   "Timeout duration",
-			Value:   defaultTimeout,
+			Usage:   "Timeout as seconds (e.g. 60) or Go duration (e.g. 90s, 1m30s)",
+			Value:   defaultTimeout.String(),
 			Sources: cli.EnvVars("GO_GALAXY_SERVER_TIMEOUT", "ANSIBLE_GALAXY_SERVER_TIMEOUT"),
 		},
 		&cli.StringFlag{

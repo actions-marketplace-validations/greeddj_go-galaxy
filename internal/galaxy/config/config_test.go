@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -162,17 +163,65 @@ func TestApplyAnsibleConfigCacheDir(t *testing.T) {
 	})
 }
 
+// TestParseTimeout checks parseTimeout accepts both ansible's bare-integer
+// seconds form (GALAXY_SERVER_TIMEOUT is an int) and Go duration strings,
+// falls back to the default on an empty value, and rejects non-positive or
+// unparsable input as helpers.ErrInvalidTimeout.
+func TestParseTimeout(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		raw     string
+		want    time.Duration
+		wantErr bool
+	}{
+		{name: "bare seconds", raw: "60", want: 60 * time.Second},
+		{name: "bare seconds, other value", raw: "90", want: 90 * time.Second},
+		{name: "go duration, minutes and seconds", raw: "1m30s", want: 90 * time.Second},
+		{name: "go duration, seconds", raw: "45s", want: 45 * time.Second},
+		{name: "empty falls back to default", raw: "", want: helpers.FetchDefaultTimeout},
+		{name: "zero seconds is invalid", raw: "0", wantErr: true},
+		{name: "negative seconds is invalid", raw: "-5", wantErr: true},
+		{name: "not a number or duration is invalid", raw: "abc", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := parseTimeout(tt.raw)
+			if tt.wantErr {
+				if !errors.Is(err, helpers.ErrInvalidTimeout) {
+					t.Errorf("parseTimeout(%q) error = %v, want helpers.ErrInvalidTimeout", tt.raw, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseTimeout(%q) error = %v, want nil", tt.raw, err)
+			}
+			if got != tt.want {
+				t.Errorf("parseTimeout(%q) = %v, want %v", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
 // newTimeoutCmd builds a *cli.Command for TestApplyTimeout. When
-// registerFlag is true it exposes a --timeout DurationFlag (mirroring how
-// CollectionFlags registers it, default helpers.FetchDefaultTimeout);
-// when false no such flag exists at all, mirroring commands like cleanup
-// that never register --timeout, so c.Duration("timeout") reads as zero.
+// registerFlag is true it exposes a --timeout StringFlag (mirroring how
+// CollectionFlags registers it, with the same env sources and default
+// helpers.FetchDefaultTimeout.String()); when false no such flag exists at
+// all, mirroring commands like cleanup that never register --timeout, so
+// c.String("timeout") reads as an empty string.
 func newTimeoutCmd(t *testing.T, registerFlag bool, args []string) *cli.Command {
 	t.Helper()
 
 	var flags []cli.Flag
 	if registerFlag {
-		flags = []cli.Flag{&cli.DurationFlag{Name: "timeout", Value: helpers.FetchDefaultTimeout}}
+		flags = []cli.Flag{&cli.StringFlag{
+			Name:    "timeout",
+			Value:   helpers.FetchDefaultTimeout.String(),
+			Sources: cli.EnvVars("GO_GALAXY_SERVER_TIMEOUT", "ANSIBLE_GALAXY_SERVER_TIMEOUT"),
+		}}
 	}
 
 	var captured *cli.Command
@@ -192,13 +241,12 @@ func newTimeoutCmd(t *testing.T, registerFlag bool, args []string) *cli.Command 
 	return captured
 }
 
-// TestApplyTimeout checks that applyTimeout only falls back to the default
-// on the absent/zero case: a small positive --timeout is honored as-is
-// (the regression this change fixes - it used to be silently floored to
-// the default), a larger value passes through unchanged, an unset flag
-// falls back to the default, and a command that never registers --timeout
-// at all (e.g. cleanup) also falls back to the default rather than
-// building an unbounded-timeout HTTP client.
+// TestApplyTimeout checks that applyTimeout wires parseTimeout's result
+// into cfg.Timeout: an explicit --timeout value (in Go duration form) is
+// honored as-is, an unset flag falls back to the default, a command that
+// never registers --timeout at all (e.g. cleanup) also falls back to the
+// default, and a value supplied via ANSIBLE_GALAXY_SERVER_TIMEOUT (ansible's
+// own env var) is picked up the same way an explicit flag would be.
 func TestApplyTimeout(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -207,7 +255,7 @@ func TestApplyTimeout(t *testing.T) {
 		registerFlag bool
 	}{
 		{
-			name:         "small positive timeout is honored, not floored",
+			name:         "small positive timeout is honored",
 			registerFlag: true,
 			args:         []string{"--timeout=5s"},
 			want:         5 * time.Second,
@@ -233,12 +281,28 @@ func TestApplyTimeout(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			c := newTimeoutCmd(t, tt.registerFlag, tt.args)
 			cfg := &Config{}
-			applyTimeout(cfg, c)
+			if err := applyTimeout(cfg, c); err != nil {
+				t.Fatalf("applyTimeout() error = %v, want nil", err)
+			}
 			if cfg.Timeout != tt.want {
 				t.Errorf("Timeout = %v, want %v", cfg.Timeout, tt.want)
 			}
 		})
 	}
+
+	// t.Setenv forbids t.Parallel, so the env-driven case is its own
+	// non-parallel subtest rather than part of the table above.
+	t.Run("env var in ansible's bare-seconds form is honored", func(t *testing.T) {
+		t.Setenv("ANSIBLE_GALAXY_SERVER_TIMEOUT", "60")
+		c := newTimeoutCmd(t, true, nil)
+		cfg := &Config{}
+		if err := applyTimeout(cfg, c); err != nil {
+			t.Fatalf("applyTimeout() error = %v, want nil", err)
+		}
+		if cfg.Timeout != 60*time.Second {
+			t.Errorf("Timeout = %v, want %v", cfg.Timeout, 60*time.Second)
+		}
+	})
 }
 
 // TestApplyAnsibleConfigServer checks the server -> Server mapping with the
