@@ -58,7 +58,7 @@ The `cacheManager.Backend` interface in [internal/galaxy/cache/backend.go](inter
 Walks every project recorded in the registry, scans `<collections_path>/ansible_collections/**/MANIFEST.json`, builds a reachability set from each project's `requirements.yml`, and removes both the on-disk install and the cached artifact for unreachable `ns.name@version` keys. `--dry-run` prints candidates without deleting.
 
 ### Output / progress
-`progress.New` returns a `Printer` (also satisfies `io.Writer` so `log.SetOutput(p)` redirects all stdlib logging through it). In verbose mode, `Debugf` and `DebugSincef` are active; in quiet mode, only `PersistentPrintf` survives. Use `Output.Errorf`/`Okf` from inside workers — the printer is goroutine-safe.
+`progress.New` returns a `Printer` (also satisfies `io.Writer` so `log.SetOutput(p)` redirects all stdlib logging through it). In verbose mode, `Debugf` and `DebugSincef` are active; in quiet mode the transient tier (`Printf`, `Write`) and the debug tier are suppressed, while the result tier (`PersistentPrintf`, `Okf`, `Errorf`) always emits. In non-TTY normal mode (typical CI), all non-debug output is printed as plain lines with no spinner, instead of being silently dropped. Regular output goes to stdout; `Errorf` (both the method and the package-level helper) goes to stderr, so diagnostics do not contaminate stdout consumers. Use `Output.Errorf`/`Okf` from inside workers - the printer is goroutine-safe.
 
 ## Conventions
 
