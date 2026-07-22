@@ -1,6 +1,7 @@
 package helpers
 
 import (
+	"context"
 	"slices"
 	"testing"
 
@@ -91,5 +92,29 @@ func TestLockInspectFlags(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			assertStringFlag(t, tt.flag, tt.want)
 		})
+	}
+}
+
+// TestDryRunEnv checks that the persistent --dry-run flag can be set via
+// GO_GALAXY_DRY_RUN, since it is a global flag also consumed by cleanup
+// (which has no --dry-run-specific wiring of its own).
+func TestDryRunEnv(t *testing.T) {
+	t.Setenv("GO_GALAXY_DRY_RUN", "true")
+
+	var gotDryRun bool
+	cmd := &cli.Command{
+		Name:  "go-galaxy",
+		Flags: CommonFlags(),
+		Action: func(_ context.Context, c *cli.Command) error {
+			gotDryRun = c.Bool("dry-run")
+			return nil
+		},
+	}
+
+	if err := cmd.Run(context.Background(), []string{"go-galaxy"}); err != nil {
+		t.Fatalf("cmd.Run() error = %v, want nil", err)
+	}
+	if !gotDryRun {
+		t.Error("c.Bool(\"dry-run\") = false, want true (from GO_GALAXY_DRY_RUN)")
 	}
 }

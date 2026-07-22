@@ -21,8 +21,9 @@ func CommonFlags() []cli.Flag {
 			Sources: cli.EnvVars("GO_GALAXY_QUIET"),
 		},
 		&cli.BoolFlag{
-			Name:  "dry-run",
-			Usage: "Enable dry-run mode",
+			Name:    "dry-run",
+			Usage:   "Enable dry-run mode",
+			Sources: cli.EnvVars("GO_GALAXY_DRY_RUN"),
 		},
 		&cli.StringFlag{
 			Name:    "cache-dir",
