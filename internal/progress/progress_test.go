@@ -414,6 +414,53 @@ func TestPrintfSuffixRace(t *testing.T) {
 	wg.Wait()
 }
 
+// TestConcurrentEmissionSerialized drives every buffer-emitting method from
+// many goroutines against a shared writer. Without the printer mutex the
+// concurrent writes and the Stop/print/Restart sequences race (the detector
+// fires); with it, writes are serialized so each line stays intact and the
+// emitted-line count is exact.
+func TestConcurrentEmissionSerialized(t *testing.T) {
+	var buf bytes.Buffer
+	p := newProgress(false, false, true, &buf)
+	if p.s == nil {
+		t.Fatal("expected active spinner for state A")
+	}
+	defer p.Close()
+
+	const (
+		workers    = 8
+		iterations = 25
+	)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			for i := range iterations {
+				p.PersistentPrintf("pp %d", i)
+				p.Okf("ok %d", i)
+				p.Errorf("err %d", i)
+				_, _ = p.Write([]byte("wr\n"))
+				p.Printf("pf %d", i) // suffix only, never reaches the buffer
+			}
+		})
+	}
+	wg.Wait()
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if want := workers * iterations * 4; len(lines) != want {
+		t.Fatalf("expected %d emitted lines, got %d", want, len(lines))
+	}
+	for _, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "pp "),
+			strings.HasPrefix(line, ok+" ok "),
+			strings.HasPrefix(line, fail+" err "),
+			line == "wr":
+		default:
+			t.Fatalf("unexpected or interleaved line: %q", line)
+		}
+	}
+}
+
 // TestPackageLevelOkfErrorf verifies the standalone package-level Okf/Errorf
 // helpers write to os.Stdout, since they run before any Progress exists.
 func TestPackageLevelOkfErrorf(t *testing.T) {

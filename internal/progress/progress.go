@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/briandowns/spinner"
@@ -25,6 +26,7 @@ const (
 type Progress struct {
 	s   *spinner.Spinner
 	out io.Writer
+	mu  sync.Mutex
 	v   bool
 	q   bool
 }
@@ -82,6 +84,8 @@ func Errorf(format string, args ...any) {
 // Printf updates the spinner suffix when a spinner is active, otherwise
 // prints a log line unless quiet mode is enabled.
 func (p *Progress) Printf(format string, args ...any) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.s != nil {
 		// The spinner render goroutine reads Suffix under the spinner's own
 		// lock, so the update must take that same lock to avoid a data race.
@@ -100,6 +104,8 @@ func (p *Progress) Printf(format string, args ...any) {
 // Unlike Printf, this always emits regardless of verbose/quiet mode - result
 // lines (success/failure) must never be swallowed.
 func (p *Progress) PersistentPrintf(format string, args ...any) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	msg := fmt.Sprintf(format, args...)
 	if p.s != nil {
 		p.s.Stop()
@@ -122,6 +128,8 @@ func (p *Progress) Errorf(format string, args ...any) {
 
 // Debugf prints a debug message when verbose mode is enabled.
 func (p *Progress) Debugf(format string, args ...any) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.v {
 		_, _ = fmt.Fprintf(p.out, "🚧 Debug: "+format+"\n", args...)
 	}
@@ -129,6 +137,8 @@ func (p *Progress) Debugf(format string, args ...any) {
 
 // DebugSincef prints a debug message with timing info.
 func (p *Progress) DebugSincef(start time.Time, format string, args ...any) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.v {
 		_, _ = fmt.Fprintf(p.out, "⏱️ Debug Timing ("+time.Since(start).Round(time.Millisecond).String()+"): "+format+"\n", args...)
 	}
@@ -136,6 +146,8 @@ func (p *Progress) DebugSincef(start time.Time, format string, args ...any) {
 
 // Write implements io.Writer for log output integration.
 func (p *Progress) Write(payload []byte) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	message := strings.TrimRight(string(payload), "\n")
 	if message == "" {
 		return len(payload), nil
@@ -155,6 +167,8 @@ func (p *Progress) Write(payload []byte) (int, error) {
 
 // Close stops the spinner if it is running.
 func (p *Progress) Close() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.s != nil {
 		p.s.Stop()
 	}
