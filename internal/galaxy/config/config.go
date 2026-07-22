@@ -112,6 +112,22 @@ type CollectionOptions struct {
 }
 
 // BuildCollectionConfig builds Config from CLI flags and ansible.cfg.
+//
+// Contract: it reads the full union of flags a command may register for
+// this path - the collection flags (server, timeout, download-path,
+// requirements-file, ansible-config, workers, no-cache, refresh,
+// clear-cache, no-deps, offline, resolution, lock-file, frozen,
+// metrics-file), the S3 cache flags (s3-bucket and friends), and the
+// global flags (verbose, quiet, dry-run, cache-dir). A command is not
+// required to register every one of them - cleanup, for example, registers
+// only the S3 flags plus the globals, since it drives its work from the
+// per-project registry and consumes just CacheDir, DryRun, and S3Cache
+// from the result. A flag a command does not register simply resolves to
+// its Go zero value here (c.String/c.Bool/c.Int return the zero value for
+// an unknown flag name); that is safe only as long as the command does not
+// read the matching Config field. Any command wired into this path in the
+// future must register every flag whose Config field it reads, or it will
+// silently observe a zero value instead of an error.
 func BuildCollectionConfig(c *cli.Command) (*Config, error) {
 	cfg := newConfigFromCLI(c)
 	if err := applyTimeout(cfg, c); err != nil {
