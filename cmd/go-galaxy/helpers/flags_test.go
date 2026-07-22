@@ -1,0 +1,95 @@
+package helpers
+
+import (
+	"slices"
+	"testing"
+
+	"github.com/urfave/cli/v3"
+)
+
+// envKeys extracts the environment variable names configured on a
+// ValueSourceChain, in order, for assertions below.
+func envKeys(t *testing.T, chain cli.ValueSourceChain) []string {
+	t.Helper()
+	keys := make([]string, 0, len(chain.Chain))
+	for _, src := range chain.Chain {
+		ev, ok := src.(cli.EnvValueSource)
+		if !ok {
+			t.Fatalf("source %v does not implement cli.EnvValueSource", src)
+		}
+		keys = append(keys, ev.Key())
+	}
+	return keys
+}
+
+// wantStringFlag is the expected shape of one LockInspectFlags entry.
+type wantStringFlag struct {
+	name    string
+	usage   string
+	aliases []string
+	envKeys []string
+}
+
+// assertStringFlag checks flag against want, reporting every mismatch.
+func assertStringFlag(t *testing.T, flag cli.Flag, want wantStringFlag) {
+	t.Helper()
+	sf, ok := flag.(*cli.StringFlag)
+	if !ok {
+		t.Fatalf("flag = %T, want *cli.StringFlag", flag)
+	}
+	if sf.Name != want.name {
+		t.Errorf("Name = %q, want %q", sf.Name, want.name)
+	}
+	if !slices.Equal(sf.Aliases, want.aliases) {
+		t.Errorf("Aliases = %v, want %v", sf.Aliases, want.aliases)
+	}
+	if sf.Usage != want.usage {
+		t.Errorf("Usage = %q, want %q", sf.Usage, want.usage)
+	}
+	if got := envKeys(t, sf.Sources); !slices.Equal(got, want.envKeys) {
+		t.Errorf("env sources = %v, want %v", got, want.envKeys)
+	}
+}
+
+// TestLockInspectFlags checks that the shared lockfile-inspection flag set
+// (used by hash, tree, explain) exposes exactly the requirements-file and
+// lock-file flags with the expected names, alias, usage, and env sources.
+func TestLockInspectFlags(t *testing.T) {
+	flags := LockInspectFlags()
+	if len(flags) != 2 {
+		t.Fatalf("LockInspectFlags() returned %d flags, want 2", len(flags))
+	}
+
+	tests := []struct {
+		flag cli.Flag
+		name string
+		want wantStringFlag
+	}{
+		{
+			name: "requirements-file",
+			flag: flags[0],
+			want: wantStringFlag{
+				name:    "requirements-file",
+				aliases: []string{"r"},
+				usage:   "Path to requirements.yml",
+				envKeys: []string{"GO_GALAXY_REQUIREMENTS_FILE", "ANSIBLE_GALAXY_REQUIREMENTS_FILE"},
+			},
+		},
+		{
+			name: "lock-file",
+			flag: flags[1],
+			want: wantStringFlag{
+				name:    "lock-file",
+				aliases: nil,
+				usage:   "Path to lockfile (default: requirements.lock.yml beside requirements file)",
+				envKeys: []string{"GO_GALAXY_LOCK_FILE"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assertStringFlag(t, tt.flag, tt.want)
+		})
+	}
+}

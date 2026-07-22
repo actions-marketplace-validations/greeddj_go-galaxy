@@ -3,8 +3,11 @@ package commands
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"sort"
 
+	"github.com/greeddj/go-galaxy/cmd/go-galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/lockfile"
 	"github.com/greeddj/go-galaxy/internal/galaxy/requirements"
 	"github.com/urfave/cli/v3"
@@ -23,19 +26,7 @@ func Tree() *cli.Command {
 		Name:    "tree",
 		Aliases: []string{"t"},
 		Usage:   "Print the resolved dependency tree from the lockfile",
-		Flags: []cli.Flag{
-			&cli.StringFlag{
-				Name:    "requirements-file",
-				Aliases: []string{"r"},
-				Usage:   "Path to requirements.yml",
-				Sources: cli.EnvVars("GO_GALAXY_REQUIREMENTS_FILE", "ANSIBLE_GALAXY_REQUIREMENTS_FILE"),
-			},
-			&cli.StringFlag{
-				Name:    "lock-file",
-				Usage:   "Path to lockfile (default: requirements.lock.yml beside requirements file)",
-				Sources: cli.EnvVars("GO_GALAXY_LOCK_FILE"),
-			},
-		},
+		Flags:   helpers.LockInspectFlags(),
 		Action: func(_ context.Context, c *cli.Command) error {
 			reqPath := c.String("requirements-file")
 			if reqPath == "" {
@@ -50,7 +41,7 @@ func Tree() *cli.Command {
 			if err != nil {
 				return err
 			}
-			printTree(lf, roots)
+			printTree(os.Stdout, reqPath, lf, roots)
 			return nil
 		},
 	}
@@ -68,7 +59,10 @@ func loadRootFQDNs(reqPath string) ([]string, error) {
 	return out, nil
 }
 
-func printTree(lf *lockfile.File, roots []string) {
+// printTree writes the header line (the actual requirements path passed in,
+// not a hardcoded name) followed by the dependency tree rooted at each entry
+// in roots.
+func printTree(w io.Writer, reqPath string, lf *lockfile.File, roots []string) {
 	byFQDN := make(map[string]lockfile.Entry, len(lf.Collections))
 	for _, e := range lf.Collections {
 		byFQDN[e.Name] = e
@@ -77,14 +71,14 @@ func printTree(lf *lockfile.File, roots []string) {
 	copy(sortedRoots, roots)
 	sort.Strings(sortedRoots)
 
-	fmt.Println("requirements.yml") //nolint:forbidigo // command output
+	_, _ = fmt.Fprintln(w, reqPath)
 	for i, root := range sortedRoots {
 		isLast := i == len(sortedRoots)-1
-		walkTree(byFQDN, root, "", isLast, make(map[string]bool))
+		walkTree(w, byFQDN, root, "", isLast, make(map[string]bool))
 	}
 }
 
-func walkTree(by map[string]lockfile.Entry, fqdn, prefix string, isLast bool, seen map[string]bool) {
+func walkTree(w io.Writer, by map[string]lockfile.Entry, fqdn, prefix string, isLast bool, seen map[string]bool) {
 	branch := "├── "
 	cont := "│   "
 	if isLast {
@@ -93,20 +87,20 @@ func walkTree(by map[string]lockfile.Entry, fqdn, prefix string, isLast bool, se
 	}
 	entry, ok := by[fqdn]
 	if !ok {
-		fmt.Printf("%s%s%s (missing in lockfile)\n", prefix, branch, fqdn) //nolint:forbidigo
+		_, _ = fmt.Fprintf(w, "%s%s%s (missing in lockfile)\n", prefix, branch, fqdn)
 		return
 	}
 	if seen[fqdn] {
-		fmt.Printf("%s%s%s %s (*)\n", prefix, branch, fqdn, entry.Version) //nolint:forbidigo
+		_, _ = fmt.Fprintf(w, "%s%s%s %s (*)\n", prefix, branch, fqdn, entry.Version)
 		return
 	}
 	seen[fqdn] = true
-	fmt.Printf("%s%s%s %s\n", prefix, branch, fqdn, entry.Version) //nolint:forbidigo
+	_, _ = fmt.Fprintf(w, "%s%s%s %s\n", prefix, branch, fqdn, entry.Version)
 
 	deps := make([]string, len(entry.Deps))
 	copy(deps, entry.Deps)
 	sort.Strings(deps)
 	for i, dep := range deps {
-		walkTree(by, dep, prefix+cont, i == len(deps)-1, seen)
+		walkTree(w, by, dep, prefix+cont, i == len(deps)-1, seen)
 	}
 }

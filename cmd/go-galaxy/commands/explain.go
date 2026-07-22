@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"slices"
 	"sort"
 
+	"github.com/greeddj/go-galaxy/cmd/go-galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/lockfile"
 	"github.com/urfave/cli/v3"
 )
@@ -26,19 +29,7 @@ func Explain() *cli.Command {
 		Aliases:   []string{"why"},
 		Usage:     "Explain why a collection was resolved to its locked version",
 		ArgsUsage: "<namespace.name>",
-		Flags: []cli.Flag{
-			&cli.StringFlag{
-				Name:    "requirements-file",
-				Aliases: []string{"r"},
-				Usage:   "Path to " + requirementsYAML,
-				Sources: cli.EnvVars("GO_GALAXY_REQUIREMENTS_FILE", "ANSIBLE_GALAXY_REQUIREMENTS_FILE"),
-			},
-			&cli.StringFlag{
-				Name:    "lock-file",
-				Usage:   "Path to lockfile",
-				Sources: cli.EnvVars("GO_GALAXY_LOCK_FILE"),
-			},
-		},
+		Flags:     helpers.LockInspectFlags(),
 		Action: func(_ context.Context, c *cli.Command) error {
 			if c.NArg() < 1 {
 				return errExplainNoTarget
@@ -58,19 +49,19 @@ func Explain() *cli.Command {
 			for _, r := range roots {
 				rootSet[r] = true
 			}
-			return printExplain(lf, target, rootSet)
+			return printExplain(os.Stdout, lf, target, rootSet)
 		},
 	}
 }
 
-func printExplain(lf *lockfile.File, target string, roots map[string]bool) error {
+func printExplain(w io.Writer, lf *lockfile.File, target string, roots map[string]bool) error {
 	entry, rdeps, found := findExplainTarget(lf, target)
 	if !found {
 		return fmt.Errorf("%w: %s", errExplainNotFound, target)
 	}
-	printEntryHeader(entry)
-	printRequiredBy(target, rdeps, roots)
-	printDepends(entry)
+	printEntryHeader(w, entry)
+	printRequiredBy(w, target, rdeps, roots)
+	printDepends(w, entry)
 	return nil
 }
 
@@ -90,39 +81,39 @@ func findExplainTarget(lf *lockfile.File, target string) (lockfile.Entry, []lock
 	return entry, rdeps, found
 }
 
-func printEntryHeader(entry lockfile.Entry) {
-	fmt.Printf("%s %s\n", entry.Name, entry.Version) //nolint:forbidigo
+func printEntryHeader(w io.Writer, entry lockfile.Entry) {
+	_, _ = fmt.Fprintf(w, "%s %s\n", entry.Name, entry.Version)
 	if entry.Source != "" {
-		fmt.Printf("  source : %s\n", entry.Source) //nolint:forbidigo
+		_, _ = fmt.Fprintf(w, "  source : %s\n", entry.Source)
 	}
 	if entry.SHA256 != "" {
-		fmt.Printf("  sha256 : %s\n", entry.SHA256) //nolint:forbidigo
+		_, _ = fmt.Fprintf(w, "  sha256 : %s\n", entry.SHA256)
 	}
 }
 
-func printRequiredBy(target string, rdeps []lockfile.Entry, roots map[string]bool) {
-	fmt.Println("  required by:") //nolint:forbidigo
+func printRequiredBy(w io.Writer, target string, rdeps []lockfile.Entry, roots map[string]bool) {
+	_, _ = fmt.Fprintln(w, "  required by:")
 	if roots[target] {
-		fmt.Println("    - " + requirementsYAML + " (root)") //nolint:forbidigo
+		_, _ = fmt.Fprintln(w, "    - "+requirementsYAML+" (root)")
 	}
 	sort.Slice(rdeps, func(i, j int) bool { return rdeps[i].Name < rdeps[j].Name })
 	for _, r := range rdeps {
-		fmt.Printf("    - %s %s\n", r.Name, r.Version) //nolint:forbidigo
+		_, _ = fmt.Fprintf(w, "    - %s %s\n", r.Name, r.Version)
 	}
 	if !roots[target] && len(rdeps) == 0 {
-		fmt.Println("    - (no parents — orphan in lockfile)") //nolint:forbidigo
+		_, _ = fmt.Fprintln(w, "    - (no parents - orphan in lockfile)")
 	}
 }
 
-func printDepends(entry lockfile.Entry) {
+func printDepends(w io.Writer, entry lockfile.Entry) {
 	if len(entry.Deps) == 0 {
 		return
 	}
 	deps := make([]string, len(entry.Deps))
 	copy(deps, entry.Deps)
 	sort.Strings(deps)
-	fmt.Println("  depends on:") //nolint:forbidigo
+	_, _ = fmt.Fprintln(w, "  depends on:")
 	for _, d := range deps {
-		fmt.Printf("    - %s\n", d) //nolint:forbidigo
+		_, _ = fmt.Fprintf(w, "    - %s\n", d)
 	}
 }

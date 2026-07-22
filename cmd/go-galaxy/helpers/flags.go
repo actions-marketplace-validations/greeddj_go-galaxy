@@ -141,6 +141,25 @@ func lockfileAndMetricsFlags() []cli.Flag {
 	}
 }
 
+// LockInspectFlags defines the two flags shared by the read-only lockfile
+// inspection commands (hash, tree, explain): where to find the requirements
+// file and, optionally, an override lockfile path.
+func LockInspectFlags() []cli.Flag {
+	return []cli.Flag{
+		&cli.StringFlag{
+			Name:    "requirements-file",
+			Aliases: []string{"r"},
+			Usage:   "Path to requirements.yml",
+			Sources: cli.EnvVars("GO_GALAXY_REQUIREMENTS_FILE", "ANSIBLE_GALAXY_REQUIREMENTS_FILE"),
+		},
+		&cli.StringFlag{
+			Name:    "lock-file",
+			Usage:   "Path to lockfile (default: requirements.lock.yml beside requirements file)",
+			Sources: cli.EnvVars("GO_GALAXY_LOCK_FILE"),
+		},
+	}
+}
+
 // S3Flags defines CLI flags for S3 cache configuration.
 func S3Flags() []cli.Flag {
 	return []cli.Flag{

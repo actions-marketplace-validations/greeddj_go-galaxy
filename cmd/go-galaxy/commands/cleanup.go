@@ -2,15 +2,9 @@ package commands
 
 import (
 	"context"
-	"io"
-	"log"
 
 	"github.com/greeddj/go-galaxy/cmd/go-galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/cleanup"
-	"github.com/greeddj/go-galaxy/internal/galaxy/config"
-	"github.com/greeddj/go-galaxy/internal/galaxy/fetch"
-	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
-	"github.com/greeddj/go-galaxy/internal/progress"
 	"github.com/urfave/cli/v3"
 )
 
@@ -22,20 +16,7 @@ func Cleanup() *cli.Command {
 		Usage:   "Cleanup unused cached collections across all projects",
 		Flags:   helpers.S3Flags(),
 		Action: func(ctx context.Context, c *cli.Command) error {
-			cfg, err := config.BuildCollectionConfig(c)
-			if err != nil {
-				return err
-			}
-			p := progress.New(cfg.Verbose, cfg.Quiet)
-			if cfg.Verbose {
-				log.SetOutput(p)
-			} else {
-				log.SetOutput(io.Discard)
-			}
-			defer p.Close()
-			runtime := infra.New(p, fetch.New(cfg.Timeout))
-			runtime.DebugAnsibleConfig(cfg)
-			return cleanup.Start(ctx, cfg, runtime)
+			return runCollectionCommand(ctx, c, cleanup.Start)
 		},
 	}
 }

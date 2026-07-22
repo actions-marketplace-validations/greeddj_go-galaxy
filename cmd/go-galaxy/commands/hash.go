@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/greeddj/go-galaxy/cmd/go-galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/lockfile"
 	"github.com/urfave/cli/v3"
 )
@@ -22,19 +23,7 @@ func Hash() *cli.Command {
 		Name:    "hash",
 		Aliases: []string{"h"},
 		Usage:   "Print a deterministic cache key for CI (sha256 of lockfile or requirements)",
-		Flags: []cli.Flag{
-			&cli.StringFlag{
-				Name:    "requirements-file",
-				Aliases: []string{"r"},
-				Usage:   "Path to requirements.yml",
-				Sources: cli.EnvVars("GO_GALAXY_REQUIREMENTS_FILE", "ANSIBLE_GALAXY_REQUIREMENTS_FILE"),
-			},
-			&cli.StringFlag{
-				Name:    "lock-file",
-				Usage:   "Path to lockfile (default: requirements.lock.yml beside requirements file)",
-				Sources: cli.EnvVars("GO_GALAXY_LOCK_FILE"),
-			},
-		},
+		Flags:   helpers.LockInspectFlags(),
 		Action: func(_ context.Context, c *cli.Command) error {
 			req := c.String("requirements-file")
 			if req == "" {
