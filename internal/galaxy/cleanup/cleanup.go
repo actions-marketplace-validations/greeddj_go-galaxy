@@ -83,7 +83,7 @@ func Start(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error 
 	if err != nil {
 		return err
 	}
-	sweepExtractedStore(cfg, state.store, reachable, installedByKey)
+	sweepExtractedStore(cfg, state.store)
 	return finalizeCleanup(ctx, cfg, runtime, state.backend, state.store, removed)
 }
 
@@ -442,31 +442,26 @@ func artifactKey(namespace, name, version string) string {
 	return url.QueryEscape(filename)
 }
 
-// sweepExtractedStore drops content-addressable extracted entries whose
-// SHA is no longer referenced by any reachable installed collection.
-func sweepExtractedStore(
-	cfg *config.Config,
-	st *store.Store,
-	reachable map[string]bool,
-	installedByKey map[string]installedCollection,
-) {
-	if cfg == nil || cfg.DryRun || cfg.CacheDir == "" {
+// sweepExtractedStore drops content-addressable extracted entries whose SHA
+// is not referenced by any entry in the persisted snapshot's Installed set.
+// The snapshot - not an on-disk workspace scan - is the correct source of
+// truth here: removeUnused has already pruned it down to installed entries
+// that are either still reachable or belong to a project whose workspace was
+// absent this run (and so was never scanned or pruned at all). An on-disk
+// scan would see an empty keep set for every absent workspace, which is the
+// normal ephemeral-CI state, and would wipe the entire extracted cache.
+func sweepExtractedStore(cfg *config.Config, st *store.Store) {
+	if cfg == nil || cfg.DryRun || cfg.CacheDir == "" || st == nil {
 		return
 	}
-	store := extracted.NewStore(cfg.CacheDir)
-	if store == nil {
+	extractedStore := extracted.NewStore(cfg.CacheDir)
+	if extractedStore == nil {
 		return
 	}
-	keep := make(map[string]bool)
-	for key := range installedByKey {
-		if !reachable[key] {
-			continue
-		}
-		entry, ok := st.GetInstalled(key)
-		if !ok || entry.ArtifactSHA256 == "" {
-			continue
-		}
-		keep[entry.ArtifactSHA256] = true
+	shaByKey := st.InstalledArtifactSHAByKey()
+	keep := make(map[string]bool, len(shaByKey))
+	for _, sha := range shaByKey {
+		keep[sha] = true
 	}
-	_ = store.Sweep(keep)
+	_ = extractedStore.Sweep(keep)
 }

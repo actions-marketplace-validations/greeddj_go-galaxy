@@ -14,6 +14,7 @@ import (
 
 	cacheBackend "github.com/greeddj/go-galaxy/internal/cache"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
+	"github.com/greeddj/go-galaxy/internal/galaxy/extracted"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
@@ -488,5 +489,140 @@ func TestStartDeletesUnreferencedWithValidRequirements(t *testing.T) {
 	manifestPath := filepath.Join(installDir, "MANIFEST.json")
 	if _, statErr := os.Stat(manifestPath); !os.IsNotExist(statErr) {
 		t.Fatalf("expected the unreferenced collection to be deleted, stat error: %v", statErr)
+	}
+}
+
+// seedSnapshotInstalled saves a store snapshot at cfg.CacheDir whose
+// Installed set is exactly entries, via the real local backend (SaveStore),
+// mirroring how a prior install run would have persisted it.
+func seedSnapshotInstalled(t *testing.T, cfg *config.Config, runtime *infra.Infra, entries map[string]store.InstalledEntry) {
+	t.Helper()
+	backend, err := cacheBackend.New(cfg, runtime)
+	if err != nil {
+		t.Fatalf("failed to build backend for seeding: %v", err)
+	}
+	if err := backend.Open(t.Context()); err != nil {
+		t.Fatalf("failed to open backend for seeding: %v", err)
+	}
+	defer func() {
+		if err := backend.Close(t.Context()); err != nil {
+			t.Errorf("failed to close seeding backend: %v", err)
+		}
+	}()
+	st := store.New()
+	for key, entry := range entries {
+		st.SetInstalled(key, entry)
+	}
+	if err := backend.SaveStore(t.Context(), st); err != nil {
+		t.Fatalf("failed to save seeded store: %v", err)
+	}
+}
+
+// seedExtractedDir creates <cacheDir>/extracted/<sha>/ with a ready marker,
+// mirroring the on-disk layout extracted.Store.Ensure/Promote produce, so
+// Sweep sees a real completed entry rather than an empty directory.
+func seedExtractedDir(t *testing.T, cacheDir, sha string) {
+	t.Helper()
+	dir := filepath.Join(cacheDir, extracted.RootDirName, sha)
+	if err := os.MkdirAll(dir, helpers.DirMod); err != nil {
+		t.Fatalf("failed to create extracted dir for %s: %v", sha, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, extracted.ReadyMarker), []byte("ok"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write ready marker for %s: %v", sha, err)
+	}
+}
+
+// recordAbsentWorkspaceProject records a project pointing at downloadPath,
+// which deliberately has no ansible_collections subdirectory. This makes
+// pickCollectionsPath skip the project entirely, so its installed snapshot
+// entries are never scanned, never pruned, and never contribute to
+// installedByKey - the normal ephemeral-CI state this commit's fix targets.
+func recordAbsentWorkspaceProject(t *testing.T, cfg *config.Config, runtime *infra.Infra, downloadPath string) {
+	t.Helper()
+	reqPath := filepath.Join(t.TempDir(), "requirements.yml")
+	backend, err := cacheBackend.New(cfg, runtime)
+	if err != nil {
+		t.Fatalf("failed to build backend to record project: %v", err)
+	}
+	if err := backend.Open(t.Context()); err != nil {
+		t.Fatalf("failed to open backend to record project: %v", err)
+	}
+	defer func() {
+		if err := backend.Close(t.Context()); err != nil {
+			t.Errorf("failed to close backend after recording project: %v", err)
+		}
+	}()
+	if err := backend.RecordProject(t.Context(), reqPath, downloadPath); err != nil {
+		t.Fatalf("failed to record project: %v", err)
+	}
+}
+
+// TestSweepKeepsCacheWhenWorkspaceAbsent is the core regression guard for
+// deriving the extracted-store keep set from the persisted snapshot instead
+// of from on-disk workspaces: a project whose ansible_collections workspace
+// is absent contributes nothing to installedByKey/reachable, but its
+// snapshot Installed entries survive untouched (removeUnused only prunes
+// entries it actually iterated), so their extracted artifact trees must
+// still be kept. Under the old on-disk-derived keep set, an empty
+// installedByKey meant Sweep(empty) wiped the entire extracted cache.
+func TestSweepKeepsCacheWhenWorkspaceAbsent(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	entries := map[string]store.InstalledEntry{
+		"ns.name@1.0.0":  {ArtifactSHA256: "sha-keep-1"},
+		"ns.other@2.0.0": {ArtifactSHA256: "sha-keep-2"},
+	}
+	seedSnapshotInstalled(t, cfg, runtime, entries)
+	for _, entry := range entries {
+		seedExtractedDir(t, cacheDir, entry.ArtifactSHA256)
+	}
+	recordAbsentWorkspaceProject(t, cfg, runtime, downloadPath)
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+
+	for _, entry := range entries {
+		dir := filepath.Join(cacheDir, extracted.RootDirName, entry.ArtifactSHA256)
+		if _, statErr := os.Stat(dir); statErr != nil {
+			t.Fatalf("expected extracted dir %s to survive an absent workspace, stat error: %v", entry.ArtifactSHA256, statErr)
+		}
+	}
+}
+
+// TestSweepDropsUnreferencedSha proves the snapshot-derived keep set still
+// drops a genuinely orphaned extracted entry: one referenced by an installed
+// snapshot entry survives, one with no referencing entry at all is removed.
+func TestSweepDropsUnreferencedSha(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	seedSnapshotInstalled(t, cfg, runtime, map[string]store.InstalledEntry{
+		"ns.name@1.0.0": {ArtifactSHA256: "sha-keep"},
+	})
+	seedExtractedDir(t, cacheDir, "sha-keep")
+	seedExtractedDir(t, cacheDir, "sha-orphan")
+	recordAbsentWorkspaceProject(t, cfg, runtime, downloadPath)
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+
+	keepDir := filepath.Join(cacheDir, extracted.RootDirName, "sha-keep")
+	if _, statErr := os.Stat(keepDir); statErr != nil {
+		t.Fatalf("expected referenced sha dir to survive, stat error: %v", statErr)
+	}
+	orphanDir := filepath.Join(cacheDir, extracted.RootDirName, "sha-orphan")
+	if _, statErr := os.Stat(orphanDir); !os.IsNotExist(statErr) {
+		t.Fatalf("expected unreferenced orphan sha dir to be removed, stat error: %v", statErr)
 	}
 }

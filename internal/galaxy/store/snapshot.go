@@ -123,6 +123,29 @@ func (m *Store) GetInstalled(key string) (InstalledEntry, bool) {
 	return entry, ok
 }
 
+// InstalledArtifactSHAByKey returns a fresh map from installed collection key
+// (ns.name@version) to its ArtifactSHA256, omitting entries with an empty
+// SHA. This is the persisted source of truth for which extracted artifact
+// trees must be kept: unlike an on-disk workspace scan, it also covers
+// projects whose workspace is currently absent (the normal ephemeral-CI
+// state), since their installed entries are never pruned from the snapshot
+// until their workspace is actually seen and scanned again.
+func (m *Store) InstalledArtifactSHAByKey() map[string]string {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make(map[string]string, len(m.Installed))
+	for key, entry := range m.Installed {
+		if entry.ArtifactSHA256 == "" {
+			continue
+		}
+		out[key] = entry.ArtifactSHA256
+	}
+	return out
+}
+
 // GetDepsCache returns cached dependency constraints for a key.
 func (m *Store) GetDepsCache(key string) (map[string]string, bool) {
 	if m == nil {
