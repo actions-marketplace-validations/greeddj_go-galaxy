@@ -84,7 +84,7 @@ func Start(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error 
 	if err != nil {
 		return err
 	}
-	sweepExtractedStore(cfg, state.store)
+	sweepExtractedStore(cfg, runtime, state.store, reachable, installedByKey)
 	return finalizeCleanup(ctx, cfg, runtime, state.backend, state.store, removed)
 }
 
@@ -529,23 +529,79 @@ func artifactKey(namespace, name, version string) string {
 // sweepExtractedStore drops content-addressable extracted entries whose SHA
 // is not referenced by any entry in the persisted snapshot's Installed set.
 // The snapshot - not an on-disk workspace scan - is the correct source of
-// truth here: removeUnused has already pruned it down to installed entries
-// that are either still reachable or belong to a project whose workspace was
-// absent this run (and so was never scanned or pruned at all). An on-disk
-// scan would see an empty keep set for every absent workspace, which is the
-// normal ephemeral-CI state, and would wipe the entire extracted cache.
-func sweepExtractedStore(cfg *config.Config, st *store.Store) {
-	if cfg == nil || cfg.DryRun || cfg.CacheDir == "" || st == nil {
+// truth here: in a real run, removeUnused has already pruned it down to
+// installed entries that are either still reachable or belong to a project
+// whose workspace was absent this run (and so was never scanned or pruned at
+// all). An on-disk scan would see an empty keep set for every absent
+// workspace, which is the normal ephemeral-CI state, and would wipe the
+// entire extracted cache.
+//
+// In a dry run, removeUnused does not prune the snapshot (it only reports
+// what it would remove), so the snapshot still contains the about-to-be-
+// removed keys. To report the sweep accurately, their SHAs are excluded from
+// keep here via reachable/installedByKey - the same two values removeUnused
+// used to decide what it would remove - so the reported plan matches what a
+// real run would actually do. This exclusion is a no-op in a real run, since
+// those keys are already absent from the snapshot by the time this runs.
+func sweepExtractedStore(
+	cfg *config.Config,
+	runtime *infra.Infra,
+	st *store.Store,
+	reachable map[string]bool,
+	installedByKey map[string][]installedCollection,
+) {
+	if cfg == nil || cfg.CacheDir == "" || st == nil {
 		return
 	}
 	extractedStore := extracted.NewStore(cfg.CacheDir)
 	if extractedStore == nil {
 		return
 	}
-	shaByKey := st.InstalledArtifactSHAByKey()
-	keep := make(map[string]bool, len(shaByKey))
-	for _, sha := range shaByKey {
-		keep[sha] = true
+	keep := extractedKeepSet(st, reachable, installedByKey)
+
+	if cfg.DryRun {
+		reportExtractedSweepPlan(runtime, extractedStore, keep)
+		return
 	}
 	_ = extractedStore.Sweep(keep)
+}
+
+// extractedKeepSet builds the set of extracted-store SHAs to keep from the
+// persisted snapshot, excluding any key that removeUnused would remove (or
+// already removed, in a real run) so a dry-run report matches what a real
+// run would actually sweep.
+func extractedKeepSet(
+	st *store.Store,
+	reachable map[string]bool,
+	installedByKey map[string][]installedCollection,
+) map[string]bool {
+	wouldRemove := make(map[string]bool, len(installedByKey))
+	for key := range installedByKey {
+		if !reachable[key] {
+			wouldRemove[key] = true
+		}
+	}
+
+	shaByKey := st.InstalledArtifactSHAByKey()
+	keep := make(map[string]bool, len(shaByKey))
+	for key, sha := range shaByKey {
+		if wouldRemove[key] {
+			continue
+		}
+		keep[sha] = true
+	}
+	return keep
+}
+
+// reportExtractedSweepPlan prints, without deleting anything, the extracted
+// entries a real run would sweep given keep.
+func reportExtractedSweepPlan(runtime *infra.Infra, extractedStore *extracted.Store, keep map[string]bool) {
+	plan, err := extractedStore.SweepPlan(keep)
+	if err != nil {
+		runtime.Output.Errorf("failed to plan extracted cache sweep: %v", err)
+		return
+	}
+	for _, name := range plan {
+		runtime.Output.Printf("🧹 would sweep extracted %s", name)
+	}
 }

@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/archive"
@@ -153,23 +154,45 @@ func (s *Store) Remove(sha string) error {
 	return os.RemoveAll(filepath.Join(s.root, sha))
 }
 
-// Sweep removes extracted entries whose SHA is not in keep.
-func (s *Store) Sweep(keep map[string]bool) error {
+// SweepPlan lists the extracted entries under the store root whose name is
+// not present in keep, sorted for deterministic output. It performs no
+// filesystem mutation, so callers can use it to report what Sweep(keep)
+// would remove without actually removing anything (e.g. a dry-run). A
+// missing root directory is not an error: it yields (nil, nil), matching
+// Sweep's own behavior when there is nothing to sweep yet.
+func (s *Store) SweepPlan(keep map[string]bool) ([]string, error) {
 	if s == nil {
-		return nil
+		return nil, nil
 	}
 	entries, err := os.ReadDir(s.root)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil
+			return nil, nil
 		}
-		return err
+		return nil, err
 	}
+	planned := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		name := entry.Name()
 		if keep[name] {
 			continue
 		}
+		planned = append(planned, name)
+	}
+	sort.Strings(planned)
+	return planned, nil
+}
+
+// Sweep removes extracted entries whose SHA is not in keep.
+func (s *Store) Sweep(keep map[string]bool) error {
+	if s == nil {
+		return nil
+	}
+	planned, err := s.SweepPlan(keep)
+	if err != nil {
+		return err
+	}
+	for _, name := range planned {
 		_ = os.RemoveAll(filepath.Join(s.root, name))
 	}
 	return nil

@@ -149,6 +149,58 @@ func TestStoreSweep(t *testing.T) {
 	}
 }
 
+// TestStoreSweepPlan proves SweepPlan reports the same set Sweep would
+// remove, sorted for deterministic output, without touching the filesystem.
+func TestStoreSweepPlan(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	tarPath := filepath.Join(dir, "src.tar.gz")
+	writeTarball(t, tarPath, map[string]string{"f": "x"})
+	store := NewStore(filepath.Join(dir, "cache"))
+
+	if _, err := store.Ensure("keep", tarPath); err != nil {
+		t.Fatalf("Ensure keep: %v", err)
+	}
+	if _, err := store.Ensure("drop-b", tarPath); err != nil {
+		t.Fatalf("Ensure drop-b: %v", err)
+	}
+	if _, err := store.Ensure("drop-a", tarPath); err != nil {
+		t.Fatalf("Ensure drop-a: %v", err)
+	}
+
+	planned, err := store.SweepPlan(map[string]bool{"keep": true})
+	if err != nil {
+		t.Fatalf("SweepPlan: %v", err)
+	}
+	want := []string{"drop-a", "drop-b"}
+	if len(planned) != len(want) || planned[0] != want[0] || planned[1] != want[1] {
+		t.Fatalf("SweepPlan = %v, want %v", planned, want)
+	}
+
+	// SweepPlan must not mutate anything: every entry, including the ones
+	// it planned to drop, is still present on disk afterward.
+	for _, name := range []string{"keep", "drop-a", "drop-b"} {
+		if _, statErr := os.Stat(filepath.Join(store.Root(), name)); statErr != nil {
+			t.Fatalf("SweepPlan removed %s from disk: %v", name, statErr)
+		}
+	}
+}
+
+// TestStoreSweepPlanMissingRoot proves SweepPlan on a store whose root
+// directory does not exist yet returns (nil, nil) rather than an error,
+// matching Sweep's own behavior on a missing root.
+func TestStoreSweepPlanMissingRoot(t *testing.T) {
+	t.Parallel()
+	store := NewStore(t.TempDir())
+	planned, err := store.SweepPlan(map[string]bool{"keep": true})
+	if err != nil {
+		t.Fatalf("SweepPlan: %v", err)
+	}
+	if planned != nil {
+		t.Fatalf("expected nil plan for a missing root, got %v", planned)
+	}
+}
+
 func TestNewStoreEmptyCacheDir(t *testing.T) {
 	t.Parallel()
 	if got := NewStore(""); got != nil {

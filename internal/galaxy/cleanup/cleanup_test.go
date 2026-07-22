@@ -37,15 +37,17 @@ func (noopPrinter) Warnf(string, ...any)                  {}
 func (noopPrinter) Debugf(string, ...any)                 {}
 func (noopPrinter) DebugSincef(time.Time, string, ...any) {}
 
-// recordingPrinter is an output.Printer stub that records Warnf calls so
-// tests can assert that a rejection surfaced a warning rather than being
-// silently swallowed. It embeds noopPrinter for the other Printer methods and
-// is safe for concurrent use since scanInstalledCollections may be called
-// from goroutines in other packages, though cleanup itself scans serially.
+// recordingPrinter is an output.Printer stub that records Warnf and Printf
+// calls so tests can assert that a rejection surfaced a warning, or that a
+// dry-run reported a transient-tier line, rather than either being silently
+// swallowed. It embeds noopPrinter for the other Printer methods and is safe
+// for concurrent use since scanInstalledCollections may be called from
+// goroutines in other packages, though cleanup itself scans serially.
 type recordingPrinter struct {
 	noopPrinter
 
 	warnings []string
+	prints   []string
 	mu       sync.Mutex
 }
 
@@ -55,12 +57,30 @@ func (p *recordingPrinter) Warnf(format string, args ...any) {
 	p.warnings = append(p.warnings, fmt.Sprintf(format, args...))
 }
 
+func (p *recordingPrinter) Printf(format string, args ...any) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.prints = append(p.prints, fmt.Sprintf(format, args...))
+}
+
 // hasWarningContaining reports whether any recorded warning contains substr.
 func (p *recordingPrinter) hasWarningContaining(substr string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, w := range p.warnings {
 		if strings.Contains(w, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasPrintContaining reports whether any recorded Printf line contains substr.
+func (p *recordingPrinter) hasPrintContaining(substr string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, line := range p.prints {
+		if strings.Contains(line, substr) {
 			return true
 		}
 	}
@@ -807,5 +827,94 @@ func TestReportsCorruptManifest(t *testing.T) {
 	validManifestPath := filepath.Join(validInstallDir, "MANIFEST.json")
 	if _, statErr := os.Stat(validManifestPath); !os.IsNotExist(statErr) {
 		t.Fatalf("expected the unreferenced valid collection to still be removed normally, stat error: %v", statErr)
+	}
+}
+
+// seedManifestAt writes a MANIFEST.json for ns.name@version under
+// <root>/ansible_collections/<ns>/<name>, for tests that need more than one
+// distinct installed collection under the same collections root.
+func seedManifestAt(t *testing.T, root, ns, name, version string) {
+	t.Helper()
+	installDir := filepath.Join(root, "ansible_collections", ns, name)
+	if err := os.MkdirAll(installDir, helpers.DirMod); err != nil {
+		t.Fatalf("failed to create install dir for %s.%s: %v", ns, name, err)
+	}
+	manifest := fmt.Sprintf(`{
+		"collection_info": {
+			"namespace": %q,
+			"name": %q,
+			"version": %q
+		}
+	}`, ns, name, version)
+	if err := os.WriteFile(filepath.Join(installDir, "MANIFEST.json"), []byte(manifest), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write manifest for %s.%s: %v", ns, name, err)
+	}
+}
+
+// assertExtractedDirsSurvive fails the test unless every named extracted
+// entry under cacheDir/extracted is still present on disk.
+func assertExtractedDirsSurvive(t *testing.T, cacheDir string, shas ...string) {
+	t.Helper()
+	for _, sha := range shas {
+		dir := filepath.Join(cacheDir, extracted.RootDirName, sha)
+		if _, statErr := os.Stat(dir); statErr != nil {
+			t.Fatalf("expected extracted dir %s to survive, stat error: %v", sha, statErr)
+		}
+	}
+}
+
+// TestDryRunReportsExtractedSweep proves a dry run reports the extracted
+// cache entries it would sweep instead of silently returning early. The
+// snapshot references two keys: one reachable (kept) and one unreachable
+// (would be removed), plus a third extracted entry with no referencing key
+// at all (a genuine orphan). Because dry-run does not prune the snapshot,
+// the would-be-removed key's SHA must be excluded from keep explicitly (via
+// reachable/installedByKey) for the report to match what a real run would
+// actually sweep. The non-negotiable assertion is that dry-run deletes
+// nothing at all; the reported plan is asserted as a secondary check.
+func TestDryRunReportsExtractedSweep(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+
+	seedManifestAt(t, downloadPath, "ns", "name", "1.0.0")
+	seedManifestAt(t, downloadPath, "orphan", "name", "2.0.0")
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: true}
+	seedSnapshotInstalled(t, cfg, newTestRuntime(), map[string]store.InstalledEntry{
+		"ns.name@1.0.0":     {ArtifactSHA256: "sha-keep"},
+		"orphan.name@2.0.0": {ArtifactSHA256: "sha-would-remove"},
+	})
+	for _, sha := range []string{"sha-keep", "sha-would-remove", "sha-orphan"} {
+		seedExtractedDir(t, cacheDir, sha)
+	}
+
+	reqPath := filepath.Join(t.TempDir(), "requirements.yml")
+	if err := os.WriteFile(reqPath, []byte("collections:\n  - ns.name\n"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write requirements file: %v", err)
+	}
+	registerCleanupProjectAt(t, cacheDir, downloadPath, reqPath)
+
+	printer := &recordingPrinter{}
+	runtime := infra.New(printer, http.DefaultClient)
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected dry-run Start to succeed, got %v", err)
+	}
+
+	// Primary, non-negotiable assertion: dry-run deletes nothing at all.
+	assertExtractedDirsSurvive(t, cacheDir, "sha-keep", "sha-would-remove", "sha-orphan")
+
+	// Secondary assertion: the report accurately reflects what a real run
+	// would sweep - both the unreachable key's SHA and the true orphan, but
+	// not the reachable, kept key's SHA.
+	if !printer.hasPrintContaining("sha-would-remove") {
+		t.Fatalf("expected a would-sweep report for sha-would-remove, got prints: %v", printer.prints)
+	}
+	if !printer.hasPrintContaining("sha-orphan") {
+		t.Fatalf("expected a would-sweep report for sha-orphan, got prints: %v", printer.prints)
+	}
+	if printer.hasPrintContaining("sha-keep") {
+		t.Fatalf("expected no would-sweep report for the reachable, kept sha-keep, got prints: %v", printer.prints)
 	}
 }
