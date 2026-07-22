@@ -98,6 +98,10 @@ var (
 	ErrUnsupportedCollectionFormat = errors.New("unsupported collection format")
 	// ErrInvalidCollectionName indicates a collection name is invalid.
 	ErrInvalidCollectionName = errors.New("invalid collection name")
+	// ErrConflictingNamespaceName indicates an explicit namespace was given
+	// alongside a dotted collection name, which would otherwise silently
+	// install a different collection than either field implies alone.
+	ErrConflictingNamespaceName = errors.New("explicit namespace conflicts with dotted collection name")
 	// ErrInvalidCollectionKey indicates a collection key is invalid.
 	ErrInvalidCollectionKey = errors.New("invalid collection key")
 	// ErrDuplicateCollectionRequirement indicates a duplicate collection requirement.

@@ -147,3 +147,94 @@ func TestParseCollectionsScalarStillErrors(t *testing.T) {
 		t.Fatalf("expected ErrInvalidCollectionsList, got %v", err)
 	}
 }
+
+// TestParseCollectionsNamespaceNameConflict checks that an explicit
+// namespace combined with a dotted name is rejected, since
+// normalizeCollectionName would otherwise silently keep the explicit
+// namespace and overwrite name with only the dotted name's last segment -
+// installing a different collection than either field implies alone.
+func TestParseCollectionsNamespaceNameConflict(t *testing.T) {
+	t.Parallel()
+	input := "- namespace: foo\n  name: bar.baz\n"
+	_, _, err := ParseCollections([]byte(input), "https://default")
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !errors.Is(err, helpers.ErrConflictingNamespaceName) {
+		t.Fatalf("expected ErrConflictingNamespaceName, got %v", err)
+	}
+}
+
+// TestParseCollectionsNamespaceNameConflictEvenWhenConsistent checks that
+// the conflict is rejected unconditionally - even when the explicit
+// namespace happens to match the dotted name's own namespace segment, so
+// the two fields "look" consistent. This is intentional: the rule is about
+// the shape of the input (namespace + dotted name is ambiguous), not about
+// whether this particular combination happens to resolve harmlessly.
+func TestParseCollectionsNamespaceNameConflictEvenWhenConsistent(t *testing.T) {
+	t.Parallel()
+	input := "- namespace: community\n  name: community.general\n"
+	_, _, err := ParseCollections([]byte(input), "https://default")
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !errors.Is(err, helpers.ErrConflictingNamespaceName) {
+		t.Fatalf("expected ErrConflictingNamespaceName, got %v", err)
+	}
+}
+
+// TestParseCollectionsNamespaceWithPlainName is a regression guard: an
+// explicit namespace with a plain (non-dotted) name is unaffected and
+// resolves normally.
+func TestParseCollectionsNamespaceWithPlainName(t *testing.T) {
+	t.Parallel()
+	input := "- namespace: foo\n  name: bar\n"
+	collections, _, err := ParseCollections([]byte(input), "https://default")
+	if err != nil {
+		t.Fatalf("ParseCollections error: %v", err)
+	}
+	if len(collections) != 1 {
+		t.Fatalf("expected 1 collection, got %d", len(collections))
+	}
+	if collections[0].Namespace != "foo" || collections[0].Name != "bar" {
+		t.Fatalf("unexpected collection[0]: %#v", collections[0])
+	}
+}
+
+// TestParseCollectionsDottedNameWithoutNamespace is a regression guard: a
+// dotted name with no explicit namespace is unaffected and still splits
+// normally, since there is nothing for the split to conflict with.
+func TestParseCollectionsDottedNameWithoutNamespace(t *testing.T) {
+	t.Parallel()
+	input := "- name: bar.baz\n"
+	collections, _, err := ParseCollections([]byte(input), "https://default")
+	if err != nil {
+		t.Fatalf("ParseCollections error: %v", err)
+	}
+	if len(collections) != 1 {
+		t.Fatalf("expected 1 collection, got %d", len(collections))
+	}
+	if collections[0].Namespace != "bar" || collections[0].Name != "baz" {
+		t.Fatalf("unexpected collection[0]: %#v", collections[0])
+	}
+}
+
+// TestParseCollectionsNamespaceWithThreePartNameUnaffected checks that a
+// three-part dotted name (e.g. "a.b.c"), for which helpers.SplitFQDN does
+// not succeed (it only splits exactly two parts), does not trigger a false
+// conflict even with an explicit namespace set: there is no ambiguous split
+// for it to conflict with, so the name passes through unchanged.
+func TestParseCollectionsNamespaceWithThreePartNameUnaffected(t *testing.T) {
+	t.Parallel()
+	input := "- namespace: foo\n  name: a.b.c\n"
+	collections, _, err := ParseCollections([]byte(input), "https://default")
+	if err != nil {
+		t.Fatalf("ParseCollections error: %v", err)
+	}
+	if len(collections) != 1 {
+		t.Fatalf("expected 1 collection, got %d", len(collections))
+	}
+	if collections[0].Namespace != "foo" || collections[0].Name != "a.b.c" {
+		t.Fatalf("unexpected collection[0]: %#v", collections[0])
+	}
+}

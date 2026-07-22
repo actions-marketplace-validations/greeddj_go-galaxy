@@ -122,6 +122,9 @@ func parseCollectionStringItem(value string, defaultSource string) (CollectionRe
 
 func parseCollectionMapItem(value map[string]any, defaultSource string) (CollectionRequirement, error) {
 	req := parseCollectionMapFields(value)
+	if err := checkNamespaceNameConflict(req); err != nil {
+		return CollectionRequirement{}, err
+	}
 	req = normalizeCollectionName(req)
 	return finalizeCollectionRequirement(req, defaultSource, value)
 }
@@ -147,6 +150,25 @@ func parseCollectionMapFields(value map[string]any) CollectionRequirement {
 		req.Version = strings.TrimSpace(fmt.Sprint(raw))
 	}
 	return req
+}
+
+// checkNamespaceNameConflict rejects an explicit namespace combined with a
+// dotted name, e.g. namespace: foo + name: bar.baz. normalizeCollectionName
+// would otherwise keep the explicit namespace but silently overwrite name
+// with the dotted name's last segment, installing a different collection
+// than either field implies alone. The conditions mirror exactly those
+// under which normalizeCollectionName would perform that split: only a
+// namespace that is actually about to be shadowed is flagged, not every
+// dotted name.
+func checkNamespaceNameConflict(req CollectionRequirement) error {
+	if req.Namespace == "" || req.Name == "" || !strings.Contains(req.Name, ".") ||
+		req.Type != "" || looksLikeSourceName(req.Name) {
+		return nil
+	}
+	if _, _, ok := helpers.SplitFQDN(req.Name); !ok {
+		return nil
+	}
+	return fmt.Errorf("%w: namespace %q with dotted name %q", helpers.ErrConflictingNamespaceName, req.Namespace, req.Name)
 }
 
 func normalizeCollectionName(req CollectionRequirement) CollectionRequirement {
