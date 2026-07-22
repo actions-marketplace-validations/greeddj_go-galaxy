@@ -148,9 +148,15 @@ func newConfigFromCLI(c *cli.Command) *Config {
 	return cfg
 }
 
+// applyTimeout sets cfg.Timeout from the --timeout flag. Only the
+// absent/zero case (the flag not registered for this command, or an
+// explicit zero) falls back to the default; any positive value the user
+// supplies, however small, is honored as-is rather than silently floored.
 func applyTimeout(cfg *Config, c *cli.Command) {
 	cfg.Timeout = c.Duration("timeout")
-	cfg.Timeout = max(cfg.Timeout, helpers.FetchDefaultTimeout)
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = helpers.FetchDefaultTimeout
+	}
 }
 
 func loadAnsibleConfigFromCLI(c *cli.Command) (ansibleConfig, string, error) {

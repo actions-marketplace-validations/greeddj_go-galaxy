@@ -3,7 +3,9 @@ package config
 import (
 	"context"
 	"testing"
+	"time"
 
+	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/urfave/cli/v3"
 )
 
@@ -158,6 +160,85 @@ func TestApplyAnsibleConfigCacheDir(t *testing.T) {
 			server: testDefaultServer, ansibleConfigPath: testAnsibleConfigPath,
 		})
 	})
+}
+
+// newTimeoutCmd builds a *cli.Command for TestApplyTimeout. When
+// registerFlag is true it exposes a --timeout DurationFlag (mirroring how
+// CollectionFlags registers it, default helpers.FetchDefaultTimeout);
+// when false no such flag exists at all, mirroring commands like cleanup
+// that never register --timeout, so c.Duration("timeout") reads as zero.
+func newTimeoutCmd(t *testing.T, registerFlag bool, args []string) *cli.Command {
+	t.Helper()
+
+	var flags []cli.Flag
+	if registerFlag {
+		flags = []cli.Flag{&cli.DurationFlag{Name: "timeout", Value: helpers.FetchDefaultTimeout}}
+	}
+
+	var captured *cli.Command
+	cmd := &cli.Command{
+		Name:  "go-galaxy",
+		Flags: flags,
+		Action: func(_ context.Context, c *cli.Command) error {
+			captured = c
+			return nil
+		},
+	}
+
+	fullArgs := append([]string{"go-galaxy"}, args...)
+	if err := cmd.Run(context.Background(), fullArgs); err != nil {
+		t.Fatalf("cmd.Run() error = %v, want nil", err)
+	}
+	return captured
+}
+
+// TestApplyTimeout checks that applyTimeout only falls back to the default
+// on the absent/zero case: a small positive --timeout is honored as-is
+// (the regression this change fixes - it used to be silently floored to
+// the default), a larger value passes through unchanged, an unset flag
+// falls back to the default, and a command that never registers --timeout
+// at all (e.g. cleanup) also falls back to the default rather than
+// building an unbounded-timeout HTTP client.
+func TestApplyTimeout(t *testing.T) {
+	tests := []struct {
+		name         string
+		args         []string
+		want         time.Duration
+		registerFlag bool
+	}{
+		{
+			name:         "small positive timeout is honored, not floored",
+			registerFlag: true,
+			args:         []string{"--timeout=5s"},
+			want:         5 * time.Second,
+		},
+		{
+			name:         "larger timeout passes through unchanged",
+			registerFlag: true,
+			args:         []string{"--timeout=45s"},
+			want:         45 * time.Second,
+		},
+		{
+			name:         "unset flag falls back to default",
+			registerFlag: true,
+			want:         helpers.FetchDefaultTimeout,
+		},
+		{
+			name: "unregistered flag falls back to default",
+			want: helpers.FetchDefaultTimeout,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newTimeoutCmd(t, tt.registerFlag, tt.args)
+			cfg := &Config{}
+			applyTimeout(cfg, c)
+			if cfg.Timeout != tt.want {
+				t.Errorf("Timeout = %v, want %v", cfg.Timeout, tt.want)
+			}
+		})
+	}
 }
 
 // TestApplyAnsibleConfigServer checks the server -> Server mapping with the
