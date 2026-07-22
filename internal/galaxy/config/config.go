@@ -268,7 +268,7 @@ func discoverAnsibleConfigPath() string {
 // /etc/ansible) or from a user-supplied env var/flag value that is later
 // opened the same way any explicit --ansible-config path already is.
 func fileExists(path string) bool {
-	_, err := os.Stat(path) // #nosec G703 -- read-only existence check, see comment above
+	_, err := os.Stat(path)
 	return err == nil
 }
 
