@@ -123,11 +123,16 @@ func initCleanup(ctx context.Context, cfg *config.Config, runtime *infra.Infra) 
 	}, nil
 }
 
-func buildReachable(runtime *infra.Infra, registry *store.ProjectRegistry) (map[string]bool, map[string]installedCollection, error) {
+func buildReachable(runtime *infra.Infra, registry *store.ProjectRegistry) (map[string]bool, map[string][]installedCollection, error) {
 	reachable := make(map[string]bool)
 	installedIndex := make(map[string][]installedCollection)
 	depsByKey := make(map[string]map[string]string)
-	installedByKey := make(map[string]installedCollection)
+	// installedByKey accumulates every on-disk copy of a given key
+	// (ns.name@version): the same collection can be installed under more
+	// than one project's collections path, and every copy must be found so
+	// removeUnused can remove all of them in a single run rather than
+	// overwriting earlier copies and only shedding one per run.
+	installedByKey := make(map[string][]installedCollection)
 
 	for projectPath, project := range registry.Projects {
 		collectionsPath := pickCollectionsPath(projectPath, project)
@@ -165,10 +170,10 @@ func removeUnused(
 	backend cacheManager.Backend,
 	st *store.Store,
 	reachable map[string]bool,
-	installedByKey map[string]installedCollection,
+	installedByKey map[string][]installedCollection,
 ) (int, error) {
 	var removed int
-	for key, inst := range installedByKey {
+	for key, insts := range installedByKey {
 		if reachable[key] {
 			continue
 		}
@@ -177,8 +182,14 @@ func removeUnused(
 			runtime.Output.Printf("🧹 would remove %s", key)
 			continue
 		}
-		if err := removeInstalled(ctx, inst, backend.Artifacts()); err != nil {
-			return removed, err
+		// The same key can be installed under more than one project's
+		// collections path; every on-disk copy is removed in this single
+		// run, and the snapshot is pruned exactly once afterward rather
+		// than once per copy.
+		for _, inst := range insts {
+			if err := removeInstalled(ctx, inst, backend.Artifacts()); err != nil {
+				return removed, err
+			}
 		}
 		runtime.Output.Printf("🧹 removed %s", key)
 		if st != nil {
@@ -256,7 +267,7 @@ func scanInstalledCollections(
 	out output.Printer,
 	collectionsPath string,
 	index map[string][]installedCollection,
-	byKey map[string]installedCollection,
+	byKey map[string][]installedCollection,
 	deps map[string]map[string]string,
 ) error {
 	root := filepath.Join(collectionsPath, "ansible_collections")
@@ -284,7 +295,7 @@ func scanNamespaceDir(
 	out output.Printer,
 	collectionsPath, root, ns string,
 	index map[string][]installedCollection,
-	byKey map[string]installedCollection,
+	byKey map[string][]installedCollection,
 	deps map[string]map[string]string,
 ) error {
 	nameEntries, err := os.ReadDir(filepath.Join(root, ns))
@@ -314,7 +325,7 @@ func scanCollectionDir(
 	out output.Printer,
 	collectionsPath, root, ns, name string,
 	index map[string][]installedCollection,
-	byKey map[string]installedCollection,
+	byKey map[string][]installedCollection,
 	deps map[string]map[string]string,
 ) error {
 	manifestPath := filepath.Join(root, ns, name, "MANIFEST.json")
@@ -339,7 +350,7 @@ func scanCollectionDir(
 		return nil
 	}
 	index[record.FQDN] = append(index[record.FQDN], record)
-	byKey[key] = record
+	byKey[key] = append(byKey[key], record)
 	deps[key] = extractDeps(manifest)
 	return nil
 }

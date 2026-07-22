@@ -699,3 +699,63 @@ func TestScanSkipsDirWithoutManifest(t *testing.T) {
 		t.Fatalf("expected Start to succeed with a manifest-less directory present, got %v", err)
 	}
 }
+
+// TestRemovesAllCopiesInOneRun proves that when the same ns.name@version is
+// installed under two distinct projects' collections paths, both on-disk
+// copies are removed in a single Start run rather than one copy per run.
+// Before this fix, installedByKey was map[string]installedCollection: the
+// second project's scan silently overwrote the first project's record for
+// the same key, so removeUnused only ever saw and removed the last copy
+// scanned, leaving the other to survive until a later run.
+func TestRemovesAllCopiesInOneRun(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPathA := t.TempDir()
+	downloadPathB := t.TempDir()
+	installDirA := seedInstallTree(t, downloadPathA)
+	installDirB := seedInstallTree(t, downloadPathB)
+
+	// Both projects need a present workspace (checked above via
+	// seedInstallTree) and a readable, valid requirements file so the run
+	// reaches removeUnused rather than aborting via the requirements-load
+	// guard. Neither references ns.name, so the key is unreachable from
+	// both projects.
+	reqPathA := filepath.Join(t.TempDir(), "requirements-a.yml")
+	if err := os.WriteFile(reqPathA, []byte("collections: []\n"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write requirements file for project A: %v", err)
+	}
+	reqPathB := filepath.Join(t.TempDir(), "requirements-b.yml")
+	if err := os.WriteFile(reqPathB, []byte("collections: []\n"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write requirements file for project B: %v", err)
+	}
+	writeProjectRegistry(t, cacheDir, &store.ProjectRegistry{
+		Projects: map[string]store.ProjectRecord{
+			"proj-a": {
+				RequirementsFile: reqPathA,
+				CollectionsPath:  downloadPathA,
+				LastRun:          time.Now().UTC(),
+			},
+			"proj-b": {
+				RequirementsFile: reqPathB,
+				CollectionsPath:  downloadPathB,
+				LastRun:          time.Now().UTC(),
+			},
+		},
+	})
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+
+	manifestA := filepath.Join(installDirA, "MANIFEST.json")
+	if _, statErr := os.Stat(manifestA); !os.IsNotExist(statErr) {
+		t.Fatalf("expected project A's copy to be removed in this single run, stat error: %v", statErr)
+	}
+	manifestB := filepath.Join(installDirB, "MANIFEST.json")
+	if _, statErr := os.Stat(manifestB); !os.IsNotExist(statErr) {
+		t.Fatalf("expected project B's copy to be removed in this single run, stat error: %v", statErr)
+	}
+}
