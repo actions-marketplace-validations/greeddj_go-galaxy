@@ -120,6 +120,9 @@ var (
 	ErrStoreNil = errors.New("store is nil")
 	// ErrUnsupportedSchemaVersion indicates the snapshot schema version is unsupported.
 	ErrUnsupportedSchemaVersion = errors.New("unsupported snapshot schema version")
+	// ErrOutdatedSchemaVersion indicates the snapshot schema version is older
+	// than the current one and the snapshot should be dropped and rebuilt.
+	ErrOutdatedSchemaVersion = errors.New("outdated snapshot schema version")
 
 	// ErrOfflineMode indicates a network operation was attempted in offline mode.
 	ErrOfflineMode = errors.New("offline mode is enabled, network access is forbidden")

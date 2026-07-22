@@ -1,10 +1,15 @@
 package store
 
 import (
+	"errors"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
+	bolt "go.etcd.io/bbolt"
+	bolterrors "go.etcd.io/bbolt/errors"
 )
 
 func TestSaveLoadRoundTrip(t *testing.T) {
@@ -167,5 +172,98 @@ func assertVersions(t *testing.T, loaded *Store) {
 	versions, ok := loaded.GetVersionsCache("versions")
 	if !ok || len(versions) != 2 {
 		t.Fatalf("unexpected versions cache: %#v", versions)
+	}
+}
+
+// TestSaveRollsBackWholeTransactionOnMidSaveFailure proves that Save writes
+// the meta bucket and all eight data buckets inside a single Bolt
+// transaction: a failure partway through (here, an oversized key in the
+// installed bucket, which the fixed save order writes after api_cache)
+// must roll back the entire attempt, leaving the previously committed
+// snapshot exactly as it was rather than a mix of old and new data.
+func TestSaveRollsBackWholeTransactionOnMidSaveFailure(t *testing.T) {
+	t.Parallel()
+	dbs := openTestDBs(t)
+
+	st := New()
+	st.SetAPICache("api", APICacheEntry{URL: "v1"})
+	st.SetInstalled("normal.key", InstalledEntry{Source: "v1"})
+	mustSave(t, dbs, st)
+
+	// Mutate api_cache (written before installed) and inject a key that
+	// exceeds bolt.MaxKeySize into installed (written after api_cache),
+	// forcing a mid-transaction failure in a non-first bucket.
+	st.SetAPICache("api", APICacheEntry{URL: "v2"})
+	giantKey := strings.Repeat("k", 40000)
+	st.SetInstalled(giantKey, InstalledEntry{Source: "v2"})
+
+	err := Save(dbs, st)
+	if err == nil {
+		t.Fatalf("expected Save to fail on oversized key")
+	}
+	if !errors.Is(err, bolterrors.ErrKeyTooLarge) {
+		t.Fatalf("expected ErrKeyTooLarge, got %v", err)
+	}
+
+	loaded := mustLoad(t, dbs)
+	entry, ok := loaded.GetAPICache("api")
+	if !ok || entry.URL != "v1" {
+		t.Fatalf("expected api cache to remain at v1 after rollback, got %#v (ok=%v)", entry, ok)
+	}
+	if _, ok := loaded.GetInstalled(giantKey); ok {
+		t.Fatalf("expected giant key to be absent after rolled-back save")
+	}
+	if _, ok := loaded.GetInstalled("normal.key"); !ok {
+		t.Fatalf("expected normal.key from the first save to survive")
+	}
+}
+
+// TestLoadRejectsNewerSchemaAndDropsOlderSchema exercises ValidateSchema
+// through Load: a newer-than-current schema version is reported as an
+// error (this binary cannot safely interpret it), while an older-than
+// -current version causes Load to drop the snapshot and return a fresh
+// empty Store with a nil error rather than partially trusting stale data.
+func TestLoadRejectsNewerSchemaAndDropsOlderSchema(t *testing.T) {
+	t.Parallel()
+	dbs := openTestDBs(t)
+	fixed := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+	st := buildTestStore(fixed)
+	mustSave(t, dbs, st)
+
+	newerVersion := helpers.StoreSnapshotSchemaVersion + 1
+	stampSchemaVersion(t, dbs, newerVersion)
+	if _, err := Load(dbs); !errors.Is(err, helpers.ErrUnsupportedSchemaVersion) {
+		t.Fatalf("expected ErrUnsupportedSchemaVersion, got %v", err)
+	}
+
+	olderVersion := helpers.StoreSnapshotSchemaVersion - 1
+	stampSchemaVersion(t, dbs, olderVersion)
+	loaded, err := Load(dbs)
+	if err != nil {
+		t.Fatalf("expected nil error for outdated schema, got %v", err)
+	}
+	fresh := New()
+	if loaded.Meta.SchemaVersion != fresh.Meta.SchemaVersion {
+		t.Fatalf("expected fresh schema version %d, got %d", fresh.Meta.SchemaVersion, loaded.Meta.SchemaVersion)
+	}
+	if len(loaded.APICache) != 0 || len(loaded.Installed) != 0 {
+		t.Fatalf("expected an empty store after dropping an outdated schema, got %#v", loaded)
+	}
+}
+
+// stampSchemaVersion directly overwrites the meta bucket's schema version
+// key, bypassing Save, to simulate a snapshot written by a different
+// binary version.
+func stampSchemaVersion(t *testing.T, dbs *DBs, version int) {
+	t.Helper()
+	err := dbs.db.Update(func(tx *bolt.Tx) error {
+		bucket, err := tx.CreateBucketIfNotExists([]byte(helpers.StoreBucketMeta))
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte(helpers.StoreMetaSchemaVersion), []byte(strconv.Itoa(version)))
+	})
+	if err != nil {
+		t.Fatalf("failed to stamp schema version: %v", err)
 	}
 }

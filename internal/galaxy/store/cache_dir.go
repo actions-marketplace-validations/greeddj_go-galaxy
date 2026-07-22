@@ -51,7 +51,6 @@ func isDeleteCacheName(name string) bool {
 		helpers.StoreSnapshotDepsCache,
 		helpers.StoreSnapshotVersions,
 		helpers.StoreDBLock,
-		helpers.StoreDBLocal,
 	}
 	return slices.Contains(deleteList, name)
 }

@@ -15,11 +15,11 @@ func TestOpenDBsReturnsCacheBusyOnTimeout(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	metaPath := filepath.Join(dir, helpers.StoreSnapshotMeta)
+	dbPath := filepath.Join(dir, helpers.StoreDBLocal)
 
-	// Hold the meta DB's file lock externally to simulate a concurrent
-	// process already occupying the cache.
-	holder, err := bolt.Open(metaPath, helpers.FileMod, nil)
+	// Hold the consolidated DB's file lock externally to simulate a
+	// concurrent process already occupying the cache.
+	holder, err := bolt.Open(dbPath, helpers.FileMod, nil)
 	if err != nil {
 		t.Fatalf("failed to open holder DB: %v", err)
 	}

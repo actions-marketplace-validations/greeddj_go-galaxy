@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"strconv"
@@ -403,28 +404,45 @@ func (m *Store) snapshotData() snapshotData {
 	return data
 }
 
-// Load reads cached state from Bolt databases.
+// Load reads cached state from the consolidated Bolt database. A schema
+// version older than the current one causes the snapshot to be dropped and
+// rebuilt (nil error, a fresh empty Store) rather than partially trusted; a
+// newer version is reported as an error since this binary cannot safely
+// interpret it.
 func Load(dbs *DBs) (*Store, error) {
 	store := New()
-	if dbs == nil {
+	if dbs == nil || dbs.db == nil {
 		return store, nil
 	}
 
-	if err := loadMeta(dbs, store); err != nil {
+	if err := dbs.db.View(func(tx *bolt.Tx) error {
+		return loadMeta(tx, store)
+	}); err != nil {
 		return nil, err
 	}
-	if err := validateSnapshotSchema(store.Meta.SchemaVersion); err != nil {
+
+	if err := ValidateSchema(store.Meta.SchemaVersion); err != nil {
+		if errors.Is(err, helpers.ErrOutdatedSchemaVersion) {
+			return New(), nil
+		}
 		return nil, err
 	}
-	if err := runLoadSteps(dbs, store); err != nil {
+
+	if err := dbs.db.View(func(tx *bolt.Tx) error {
+		return runLoadSteps(tx, store)
+	}); err != nil {
 		return nil, err
 	}
 	return store, nil
 }
 
-// Save writes cached state to Bolt databases.
+// Save writes cached state to the consolidated Bolt database. The meta
+// bucket and all eight data buckets are written inside a single Bolt
+// transaction so a mid-save failure (e.g. a key or value exceeding Bolt's
+// limits) leaves the previously committed snapshot fully intact instead of
+// a partially overwritten mix of old and new data.
 func Save(dbs *DBs, store *Store) error {
-	if dbs == nil {
+	if dbs == nil || dbs.db == nil {
 		return helpers.ErrDbNil
 	}
 	if store == nil {
@@ -435,92 +453,110 @@ func Save(dbs *DBs, store *Store) error {
 	data.Meta.SchemaVersion = helpers.StoreSnapshotSchemaVersion
 	data.Meta.LastSnapshot = time.Now().UTC()
 
-	if err := saveMeta(dbs, data.Meta); err != nil {
-		return err
-	}
-	return runSaveSteps(dbs, data)
-}
-
-func validateSnapshotSchema(version int) error {
-	if version > helpers.StoreSnapshotSchemaVersion {
-		return fmt.Errorf("%w: %d", helpers.ErrUnsupportedSchemaVersion, version)
-	}
-	return nil
-}
-
-func runLoadSteps(dbs *DBs, store *Store) error {
-	steps := []func() error{
-		func() error { return loadAPICache(dbs, store) },
-		func() error { return loadInstalled(dbs, store) },
-		func() error { return loadDepsCache(dbs, store) },
-		func() error { return loadGraph(dbs, store) },
-		func() error { return loadRequirements(dbs, store) },
-		func() error { return loadRoots(dbs, store) },
-		func() error { return loadResolved(dbs, store) },
-		func() error { return loadVersions(dbs, store) },
-	}
-	for _, step := range steps {
-		if err := step(); err != nil {
+	return dbs.db.Update(func(tx *bolt.Tx) error {
+		if err := saveMeta(tx, data.Meta); err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-func runSaveSteps(dbs *DBs, data snapshotData) error {
-	steps := []func() error{
-		func() error { return saveAPICache(dbs, data) },
-		func() error { return saveDepsCache(dbs, data) },
-		func() error { return saveInstalled(dbs, data) },
-		func() error { return saveGraph(dbs, data) },
-		func() error { return saveRequirements(dbs, data) },
-		func() error { return saveRoots(dbs, data) },
-		func() error { return saveResolved(dbs, data) },
-		func() error { return saveVersions(dbs, data) },
-	}
-	for _, step := range steps {
-		if err := step(); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func loadMeta(dbs *DBs, store *Store) error {
-	if dbs.meta == nil {
-		return nil
-	}
-	return dbs.meta.View(func(tx *bolt.Tx) error {
-		metaBucket := tx.Bucket([]byte(helpers.StoreBucketMeta))
-		if metaBucket == nil {
-			return nil
-		}
-		if v := metaBucket.Get([]byte(helpers.StoreMetaSchemaVersion)); v != nil {
-			version, err := strconv.Atoi(string(v))
-			if err != nil {
-				return fmt.Errorf("invalid schema version: %w", err)
-			}
-			store.Meta.SchemaVersion = version
-		}
-		if v := metaBucket.Get([]byte(helpers.StoreMetaLastSnapshot)); v != nil {
-			t, err := time.Parse(time.RFC3339Nano, string(v))
-			if err != nil {
-				return fmt.Errorf("invalid snapshot time: %w", err)
-			}
-			store.Meta.LastSnapshot = t
-		}
-		if v := metaBucket.Get([]byte(helpers.StoreMetaRequirementsHash)); v != nil {
-			store.Meta.RequirementsHash = string(v)
-		}
-		if v := metaBucket.Get([]byte(helpers.StoreMetaServer)); v != nil {
-			store.Meta.Server = string(v)
-		}
-		return nil
+		return runSaveSteps(tx, data)
 	})
 }
 
-func loadAPICache(dbs *DBs, store *Store) error {
-	return loadBucket(dbs.apiCache, helpers.StoreBucketAPICache, func(k, v []byte) error {
+// ValidateSchema reports whether a stored snapshot schema version is
+// compatible with this binary. A newer version means this build is too old
+// to safely interpret the snapshot; an older version means the snapshot
+// predates a breaking change and must be dropped and rebuilt rather than
+// partially trusted.
+func ValidateSchema(version int) error {
+	switch {
+	case version == helpers.StoreSnapshotSchemaVersion:
+		return nil
+	case version > helpers.StoreSnapshotSchemaVersion:
+		return fmt.Errorf("%w: %d", helpers.ErrUnsupportedSchemaVersion, version)
+	default:
+		return fmt.Errorf("%w: %d", helpers.ErrOutdatedSchemaVersion, version)
+	}
+}
+
+// runLoadSteps reads the eight data buckets in the given transaction.
+func runLoadSteps(tx *bolt.Tx, store *Store) error {
+	steps := []func() error{
+		func() error { return loadAPICache(tx, store) },
+		func() error { return loadInstalled(tx, store) },
+		func() error { return loadDepsCache(tx, store) },
+		func() error { return loadGraph(tx, store) },
+		func() error { return loadRequirements(tx, store) },
+		func() error { return loadRoots(tx, store) },
+		func() error { return loadResolved(tx, store) },
+		func() error { return loadVersions(tx, store) },
+	}
+	for _, step := range steps {
+		if err := step(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// runSaveSteps writes the eight data buckets in the given transaction, in a
+// fixed order (api_cache, deps_cache, installed, graph, requirements, roots,
+// resolved, versions_cache) that callers rely on for fault injection tests.
+func runSaveSteps(tx *bolt.Tx, data snapshotData) error {
+	steps := []func() error{
+		func() error { return saveAPICache(tx, data) },
+		func() error { return saveDepsCache(tx, data) },
+		func() error { return saveInstalled(tx, data) },
+		func() error { return saveGraph(tx, data) },
+		func() error { return saveRequirements(tx, data) },
+		func() error { return saveRoots(tx, data) },
+		func() error { return saveResolved(tx, data) },
+		func() error { return saveVersions(tx, data) },
+	}
+	for _, step := range steps {
+		if err := step(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// loadMeta reads the meta bucket into store.Meta. When the meta bucket does
+// not exist at all (a brand-new file), the schema version keeps the current
+// default set by New(). When the bucket exists but the schema key is
+// missing, the version is treated as 0 (outdated) rather than silently
+// keeping the current-version default, so a populated-but-unstamped
+// database is dropped and rebuilt instead of passing validation.
+func loadMeta(tx *bolt.Tx, store *Store) error {
+	metaBucket := tx.Bucket([]byte(helpers.StoreBucketMeta))
+	if metaBucket == nil {
+		return nil
+	}
+	if v := metaBucket.Get([]byte(helpers.StoreMetaSchemaVersion)); v != nil {
+		version, err := strconv.Atoi(string(v))
+		if err != nil {
+			return fmt.Errorf("invalid schema version: %w", err)
+		}
+		store.Meta.SchemaVersion = version
+	} else {
+		store.Meta.SchemaVersion = 0
+	}
+	if v := metaBucket.Get([]byte(helpers.StoreMetaLastSnapshot)); v != nil {
+		t, err := time.Parse(time.RFC3339Nano, string(v))
+		if err != nil {
+			return fmt.Errorf("invalid snapshot time: %w", err)
+		}
+		store.Meta.LastSnapshot = t
+	}
+	if v := metaBucket.Get([]byte(helpers.StoreMetaRequirementsHash)); v != nil {
+		store.Meta.RequirementsHash = string(v)
+	}
+	if v := metaBucket.Get([]byte(helpers.StoreMetaServer)); v != nil {
+		store.Meta.Server = string(v)
+	}
+	return nil
+}
+
+func loadAPICache(tx *bolt.Tx, store *Store) error {
+	return loadBucket(tx, helpers.StoreBucketAPICache, func(k, v []byte) error {
 		var entry APICacheEntry
 		if err := json.Unmarshal(v, &entry); err != nil {
 			return err
@@ -530,8 +566,8 @@ func loadAPICache(dbs *DBs, store *Store) error {
 	})
 }
 
-func loadInstalled(dbs *DBs, store *Store) error {
-	return loadBucket(dbs.installed, helpers.StoreBucketInstalled, func(k, v []byte) error {
+func loadInstalled(tx *bolt.Tx, store *Store) error {
+	return loadBucket(tx, helpers.StoreBucketInstalled, func(k, v []byte) error {
 		var entry InstalledEntry
 		if err := json.Unmarshal(v, &entry); err != nil {
 			return err
@@ -541,8 +577,8 @@ func loadInstalled(dbs *DBs, store *Store) error {
 	})
 }
 
-func loadDepsCache(dbs *DBs, store *Store) error {
-	return loadBucket(dbs.depsCache, helpers.StoreBucketDepsCache, func(k, v []byte) error {
+func loadDepsCache(tx *bolt.Tx, store *Store) error {
+	return loadBucket(tx, helpers.StoreBucketDepsCache, func(k, v []byte) error {
 		var entry map[string]string
 		if err := json.Unmarshal(v, &entry); err != nil {
 			return err
@@ -552,8 +588,8 @@ func loadDepsCache(dbs *DBs, store *Store) error {
 	})
 }
 
-func loadGraph(dbs *DBs, store *Store) error {
-	return loadBucket(dbs.graph, helpers.StoreBucketGraph, func(k, v []byte) error {
+func loadGraph(tx *bolt.Tx, store *Store) error {
+	return loadBucket(tx, helpers.StoreBucketGraph, func(k, v []byte) error {
 		var deps []string
 		if err := json.Unmarshal(v, &deps); err != nil {
 			return err
@@ -563,8 +599,8 @@ func loadGraph(dbs *DBs, store *Store) error {
 	})
 }
 
-func loadRequirements(dbs *DBs, store *Store) error {
-	return loadBucket(dbs.requirements, helpers.StoreBucketRequirements, func(k, v []byte) error {
+func loadRequirements(tx *bolt.Tx, store *Store) error {
+	return loadBucket(tx, helpers.StoreBucketRequirements, func(k, v []byte) error {
 		var spec RequirementSpec
 		if err := json.Unmarshal(v, &spec); err != nil {
 			return err
@@ -574,8 +610,8 @@ func loadRequirements(dbs *DBs, store *Store) error {
 	})
 }
 
-func loadRoots(dbs *DBs, store *Store) error {
-	return loadBucket(dbs.roots, helpers.StoreBucketRoots, func(k, v []byte) error {
+func loadRoots(tx *bolt.Tx, store *Store) error {
+	return loadBucket(tx, helpers.StoreBucketRoots, func(k, v []byte) error {
 		var roots []string
 		if err := json.Unmarshal(v, &roots); err != nil {
 			return err
@@ -585,8 +621,8 @@ func loadRoots(dbs *DBs, store *Store) error {
 	})
 }
 
-func loadResolved(dbs *DBs, store *Store) error {
-	return loadBucket(dbs.resolved, helpers.StoreBucketResolved, func(k, v []byte) error {
+func loadResolved(tx *bolt.Tx, store *Store) error {
+	return loadBucket(tx, helpers.StoreBucketResolved, func(k, v []byte) error {
 		var entry ResolvedEntry
 		if err := json.Unmarshal(v, &entry); err == nil && entry.Version != "" {
 			store.Resolved[string(k)] = entry
@@ -597,8 +633,8 @@ func loadResolved(dbs *DBs, store *Store) error {
 	})
 }
 
-func loadVersions(dbs *DBs, store *Store) error {
-	return loadBucket(dbs.versions, helpers.StoreBucketVersions, func(k, v []byte) error {
+func loadVersions(tx *bolt.Tx, store *Store) error {
+	return loadBucket(tx, helpers.StoreBucketVersions, func(k, v []byte) error {
 		var entry []string
 		if err := json.Unmarshal(v, &entry); err != nil {
 			return err
@@ -608,79 +644,74 @@ func loadVersions(dbs *DBs, store *Store) error {
 	})
 }
 
-func saveMeta(dbs *DBs, meta SnapshotMeta) error {
-	if dbs.meta == nil {
-		return nil
+func saveMeta(tx *bolt.Tx, meta SnapshotMeta) error {
+	metaBucket, err := ensureEmptyBucket(tx, helpers.StoreBucketMeta)
+	if err != nil {
+		return err
 	}
-	return dbs.meta.Update(func(tx *bolt.Tx) error {
-		metaBucket, err := ensureEmptyBucket(tx, helpers.StoreBucketMeta)
-		if err != nil {
+	if err := metaBucket.Put([]byte(helpers.StoreMetaSchemaVersion), []byte(strconv.Itoa(meta.SchemaVersion))); err != nil {
+		return err
+	}
+	if err := metaBucket.Put([]byte(helpers.StoreMetaLastSnapshot), []byte(meta.LastSnapshot.Format(time.RFC3339Nano))); err != nil {
+		return err
+	}
+	if meta.RequirementsHash != "" {
+		if err := metaBucket.Put([]byte(helpers.StoreMetaRequirementsHash), []byte(meta.RequirementsHash)); err != nil {
 			return err
 		}
-		if err := metaBucket.Put([]byte(helpers.StoreMetaSchemaVersion), []byte(strconv.Itoa(meta.SchemaVersion))); err != nil {
+	}
+	if meta.Server != "" {
+		if err := metaBucket.Put([]byte(helpers.StoreMetaServer), []byte(meta.Server)); err != nil {
 			return err
 		}
-		if err := metaBucket.Put([]byte(helpers.StoreMetaLastSnapshot), []byte(meta.LastSnapshot.Format(time.RFC3339Nano))); err != nil {
-			return err
-		}
-		if meta.RequirementsHash != "" {
-			if err := metaBucket.Put([]byte(helpers.StoreMetaRequirementsHash), []byte(meta.RequirementsHash)); err != nil {
-				return err
-			}
-		}
-		if meta.Server != "" {
-			if err := metaBucket.Put([]byte(helpers.StoreMetaServer), []byte(meta.Server)); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
-func saveAPICache(dbs *DBs, data snapshotData) error {
-	return saveBucket(dbs.apiCache, helpers.StoreBucketAPICache, data.APICache, func(entry APICacheEntry) ([]byte, error) {
+func saveAPICache(tx *bolt.Tx, data snapshotData) error {
+	return saveBucket(tx, helpers.StoreBucketAPICache, data.APICache, func(entry APICacheEntry) ([]byte, error) {
 		return json.Marshal(&entry)
 	})
 }
 
-func saveDepsCache(dbs *DBs, data snapshotData) error {
-	return saveBucket(dbs.depsCache, helpers.StoreBucketDepsCache, data.DepsCache, func(entry map[string]string) ([]byte, error) {
+func saveDepsCache(tx *bolt.Tx, data snapshotData) error {
+	return saveBucket(tx, helpers.StoreBucketDepsCache, data.DepsCache, func(entry map[string]string) ([]byte, error) {
 		return json.Marshal(&entry)
 	})
 }
 
-func saveInstalled(dbs *DBs, data snapshotData) error {
-	return saveBucket(dbs.installed, helpers.StoreBucketInstalled, data.Installed, func(entry InstalledEntry) ([]byte, error) {
+func saveInstalled(tx *bolt.Tx, data snapshotData) error {
+	return saveBucket(tx, helpers.StoreBucketInstalled, data.Installed, func(entry InstalledEntry) ([]byte, error) {
 		return json.Marshal(&entry)
 	})
 }
 
-func saveGraph(dbs *DBs, data snapshotData) error {
-	return saveBucket(dbs.graph, helpers.StoreBucketGraph, data.Graph, func(entry []string) ([]byte, error) {
+func saveGraph(tx *bolt.Tx, data snapshotData) error {
+	return saveBucket(tx, helpers.StoreBucketGraph, data.Graph, func(entry []string) ([]byte, error) {
 		return json.Marshal(&entry)
 	})
 }
 
-func saveRequirements(dbs *DBs, data snapshotData) error {
-	return saveBucket(dbs.requirements, helpers.StoreBucketRequirements, data.Requirements, func(entry RequirementSpec) ([]byte, error) {
+func saveRequirements(tx *bolt.Tx, data snapshotData) error {
+	return saveBucket(tx, helpers.StoreBucketRequirements, data.Requirements, func(entry RequirementSpec) ([]byte, error) {
 		return json.Marshal(&entry)
 	})
 }
 
-func saveRoots(dbs *DBs, data snapshotData) error {
-	return saveBucket(dbs.roots, helpers.StoreBucketRoots, data.Roots, func(entry []string) ([]byte, error) {
+func saveRoots(tx *bolt.Tx, data snapshotData) error {
+	return saveBucket(tx, helpers.StoreBucketRoots, data.Roots, func(entry []string) ([]byte, error) {
 		return json.Marshal(&entry)
 	})
 }
 
-func saveResolved(dbs *DBs, data snapshotData) error {
-	return saveBucket(dbs.resolved, helpers.StoreBucketResolved, data.Resolved, func(entry ResolvedEntry) ([]byte, error) {
+func saveResolved(tx *bolt.Tx, data snapshotData) error {
+	return saveBucket(tx, helpers.StoreBucketResolved, data.Resolved, func(entry ResolvedEntry) ([]byte, error) {
 		return json.Marshal(&entry)
 	})
 }
 
-func saveVersions(dbs *DBs, data snapshotData) error {
-	return saveBucket(dbs.versions, helpers.StoreBucketVersions, data.Versions, func(entry []string) ([]byte, error) {
+func saveVersions(tx *bolt.Tx, data snapshotData) error {
+	return saveBucket(tx, helpers.StoreBucketVersions, data.Versions, func(entry []string) ([]byte, error) {
 		return json.Marshal(&entry)
 	})
 }
@@ -697,38 +728,29 @@ func ensureEmptyBucket(tx *bolt.Tx, name string) (*bolt.Bucket, error) {
 }
 
 // loadBucket iterates over a bucket and calls fn for each entry.
-func loadBucket(db *bolt.DB, name string, fn func(k, v []byte) error) error {
-	if db == nil {
+func loadBucket(tx *bolt.Tx, name string, fn func(k, v []byte) error) error {
+	bucket := tx.Bucket([]byte(name))
+	if bucket == nil {
 		return nil
 	}
-	return db.View(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket([]byte(name))
-		if bucket == nil {
-			return nil
-		}
-		return bucket.ForEach(fn)
-	})
+	return bucket.ForEach(fn)
 }
 
-// saveBucket writes data to a bucket using the encode callback.
-func saveBucket[T any](db *bolt.DB, name string, data map[string]T, encode func(T) ([]byte, error)) error {
-	if db == nil {
-		return nil
+// saveBucket writes data to a bucket using the encode callback, within the
+// caller's transaction.
+func saveBucket[T any](tx *bolt.Tx, name string, data map[string]T, encode func(T) ([]byte, error)) error {
+	bucket, err := ensureEmptyBucket(tx, name)
+	if err != nil {
+		return err
 	}
-	return db.Update(func(tx *bolt.Tx) error {
-		bucket, err := ensureEmptyBucket(tx, name)
+	for key, entry := range data {
+		encoded, err := encode(entry)
 		if err != nil {
 			return err
 		}
-		for key, entry := range data {
-			encoded, err := encode(entry)
-			if err != nil {
-				return err
-			}
-			if err := bucket.Put([]byte(key), encoded); err != nil {
-				return err
-			}
+		if err := bucket.Put([]byte(key), encoded); err != nil {
+			return err
 		}
-		return nil
-	})
+	}
+	return nil
 }

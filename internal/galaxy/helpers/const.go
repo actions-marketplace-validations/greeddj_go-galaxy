@@ -41,7 +41,7 @@ const (
 	FetchExpectContinueTimeout = 1 * time.Second
 
 	// StoreSnapshotSchemaVersion is the current snapshot schema version.
-	StoreSnapshotSchemaVersion = 2
+	StoreSnapshotSchemaVersion = 3
 
 	// StoreDBLock is the cache lock file name.
 	StoreDBLock = ".go-galaxy.lock"
