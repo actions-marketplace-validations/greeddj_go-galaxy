@@ -27,25 +27,24 @@ type fakeObject struct {
 // SigV4 verification (the client always signs requests, but this fake never
 // checks the Authorization header).
 type fakeS3 struct {
-	objects map[string]fakeObject
-	bucket  string
-	mu      sync.Mutex
-	// deleteDelay, when non-zero, makes handleDelete wait that long (or
-	// until the request's context is done, whichever comes first) before
-	// acting. It lets a test simulate a slow/hanging DELETE so a caller's
-	// bounded context can be observed timing it out. Zero (the default)
-	// preserves the original immediate-delete behavior for every other
-	// test. It must be set before the fake starts handling requests that
-	// exercise it: this test double does not synchronize concurrent
-	// writes to it against concurrent reads from handler goroutines.
-	deleteDelay time.Duration
-	// ignoreIfNoneMatch, when true, makes handlePut always overwrite and
-	// report success regardless of the If-None-Match header, simulating a
-	// non-conforming backend that does not enforce conditional PUT. False
-	// (the default) preserves the original 412-on-existing behavior every
-	// other test relies on. Like deleteDelay, it must be set before the
-	// fake starts handling requests that exercise it.
+	objects           map[string]fakeObject
+	fails             map[string]*forcedFailure
+	bucket            string
+	deleteDelay       time.Duration
+	mu                sync.Mutex
 	ignoreIfNoneMatch bool
+}
+
+// forcedFailure is a fault-injection rule matched by object key and HTTP
+// method: while remaining is nonzero, a matching request receives status
+// instead of the fake's normal response, and remaining is decremented
+// (unless already negative, meaning "fail indefinitely"). It exists to
+// force error branches - HEAD/PUT/DELETE failures - that a conforming
+// in-memory fake would otherwise never produce on its own.
+type forcedFailure struct {
+	method    string // http.MethodHead/Put/Delete, or "" to match any method
+	status    int
+	remaining int
 }
 
 // newFakeS3 constructs an empty fake bucket store named "test". One
@@ -70,6 +69,35 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// failNext arms a forced-failure rule for key: the next count requests to
+// key matching method (or every method, if method == "") receive status
+// instead of the fake's normal response. count == -1 fails every matching
+// request indefinitely, until failNext is called again for the same key.
+func (f *fakeS3) failNext(key, method string, status, count int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fails == nil {
+		f.fails = make(map[string]*forcedFailure)
+	}
+	f.fails[key] = &forcedFailure{method: method, status: status, remaining: count}
+}
+
+// shouldFail reports whether the request for key+method matches an armed
+// forced-failure rule, consuming one use of it (unless the rule fails
+// indefinitely). It locks mu itself; callers must not already hold mu.
+func (f *fakeS3) shouldFail(key, method string) (int, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	rule, ok := f.fails[key]
+	if !ok || rule.remaining == 0 || (rule.method != "" && rule.method != method) {
+		return 0, false
+	}
+	if rule.remaining > 0 {
+		rule.remaining--
+	}
+	return rule.status, true
 }
 
 // handleBucket answers bucket-level requests: existence probes (HEAD) and
@@ -141,8 +169,13 @@ func (f *fakeS3) handleObject(w http.ResponseWriter, r *http.Request, key string
 
 // handleHead reports the stored object's metadata headers and Last-Modified
 // verbatim, or 404 if absent. This backs the lock protocol's HEAD-only reads
-// (token/deadline verification never needs to transfer the body).
+// (token/deadline verification never needs to transfer the body). A forced
+// failure armed via failNext takes precedence over the normal response.
 func (f *fakeS3) handleHead(w http.ResponseWriter, key string) {
+	if status, fail := f.shouldFail(key, http.MethodHead); fail {
+		w.WriteHeader(status)
+		return
+	}
 	f.mu.Lock()
 	obj, ok := f.objects[key]
 	f.mu.Unlock()
@@ -173,11 +206,18 @@ func (f *fakeS3) handleGet(w http.ResponseWriter, key string) {
 // honoring the conditional If-None-Match: * header used by the distributed
 // lock's "create if absent" semantics: it fails with 412 when the key
 // already exists - unless ignoreIfNoneMatch simulates a non-conforming
-// backend that always overwrites regardless of the header.
+// backend that always overwrites regardless of the header. A forced failure
+// armed via failNext takes precedence over both of those behaviors (e.g. to
+// simulate another writer's create winning a race, regardless of what this
+// fake's own object map currently holds for key).
 func (f *fakeS3) handlePut(w http.ResponseWriter, r *http.Request, key string) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if status, fail := f.shouldFail(key, http.MethodPut); fail {
+		w.WriteHeader(status)
 		return
 	}
 
@@ -225,8 +265,13 @@ func writeObjectHeaders(header http.Header, obj fakeObject) {
 // even when the key is already absent. If deleteDelay is set, it first
 // waits that long - or until the request's context is done, whichever
 // comes first - so a test can make DELETE outlast a caller's bounded
-// context and observe the resulting timeout.
+// context and observe the resulting timeout. A forced failure armed via
+// failNext takes precedence over both of those behaviors.
 func (f *fakeS3) handleDelete(w http.ResponseWriter, r *http.Request, key string) {
+	if status, fail := f.shouldFail(key, http.MethodDelete); fail {
+		w.WriteHeader(status)
+		return
+	}
 	f.mu.Lock()
 	delay := f.deleteDelay
 	f.mu.Unlock()

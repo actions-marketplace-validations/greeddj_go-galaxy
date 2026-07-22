@@ -211,7 +211,7 @@ func (b *Backend) putLock(ctx context.Context, key, token string, deadline time.
 		Updated:  now,
 	})
 	if err != nil {
-		return err
+		return err // unreachable for this fixed four-string struct; kept as a defensive guard.
 	}
 	reader := bytes.NewReader(body)
 	return b.client.putObject(ctx, key, reader, int64(len(body)), "application/json", "", meta, create, "")

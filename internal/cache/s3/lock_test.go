@@ -12,6 +12,11 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 )
 
+// foreignToken stands in for a lock token belonging to some other acquirer
+// across the tests that seed a lock object out-of-band to simulate
+// contention, reclaim, or takeover scenarios.
+const foreignToken = "foreign-token"
+
 // testLockTiming returns a lockTiming with ttl set to the given value and
 // every other interval shrunk to make the lock's state machine fast and
 // deterministic in tests. Callers needing a non-default waitCeiling,
@@ -189,7 +194,7 @@ func TestLockReclaimsExpiredLock(t *testing.T) {
 	ctx := context.Background()
 
 	pastDeadline := time.Now().UTC().Add(-time.Hour)
-	seedLockObject(ctx, t, b, "foreign-token", pastDeadline)
+	seedLockObject(ctx, t, b, foreignToken, pastDeadline)
 	time.Sleep(2 * b.lock.ttl) // let the seeded lock's TTL elapse per Last-Modified
 
 	release, err := b.Lock(ctx)
@@ -203,7 +208,7 @@ func TestLockReclaimsExpiredLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("headObject: %v", err)
 	}
-	if got := headers.Get("X-Amz-Meta-Token"); got == "foreign-token" {
+	if got := headers.Get("X-Amz-Meta-Token"); got == foreignToken {
 		t.Fatalf("expected the reclaimer's token, still foreign-token")
 	}
 	deadline, err := time.Parse(time.RFC3339, headers.Get("X-Amz-Meta-Deadline"))
@@ -226,7 +231,7 @@ func TestLockWaitsThenTimesOutOnLiveLock(t *testing.T) {
 	b.lock = timing
 	ctx := context.Background()
 
-	seedLockObject(ctx, t, b, "foreign-token", time.Now().UTC().Add(b.lock.ttl))
+	seedLockObject(ctx, t, b, foreignToken, time.Now().UTC().Add(b.lock.ttl))
 
 	start := time.Now()
 	_, err := b.Lock(ctx)
@@ -254,7 +259,7 @@ func TestLockAcquirePropagatesCallerCancellation(t *testing.T) {
 	timing.waitCeiling = 10 * time.Second
 	b.lock = timing
 
-	seedLockObject(context.Background(), t, b, "foreign-token", time.Now().UTC().Add(b.lock.ttl))
+	seedLockObject(context.Background(), t, b, foreignToken, time.Now().UTC().Add(b.lock.ttl))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -345,7 +350,7 @@ func TestHeartbeatDetectsLostOwnershipAndReleaseSkipsDelete(t *testing.T) {
 	key := b.key(locksPrefix, lockObject)
 	// Simulate a foreign acquirer reclaiming the lock out-of-band (e.g.
 	// after this holder stalled past its TTL from S3's point of view).
-	if err := b.putLock(ctx, key, "foreign-token", time.Now().UTC().Add(b.lock.ttl), false); err != nil {
+	if err := b.putLock(ctx, key, foreignToken, time.Now().UTC().Add(b.lock.ttl), false); err != nil {
 		t.Fatalf("seed foreign takeover: %v", err)
 	}
 
@@ -359,8 +364,180 @@ func TestHeartbeatDetectsLostOwnershipAndReleaseSkipsDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("headObject: %v", err)
 	}
-	if got := headers.Get("X-Amz-Meta-Token"); got != "foreign-token" {
+	if got := headers.Get("X-Amz-Meta-Token"); got != foreignToken {
 		t.Fatalf("expected the foreign lock to remain in place, got token %q", got)
+	}
+}
+
+// TestHeartbeatSurvivesTransientHeadFailures forces the heartbeat's HEAD
+// (verifyOwner) calls to fail a bounded number of times with a transient
+// server error, then recover, while the holder keeps the lock. It confirms
+// heartbeatTick's error branch never flips the lost flag on its own: only a
+// definitive token mismatch may do that. Release afterward must succeed
+// (not errS3LockLost) and must actually delete the lock object, proving the
+// heartbeat kept refreshing normally once the forced failures were spent.
+func TestHeartbeatSurvivesTransientHeadFailures(t *testing.T) {
+	t.Parallel()
+	fake := newFakeS3()
+	b := newTestBackendWithFake(t, fake)
+	timing := testLockTiming(10 * time.Second)
+	timing.heartbeatInterval = 20 * time.Millisecond
+	b.lock = timing
+	ctx := context.Background()
+
+	release, err := b.Lock(ctx)
+	if err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+
+	key := b.key(locksPrefix, lockObject)
+	// Fail the next two HEAD requests on the lock key (two heartbeat
+	// ticks' worth), then let the fake behave normally again.
+	fake.failNext(key, http.MethodHead, http.StatusInternalServerError, 2)
+
+	// Give the heartbeat enough ticks to hit both forced failures and then
+	// tick again successfully at least once before we release.
+	time.Sleep(6 * b.lock.heartbeatInterval)
+
+	if err := release(); err != nil {
+		t.Fatalf("expected release to succeed after transient HEAD failures, got %v", err)
+	}
+	if _, err := b.client.headObject(ctx, key); !errors.Is(err, errS3NotFound) {
+		t.Fatalf("expected the lock object to be deleted, headObject error = %v", err)
+	}
+}
+
+// TestReclaimIfExpiredLosesRaceOnRecreate directly unit-tests
+// reclaimIfExpired's losing-the-recreate-race branch: the existing lock is
+// expired (so this call deletes it), but a forced failure makes the
+// following create-if-absent PUT report precondition-failed - exactly as
+// real S3 would if another acquirer's create landed first. reclaimIfExpired
+// must report this as "not acquired, no immediate retry" (nil release,
+// retryNow=false, nil error) rather than as an error or a retryNow signal.
+func TestReclaimIfExpiredLosesRaceOnRecreate(t *testing.T) {
+	t.Parallel()
+	fake := newFakeS3()
+	b := newTestBackendWithFake(t, fake)
+	b.lock = testLockTiming(time.Minute)
+	ctx := context.Background()
+	if err := b.Open(ctx); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	key := b.key(locksPrefix, lockObject)
+	pastDeadline := time.Now().UTC().Add(-time.Hour)
+	if err := b.putLock(ctx, key, foreignToken, pastDeadline, false); err != nil {
+		t.Fatalf("seed expired lock: %v", err)
+	}
+
+	// The next PUT to this key (the create-if-absent recreate that follows
+	// our delete) reports precondition-failed, simulating another
+	// acquirer's create winning the race for the just-deleted key.
+	fake.failNext(key, http.MethodPut, http.StatusPreconditionFailed, 1)
+
+	release, retryNow, err := b.reclaimIfExpired(ctx, key, "our-token")
+	if err != nil {
+		t.Fatalf("reclaimIfExpired: %v", err)
+	}
+	if release != nil {
+		t.Fatalf("expected no release function for a lost recreate race")
+	}
+	if retryNow {
+		t.Fatalf("expected retryNow=false for a lost recreate race (back off, don't retry immediately)")
+	}
+}
+
+// TestReclaimIfExpiredRetriesImmediatelyWhenObjectVanished directly
+// unit-tests reclaimIfExpired's vanished-object branch: HEAD on a key that
+// was never written returns not-found, which must be reported as an
+// immediate-retry signal (retryNow=true) rather than an error, since
+// acquireLock's caller loop uses it to retry the create without waiting
+// out a backoff interval.
+func TestReclaimIfExpiredRetriesImmediatelyWhenObjectVanished(t *testing.T) {
+	t.Parallel()
+	b := newTestBackend(t)
+	ctx := context.Background()
+	if err := b.Open(ctx); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	key := b.key(locksPrefix, "never-written-lock")
+	release, retryNow, err := b.reclaimIfExpired(ctx, key, "token")
+	if err != nil {
+		t.Fatalf("reclaimIfExpired: %v", err)
+	}
+	if release != nil {
+		t.Fatalf("expected no release function when the object has vanished")
+	}
+	if !retryNow {
+		t.Fatalf("expected retryNow=true when the object has vanished")
+	}
+}
+
+// TestReleaseLockOnMissingObjectReturnsNil directly unit-tests releaseLock's
+// not-found branch: a key that was never written is treated as an already
+// released lock, not an error.
+func TestReleaseLockOnMissingObjectReturnsNil(t *testing.T) {
+	t.Parallel()
+	b := newTestBackend(t)
+	ctx := context.Background()
+	if err := b.Open(ctx); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	key := b.key(locksPrefix, "never-written-lock")
+	if err := b.releaseLock(ctx, key, "token"); err != nil {
+		t.Fatalf("expected nil for a missing object, got %v", err)
+	}
+}
+
+// TestReleaseLockOnForeignTokenDoesNotDelete directly unit-tests
+// releaseLock's token-mismatch branch: releasing with a token that does not
+// match the object's recorded owner must return nil without deleting the
+// object, since it belongs to a different holder.
+func TestReleaseLockOnForeignTokenDoesNotDelete(t *testing.T) {
+	t.Parallel()
+	b := newTestBackend(t)
+	ctx := context.Background()
+	if err := b.Open(ctx); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	key := b.key(locksPrefix, "foreign-lock")
+	if err := b.putLock(ctx, key, foreignToken, time.Now().UTC().Add(time.Hour), false); err != nil {
+		t.Fatalf("seed foreign lock: %v", err)
+	}
+
+	if err := b.releaseLock(ctx, key, "our-token"); err != nil {
+		t.Fatalf("expected nil for a foreign-token release, got %v", err)
+	}
+
+	headers, err := b.client.headObject(ctx, key)
+	if err != nil {
+		t.Fatalf("headObject: %v", err)
+	}
+	if got := headers.Get("X-Amz-Meta-Token"); got != foreignToken {
+		t.Fatalf("expected the foreign lock to remain in place, got token %q", got)
+	}
+}
+
+// TestReleaseLockPropagatesHeadError directly unit-tests releaseLock's
+// non-not-found HEAD error branch: a genuine S3 failure (as opposed to a
+// 404) must propagate to the caller rather than being swallowed.
+func TestReleaseLockPropagatesHeadError(t *testing.T) {
+	t.Parallel()
+	fake := newFakeS3()
+	b := newTestBackendWithFake(t, fake)
+	ctx := context.Background()
+	if err := b.Open(ctx); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	key := b.key(locksPrefix, "lock-with-head-error")
+	fake.failNext(key, http.MethodHead, http.StatusInternalServerError, 1)
+
+	if err := b.releaseLock(ctx, key, "token"); !errors.Is(err, errS3HeadFailed) {
+		t.Fatalf("expected errS3HeadFailed to propagate, got %v", err)
 	}
 }
 
