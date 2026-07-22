@@ -103,8 +103,8 @@ func prepareInstall(
 	cacheHit := useCache && artifacts != nil && artifactExists(ctx, artifacts, col)
 
 	// Fast path: artifact is already in cache and the caller did not push
-	// metadata. We have everything required to install — namespace/name/version
-	// from col, SHA from a sidecar (S3) or by hashing the file (local) — so we
+	// metadata. We have everything required to install - namespace/name/version
+	// from col, SHA from a sidecar (S3) or by hashing the file (local) - so we
 	// can skip the metadata roundtrip entirely.
 	if cacheHit && meta == nil {
 		runtime.Output.Printf("📦 Using cached %s", filename)

@@ -1,6 +1,6 @@
 // Package lockfile reads and writes go-galaxy lockfiles. The lockfile pins
 // every transitive collection to an exact version with a SHA256 so CI runs
-// are reproducible and hermetic — once a lockfile exists, install only
+// are reproducible and hermetic - once a lockfile exists, install only
 // reads the cache, never the Galaxy API.
 package lockfile
 

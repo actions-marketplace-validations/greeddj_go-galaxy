@@ -60,7 +60,7 @@ func lockfileDepsFromGraph(graph map[string][]string, key string) []string {
 
 // resolveFromLockfile builds resolved/graph maps from a lockfile and
 // validates that every requested root is present and constraint-satisfied.
-// No HTTP calls are made — this is the offline / --frozen fast path.
+// No HTTP calls are made - this is the offline / --frozen fast path.
 func resolveFromLockfile(
 	cfg *config.Config,
 	lf *lockfile.File,
