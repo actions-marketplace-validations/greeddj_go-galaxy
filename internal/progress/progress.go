@@ -22,25 +22,30 @@ const (
 	fail           = ansiRed + "✗" + ansiReset
 )
 
-// Progress renders CLI progress output with optional spinner.
+// Progress renders CLI progress output with optional spinner. Regular output
+// goes to out; error and failure lines go to errOut so diagnostics do not
+// contaminate stdout consumers.
 type Progress struct {
-	s   *spinner.Spinner
-	out io.Writer
-	mu  sync.Mutex
-	v   bool
-	q   bool
+	s      *spinner.Spinner
+	out    io.Writer
+	errOut io.Writer
+	mu     sync.Mutex
+	v      bool
+	q      bool
 }
 
-// newProgress builds a Progress writing to out, creating and starting a
-// spinner only when output is neither quiet nor verbose and the target is a
-// terminal - otherwise raw ANSI escapes or interleaved spinner frames would
-// clutter logs (typical in CI, where stdout is not a TTY).
-func newProgress(verbose, quiet, terminal bool, out io.Writer) *Progress {
+// newProgress builds a Progress writing regular output to out and error output
+// to errOut, creating and starting a spinner only when output is neither quiet
+// nor verbose and the target is a terminal - otherwise raw ANSI escapes or
+// interleaved spinner frames would clutter logs (typical in CI, where stdout is
+// not a TTY).
+func newProgress(verbose, quiet, terminal bool, out, errOut io.Writer) *Progress {
 	if quiet || verbose || !terminal {
 		return &Progress{
-			v:   verbose,
-			q:   quiet,
-			out: out,
+			v:      verbose,
+			q:      quiet,
+			out:    out,
+			errOut: errOut,
 		}
 	}
 
@@ -48,10 +53,11 @@ func newProgress(verbose, quiet, terminal bool, out io.Writer) *Progress {
 	_ = spin.Color(spinnerColor)
 
 	p := &Progress{
-		v:   verbose,
-		q:   quiet,
-		s:   spin,
-		out: out,
+		v:      verbose,
+		q:      quiet,
+		s:      spin,
+		out:    out,
+		errOut: errOut,
 	}
 	p.s.Start()
 	return p
@@ -59,7 +65,7 @@ func newProgress(verbose, quiet, terminal bool, out io.Writer) *Progress {
 
 // New creates a Progress printer configured for verbose/quiet output.
 func New(verbose, quiet bool) *Progress {
-	return newProgress(verbose, quiet, isStdoutTerminal(), os.Stdout)
+	return newProgress(verbose, quiet, isStdoutTerminal(), os.Stdout, os.Stderr)
 }
 
 // isStdoutTerminal reports whether stdout is connected to a terminal.
@@ -76,9 +82,10 @@ func Okf(format string, args ...any) {
 	_, _ = fmt.Fprintf(os.Stdout, ok+" "+format+"\n", args...)
 }
 
-// Errorf prints an error message with a colored marker. For standalone use.
+// Errorf prints an error message with a colored marker to stderr. For
+// standalone use.
 func Errorf(format string, args ...any) {
-	_, _ = fmt.Fprintf(os.Stdout, fail+" "+format+"\n", args...)
+	_, _ = fmt.Fprintf(os.Stderr, fail+" "+format+"\n", args...)
 }
 
 // Printf updates the spinner suffix when a spinner is active, otherwise
@@ -100,30 +107,21 @@ func (p *Progress) Printf(format string, args ...any) {
 	_, _ = fmt.Fprintf(p.out, format+"\n", args...)
 }
 
-// PersistentPrintf prints a persistent line that survives spinner updates.
-// Unlike Printf, this always emits regardless of verbose/quiet mode - result
-// lines (success/failure) must never be swallowed.
+// PersistentPrintf prints a persistent line to stdout that survives spinner
+// updates.
 func (p *Progress) PersistentPrintf(format string, args ...any) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	msg := fmt.Sprintf(format, args...)
-	if p.s != nil {
-		p.s.Stop()
-		_, _ = fmt.Fprintf(p.out, "%s\n", msg)
-		p.s.Restart()
-		return
-	}
-	_, _ = fmt.Fprintf(p.out, "%s\n", msg)
+	p.persist(p.out, fmt.Sprintf(format, args...))
 }
 
-// Okf prints a success message with a colored marker.
+// Okf prints a success message with a colored marker to stdout.
 func (p *Progress) Okf(format string, args ...any) {
-	p.PersistentPrintf(ok+" "+format, args...)
+	p.persist(p.out, ok+" "+fmt.Sprintf(format, args...))
 }
 
-// Errorf prints an error message with a colored marker.
+// Errorf prints an error message with a colored marker to stderr, so failures
+// do not contaminate stdout consumers.
 func (p *Progress) Errorf(format string, args ...any) {
-	p.PersistentPrintf(fail+" "+format, args...)
+	p.persist(p.errOut, fail+" "+fmt.Sprintf(format, args...))
 }
 
 // Debugf prints a debug message when verbose mode is enabled.
@@ -172,4 +170,19 @@ func (p *Progress) Close() {
 	if p.s != nil {
 		p.s.Stop()
 	}
+}
+
+// persist writes a persistent line to w, stopping and restarting the spinner
+// around it so the line survives the spinner. It always emits regardless of
+// verbose/quiet mode - result lines (success/failure) must never be swallowed.
+func (p *Progress) persist(w io.Writer, msg string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.s != nil {
+		p.s.Stop()
+		_, _ = fmt.Fprintf(w, "%s\n", msg)
+		p.s.Restart()
+		return
+	}
+	_, _ = fmt.Fprintf(w, "%s\n", msg)
 }

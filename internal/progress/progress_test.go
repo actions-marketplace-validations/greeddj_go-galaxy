@@ -14,9 +14,9 @@ import (
 // the single (verbose=false, quiet=false, terminal=true) combination; every
 // other combination of the three booleans must leave the spinner nil.
 func TestNewProgressSpinnerCreation(t *testing.T) {
-	var buf bytes.Buffer
+	var out, errOut bytes.Buffer
 
-	p := newProgress(false, false, true, &buf)
+	p := newProgress(false, false, true, &out, &errOut)
 	if p.s == nil {
 		t.Fatal("expected spinner to be created for verbose=false, quiet=false, terminal=true")
 	}
@@ -35,7 +35,7 @@ func TestNewProgressSpinnerCreation(t *testing.T) {
 	}
 	for _, c := range combos {
 		t.Run(c.name, func(t *testing.T) {
-			p := newProgress(c.verbose, c.quiet, c.terminal, &buf)
+			p := newProgress(c.verbose, c.quiet, c.terminal, &out, &errOut)
 			if p.s != nil {
 				t.Fatalf("expected nil spinner for verbose=%v quiet=%v terminal=%v", c.verbose, c.quiet, c.terminal)
 			}
@@ -60,27 +60,28 @@ func assertEmpty(t *testing.T, buf *bytes.Buffer) {
 	}
 }
 
-// stateA builds a fresh Progress/buffer pair for state A (TTY normal: spinner active).
-func stateA() (*Progress, *bytes.Buffer) {
-	var buf bytes.Buffer
-	return newProgress(false, false, true, &buf), &buf
+// stateA builds a Progress plus its stdout/stderr buffers for state A
+// (TTY normal: spinner active).
+func stateA() (*Progress, *bytes.Buffer, *bytes.Buffer) {
+	var out, errOut bytes.Buffer
+	return newProgress(false, false, true, &out, &errOut), &out, &errOut
 }
 
 // TestStateATransient covers Printf and Write for state A: both route through
 // the spinner (suffix update / stop-print-restart) instead of the buffer directly.
 func TestStateATransient(t *testing.T) {
 	t.Run("Printf", func(t *testing.T) {
-		p, buf := stateA()
+		p, out, _ := stateA()
 		defer p.Close()
 		p.Printf("x")
-		assertEmpty(t, buf)
+		assertEmpty(t, out)
 		if p.s.Suffix != " x" {
 			t.Fatalf("expected spinner suffix %q, got %q", " x", p.s.Suffix)
 		}
 	})
 
 	t.Run("WriteWithMessage", func(t *testing.T) {
-		p, buf := stateA()
+		p, out, _ := stateA()
 		defer p.Close()
 		n, err := p.Write([]byte("x\n"))
 		if err != nil {
@@ -89,11 +90,11 @@ func TestStateATransient(t *testing.T) {
 		if n != 2 {
 			t.Fatalf("expected n=2, got %d", n)
 		}
-		assertBuf(t, buf, "x\n")
+		assertBuf(t, out, "x\n")
 	})
 
 	t.Run("WriteEmptyMessage", func(t *testing.T) {
-		p, buf := stateA()
+		p, out, _ := stateA()
 		defer p.Close()
 		n, err := p.Write([]byte("\n"))
 		if err != nil {
@@ -102,32 +103,35 @@ func TestStateATransient(t *testing.T) {
 		if n != 1 {
 			t.Fatalf("expected n=1, got %d", n)
 		}
-		assertEmpty(t, buf)
+		assertEmpty(t, out)
 	})
 }
 
-// TestStateAResult covers the result tier for state A: PersistentPrintf,
-// Okf and Errorf must all emit even though a spinner is active.
+// TestStateAResult covers the result tier for state A: PersistentPrintf and Okf
+// emit to stdout, Errorf emits to stderr, all despite an active spinner.
 func TestStateAResult(t *testing.T) {
 	t.Run("PersistentPrintf", func(t *testing.T) {
-		p, buf := stateA()
+		p, out, errOut := stateA()
 		defer p.Close()
 		p.PersistentPrintf("x")
-		assertBuf(t, buf, "x\n")
+		assertBuf(t, out, "x\n")
+		assertEmpty(t, errOut)
 	})
 
 	t.Run("Okf", func(t *testing.T) {
-		p, buf := stateA()
+		p, out, errOut := stateA()
 		defer p.Close()
 		p.Okf("x")
-		assertBuf(t, buf, ok+" x\n")
+		assertBuf(t, out, ok+" x\n")
+		assertEmpty(t, errOut)
 	})
 
 	t.Run("Errorf", func(t *testing.T) {
-		p, buf := stateA()
+		p, out, errOut := stateA()
 		defer p.Close()
 		p.Errorf("x")
-		assertBuf(t, buf, fail+" x\n")
+		assertBuf(t, errOut, fail+" x\n")
+		assertEmpty(t, out)
 	})
 }
 
@@ -135,38 +139,38 @@ func TestStateAResult(t *testing.T) {
 // suppressed since verbose is false.
 func TestStateADebug(t *testing.T) {
 	t.Run("Debugf", func(t *testing.T) {
-		p, buf := stateA()
+		p, out, _ := stateA()
 		defer p.Close()
 		p.Debugf("x")
-		assertEmpty(t, buf)
+		assertEmpty(t, out)
 	})
 
 	t.Run("DebugSincef", func(t *testing.T) {
-		p, buf := stateA()
+		p, out, _ := stateA()
 		defer p.Close()
 		p.DebugSincef(time.Now(), "x")
-		assertEmpty(t, buf)
+		assertEmpty(t, out)
 	})
 }
 
-// stateB builds a fresh Progress/buffer pair for state B (verbose, no spinner).
-func stateB() (*Progress, *bytes.Buffer) {
-	var buf bytes.Buffer
-	return newProgress(true, false, true, &buf), &buf
+// stateB builds a Progress plus its buffers for state B (verbose, no spinner).
+func stateB() (*Progress, *bytes.Buffer, *bytes.Buffer) {
+	var out, errOut bytes.Buffer
+	return newProgress(true, false, true, &out, &errOut), &out, &errOut
 }
 
 // TestStateBTransient covers Printf and Write for state B: no spinner exists,
 // so both write a full line directly.
 func TestStateBTransient(t *testing.T) {
 	t.Run("Printf", func(t *testing.T) {
-		p, buf := stateB()
+		p, out, _ := stateB()
 		defer p.Close()
 		p.Printf("x")
-		assertBuf(t, buf, "x\n")
+		assertBuf(t, out, "x\n")
 	})
 
 	t.Run("Write", func(t *testing.T) {
-		p, buf := stateB()
+		p, out, _ := stateB()
 		defer p.Close()
 		n, err := p.Write([]byte("x\n"))
 		if err != nil {
@@ -175,31 +179,35 @@ func TestStateBTransient(t *testing.T) {
 		if n != 2 {
 			t.Fatalf("expected n=2, got %d", n)
 		}
-		assertBuf(t, buf, "x\n")
+		assertBuf(t, out, "x\n")
 	})
 }
 
-// TestStateBResult covers the result tier for state B: all methods emit.
+// TestStateBResult covers the result tier for state B: PersistentPrintf and Okf
+// emit to stdout, Errorf to stderr.
 func TestStateBResult(t *testing.T) {
 	t.Run("PersistentPrintf", func(t *testing.T) {
-		p, buf := stateB()
+		p, out, errOut := stateB()
 		defer p.Close()
 		p.PersistentPrintf("x")
-		assertBuf(t, buf, "x\n")
+		assertBuf(t, out, "x\n")
+		assertEmpty(t, errOut)
 	})
 
 	t.Run("Okf", func(t *testing.T) {
-		p, buf := stateB()
+		p, out, errOut := stateB()
 		defer p.Close()
 		p.Okf("x")
-		assertBuf(t, buf, ok+" x\n")
+		assertBuf(t, out, ok+" x\n")
+		assertEmpty(t, errOut)
 	})
 
 	t.Run("Errorf", func(t *testing.T) {
-		p, buf := stateB()
+		p, out, errOut := stateB()
 		defer p.Close()
 		p.Errorf("x")
-		assertBuf(t, buf, fail+" x\n")
+		assertBuf(t, errOut, fail+" x\n")
+		assertEmpty(t, out)
 	})
 }
 
@@ -207,44 +215,44 @@ func TestStateBResult(t *testing.T) {
 // both Debugf and DebugSincef.
 func TestStateBDebug(t *testing.T) {
 	t.Run("Debugf", func(t *testing.T) {
-		p, buf := stateB()
+		p, out, _ := stateB()
 		defer p.Close()
 		p.Debugf("x")
-		assertBuf(t, buf, "🚧 Debug: x\n")
+		assertBuf(t, out, "🚧 Debug: x\n")
 	})
 
 	t.Run("DebugSincef", func(t *testing.T) {
-		p, buf := stateB()
+		p, out, _ := stateB()
 		defer p.Close()
 		p.DebugSincef(time.Now(), "x")
-		out := buf.String()
-		if !strings.HasPrefix(out, "⏱️ Debug Timing (") {
-			t.Fatalf("expected prefix %q, got %q", "⏱️ Debug Timing (", out)
+		got := out.String()
+		if !strings.HasPrefix(got, "⏱️ Debug Timing (") {
+			t.Fatalf("expected prefix %q, got %q", "⏱️ Debug Timing (", got)
 		}
-		if !strings.HasSuffix(out, "): x\n") {
-			t.Fatalf("expected suffix %q, got %q", "): x\n", out)
+		if !strings.HasSuffix(got, "): x\n") {
+			t.Fatalf("expected suffix %q, got %q", "): x\n", got)
 		}
 	})
 }
 
-// stateC builds a fresh Progress/buffer pair for state C (quiet, no spinner).
-func stateC() (*Progress, *bytes.Buffer) {
-	var buf bytes.Buffer
-	return newProgress(false, true, true, &buf), &buf
+// stateC builds a Progress plus its buffers for state C (quiet, no spinner).
+func stateC() (*Progress, *bytes.Buffer, *bytes.Buffer) {
+	var out, errOut bytes.Buffer
+	return newProgress(false, true, true, &out, &errOut), &out, &errOut
 }
 
 // TestStateCSuppressed covers the tiers suppressed by quiet mode: Printf,
 // Write and both debug methods must stay silent.
 func TestStateCSuppressed(t *testing.T) {
 	t.Run("Printf", func(t *testing.T) {
-		p, buf := stateC()
+		p, out, _ := stateC()
 		defer p.Close()
 		p.Printf("x")
-		assertEmpty(t, buf)
+		assertEmpty(t, out)
 	})
 
 	t.Run("Write", func(t *testing.T) {
-		p, buf := stateC()
+		p, out, _ := stateC()
 		defer p.Close()
 		n, err := p.Write([]byte("x\n"))
 		if err != nil {
@@ -253,54 +261,57 @@ func TestStateCSuppressed(t *testing.T) {
 		if n != 2 {
 			t.Fatalf("expected n=2, got %d", n)
 		}
-		assertEmpty(t, buf)
+		assertEmpty(t, out)
 	})
 
 	t.Run("Debugf", func(t *testing.T) {
-		p, buf := stateC()
+		p, out, _ := stateC()
 		defer p.Close()
 		p.Debugf("x")
-		assertEmpty(t, buf)
+		assertEmpty(t, out)
 	})
 
 	t.Run("DebugSincef", func(t *testing.T) {
-		p, buf := stateC()
+		p, out, _ := stateC()
 		defer p.Close()
 		p.DebugSincef(time.Now(), "x")
-		assertEmpty(t, buf)
+		assertEmpty(t, out)
 	})
 }
 
 // TestStateCResult covers the result tier for state C: quiet mode never
-// suppresses PersistentPrintf, Okf or Errorf.
+// suppresses PersistentPrintf, Okf or Errorf; Errorf still targets stderr.
 func TestStateCResult(t *testing.T) {
 	t.Run("PersistentPrintf", func(t *testing.T) {
-		p, buf := stateC()
+		p, out, errOut := stateC()
 		defer p.Close()
 		p.PersistentPrintf("x")
-		assertBuf(t, buf, "x\n")
+		assertBuf(t, out, "x\n")
+		assertEmpty(t, errOut)
 	})
 
 	t.Run("Okf", func(t *testing.T) {
-		p, buf := stateC()
+		p, out, errOut := stateC()
 		defer p.Close()
 		p.Okf("x")
-		assertBuf(t, buf, ok+" x\n")
+		assertBuf(t, out, ok+" x\n")
+		assertEmpty(t, errOut)
 	})
 
 	t.Run("Errorf", func(t *testing.T) {
-		p, buf := stateC()
+		p, out, errOut := stateC()
 		defer p.Close()
 		p.Errorf("x")
-		assertBuf(t, buf, fail+" x\n")
+		assertBuf(t, errOut, fail+" x\n")
+		assertEmpty(t, out)
 	})
 }
 
-// stateD builds a fresh Progress/buffer pair for state D (non-TTY normal:
+// stateD builds a Progress plus its buffers for state D (non-TTY normal:
 // the CI-defect regression case, no spinner, verbose=false, quiet=false).
-func stateD() (*Progress, *bytes.Buffer) {
-	var buf bytes.Buffer
-	return newProgress(false, false, false, &buf), &buf
+func stateD() (*Progress, *bytes.Buffer, *bytes.Buffer) {
+	var out, errOut bytes.Buffer
+	return newProgress(false, false, false, &out, &errOut), &out, &errOut
 }
 
 // TestStateDTransient covers Printf and Write for state D: no spinner
@@ -308,14 +319,14 @@ func stateD() (*Progress, *bytes.Buffer) {
 // CI-defect regression case (output previously vanished with no TTY).
 func TestStateDTransient(t *testing.T) {
 	t.Run("Printf", func(t *testing.T) {
-		p, buf := stateD()
+		p, out, _ := stateD()
 		defer p.Close()
 		p.Printf("x")
-		assertBuf(t, buf, "x\n")
+		assertBuf(t, out, "x\n")
 	})
 
 	t.Run("Write", func(t *testing.T) {
-		p, buf := stateD()
+		p, out, _ := stateD()
 		defer p.Close()
 		n, err := p.Write([]byte("x\n"))
 		if err != nil {
@@ -324,32 +335,35 @@ func TestStateDTransient(t *testing.T) {
 		if n != 2 {
 			t.Fatalf("expected n=2, got %d", n)
 		}
-		assertBuf(t, buf, "x\n")
+		assertBuf(t, out, "x\n")
 	})
 }
 
 // TestStateDResult covers the result tier for state D: it must always emit,
-// same as every other state.
+// same as every other state; Errorf targets stderr.
 func TestStateDResult(t *testing.T) {
 	t.Run("PersistentPrintf", func(t *testing.T) {
-		p, buf := stateD()
+		p, out, errOut := stateD()
 		defer p.Close()
 		p.PersistentPrintf("x")
-		assertBuf(t, buf, "x\n")
+		assertBuf(t, out, "x\n")
+		assertEmpty(t, errOut)
 	})
 
 	t.Run("Okf", func(t *testing.T) {
-		p, buf := stateD()
+		p, out, errOut := stateD()
 		defer p.Close()
 		p.Okf("x")
-		assertBuf(t, buf, ok+" x\n")
+		assertBuf(t, out, ok+" x\n")
+		assertEmpty(t, errOut)
 	})
 
 	t.Run("Errorf", func(t *testing.T) {
-		p, buf := stateD()
+		p, out, errOut := stateD()
 		defer p.Close()
 		p.Errorf("x")
-		assertBuf(t, buf, fail+" x\n")
+		assertBuf(t, errOut, fail+" x\n")
+		assertEmpty(t, out)
 	})
 }
 
@@ -357,28 +371,28 @@ func TestStateDResult(t *testing.T) {
 // suppressed since verbose is false.
 func TestStateDDebug(t *testing.T) {
 	t.Run("Debugf", func(t *testing.T) {
-		p, buf := stateD()
+		p, out, _ := stateD()
 		defer p.Close()
 		p.Debugf("x")
-		assertEmpty(t, buf)
+		assertEmpty(t, out)
 	})
 
 	t.Run("DebugSincef", func(t *testing.T) {
-		p, buf := stateD()
+		p, out, _ := stateD()
 		defer p.Close()
 		p.DebugSincef(time.Now(), "x")
-		assertEmpty(t, buf)
+		assertEmpty(t, out)
 	})
 }
 
 // TestClose verifies Close does not panic whether or not a spinner exists.
 func TestClose(*testing.T) {
-	var buf bytes.Buffer
+	var out, errOut bytes.Buffer
 
-	withSpinner := newProgress(false, false, true, &buf)
+	withSpinner := newProgress(false, false, true, &out, &errOut)
 	withSpinner.Close()
 
-	withoutSpinner := newProgress(true, false, true, &buf)
+	withoutSpinner := newProgress(true, false, true, &out, &errOut)
 	withoutSpinner.Close()
 }
 
@@ -386,7 +400,7 @@ func TestClose(*testing.T) {
 // against concurrent reads that hold the spinner lock, mirroring how the render
 // goroutine reads Suffix. It must stay clean under the race detector.
 func TestPrintfSuffixRace(t *testing.T) {
-	p := newProgress(false, false, true, io.Discard)
+	p := newProgress(false, false, true, io.Discard, io.Discard)
 	if p.s == nil {
 		t.Fatal("expected active spinner for the race scenario")
 	}
@@ -415,13 +429,14 @@ func TestPrintfSuffixRace(t *testing.T) {
 }
 
 // TestConcurrentEmissionSerialized drives every buffer-emitting method from
-// many goroutines against a shared writer. Without the printer mutex the
+// many goroutines against shared writers. Without the printer mutex the
 // concurrent writes and the Stop/print/Restart sequences race (the detector
 // fires); with it, writes are serialized so each line stays intact and the
-// emitted-line count is exact.
+// emitted-line counts are exact. It also confirms Errorf lands on stderr and
+// the stdout methods land on stdout under concurrency.
 func TestConcurrentEmissionSerialized(t *testing.T) {
-	var buf bytes.Buffer
-	p := newProgress(false, false, true, &buf)
+	var out, errOut bytes.Buffer
+	p := newProgress(false, false, true, &out, &errOut)
 	if p.s == nil {
 		t.Fatal("expected active spinner for state A")
 	}
@@ -439,31 +454,41 @@ func TestConcurrentEmissionSerialized(t *testing.T) {
 				p.Okf("ok %d", i)
 				p.Errorf("err %d", i)
 				_, _ = p.Write([]byte("wr\n"))
-				p.Printf("pf %d", i) // suffix only, never reaches the buffer
+				p.Printf("pf %d", i) // suffix only, never reaches a buffer
 			}
 		})
 	}
 	wg.Wait()
 
-	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
-	if want := workers * iterations * 4; len(lines) != want {
-		t.Fatalf("expected %d emitted lines, got %d", want, len(lines))
+	validStdout := func(line string) bool {
+		return strings.HasPrefix(line, "pp ") || strings.HasPrefix(line, ok+" ok ") || line == "wr"
+	}
+	assertLines(t, out.String(), workers*iterations*3, validStdout, "stdout")
+
+	validStderr := func(line string) bool {
+		return strings.HasPrefix(line, fail+" err ")
+	}
+	assertLines(t, errOut.String(), workers*iterations, validStderr, "stderr")
+}
+
+// assertLines splits content into non-trailing lines and asserts the exact
+// count and that every line passes valid; stream names the writer for errors.
+func assertLines(t *testing.T, content string, want int, valid func(string) bool, stream string) {
+	t.Helper()
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	if len(lines) != want {
+		t.Fatalf("expected %d %s lines, got %d", want, stream, len(lines))
 	}
 	for _, line := range lines {
-		switch {
-		case strings.HasPrefix(line, "pp "),
-			strings.HasPrefix(line, ok+" ok "),
-			strings.HasPrefix(line, fail+" err "),
-			line == "wr":
-		default:
-			t.Fatalf("unexpected or interleaved line: %q", line)
+		if !valid(line) {
+			t.Fatalf("unexpected or interleaved %s line: %q", stream, line)
 		}
 	}
 }
 
-// TestPackageLevelOkfErrorf verifies the standalone package-level Okf/Errorf
-// helpers write to os.Stdout, since they run before any Progress exists.
-func TestPackageLevelOkfErrorf(t *testing.T) {
+// TestPackageLevelOkf verifies the standalone package-level Okf helper writes
+// to os.Stdout, since it runs before any Progress exists.
+func TestPackageLevelOkf(t *testing.T) {
 	orig := os.Stdout
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -473,18 +498,42 @@ func TestPackageLevelOkfErrorf(t *testing.T) {
 	defer func() { os.Stdout = orig }()
 
 	Okf("hello %s", "world")
+
+	if closeErr := w.Close(); closeErr != nil {
+		t.Fatalf("failed to close pipe writer: %v", closeErr)
+	}
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("failed to read pipe: %v", err)
+	}
+
+	if want := ok + " hello world\n"; string(got) != want {
+		t.Fatalf("expected %q, got %q", want, string(got))
+	}
+}
+
+// TestPackageLevelErrorf verifies the standalone package-level Errorf helper
+// writes to os.Stderr, keeping diagnostics off stdout.
+func TestPackageLevelErrorf(t *testing.T) {
+	orig := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create pipe: %v", err)
+	}
+	os.Stderr = w
+	defer func() { os.Stderr = orig }()
+
 	Errorf("bye %s", "world")
 
 	if closeErr := w.Close(); closeErr != nil {
 		t.Fatalf("failed to close pipe writer: %v", closeErr)
 	}
-	out, err := io.ReadAll(r)
+	got, err := io.ReadAll(r)
 	if err != nil {
 		t.Fatalf("failed to read pipe: %v", err)
 	}
 
-	want := ok + " hello world\n" + fail + " bye world\n"
-	if string(out) != want {
-		t.Fatalf("expected %q, got %q", want, string(out))
+	if want := fail + " bye world\n"; string(got) != want {
+		t.Fatalf("expected %q, got %q", want, string(got))
 	}
 }
