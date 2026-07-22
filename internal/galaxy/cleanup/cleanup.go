@@ -137,10 +137,16 @@ func buildReachable(runtime *infra.Infra, registry *store.ProjectRegistry) (map[
 		if err := scanInstalledCollections(runtime.Output, collectionsPath, installedIndex, installedByKey, depsByKey); err != nil {
 			return nil, nil, err
 		}
+		// The project's workspace is present on disk (collectionsPath != "",
+		// checked above) and scanInstalledCollections has already populated
+		// installedByKey with its installed collections as deletion
+		// candidates. A requirements file that cannot be read or parsed here
+		// must abort the whole run rather than silently contributing zero
+		// reachability roots: the latter would make every uniquely-installed
+		// collection under this project look unreachable and get deleted.
 		roots, err := loadRequirements(project.RequirementsFile, "")
 		if err != nil {
-			runtime.Output.Printf("⚠️ Failed to load requirements %s: %v", project.RequirementsFile, err)
-			continue
+			return nil, nil, fmt.Errorf("%w: %s: %w", helpers.ErrProjectRequirementsUnreadable, project.RequirementsFile, err)
 		}
 		for _, root := range roots {
 			fqdn := fmt.Sprintf("%s.%s", root.Namespace, root.Name)

@@ -276,6 +276,16 @@ func registerCleanupProject(t *testing.T, cacheDir, downloadPath string) {
 	if err := os.WriteFile(reqPath, []byte("collections: []\n"), helpers.FileMod); err != nil {
 		t.Fatalf("failed to write requirements file: %v", err)
 	}
+	registerCleanupProjectAt(t, cacheDir, downloadPath, reqPath)
+}
+
+// registerCleanupProjectAt writes a project registry entry pointing at
+// downloadPath whose requirements file is reqPath. Unlike
+// registerCleanupProject, the caller fully controls reqPath's existence and
+// content - including deliberately leaving it nonexistent or writing
+// unparseable content - so this is used to test requirements-load failures.
+func registerCleanupProjectAt(t *testing.T, cacheDir, downloadPath, reqPath string) {
+	t.Helper()
 	writeProjectRegistry(t, cacheDir, &store.ProjectRegistry{
 		Projects: map[string]store.ProjectRecord{
 			"proj": {
@@ -398,5 +408,85 @@ func TestBuildInstalledRecordRejectsSeparators(t *testing.T) {
 				t.Fatalf("expected ok=%v, got %v (record=%+v key=%q)", tc.wantOK, ok, record, key)
 			}
 		})
+	}
+}
+
+// TestStartFailsOnUnreadableRequirementsCorrupt proves that a recorded
+// project whose workspace is present on disk (its collections tree is
+// seeded and found by pickCollectionsPath), but whose requirements file
+// contains unparseable content, aborts the whole run with
+// helpers.ErrProjectRequirementsUnreadable instead of silently contributing
+// zero reachability roots and letting the seeded install become an
+// unreachable deletion candidate.
+func TestStartFailsOnUnreadableRequirementsCorrupt(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+	installDir := seedInstallTree(t, downloadPath)
+
+	reqPath := filepath.Join(t.TempDir(), "requirements.yml")
+	if err := os.WriteFile(reqPath, []byte("{invalid"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write corrupt requirements file: %v", err)
+	}
+	registerCleanupProjectAt(t, cacheDir, downloadPath, reqPath)
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	err := Start(t.Context(), cfg, runtime)
+	if !errors.Is(err, helpers.ErrProjectRequirementsUnreadable) {
+		t.Fatalf("expected ErrProjectRequirementsUnreadable, got %v", err)
+	}
+	assertManifestSurvives(t, installDir)
+}
+
+// TestStartFailsOnMissingRequirements proves the same fail-safe as
+// TestStartFailsOnUnreadableRequirementsCorrupt for a requirements file that
+// does not exist at all, for a project whose workspace is otherwise present
+// on disk. A missing file for a present workspace is a load failure exactly
+// like corrupt content - it must abort the run rather than skip past it,
+// since pickCollectionsPath has already confirmed the workspace exists and
+// scanInstalledCollections has already populated deletion candidates for it.
+func TestStartFailsOnMissingRequirements(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+	installDir := seedInstallTree(t, downloadPath)
+
+	reqPath := filepath.Join(t.TempDir(), "does-not-exist.yml")
+	registerCleanupProjectAt(t, cacheDir, downloadPath, reqPath)
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	err := Start(t.Context(), cfg, runtime)
+	if !errors.Is(err, helpers.ErrProjectRequirementsUnreadable) {
+		t.Fatalf("expected ErrProjectRequirementsUnreadable, got %v", err)
+	}
+	assertManifestSurvives(t, installDir)
+}
+
+// TestStartDeletesUnreferencedWithValidRequirements is the control for the
+// two requirements-load-failure tests above: a project with a valid
+// requirements file that references nothing must still let cleanup proceed
+// normally and delete the unreferenced installed collection, proving the
+// new fail-the-run behavior triggers only on an actual load failure and not
+// on every non-matching or empty requirements file.
+func TestStartDeletesUnreferencedWithValidRequirements(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+	installDir := seedInstallTree(t, downloadPath)
+	registerCleanupProject(t, cacheDir, downloadPath)
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed with a valid requirements file, got %v", err)
+	}
+	manifestPath := filepath.Join(installDir, "MANIFEST.json")
+	if _, statErr := os.Stat(manifestPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the unreferenced collection to be deleted, stat error: %v", statErr)
 	}
 }

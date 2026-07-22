@@ -154,4 +154,11 @@ var (
 	// ErrUnsafeRemovalPath indicates a computed removal path failed a
 	// containment check against its expected root directory.
 	ErrUnsafeRemovalPath = errors.New("unsafe removal path")
+	// ErrProjectRequirementsUnreadable indicates a recorded project's
+	// requirements file could not be read or parsed even though the
+	// project's workspace is present on disk. Cleanup must abort rather
+	// than silently treat it as contributing zero reachability roots,
+	// since that would make every uniquely-installed collection under
+	// that project look unreachable and get deleted.
+	ErrProjectRequirementsUnreadable = errors.New("project requirements file is unreadable")
 )
