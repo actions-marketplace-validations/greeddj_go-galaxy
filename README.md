@@ -163,7 +163,7 @@ Clean unreachable collections:
 - `--no-deps` (`$GO_GALAXY_NO_DEPS`)
 - `--offline` (`$GO_GALAXY_OFFLINE`) — fail on any network access (cached state only)
 - `--lock-file` (`$GO_GALAXY_LOCK_FILE`)
-- `--frozen` (`$GO_GALAXY_FROZEN`) — require lockfile and reject drift
+- `--frozen` (`$GO_GALAXY_FROZEN`) - require a lockfile and verify each installed or cached artifact's SHA256 against its lockfile pin, aborting the run on any mismatch
 - `--metrics-file` (`$GO_GALAXY_METRICS_FILE`) — emit JSON run report
 
 S3 cache options (if `--s3-bucket` is set, S3 backend is used):
@@ -236,6 +236,10 @@ go-galaxy lock                       # writes requirements.lock.yml
 # in CI:
 go-galaxy install --frozen --offline # use lockfile, no network calls
 ```
+
+A frozen install fails loudly if a cached or downloaded artifact does not match the
+lockfile's recorded SHA256, so a poisoned cache or a mutated upstream artifact cannot
+install silently; lockfiles with no recorded SHA (older lockfiles) are not pin-checked.
 
 `go-galaxy hash` prints a deterministic `sha256:…` of the lockfile (or `requirements.yml`
 when no lockfile is present) — perfect as a CI cache key.
