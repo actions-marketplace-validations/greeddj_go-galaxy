@@ -307,6 +307,22 @@ COPY requirements.yml requirements.lock.yml ./
 RUN go-galaxy warm --frozen
 ```
 
+## Exit codes
+
+`go-galaxy` exits with a class-specific code instead of a flat `1`, so CI
+pipelines can branch on failure type without parsing log output:
+
+| Code | Meaning                                                                           |
+|-----:|-----------------------------------------------------------------------------------|
+|    0 | Success                                                                           |
+|    1 | Generic failure (does not match any class below)                                  |
+|    2 | Usage or configuration error (invalid flags, requirements, or `ansible.cfg`)      |
+|    3 | Dependency resolution failure (conflicts, missing candidates, cycle)              |
+|    4 | Network or Galaxy API failure (timeouts, offline-mode violations)                 |
+|    5 | Install or artifact-integrity failure (checksum mismatch, unsafe archive/symlink) |
+|    6 | Lockfile error (missing, invalid, or mismatched with requirements)                |
+|  130 | Interrupted (SIGINT)                                                              |
+
 ## Metrics
 
 Pass `--metrics-file path/to/run.json` to install/warm/lock to emit a JSON report
