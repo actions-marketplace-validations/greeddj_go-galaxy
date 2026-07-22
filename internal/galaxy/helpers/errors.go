@@ -146,4 +146,12 @@ var (
 	// ErrAnsibleConfigNotFound indicates an explicitly requested ansible.cfg
 	// path does not exist.
 	ErrAnsibleConfigNotFound = errors.New("ansible config file not found")
+
+	// ErrUnsafeCollectionIdentifier indicates a manifest field (namespace,
+	// name, or version) cannot be safely used as a single filesystem path
+	// element, e.g. it contains a path separator or is "..".
+	ErrUnsafeCollectionIdentifier = errors.New("unsafe collection identifier")
+	// ErrUnsafeRemovalPath indicates a computed removal path failed a
+	// containment check against its expected root directory.
+	ErrUnsafeRemovalPath = errors.New("unsafe removal path")
 )

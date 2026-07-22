@@ -16,6 +16,7 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/extracted"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
+	"github.com/greeddj/go-galaxy/internal/galaxy/output"
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
 	"github.com/psvmcc/hub/pkg/types"
 )
@@ -123,7 +124,7 @@ func buildReachable(runtime *infra.Infra, registry *store.ProjectRegistry) (map[
 		if collectionsPath == "" {
 			continue
 		}
-		if err := scanInstalledCollections(collectionsPath, installedIndex, installedByKey, depsByKey); err != nil {
+		if err := scanInstalledCollections(runtime.Output, collectionsPath, installedIndex, installedByKey, depsByKey); err != nil {
 			return nil, nil, err
 		}
 		roots, err := loadRequirements(project.RequirementsFile, "")
@@ -224,7 +225,12 @@ func dirExists(path string) bool {
 }
 
 // scanInstalledCollections indexes installed collections under collectionsPath.
+// Manifests whose namespace/name/version cannot be safely used as filesystem
+// path elements are rejected at ingestion (see buildInstalledRecord): a
+// warning is emitted via out and the scan continues rather than aborting the
+// whole run or indexing the tainted record.
 func scanInstalledCollections(
+	out output.Printer,
 	collectionsPath string,
 	index map[string][]installedCollection,
 	byKey map[string]installedCollection,
@@ -245,7 +251,11 @@ func scanInstalledCollections(
 		if err != nil || !ok {
 			return err
 		}
-		record, key, ok := buildInstalledRecord(collectionsPath, path, manifest)
+		record, key, ok, err := buildInstalledRecord(collectionsPath, path, manifest)
+		if err != nil {
+			out.Warnf("skipping install with unsafe identifier at %s: %v", path, err)
+			return nil
+		}
 		if !ok {
 			return nil
 		}
@@ -269,16 +279,29 @@ func readManifest(path string) (types.GalaxyCollectionVersionInfoManifest, bool,
 	return manifest, true, nil
 }
 
+// buildInstalledRecord builds an installedCollection from a parsed manifest.
+// An incomplete manifest (missing namespace, name, or version) is a benign
+// skip: ok is false and err is nil. A manifest with all three fields present
+// but where any of them cannot be safely used as a single filesystem path
+// element (e.g. it contains "/" or is "..") is rejected with
+// helpers.ErrUnsafeCollectionIdentifier rather than silently building a
+// record whose Version would later escape the collections tree in
+// removeInstalled.
 func buildInstalledRecord(
 	collectionsPath string,
 	manifestPath string,
 	manifest types.GalaxyCollectionVersionInfoManifest,
-) (installedCollection, string, bool) {
+) (installedCollection, string, bool, error) {
 	ns := manifest.CollectionInfo.Namespace
 	name := manifest.CollectionInfo.Name
 	version := manifest.CollectionInfo.Version
 	if ns == "" || name == "" || version == "" {
-		return installedCollection{}, "", false
+		return installedCollection{}, "", false, nil
+	}
+	if !helpers.IsPathElement(ns) || !helpers.IsPathElement(name) || !helpers.IsPathElement(version) {
+		return installedCollection{}, "", false, fmt.Errorf(
+			"%w: ns=%q name=%q version=%q", helpers.ErrUnsafeCollectionIdentifier, ns, name, version,
+		)
 	}
 	installPath := filepath.Dir(manifestPath)
 	key := fmt.Sprintf("%s.%s@%s", ns, name, version)
@@ -289,7 +312,7 @@ func buildInstalledRecord(
 		Version:        version,
 		InstallPath:    installPath,
 		CollectionsDir: collectionsPath,
-	}, key, true
+	}, key, true, nil
 }
 
 func extractDeps(manifest types.GalaxyCollectionVersionInfoManifest) map[string]string {
@@ -356,6 +379,13 @@ func markReachable(key string, reachable map[string]bool, deps map[string]map[st
 }
 
 // removeInstalled deletes collection files and cached artifacts.
+//
+// This is a defense-in-depth check: buildInstalledRecord already rejects any
+// namespace/name/version that cannot be safely used as a path element at
+// ingestion, so the containment failures below should never trigger on a
+// record built through the normal scan. If they do, the in-memory state is
+// anomalous (e.g. constructed directly rather than scanned), and the safest
+// action is to abort rather than guess which part of the path is untrusted.
 func removeInstalled(ctx context.Context, inst installedCollection, artifacts cacheManager.ArtifactStore) error {
 	parts := strings.Split(inst.FQDN, ".")
 	if len(parts) != helpers.CollectionNameParts {
@@ -363,12 +393,24 @@ func removeInstalled(ctx context.Context, inst installedCollection, artifacts ca
 	}
 	namespace := parts[0]
 	name := parts[1]
+	if !helpers.IsPathElement(namespace) || !helpers.IsPathElement(name) || !helpers.IsPathElement(inst.Version) {
+		return fmt.Errorf("%w: ns=%q name=%q version=%q", helpers.ErrUnsafeRemovalPath, namespace, name, inst.Version)
+	}
+
+	acRoot := filepath.Join(inst.CollectionsDir, "ansible_collections")
 	if inst.InstallPath != "" {
+		if !helpers.WithinDir(inst.CollectionsDir, inst.InstallPath) {
+			return fmt.Errorf("%w: install path %q escapes %q", helpers.ErrUnsafeRemovalPath, inst.InstallPath, inst.CollectionsDir)
+		}
 		if err := os.RemoveAll(inst.InstallPath); err != nil {
 			return err
 		}
 	}
-	infoDir := filepath.Join(inst.CollectionsDir, "ansible_collections", fmt.Sprintf("%s.%s-%s.info", namespace, name, inst.Version))
+
+	infoDir := filepath.Join(acRoot, fmt.Sprintf("%s.%s-%s.info", namespace, name, inst.Version))
+	if !helpers.WithinDir(acRoot, infoDir) {
+		return fmt.Errorf("%w: info dir %q escapes %q", helpers.ErrUnsafeRemovalPath, infoDir, acRoot)
+	}
 	_ = os.RemoveAll(infoDir)
 
 	if artifacts != nil {

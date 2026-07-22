@@ -1,16 +1,22 @@
 package cleanup
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
+	"github.com/greeddj/go-galaxy/internal/galaxy/store"
+	"github.com/psvmcc/hub/pkg/types"
 )
 
 // noopPrinter is a minimal output.Printer stub for tests that need an Infra
@@ -28,6 +34,36 @@ func (noopPrinter) Errorf(string, ...any)                 {}
 func (noopPrinter) Warnf(string, ...any)                  {}
 func (noopPrinter) Debugf(string, ...any)                 {}
 func (noopPrinter) DebugSincef(time.Time, string, ...any) {}
+
+// recordingPrinter is an output.Printer stub that records Warnf calls so
+// tests can assert that a rejection surfaced a warning rather than being
+// silently swallowed. It embeds noopPrinter for the other Printer methods and
+// is safe for concurrent use since scanInstalledCollections may be called
+// from goroutines in other packages, though cleanup itself scans serially.
+type recordingPrinter struct {
+	noopPrinter
+
+	warnings []string
+	mu       sync.Mutex
+}
+
+func (p *recordingPrinter) Warnf(format string, args ...any) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.warnings = append(p.warnings, fmt.Sprintf(format, args...))
+}
+
+// hasWarningContaining reports whether any recorded warning contains substr.
+func (p *recordingPrinter) hasWarningContaining(substr string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, w := range p.warnings {
+		if strings.Contains(w, substr) {
+			return true
+		}
+	}
+	return false
+}
 
 // testManifestJSON is a minimal, valid MANIFEST.json body for ns.name@1.0.0.
 // scanInstalledCollections/buildInstalledRecord only read collection_info's
@@ -147,5 +183,193 @@ func assertManifestSurvives(t *testing.T, installDir string) {
 	manifestPath := filepath.Join(installDir, "MANIFEST.json")
 	if _, err := os.Stat(manifestPath); err != nil {
 		t.Fatalf("expected the pre-seeded install tree to survive, stat error: %v", err)
+	}
+}
+
+// writeProjectRegistry writes a valid project registry JSON directly at
+// cacheDir, bypassing store.RecordProject so the test controls the exact
+// CollectionsPath and RequirementsFile without needing a real project
+// directory layout.
+func writeProjectRegistry(t *testing.T, cacheDir string, registry *store.ProjectRegistry) {
+	t.Helper()
+	data, err := json.Marshal(registry)
+	if err != nil {
+		t.Fatalf("failed to marshal project registry: %v", err)
+	}
+	path := filepath.Join(cacheDir, helpers.StoreDBProjects)
+	if err := os.WriteFile(path, data, helpers.FileMod); err != nil {
+		t.Fatalf("failed to write project registry: %v", err)
+	}
+}
+
+// writeOutsideSentinel creates a file at outsideRoot/name/keep.txt,
+// simulating a target that a successful path-traversal exploit could reach
+// if it escaped the collections tree, and returns the file's path.
+func writeOutsideSentinel(t *testing.T, outsideRoot, name string) string {
+	t.Helper()
+	sentinelDir := filepath.Join(outsideRoot, name)
+	if err := os.MkdirAll(sentinelDir, helpers.DirMod); err != nil {
+		t.Fatalf("failed to create outside sentinel dir: %v", err)
+	}
+	sentinelFile := filepath.Join(sentinelDir, "keep.txt")
+	if err := os.WriteFile(sentinelFile, []byte("keep me"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write outside sentinel file: %v", err)
+	}
+	return sentinelFile
+}
+
+// writeMaliciousManifestTree seeds a MANIFEST.json under downloadPath whose
+// version is a path-traversal payload, and returns the manifest's path.
+func writeMaliciousManifestTree(t *testing.T, downloadPath string) string {
+	t.Helper()
+	installDir := filepath.Join(downloadPath, "ansible_collections", "ns", "name")
+	if err := os.MkdirAll(installDir, helpers.DirMod); err != nil {
+		t.Fatalf("failed to create install dir: %v", err)
+	}
+	maliciousManifest := `{
+		"collection_info": {
+			"namespace": "ns",
+			"name": "name",
+			"version": "../../../../pwn"
+		}
+	}`
+	manifestPath := filepath.Join(installDir, "MANIFEST.json")
+	if err := os.WriteFile(manifestPath, []byte(maliciousManifest), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write malicious MANIFEST.json: %v", err)
+	}
+	return manifestPath
+}
+
+// registerCleanupProject writes a project registry entry pointing at
+// downloadPath with an empty requirements file (nothing reachable), so that
+// any indexed collection would be a removal candidate.
+func registerCleanupProject(t *testing.T, cacheDir, downloadPath string) {
+	t.Helper()
+	reqPath := filepath.Join(t.TempDir(), "requirements.yml")
+	if err := os.WriteFile(reqPath, []byte("collections: []\n"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write requirements file: %v", err)
+	}
+	writeProjectRegistry(t, cacheDir, &store.ProjectRegistry{
+		Projects: map[string]store.ProjectRecord{
+			"proj": {
+				RequirementsFile: reqPath,
+				CollectionsPath:  downloadPath,
+				LastRun:          time.Now().UTC(),
+			},
+		},
+	})
+}
+
+// TestRemoveInstalledRejectsTraversalVersion proves the path-traversal fix
+// end to end through Start: a MANIFEST.json whose version is a traversal
+// payload must never reach removeInstalled at all, because
+// buildInstalledRecord rejects it at ingestion. The collection's own
+// on-disk directory and an unrelated sentinel file outside the whole
+// collections tree must both survive, and a warning must be recorded
+// instead of the run aborting or silently deleting anything.
+func TestRemoveInstalledRejectsTraversalVersion(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+
+	sentinelFile := writeOutsideSentinel(t, t.TempDir(), "pwn")
+	manifestPath := writeMaliciousManifestTree(t, downloadPath)
+	registerCleanupProject(t, cacheDir, downloadPath)
+
+	printer := &recordingPrinter{}
+	runtime := infra.New(printer, http.DefaultClient)
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+
+	if _, err := os.Stat(sentinelFile); err != nil {
+		t.Fatalf("expected outside sentinel to survive, stat error: %v", err)
+	}
+	if _, err := os.Stat(manifestPath); err != nil {
+		t.Fatalf("expected the collection's own install dir to survive since ingestion rejected it, stat error: %v", err)
+	}
+	if !printer.hasWarningContaining("unsafe identifier") {
+		t.Fatalf("expected a warning about an unsafe identifier, got: %v", printer.warnings)
+	}
+}
+
+// TestRemoveInstalledContainmentGuard exercises removeInstalled directly
+// with a crafted installedCollection whose Version is a traversal payload,
+// proving the removal-time guard rejects it with ErrUnsafeRemovalPath
+// (defense in depth, independent of the ingestion-time rejection covered by
+// TestRemoveInstalledRejectsTraversalVersion) and never calls os.RemoveAll
+// on anything, so an unrelated outside sentinel survives.
+func TestRemoveInstalledContainmentGuard(t *testing.T) {
+	t.Parallel()
+	collectionsDir := t.TempDir()
+	sentinelFile := writeOutsideSentinel(t, t.TempDir(), "evil")
+
+	inst := installedCollection{
+		Key:            "ns.name@../../evil",
+		FQDN:           "ns.name",
+		Version:        "../../evil",
+		InstallPath:    filepath.Join(collectionsDir, "ansible_collections", "ns", "name"),
+		CollectionsDir: collectionsDir,
+	}
+
+	err := removeInstalled(t.Context(), inst, nil)
+	if !errors.Is(err, helpers.ErrUnsafeRemovalPath) {
+		t.Fatalf("expected ErrUnsafeRemovalPath, got %v", err)
+	}
+	if _, statErr := os.Stat(sentinelFile); statErr != nil {
+		t.Fatalf("expected outside sentinel to survive, stat error: %v", statErr)
+	}
+}
+
+// TestBuildInstalledRecordRejectsSeparators table-tests buildInstalledRecord
+// across namespace/name/version combinations: unsafe path elements must be
+// rejected with helpers.ErrUnsafeCollectionIdentifier, incomplete manifests
+// remain a benign skip (ok=false, err=nil), and valid identifiers - including
+// a semver value with both a prerelease and a build metadata segment - must
+// succeed.
+func TestBuildInstalledRecordRejectsSeparators(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name              string
+		ns, coll, version string
+		wantOK            bool
+		wantErr           bool
+	}{
+		{"valid identifiers", "ns", "name", "1.0.0", true, false},
+		{"valid semver with prerelease and build", "ns", "name", "1.0.0-rc.1+build", true, false},
+		{"namespace is traversal", "..", "name", "1.0.0", false, true},
+		{"name contains slash", "ns", "a/b", "1.0.0", false, true},
+		{"version is traversal", "ns", "name", "../../../../pwn", false, true},
+		{"version is absolute path", "ns", "name", "/etc/passwd", false, true},
+		{"namespace is empty", "", "name", "1.0.0", false, false},
+		{"name is empty", "ns", "", "1.0.0", false, false},
+		{"version is empty", "ns", "name", "", false, false},
+		{"version is dot", "ns", "name", ".", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var manifest types.GalaxyCollectionVersionInfoManifest
+			manifest.CollectionInfo.Namespace = tc.ns
+			manifest.CollectionInfo.Name = tc.coll
+			manifest.CollectionInfo.Version = tc.version
+
+			record, key, ok, err := buildInstalledRecord("/collections", "/collections/ansible_collections/x/MANIFEST.json", manifest)
+
+			if tc.wantErr {
+				if !errors.Is(err, helpers.ErrUnsafeCollectionIdentifier) {
+					t.Fatalf("expected ErrUnsafeCollectionIdentifier, got %v (ok=%v)", err, ok)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+			if ok != tc.wantOK {
+				t.Fatalf("expected ok=%v, got %v (record=%+v key=%q)", tc.wantOK, ok, record, key)
+			}
+		})
 	}
 }
