@@ -9,6 +9,7 @@ import (
 
 	"github.com/greeddj/go-galaxy/cmd/go-galaxy/commands"
 	"github.com/greeddj/go-galaxy/cmd/go-galaxy/helpers"
+	"github.com/greeddj/go-galaxy/internal/progress"
 	"github.com/urfave/cli/v3"
 )
 
@@ -31,6 +32,11 @@ func run() int {
 	cli.VersionPrinter = func(c *cli.Command) {
 		_, _ = fmt.Fprintln(c.Writer, Version)
 	}
+
+	// cmdErr captures action/before/after/flag-action errors via ExitErrHandler.
+	// Flag-parse "Incorrect Usage" errors are printed by urfave itself and never
+	// reach this handler, so capturing here keeps the print to a single seam.
+	var cmdErr error
 	app := &cli.Command{
 		Name:                   "go-galaxy",
 		Usage:                  "Galaxy Collection Manager for CI",
@@ -49,13 +55,30 @@ func run() int {
 			commands.Explain(),
 			commands.Outdated(),
 		},
+		ExitErrHandler: func(_ context.Context, _ *cli.Command, err error) { cmdErr = err },
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	defer stop()
 
-	if err := app.Run(ctx, os.Args); err != nil {
-		return 1
+	runErr := app.Run(ctx, os.Args)
+	code, printErr := handleResult(runErr, cmdErr)
+	if printErr != nil {
+		progress.Errorf("%s", printErr.Error())
 	}
-	return 0
+	return code
+}
+
+// handleResult decides the process exit code and the error, if any, that
+// still needs printing. capturedErr (from ExitErrHandler) takes precedence
+// since it carries the actual error value; a bare runErr with no capturedErr
+// means urfave already printed a flag-parse usage error itself.
+func handleResult(runErr, capturedErr error) (int, error) {
+	if capturedErr != nil {
+		return 1, capturedErr
+	}
+	if runErr != nil {
+		return 1, nil
+	}
+	return 0, nil
 }

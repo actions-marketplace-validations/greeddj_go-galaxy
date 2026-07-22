@@ -24,7 +24,6 @@ func Cleanup() *cli.Command {
 		Action: func(ctx context.Context, c *cli.Command) error {
 			cfg, err := config.BuildCollectionConfig(c)
 			if err != nil {
-				progress.Errorf("%s", err.Error())
 				return err
 			}
 			p := progress.New(cfg.Verbose, cfg.Quiet)

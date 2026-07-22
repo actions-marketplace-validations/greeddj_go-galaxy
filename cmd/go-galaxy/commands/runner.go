@@ -19,7 +19,6 @@ type collectionAction func(ctx context.Context, cfg *config.Config, runtime *inf
 func runCollectionCommand(ctx context.Context, c *cli.Command, action collectionAction) error {
 	cfg, err := config.BuildCollectionConfig(c)
 	if err != nil {
-		progress.Errorf("%s", err.Error())
 		return err
 	}
 	p := progress.New(cfg.Verbose, cfg.Quiet)
