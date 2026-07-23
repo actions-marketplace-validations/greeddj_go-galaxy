@@ -238,7 +238,16 @@ func verifyAndExtract(_ context.Context, deps installDeps, col collection, paylo
 // spends exactly one evict-and-refetch attempt with no classification of
 // *why* it failed. A rare transient failure therefore costs one wasted
 // refetch of otherwise-good bytes; that cost is bounded to a single retry and
-// the end result is still correct.
+// the end result is still correct. The one exception is the prepareInstall
+// failure arm below, which does classify: only helpers.ErrSHA256Mismatch (the
+// S3 backend's read-time integrity check) is worth retrying there, since
+// every other prepareInstall failure (a metadata error, a download error, an
+// offline miss) would just reproduce identically against the same cache
+// entry or the same origin.
+//
+// canRetryCacheHit and evictCorruptCachedArtifact are factored out so both
+// recovery arms below share one guard and one log line - kept out of this
+// function's own body to stay under its cyclomatic complexity budget.
 func prepareWithRecovery(
 	ctx context.Context,
 	deps installDeps,
@@ -251,6 +260,16 @@ func prepareWithRecovery(
 	for {
 		payload, fromCache, err := prepareInstall(ctx, deps, col, metaOverride, filename, forceDownload)
 		if err != nil {
+			// A cache-resident integrity failure surfaced by prepareInstall
+			// itself - the S3 backend verifies a fetched object's sha256 on
+			// read - is recovered once by evicting the object and refetching
+			// from the origin. The local backend does not sha-check on read,
+			// so this arm never fires for it.
+			if canRetryCacheHit(deps, fromCache, forceDownload) && errors.Is(err, helpers.ErrSHA256Mismatch) {
+				evictCorruptCachedArtifact(ctx, deps, col, filename, err)
+				forceDownload = true
+				continue
+			}
 			return installPayload{}, err
 		}
 		actionErr := action(payload)
@@ -260,15 +279,32 @@ func prepareWithRecovery(
 		if payload.artifact.Cleanup != nil {
 			payload.artifact.Cleanup()
 		}
-		if forceDownload || !fromCache || deps.cfg.Offline {
+		if !canRetryCacheHit(deps, fromCache, forceDownload) {
 			return installPayload{}, actionErr
 		}
-
-		deps.runtime.Output.Printf("♻️ Evicting corrupt cached %s and refetching: %v", filename, actionErr)
-		if deps.artifacts != nil {
-			_ = deps.artifacts.Delete(ctx, artifactKey(col))
-		}
+		evictCorruptCachedArtifact(ctx, deps, col, filename, actionErr)
 		forceDownload = true
+	}
+}
+
+// canRetryCacheHit reports whether prepareWithRecovery may spend its one
+// bounded eviction-and-refetch attempt: only for a genuine cache-hit artifact
+// (fromCache), not on what is already the retry (forceDownload), and only
+// when the run can actually reach the origin to replace it (not
+// deps.cfg.Offline) - offline, deleting the only local copy with nothing to
+// refetch it from would be pure data loss for no benefit.
+func canRetryCacheHit(deps installDeps, fromCache, forceDownload bool) bool {
+	return fromCache && !forceDownload && !deps.cfg.Offline
+}
+
+// evictCorruptCachedArtifact logs and deletes col's cached artifact ahead of
+// a forced refetch. Both of prepareWithRecovery's recovery arms - a
+// prepareInstall-level integrity failure and an action-level one - call this
+// so the log line reads identically regardless of which one fired.
+func evictCorruptCachedArtifact(ctx context.Context, deps installDeps, col collection, filename string, cause error) {
+	deps.runtime.Output.Printf("♻️ Evicting corrupt cached %s and refetching: %v", filename, cause)
+	if deps.artifacts != nil {
+		_ = deps.artifacts.Delete(ctx, artifactKey(col))
 	}
 }
 

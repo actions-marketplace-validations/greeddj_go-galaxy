@@ -75,7 +75,11 @@ func verifyArtifactSHA(meta map[string]string, sum []byte) error {
 	if strings.EqualFold(actual, expected) {
 		return nil
 	}
-	return fmt.Errorf("%w: %s != %s", errArtifactSHA256Mismatch, actual, expected)
+	// Wrap both the package-local sentinel (kept for any existing callers
+	// that already match on it) and helpers.ErrSHA256Mismatch, so the
+	// collections layer can classify this as a recoverable cache-integrity
+	// failure without importing s3-specific error types.
+	return fmt.Errorf("%w: %w: %s != %s", errArtifactSHA256Mismatch, helpers.ErrSHA256Mismatch, actual, expected)
 }
 
 func cleanupIfNeeded(cleanup func()) {

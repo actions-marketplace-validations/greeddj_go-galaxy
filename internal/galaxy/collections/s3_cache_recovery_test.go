@@ -1,0 +1,125 @@
+package collections
+
+// This file covers the S3-specific arm of prepareWithRecovery's corruption
+// recovery: a cache-resident sha256 mismatch surfaced by prepareInstall
+// itself - which is how the S3 artifact store reports a corrupt object on
+// read, since it verifies sha256 at Fetch time, unlike the local store - is
+// recovered by evicting the cached artifact and refetching from the origin,
+// exactly once.
+//
+// Standing up the real S3 backend end-to-end would require duplicating the
+// fakeS3 HTTP test double that lives, unexported, in internal/cache/s3's own
+// _test.go files; those symbols are not part of that package's compiled
+// output, so they cannot be imported from here. Instead this test uses a
+// stub cacheManager.ArtifactStore that wraps a real local.Artifacts - so
+// Has/TempFile/Commit/Delete all behave exactly like a real cache - and
+// overrides only Fetch, to reproduce on its first call the wrapped
+// helpers.ErrSHA256Mismatch the S3 backend's verifyArtifactSHA now returns on
+// a corrupt read.
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sync/atomic"
+	"testing"
+
+	"github.com/greeddj/go-galaxy/internal/cache/local"
+	cacheManager "github.com/greeddj/go-galaxy/internal/galaxy/cache"
+	"github.com/greeddj/go-galaxy/internal/galaxy/config"
+	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
+	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
+	"github.com/greeddj/go-galaxy/internal/galaxy/store"
+	"github.com/greeddj/go-galaxy/internal/testing/fakegalaxy"
+)
+
+// fetchOnceMismatchArtifacts wraps a real local.Artifacts store, standing in
+// for the S3 backend's ArtifactStore: it delegates Has, TempFile, and Commit
+// straight to the real store (so a forced refetch after eviction downloads
+// and commits exactly like a real cache would), but its own Fetch fails with
+// a wrapped helpers.ErrSHA256Mismatch on its first call - reproducing the S3
+// backend's read-time sha256 check failing against a corrupt object -
+// regardless of what is actually on disk. Delete is counted (rather than
+// merely delegated) so a test can assert the recovery arm evicts exactly
+// once.
+type fetchOnceMismatchArtifacts struct {
+	*local.Artifacts
+
+	fetchCalls  atomic.Int32
+	deleteCalls atomic.Int32
+}
+
+// Fetch fails with a wrapped helpers.ErrSHA256Mismatch on its first call,
+// simulating a corrupt cache-resident object; every later call delegates to
+// the real local store.
+func (a *fetchOnceMismatchArtifacts) Fetch(ctx context.Context, key string) (cacheManager.ArtifactFile, error) {
+	if a.fetchCalls.Add(1) == 1 {
+		return cacheManager.ArtifactFile{}, fmt.Errorf("simulated corrupt s3 object: %w", helpers.ErrSHA256Mismatch)
+	}
+	return a.Artifacts.Fetch(ctx, key)
+}
+
+// Delete counts every call before delegating to the real local store, so a
+// test can assert the recovery arm evicted exactly once.
+func (a *fetchOnceMismatchArtifacts) Delete(ctx context.Context, key string) error {
+	a.deleteCalls.Add(1)
+	return a.Artifacts.Delete(ctx, key)
+}
+
+// TestInstallCollectionS3CacheFetchMismatchEvictsAndRefetches is the
+// load-bearing proof that prepareWithRecovery's prepare-error arm - added for
+// the S3 backend's read-time sha256 check - evicts a cache-resident artifact
+// that fails integrity verification on Fetch and refetches it from the origin
+// exactly once, healing the artifact cache and completing the install.
+func TestInstallCollectionS3CacheFetchMismatchEvictsAndRefetches(t *testing.T) {
+	t.Parallel()
+	srv := fakegalaxy.New(t)
+	version := srv.AddVersion("acme", "widgets", "1.0.0", nil)
+
+	root := t.TempDir()
+	cacheDir := filepath.Join(root, "cache")
+	downloadPath := filepath.Join(root, "install")
+	if err := os.MkdirAll(cacheDir, helpers.DirMod); err != nil {
+		t.Fatalf("mkdir cacheDir: %v", err)
+	}
+
+	col := collection{Namespace: "acme", Name: "widgets", Version: "1.0.0"}
+	// The seeded content is irrelevant: Fetch is stubbed to fail on its first
+	// call regardless of what is on disk. Only Has() needs to report the key
+	// present, so prepareInstall takes the cache-hit path in the first place.
+	artifactPath := filepath.Join(cacheDir, artifactKey(col))
+	mustWriteFile(t, artifactPath, []byte("stand-in for a corrupt cache-resident object"))
+
+	cfg := &config.Config{
+		Server:       srv.URL(),
+		CacheDir:     cacheDir,
+		DownloadPath: downloadPath,
+		Workers:      1,
+		NoDeps:       true,
+		Offline:      false,
+		NoCache:      false,
+	}
+	runtime := infra.New(noopPrinter{}, http.DefaultClient)
+	st := store.New()
+	artifacts := &fetchOnceMismatchArtifacts{Artifacts: local.NewArtifacts(cacheDir)}
+	deps := installDeps{
+		collectionDeps: newCollectionDeps(cfg, runtime, st),
+		artifacts:      artifacts,
+	}
+
+	if err := installCollection(context.Background(), col, deps, nil, nil); err != nil {
+		t.Fatalf("expected the corrupt cache-resident artifact to recover via a single refetch, got %v", err)
+	}
+	if got := srv.Count(fakegalaxy.EndpointArtifact); got != 1 {
+		t.Fatalf("EndpointArtifact count = %d, want 1 (a single bounded refetch)", got)
+	}
+	if got := artifacts.deleteCalls.Load(); got != 1 {
+		t.Fatalf("Delete calls = %d, want exactly 1", got)
+	}
+
+	installPathDir := filepath.Join(downloadPath, "ansible_collections", col.Namespace, col.Name)
+	assertFileContent(t, filepath.Join(installPathDir, "README.md"), "# acme.widgets\n")
+	assertFileSHA256(t, artifactPath, version.SHA256)
+}
