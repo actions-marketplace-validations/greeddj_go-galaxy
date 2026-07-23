@@ -14,14 +14,17 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 )
 
-// capturingPrinter is an output.Printer stub that records Printf calls so a
-// test can assert a best-effort sweep failure surfaced its warning line
-// rather than being silently swallowed. It embeds noopPrinter (defined in
+// capturingPrinter is an output.Printer stub that records Printf and Warnf
+// calls (into separate slices, mirroring the Printer interface's separate
+// transient and always-emitted tiers) so a test can assert a best-effort
+// failure, or a security-relevant warning, surfaced its line rather than
+// being silently swallowed. It embeds noopPrinter (defined in
 // lock_pin_test.go) for the other Printer methods.
 type capturingPrinter struct {
 	noopPrinter
 
 	prints []string
+	warns  []string
 	mu     sync.Mutex
 }
 
@@ -31,11 +34,29 @@ func (p *capturingPrinter) Printf(format string, args ...any) {
 	p.prints = append(p.prints, fmt.Sprintf(format, args...))
 }
 
+func (p *capturingPrinter) Warnf(format string, args ...any) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.warns = append(p.warns, fmt.Sprintf(format, args...))
+}
+
 // hasPrintContaining reports whether any recorded Printf line contains substr.
 func (p *capturingPrinter) hasPrintContaining(substr string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, line := range p.prints {
+		if strings.Contains(line, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasWarnContaining reports whether any recorded Warnf line contains substr.
+func (p *capturingPrinter) hasWarnContaining(substr string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, line := range p.warns {
 		if strings.Contains(line, substr) {
 			return true
 		}

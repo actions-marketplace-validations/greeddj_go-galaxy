@@ -575,6 +575,41 @@ func downloadCollectionToCache(
 	return result, nil
 }
 
+// warnIfOffServerDownloadHost emits a warning when an artifact's download URL
+// points at a host other than the configured Galaxy server. The metadata that
+// supplies the URL can come from a cached snapshot, which a bucket writer
+// could poison to redirect a download off-server; surfacing the mismatch
+// gives a visible signal in CI logs without blocking, since a legitimate
+// deployment (an enterprise content host or an object-storage URL) may serve
+// downloads from a different host than its API server. A missing server or
+// an unparseable URL is not warned about, to avoid false alarms. The warning
+// goes out through Warnf rather than Printf: this is a security/integrity
+// detection signal, so it must survive --quiet (Warnf always emits, to
+// stderr, unlike the transient Printf tier) rather than risk being silenced
+// in the very CI mode where it matters most.
+func warnIfOffServerDownloadHost(runtime *infra.Infra, cfg *config.Config, downloadURL string) {
+	if cfg == nil || strings.TrimSpace(cfg.Server) == "" {
+		return
+	}
+	server, err := url.Parse(cfg.Server)
+	if err != nil {
+		return
+	}
+	dl, err := url.Parse(downloadURL)
+	if err != nil {
+		return
+	}
+	serverHost := strings.ToLower(server.Hostname())
+	dlHost := strings.ToLower(dl.Hostname())
+	if serverHost == "" || dlHost == "" || serverHost == dlHost {
+		return
+	}
+	runtime.Output.Warnf(
+		"Downloading %s from host %q, which differs from the configured server host %q",
+		downloadURL, dlHost, serverHost,
+	)
+}
+
 // attemptDownloadToCache performs one full download attempt: it opens a
 // fresh HTTP response via downloadCollection, then either tees it through
 // streamDownloadAndExtract (when an extracted store is configured) or writes
@@ -585,6 +620,11 @@ func downloadCollectionToCache(
 // sha256 hasher, the artifact tmp file, and a tar.gz extraction pipeline
 // that populates the content-addressable extracted store, all in a single
 // pass.
+//
+// warnIfOffServerDownloadHost runs here, ahead of the actual GET: this is the
+// single point every artifact download passes through, whether reached from
+// the prefetcher or from the main install path's fetchArtifact, and whether
+// meta came in fresh from the API or from a (poisonable) cached snapshot.
 func attemptDownloadToCache(
 	ctx context.Context,
 	deps installDeps,
@@ -592,6 +632,7 @@ func attemptDownloadToCache(
 	meta *types.GalaxyCollectionVersionInfo,
 	useCache bool,
 ) (downloadResult, error) {
+	warnIfOffServerDownloadHost(deps.runtime, deps.cfg, meta.DownloadURL)
 	resp, err := downloadCollection(ctx, deps.runtime, meta.DownloadURL)
 	if err != nil {
 		return downloadResult{}, err

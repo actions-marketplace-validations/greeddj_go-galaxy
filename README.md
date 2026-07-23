@@ -227,6 +227,29 @@ cache_dir = /home/ci/.cache/go-galaxy
 When `--s3-bucket` (or `GO_GALAXY_S3_BUCKET`) is set, go-galaxy uses S3 as the cache backend.
 Artifacts and cache metadata are stored in S3; collections are still installed locally.
 
+## Security / Trust model
+
+- The shared S3 snapshot object and the project registry object are a trust boundary:
+  go-galaxy serves cached Galaxy metadata (including a collection's download URL and
+  sha256) from them without re-validating against the origin on every use, so anyone
+  who can write to the bucket can influence what a run installs. Restrict bucket write
+  access (a write-restricted ACL, or dedicated credentials) just as you would protect
+  a local cache directory - the local Bolt snapshot is implicitly trusted for the same
+  reason, since writing it already requires local filesystem access to the cache
+  directory.
+- Snapshot and project-registry reads are size-capped (a compressed-size ceiling and a
+  decompressed-size ceiling), so a hostile-but-writable bucket cannot OOM the process
+  with an oversized object or a gzip bomb.
+- An artifact download whose host differs from the configured Galaxy server is warned
+  about (a visible signal in CI logs) rather than blocked, so deployments that serve
+  downloads from a separate content host or object storage still work.
+- Pinned (`--frozen`) installs are already immune to a poisoned snapshot: for a
+  lockfile-pinned collection, go-galaxy hashes the actually downloaded (or on-disk)
+  bytes and compares them to the sha256 recorded in the in-repo lockfile, not to the
+  cacheable metadata sha, so a poisoned download URL or sha causes the install to fail
+  closed instead of installing attacker content. Use `--frozen` with a committed
+  lockfile in CI as the robust mitigation against a compromised cache.
+
 ## Reproducible CI
 
 Pin transitive collections with a lockfile, then drive CI from it:
