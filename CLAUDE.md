@@ -37,6 +37,7 @@ The `cacheManager.Backend` interface in [internal/galaxy/cache/backend.go](inter
 - [internal/cache/local](internal/cache/local) — filesystem under `cfg.CacheDir`; uses Bolt files for state and a directory layout for tarballs.
 - [internal/cache/s3](internal/cache/s3) — S3-compatible object store (selected when `--s3-bucket` / `GO_GALAXY_S3_BUCKET` is set). Includes its own minimal S3 client, distributed locking via conditional `PUT` + lock TTL, and gzip-on-the-wire for the snapshot.
 - The S3 backend's `LoadStore` checks the persisted schema version via a lightweight meta-only probe before decoding the full payload, matching the local backend's schema-first `Load` order.
+- `Backend` also exposes `SweepTemp(ctx)`, called once by `initInstall` while the exclusive lock is held. The local backend removes leftover `.download-*` files from the cache directory; the S3 backend is a no-op, since its download temps live under the OS temp directory instead of the shared cache.
 
 `internal/cache/cache.go::New` is the factory that picks one based on `cfg.S3Cache.Enabled`. **Add new backends here**, and make sure they implement `Backend` and return an `ArtifactStore`.
 
@@ -52,6 +53,7 @@ The `cacheManager.Backend` interface in [internal/galaxy/cache/backend.go](inter
 `collections.Start` → `runInstall` orchestrates:
 
 1. `initInstall` — open backend, acquire backend lock, load `Store`, optionally clear caches, record this project.
+   After acquiring the lock and before loading the store, `initInstall` sweeps dead-run temp orphans: leftover `.download-*` artifact temps and the extracted store's `ingest-*` / `<sha>.tmp` directories. This is safe only because the exclusive lock guarantees no other run is mid-write, and it is best-effort - a sweep failure just logs a warning and the install proceeds.
 2. `prepareInstallPlan` — load + parse `requirements.yml`, resolve transitive deps (`resolve.go`), build `collections` map keyed by `<ns>.<name>@<version>`, kick off the prefetcher, then topologically split into `levels` (`buildInstallLevels`).
 3. `installLevels` - for each level, fan out installs to `cfg.Workers` goroutines (semaphore-bounded). On any failure within a level, the loop breaks before the next level. The prefetcher hands off downloaded artifact metadata via `prefetch.Wait(key)`. A cache-hit artifact that fails its pin/hash check or fails to extract is evicted (tarball plus sidecar) and refetched exactly once, then re-verified and re-extracted; offline runs never evict.
 4. `finalizeInstall` — save the snapshot back to the backend; if any failures, return a wrapped `ErrInstallationFailed`.

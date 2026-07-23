@@ -3,6 +3,7 @@ package local
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -59,6 +60,68 @@ func TestBackendLockFailsFastWhenHeld(t *testing.T) {
 	}
 	if err := b2.Close(ctx); err != nil {
 		t.Fatalf("b2.Close failed: %v", err)
+	}
+}
+
+// TestBackendSweepTempRemovesDownloadOrphansKeepsRealFiles proves SweepTemp
+// removes only leftover download-temp files: a committed tarball, its sha256
+// sidecar, and the consolidated Bolt database must all survive.
+func TestBackendSweepTempRemovesDownloadOrphansKeepsRealFiles(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	writeCacheFile(t, dir, helpers.ArtifactDownloadTempPrefix+"abc", []byte("orphan"))
+	writeCacheFile(t, dir, helpers.ArtifactDownloadTempPrefix+"xyz", []byte("orphan"))
+	writeCacheFile(t, dir, "acme-widgets-1.0.0.tar.gz", []byte("tarball"))
+	writeCacheFile(t, dir, "acme-widgets-1.0.0.tar.gz"+helpers.ArtifactSHASidecarSuffix, []byte("sha256"))
+	writeCacheFile(t, dir, helpers.StoreDBLocal, []byte("bolt"))
+
+	b := New(dir)
+	if err := b.SweepTemp(context.Background()); err != nil {
+		t.Fatalf("SweepTemp error: %v", err)
+	}
+
+	assertFileAbsent(t, dir, helpers.ArtifactDownloadTempPrefix+"abc")
+	assertFileAbsent(t, dir, helpers.ArtifactDownloadTempPrefix+"xyz")
+	assertFileExists(t, dir, "acme-widgets-1.0.0.tar.gz")
+	assertFileExists(t, dir, "acme-widgets-1.0.0.tar.gz"+helpers.ArtifactSHASidecarSuffix)
+	assertFileExists(t, dir, helpers.StoreDBLocal)
+}
+
+// TestBackendSweepTempMissingDirIsNoError proves SweepTemp treats a
+// not-yet-created cache directory as nothing to sweep, matching
+// store.SweepDownloadTemps' own ErrNotExist handling.
+func TestBackendSweepTempMissingDirIsNoError(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "does-not-exist")
+
+	b := New(dir)
+	if err := b.SweepTemp(context.Background()); err != nil {
+		t.Fatalf("expected nil error for a missing cache dir, got %v", err)
+	}
+}
+
+// writeCacheFile writes a small file under dir, failing the test on error.
+func writeCacheFile(t *testing.T, dir, name string, data []byte) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), data, helpers.FileMod); err != nil {
+		t.Fatalf("failed to write %s: %v", name, err)
+	}
+}
+
+// assertFileExists fails the test unless the named file is present.
+func assertFileExists(t *testing.T, dir, name string) {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+		t.Fatalf("expected %s to exist, stat error: %v", name, err)
+	}
+}
+
+// assertFileAbsent fails the test unless the named file is gone.
+func assertFileAbsent(t *testing.T, dir, name string) {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+		t.Fatalf("expected %s to be removed, stat error: %v", name, err)
 	}
 }
 

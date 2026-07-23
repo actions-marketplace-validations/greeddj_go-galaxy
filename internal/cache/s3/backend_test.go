@@ -267,6 +267,19 @@ func TestLoadProjectRegistryMissingObjectReturnsEmpty(t *testing.T) {
 	}
 }
 
+// TestBackendSweepTempNoOp confirms the S3 backend's SweepTemp is a genuine
+// no-op: its download temps live under the OS temp directory rather than the
+// shared S3 storage, so there is nothing for the backend itself to sweep.
+func TestBackendSweepTempNoOp(t *testing.T) {
+	t.Parallel()
+	b := newTestBackend(t)
+	ctx := t.Context()
+
+	if err := b.SweepTemp(ctx); err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+}
+
 // putProjectsObject seeds the state/projects.json object with raw bytes,
 // mirroring saveProjectRegistry's plain (non-gzipped) JSON encoding so
 // LoadProjectRegistry's decoding path is exercised the same way it would be

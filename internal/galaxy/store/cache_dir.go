@@ -35,6 +35,36 @@ func ClearCacheFiles(cacheDir string) error {
 	return nil
 }
 
+// SweepDownloadTemps removes leftover download-temp files
+// (helpers.ArtifactDownloadTempPrefix) from the top level of cacheDir. These
+// are created by the local artifact store's TempFile during a download and
+// removed by its cleanup on success or failure; only a hard-killed run leaves
+// them behind. It matches the temp prefix exclusively, so committed .tar.gz
+// artifacts, sidecars, the Bolt databases, and the lock file are never
+// touched. A missing cacheDir is not an error.
+func SweepDownloadTemps(cacheDir string) error {
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, helpers.ArtifactDownloadTempPrefix) {
+			continue
+		}
+		if err := removeCacheFile(cacheDir, name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func shouldDeleteCacheFile(name string) bool {
 	if isDeleteCacheName(name) {
 		return true
@@ -43,7 +73,7 @@ func shouldDeleteCacheFile(name string) bool {
 		return false
 	}
 	return strings.HasSuffix(name, ".tar.gz") ||
-		strings.HasPrefix(name, ".download-") ||
+		strings.HasPrefix(name, helpers.ArtifactDownloadTempPrefix) ||
 		strings.HasSuffix(name, ".tmp") ||
 		strings.HasSuffix(name, helpers.ArtifactSHASidecarSuffix)
 }

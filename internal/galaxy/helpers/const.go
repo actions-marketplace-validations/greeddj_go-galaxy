@@ -43,6 +43,14 @@ const (
 	// the real bytes.
 	ArtifactSHASidecarSuffix = ".sha256"
 
+	// ArtifactDownloadTempPrefix is the prefix the local artifact store uses
+	// for in-flight download temp files (see local.Artifacts.TempFile). A
+	// file under this prefix is removed by its own download's cleanup on
+	// success or failure; one that survives past that can only be a
+	// dead-run orphan, so it is the exact string matched by both the
+	// dead-run sweep and the --clear-cache sweep.
+	ArtifactDownloadTempPrefix = ".download-"
+
 	// FetchDefaultTimeout is the overall HTTP client timeout.
 	FetchDefaultTimeout = 30 * time.Second
 	// FetchDialContextTimeout is the dial timeout for outbound connections.

@@ -297,6 +297,12 @@ func initInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) 
 		return nil, err
 	}
 
+	extractStore := newExtractStore(cfg)
+	// The exclusive backend lock is held now, so no other go-galaxy process can
+	// be mid-write: every leftover download-temp and extract-temp is a dead-run
+	// orphan and is safe to reclaim.
+	sweepDeadRunTemps(ctx, runtime, backend, extractStore)
+
 	snapshotStart := time.Now()
 	runtime.Output.Printf("🚀 load storage")
 	st, err := backend.LoadStore(ctx)
@@ -322,7 +328,7 @@ func initInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) 
 		backend:      backend,
 		store:        st,
 		release:      releaseLock,
-		extractStore: newExtractStore(cfg),
+		extractStore: extractStore,
 	}, nil
 }
 
@@ -333,6 +339,20 @@ func newExtractStore(cfg *config.Config) *extracted.Store {
 		return nil
 	}
 	return extracted.NewStore(cfg.CacheDir)
+}
+
+// sweepDeadRunTemps reclaims temporary files and directories left behind by a
+// previously killed run, safe to delete because the caller holds the backend's
+// exclusive lock. It is best-effort: each failure is logged and the install
+// proceeds, since leaked temp space is not worth failing an otherwise-valid
+// install over.
+func sweepDeadRunTemps(ctx context.Context, runtime *infra.Infra, backend cacheManager.Backend, extractStore *extracted.Store) {
+	if err := backend.SweepTemp(ctx); err != nil {
+		runtime.Output.Printf("⚠️ Failed to sweep leftover download temps: %v", err)
+	}
+	if err := extractStore.SweepTemp(); err != nil {
+		runtime.Output.Printf("⚠️ Failed to sweep leftover extract temps: %v", err)
+	}
 }
 
 // writeRunMetrics persists a JSON metrics report when cfg.MetricsFile is set.

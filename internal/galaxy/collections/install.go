@@ -578,7 +578,7 @@ func streamDownloadAndExtract(
 	body io.Reader,
 	useCache bool,
 ) (downloadResult, error) {
-	tmpFile, tmpCleanup, err := deps.artifacts.TempFile(ctx, ".download-")
+	tmpFile, tmpCleanup, err := deps.artifacts.TempFile(ctx, helpers.ArtifactDownloadTempPrefix)
 	if err != nil {
 		return downloadResult{}, err
 	}
@@ -655,7 +655,7 @@ func validateDownloadInputs(cfg *config.Config, artifacts cacheManager.ArtifactS
 }
 
 func writeDownloadToTemp(ctx context.Context, artifacts cacheManager.ArtifactStore, body io.Reader) (string, func(), string, error) {
-	tmpFile, cleanup, err := artifacts.TempFile(ctx, ".download-")
+	tmpFile, cleanup, err := artifacts.TempFile(ctx, helpers.ArtifactDownloadTempPrefix)
 	if err != nil {
 		return "", cleanup, "", err
 	}

@@ -259,6 +259,14 @@ func (b *Backend) Artifacts() cacheManager.ArtifactStore {
 	return b.artifacts
 }
 
+// SweepTemp is a no-op for the S3 backend: its artifact download temps are
+// created under the OS temp directory (os.TempDir() or a configured base),
+// which the operating system reclaims, not under the shared cache, so there
+// is nothing in the backend's own storage to sweep.
+func (b *Backend) SweepTemp(_ context.Context) error {
+	return nil
+}
+
 // probeConditionalPut verifies that the configured backend actually enforces
 // If-None-Match: * before the lock protocol is allowed to rely on it. It
 // writes a small, per-process-unique probe object under the locks prefix

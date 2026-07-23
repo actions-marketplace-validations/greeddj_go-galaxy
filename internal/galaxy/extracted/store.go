@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/archive"
@@ -23,6 +24,9 @@ const (
 	// ReadyMarker is the file written last to mark a complete extraction.
 	ReadyMarker = ".ready"
 	tmpSuffix   = ".tmp"
+	// ingestPrefix names the temp directories IngestReader creates under the
+	// store root before a stream is finalized via Promote.
+	ingestPrefix = "ingest-"
 )
 
 var (
@@ -98,7 +102,7 @@ func (s *Store) IngestReader(r io.Reader) (string, error) {
 		_, _ = io.Copy(io.Discard, r)
 		return "", err
 	}
-	tmpDir, err := os.MkdirTemp(s.root, "ingest-")
+	tmpDir, err := os.MkdirTemp(s.root, ingestPrefix)
 	if err != nil {
 		_, _ = io.Copy(io.Discard, r)
 		return "", err
@@ -196,6 +200,44 @@ func (s *Store) Sweep(keep map[string]bool) error {
 		_ = os.RemoveAll(filepath.Join(s.root, name))
 	}
 	return nil
+}
+
+// SweepTemp removes leftover temporary entries under the store root left by a
+// previously killed run: the "ingest-" directories created by IngestReader
+// and the "<sha>.tmp" directories created by Ensure/extractInto, both renamed
+// to their final CAS location on success and cleaned on failure. A finalized
+// CAS tree - a bare sha directory with a .ready marker, carrying neither the
+// "ingest-" prefix nor the ".tmp" suffix - is never matched. A missing root
+// is not an error. The caller must hold the install lock so every match is a
+// dead-run orphan.
+func (s *Store) SweepTemp() error {
+	if s == nil {
+		return nil
+	}
+	entries, err := os.ReadDir(s.root)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !isTempEntryName(name) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(s.root, name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// isTempEntryName reports whether name is one of the two temp forms the store
+// creates under its root, as opposed to a finalized CAS tree named by a bare
+// sha.
+func isTempEntryName(name string) bool {
+	return strings.HasPrefix(name, ingestPrefix) || strings.HasSuffix(name, tmpSuffix)
 }
 
 func (s *Store) extractInto(final, tarPath string) (string, error) {

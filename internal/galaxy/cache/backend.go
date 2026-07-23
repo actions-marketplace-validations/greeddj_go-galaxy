@@ -34,4 +34,9 @@ type Backend interface {
 	RecordProject(ctx context.Context, requirementsFile, downloadPath string) error
 	LoadProjectRegistry(ctx context.Context) (*store.ProjectRegistry, error)
 	Artifacts() ArtifactStore
+	// SweepTemp deletes temporary artifact files left by a previously killed
+	// run. It must be called only while the caller holds the backend's
+	// exclusive lock, so every matching entry is provably a dead-run orphan and
+	// no live writer's in-flight temp can be removed.
+	SweepTemp(ctx context.Context) error
 }

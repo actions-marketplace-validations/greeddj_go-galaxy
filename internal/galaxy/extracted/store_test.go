@@ -232,6 +232,76 @@ func TestStoreSweepPlanPropagatesRealReadDirError(t *testing.T) {
 	}
 }
 
+// TestStoreSweepTempRemovesOrphanTempsKeepsFinalized proves SweepTemp removes
+// both temp forms the store creates under its root - an "ingest-" directory
+// from IngestReader and a "<sha>.tmp" directory from Ensure/extractInto -
+// while leaving a finalized CAS tree (a bare sha directory with its .ready
+// marker) untouched.
+func TestStoreSweepTempRemovesOrphanTempsKeepsFinalized(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	tarPath := filepath.Join(dir, "src.tar.gz")
+	writeTarball(t, tarPath, map[string]string{"f": "x"})
+	store := NewStore(filepath.Join(dir, "cache"))
+
+	finalized, err := store.Ensure("deadbeef", tarPath)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+
+	ingestDir := filepath.Join(store.Root(), "ingest-orphan")
+	seedTempEntry(t, ingestDir)
+
+	extractTmpDir := filepath.Join(store.Root(), "cafebabe"+tmpSuffix)
+	seedTempEntry(t, extractTmpDir)
+
+	if err := store.SweepTemp(); err != nil {
+		t.Fatalf("SweepTemp: %v", err)
+	}
+
+	if _, err := os.Stat(ingestDir); !os.IsNotExist(err) {
+		t.Fatalf("ingest-* dir survived SweepTemp: err=%v", err)
+	}
+	if _, err := os.Stat(extractTmpDir); !os.IsNotExist(err) {
+		t.Fatalf("<sha>.tmp dir survived SweepTemp: err=%v", err)
+	}
+	if _, err := os.Stat(finalized); err != nil {
+		t.Fatalf("finalized entry removed by SweepTemp: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(finalized, ReadyMarker)); err != nil {
+		t.Fatalf("finalized ready marker removed by SweepTemp: %v", err)
+	}
+}
+
+// seedTempEntry creates a directory at path containing a single file,
+// simulating a leftover temp entry left under a store root by a killed run.
+func seedTempEntry(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, helpers.DirMod); err != nil {
+		t.Fatalf("mkdir %s: %v", path, err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "partial"), []byte("x"), helpers.FileMod); err != nil {
+		t.Fatalf("write file in %s: %v", path, err)
+	}
+}
+
+// TestStoreSweepTempMissingRootAndNilReceiver proves SweepTemp treats a
+// not-yet-created store root as nothing to sweep, and is safe to call on a
+// nil *Store (the "caching disabled" case), both returning a nil error.
+func TestStoreSweepTempMissingRootAndNilReceiver(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	if err := store.SweepTemp(); err != nil {
+		t.Fatalf("expected nil error for a missing store root, got %v", err)
+	}
+
+	var nilStore *Store
+	if err := nilStore.SweepTemp(); err != nil {
+		t.Fatalf("expected nil error for a nil store, got %v", err)
+	}
+}
+
 func TestNewStoreEmptyCacheDir(t *testing.T) {
 	t.Parallel()
 	if got := NewStore(""); got != nil {

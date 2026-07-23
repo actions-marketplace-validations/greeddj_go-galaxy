@@ -96,6 +96,17 @@ func (b *Backend) Artifacts() cacheManager.ArtifactStore {
 	return b.artifacts
 }
 
+// SweepTemp removes download-temp files left in the cache directory by a
+// previously killed run. Safe only under the backend's exclusive lock, which
+// the caller holds; a killed run is the only way these outlive their per-run
+// cleanup.
+func (b *Backend) SweepTemp(_ context.Context) error {
+	if b.cacheDir == "" {
+		return errCacheDirEmpty
+	}
+	return store.SweepDownloadTemps(b.cacheDir)
+}
+
 // ensureOpen lazily opens the Bolt snapshot files. Deferring this past
 // directory creation lets callers take the instance lock first, so a
 // second process on the same cache dir fails fast via BoltOpenTimeout
