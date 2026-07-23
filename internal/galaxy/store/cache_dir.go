@@ -42,7 +42,10 @@ func shouldDeleteCacheFile(name string) bool {
 	if isKeepCacheName(name) {
 		return false
 	}
-	return strings.HasSuffix(name, ".tar.gz") || strings.HasPrefix(name, ".download-") || strings.HasSuffix(name, ".tmp")
+	return strings.HasSuffix(name, ".tar.gz") ||
+		strings.HasPrefix(name, ".download-") ||
+		strings.HasSuffix(name, ".tmp") ||
+		strings.HasSuffix(name, helpers.ArtifactSHASidecarSuffix)
 }
 
 // isDeleteCacheName reports whether name is a file that is always safe to

@@ -3,6 +3,7 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
@@ -112,6 +113,20 @@ func TestClearCacheFilesReclaimsLegacySnapshotFiles(t *testing.T) {
 	for _, name := range legacyNames {
 		assertFileAbsent(t, dir, name)
 	}
+}
+
+// TestClearCacheFilesRemovesArtifactSHASidecar confirms --clear-cache sweeps
+// a sha256 sidecar left next to a cached tarball, so a stale digest can
+// never survive a clear and be picked up against different bytes later.
+func TestClearCacheFilesRemovesArtifactSHASidecar(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeCacheFile(t, dir, "x.tar.gz"+helpers.ArtifactSHASidecarSuffix, []byte(strings.Repeat("a", 64)))
+
+	if err := ClearCacheFiles(dir); err != nil {
+		t.Fatalf("ClearCacheFiles error: %v", err)
+	}
+	assertFileAbsent(t, dir, "x.tar.gz"+helpers.ArtifactSHASidecarSuffix)
 }
 
 // writeCacheFile writes a small file under dir, failing the test on error.

@@ -36,6 +36,13 @@ const (
 	// to.
 	ArtifactMaxDownloadSize = ArchiveMaxTotalSize
 
+	// ArtifactSHASidecarSuffix names the sidecar file written next to a
+	// locally cached artifact tarball, holding its sha256 digest. A later
+	// non-pinned cache hit reads this sidecar instead of re-hashing the whole
+	// tarball; a frozen (pinned) cache hit never trusts it and always hashes
+	// the real bytes.
+	ArtifactSHASidecarSuffix = ".sha256"
+
 	// FetchDefaultTimeout is the overall HTTP client timeout.
 	FetchDefaultTimeout = 30 * time.Second
 	// FetchDialContextTimeout is the dial timeout for outbound connections.

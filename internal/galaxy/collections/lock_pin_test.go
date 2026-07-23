@@ -1,6 +1,9 @@
 package collections
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -131,6 +134,138 @@ func TestInstallCollectionCacheHitPinMismatch(t *testing.T) {
 	} else if !os.IsNotExist(statErr) {
 		t.Fatalf("unexpected stat error on install path: %v", statErr)
 	}
+}
+
+// TestInstallCollectionCacheHitPinIgnoresSidecarAndHashesRealBytes is the
+// load-bearing proof that a frozen (pinned) cache hit never trusts a
+// recorded sha256 - here, a sidecar whose content happens to equal the pin
+// itself, simulating stale or upstream-claimed metadata - over the actual
+// bytes on disk. The cached tarball's real content differs from both the
+// pin and the sidecar, so a correct install must hash the real file and
+// fail closed; trusting the sidecar instead would incorrectly let the
+// install through.
+func TestInstallCollectionCacheHitPinIgnoresSidecarAndHashesRealBytes(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cacheDir := filepath.Join(root, "cache")
+	downloadPath := filepath.Join(root, "install")
+	if err := os.MkdirAll(cacheDir, helpers.DirMod); err != nil {
+		t.Fatalf("mkdir cacheDir: %v", err)
+	}
+
+	pin := strings.Repeat("1", 64)
+	col := collection{Namespace: "acme", Name: "widgets", Version: "1.0.0", SHA256: pin}
+	artifactPath := filepath.Join(cacheDir, artifactKey(col))
+	content := []byte("real on-disk tarball bytes that differ from both the pin and the sidecar")
+	if err := os.WriteFile(artifactPath, content, helpers.FileMod); err != nil {
+		t.Fatalf("seed cached artifact: %v", err)
+	}
+	if realSHA := sha256Hex(content); realSHA == pin {
+		t.Fatalf("test setup bug: pin accidentally matches real hash")
+	}
+	// The sidecar falsely agrees with the pin, simulating stale or
+	// upstream-claimed metadata that does not match the bytes actually on
+	// disk. If the pinned path trusted this sidecar, the mismatch below
+	// would never be caught.
+	sidecarPath := artifactPath + helpers.ArtifactSHASidecarSuffix
+	if err := os.WriteFile(sidecarPath, []byte(pin), helpers.FileMod); err != nil {
+		t.Fatalf("seed sidecar: %v", err)
+	}
+
+	cfg := &config.Config{
+		CacheDir:     cacheDir,
+		DownloadPath: downloadPath,
+		Workers:      1,
+		NoDeps:       true,
+		Offline:      true,
+	}
+	deps := newTestInstallDeps(t, cfg)
+
+	err := installCollection(context.Background(), col, deps, nil, nil)
+	if err == nil {
+		t.Fatalf("expected pin mismatch error, got nil")
+	}
+	if !errors.Is(err, helpers.ErrSHA256Mismatch) {
+		t.Fatalf("expected errors.Is ErrSHA256Mismatch, got %v", err)
+	}
+
+	installPath := filepath.Join(downloadPath, "ansible_collections", col.Namespace, col.Name)
+	if _, statErr := os.Stat(installPath); statErr == nil {
+		t.Fatalf("install path %s was created despite the pin mismatch", installPath)
+	} else if !os.IsNotExist(statErr) {
+		t.Fatalf("unexpected stat error on install path: %v", statErr)
+	}
+}
+
+// TestInstallCollectionCacheHitPinIntactBytesSucceeds asserts a pinned cache
+// hit whose real tarball bytes DO match the pin succeeds even though its
+// sidecar disagrees, confirming the frozen path verifies the pin against
+// the actual file rather than ever consulting the sidecar.
+func TestInstallCollectionCacheHitPinIntactBytesSucceeds(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cacheDir := filepath.Join(root, "cache")
+	downloadPath := filepath.Join(root, "install")
+	if err := os.MkdirAll(cacheDir, helpers.DirMod); err != nil {
+		t.Fatalf("mkdir cacheDir: %v", err)
+	}
+
+	content := buildMinimalTarGz(t)
+	realSHA := sha256Hex(content)
+	col := collection{Namespace: "acme", Name: "gizmos", Version: "1.0.0", SHA256: realSHA}
+	artifactPath := filepath.Join(cacheDir, artifactKey(col))
+	if err := os.WriteFile(artifactPath, content, helpers.FileMod); err != nil {
+		t.Fatalf("seed cached artifact: %v", err)
+	}
+	// The sidecar disagrees with the real hash; the pinned path must ignore
+	// it entirely and still succeed because the actual bytes match the pin.
+	wrongSidecar := strings.Repeat("f", 64)
+	sidecarPath := artifactPath + helpers.ArtifactSHASidecarSuffix
+	if err := os.WriteFile(sidecarPath, []byte(wrongSidecar), helpers.FileMod); err != nil {
+		t.Fatalf("seed mismatched sidecar: %v", err)
+	}
+
+	cfg := &config.Config{
+		CacheDir:     cacheDir,
+		DownloadPath: downloadPath,
+		Workers:      1,
+		NoDeps:       true,
+		Offline:      true,
+	}
+	deps := newTestInstallDeps(t, cfg)
+
+	if err := installCollection(context.Background(), col, deps, nil, nil); err != nil {
+		t.Fatalf("expected the pinned install to succeed, got %v", err)
+	}
+
+	installPath := filepath.Join(downloadPath, "ansible_collections", col.Namespace, col.Name)
+	if _, statErr := os.Stat(installPath); statErr != nil {
+		t.Fatalf("expected install path %s to exist, stat error: %v", installPath, statErr)
+	}
+}
+
+// buildMinimalTarGz builds a minimal but valid gzip+tar stream containing a
+// single small regular file, suitable for archive.ExtractTarGz.
+func buildMinimalTarGz(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	body := []byte("# widgets\n")
+	header := &tar.Header{Typeflag: tar.TypeReg, Name: "README.md", Size: int64(len(body)), Mode: 0o644}
+	if err := tw.WriteHeader(header); err != nil {
+		t.Fatalf("write tar header: %v", err)
+	}
+	if _, err := tw.Write(body); err != nil {
+		t.Fatalf("write tar body: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("close gzip writer: %v", err)
+	}
+	return buf.Bytes()
 }
 
 func TestInstallCollectionFreshDownloadPinMismatch(t *testing.T) {

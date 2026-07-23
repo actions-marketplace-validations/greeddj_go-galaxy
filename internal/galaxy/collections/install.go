@@ -131,8 +131,8 @@ func prepareInstall(
 
 	// Fast path: artifact is already in cache and the caller did not push
 	// metadata. We have everything required to install - namespace/name/version
-	// from col, SHA from a sidecar (S3) or by hashing the file (local) - so we
-	// can skip the metadata roundtrip entirely.
+	// from col, SHA from a sidecar (local or S3) or, failing that, by hashing
+	// the file - so we can skip the metadata roundtrip entirely.
 	if cacheHit && meta == nil {
 		runtime.Output.Printf("📦 Using cached %s", filename)
 		return prepareFromCache(ctx, deps, col)
@@ -147,7 +147,7 @@ func prepareInstall(
 	if err != nil {
 		return installPayload{}, err
 	}
-	artifactSHA, err := resolveArtifactSHA(artifact.Path, meta, artifact.Meta, artifact.SHA)
+	artifactSHA, err := resolveArtifactSHA(artifact.Path, meta, artifact.Meta, artifact.SHA, col.SHA256)
 	if err != nil {
 		if artifact.Cleanup != nil {
 			artifact.Cleanup()
@@ -162,7 +162,7 @@ func prepareFromCache(ctx context.Context, deps installDeps, col collection) (in
 	if err != nil {
 		return installPayload{}, err
 	}
-	artifactSHA, err := resolveArtifactSHA(artifact.Path, nil, artifact.Meta, artifact.SHA)
+	artifactSHA, err := resolveArtifactSHA(artifact.Path, nil, artifact.Meta, artifact.SHA, col.SHA256)
 	if err != nil {
 		if artifact.Cleanup != nil {
 			artifact.Cleanup()
@@ -260,21 +260,39 @@ func fetchArtifact(
 	return artifactData{Path: cached.Path, Cleanup: cached.Cleanup, Meta: cached.Meta}, nil
 }
 
+// resolveArtifactSHA determines the sha256 to record for an installed
+// artifact, preferring cheaper sources but never trusting an unverified one
+// when the lockfile pins an exact hash. artifactSHA (set only on a fresh
+// download) is always a hash of the actual bytes just streamed, so it is
+// authoritative regardless of pin. Everything else - a cache hit's recorded
+// metadata or its sidecar - was written by an earlier process and never
+// re-verified against the bytes on disk today, so a non-empty pin skips
+// straight to hashing the real tarball: trusting a recorded value here would
+// let drifted-on-disk bytes slip past a frozen install by coincidentally
+// matching a stale pin. Without a pin, the cheaper recorded sources are used
+// in order, falling back to hashing the file only when none are available.
 func resolveArtifactSHA(
 	path string,
 	meta *types.GalaxyCollectionVersionInfo,
 	artifactMeta map[string]string,
 	artifactSHA string,
+	pin string,
 ) (string, error) {
-	sha := strings.TrimSpace(artifactSHA)
-	if sha == "" && meta != nil && meta.Artifact.Sha256 != "" {
-		sha = strings.TrimSpace(meta.Artifact.Sha256)
-	}
-	if sha == "" && artifactMeta != nil {
-		sha = strings.TrimSpace(artifactMeta["sha256"])
-	}
-	if sha != "" {
+	if sha := strings.TrimSpace(artifactSHA); sha != "" {
 		return sha, nil
+	}
+	if strings.TrimSpace(pin) != "" {
+		return archive.FileHashSHA256(path)
+	}
+	if meta != nil {
+		if sha := strings.TrimSpace(meta.Artifact.Sha256); sha != "" {
+			return sha, nil
+		}
+	}
+	if artifactMeta != nil {
+		if sha := strings.TrimSpace(artifactMeta["sha256"]); sha != "" {
+			return sha, nil
+		}
 	}
 	return archive.FileHashSHA256(path)
 }
