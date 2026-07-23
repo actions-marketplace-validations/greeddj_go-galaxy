@@ -72,7 +72,7 @@ Read `CLAUDE.md` for the full picture; these are the load-bearing ones.
   (`internal/galaxy/infra`), not new globals or ad-hoc params.
 - **`Store` is mutex-protected.** All access goes through `Store` methods; never
   touch fields across goroutines. Changing the serialized shape requires bumping
-  `helpers.StoreSnapshotSchemaVersion` with a migration; `validateSnapshotSchema`
+  `helpers.StoreSnapshotSchemaVersion` with a migration; `store.ValidateSchema`
   rejects newer schemas.
 - **Install pipeline contract.** `collections.Start` -> `runInstall` ->
   `initInstall` -> `prepareInstallPlan` -> `installLevels` -> `finalizeInstall`.

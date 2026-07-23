@@ -36,7 +36,7 @@ Tests are colocated with source. Notable suites:
 
 - **`-race` is non-negotiable** for concurrency-touching code. The install pipeline uses worker pools (`sem := make(chan struct{}, cfg.Workers)` + `wg.Go`), and `Store` is RWMutex-protected. CI runs with `-race`; reproduce locally with the same flag.
 - **`Store` mutex** is internal — never access fields directly across goroutines. Tests that exercise concurrent install levels must go through the public methods.
-- **Snapshot schema** is gated by `helpers.StoreSnapshotSchemaVersion`. Tests that load fixtures with a newer schema must construct fixtures matching the current version, or expect rejection from `validateSnapshotSchema`.
+- **Snapshot schema** is gated by `helpers.StoreSnapshotSchemaVersion`. Tests that load fixtures with a newer schema must construct fixtures matching the current version, or expect rejection from `store.ValidateSchema`.
 - **S3 backend tests** rely on the in-process minimal client. Don't introduce real network I/O — keep them hermetic.
 - **`Printer`/`Output`** captures `log` output. Tests asserting on log lines should drive output through the same `progress.New(verbose, quiet)` flow rather than reading `os.Stdout` directly.
 

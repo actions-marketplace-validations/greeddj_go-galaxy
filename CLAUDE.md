@@ -46,7 +46,7 @@ The `cacheManager.Backend` interface in [internal/galaxy/cache/backend.go](inter
 ### Snapshot store
 [internal/galaxy/store](internal/galaxy/store) defines `Store` — the in-memory representation of cached state (API responses, deps cache, installed collections, dependency graph, resolved versions, project registry). It is bucket-mapped to BoltDB files locally and serialized as gzipped JSON for S3.
 
-- `helpers.StoreSnapshotSchemaVersion` gates compatibility; bumping it requires a migration path. `validateSnapshotSchema` rejects newer schemas.
+- `helpers.StoreSnapshotSchemaVersion` gates compatibility; bumping it requires a migration path. `store.ValidateSchema` rejects newer schemas.
 - The current snapshot schema version is 4. At persist time, entries in the `APICache`, `DepsCache`, and `Versions` buckets are age-evicted against `helpers.CacheEntryMaxAge` (30 days) and stamped at write time, all inside the shared `snapshotData()` copy path, so both the local Bolt `Save` and the S3 `MarshalSnapshot` inherit the same eviction. The migration path for this bump is drop-and-rebuild: a snapshot persisted under an older schema is dropped rather than migrated in place, and its caches rebuild cold on the next run.
 - All `Store` methods are protected by an internal `RWMutex`; do not access fields directly across goroutines.
 - `RecordProject` keeps a per-project registry consumed by `cleanup` to compute reachability across all known requirements files.
