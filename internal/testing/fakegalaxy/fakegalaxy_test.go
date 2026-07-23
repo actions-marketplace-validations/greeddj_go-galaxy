@@ -9,9 +9,12 @@ import (
 	"errors"
 	"io"
 	"maps"
+	"math"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -350,4 +353,248 @@ func TestCounters(t *testing.T) {
 			t.Errorf("Count(%d) after ResetCounts = %d, want 0", ep, got)
 		}
 	}
+}
+
+// TestFailWildcardAndNamespaceMatching asserts ruleMatches' namespace/name
+// wildcard semantics: an empty namespace/name on a Fail call matches any
+// collection, while a rule pinned to one namespace must not trip for a
+// request against a different one.
+func TestFailWildcardAndNamespaceMatching(t *testing.T) {
+	t.Parallel()
+
+	t.Run("wildcard fault fires for a collection never named in Fail", func(t *testing.T) {
+		t.Parallel()
+		s := New(t)
+		s.Fail(EndpointRootMetadata, "", "", Fault{Status: http.StatusTooManyRequests, Count: 1})
+		s.AddVersion("other", "thing", "1.0.0", nil)
+
+		url := s.URL() + "/api/v3/collections/other/thing"
+		if status := getJSON(t, s.Client(), url, nil); status != http.StatusTooManyRequests {
+			t.Errorf("status = %d, want %d", status, http.StatusTooManyRequests)
+		}
+	})
+
+	t.Run("namespace-pinned fault does not fire for a different namespace", func(t *testing.T) {
+		t.Parallel()
+		s := New(t)
+		s.Fail(EndpointRootMetadata, "ns1", "x", Fault{Status: http.StatusTooManyRequests, Count: 1})
+		s.AddVersion("ns2", "x", "1.0.0", nil)
+
+		url := s.URL() + "/api/v3/collections/ns2/x"
+		if status := getJSON(t, s.Client(), url, nil); status != http.StatusOK {
+			t.Errorf("status = %d, want %d", status, http.StatusOK)
+		}
+	})
+}
+
+// TestRootMetadataUnregistered404 asserts root metadata 404s for a
+// namespace/name that was never registered, even while a different
+// collection is.
+func TestRootMetadataUnregistered404(t *testing.T) {
+	t.Parallel()
+	s := New(t)
+	s.AddVersion("ns", "name", "1.0.0", nil)
+
+	status := getJSON(t, s.Client(), s.URL()+"/api/v3/collections/ns/unknown", nil)
+	if status != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", status, http.StatusNotFound)
+	}
+}
+
+// TestVersionsListUnregistered404 asserts the versions-list route 404s for
+// a namespace/name that was never registered.
+func TestVersionsListUnregistered404(t *testing.T) {
+	t.Parallel()
+	s := New(t)
+
+	status := getJSON(t, s.Client(), s.URL()+"/api/v3/collections/ns/unknown/versions", nil)
+	if status != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", status, http.StatusNotFound)
+	}
+}
+
+// TestArtifactUnknownFilename404 asserts the download route 404s for a
+// filename that was never registered, even while a different artifact is.
+func TestArtifactUnknownFilename404(t *testing.T) {
+	t.Parallel()
+	s := New(t)
+	s.AddVersion("ns", "name", "1.0.0", nil)
+
+	resp := doGet(t, s.Client(), s.URL()+"/download/does-not-exist.tar.gz")
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+}
+
+// TestFaultFiresOnEachEndpoint asserts each of the four routes passes its
+// own Endpoint constant into applyFault: arming a one-shot fault against
+// one endpoint trips exactly the first request to it, while the second
+// request gets the fake's normal response.
+func TestFaultFiresOnEachEndpoint(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		path       string
+		endpoint   Endpoint
+		wantStatus int
+	}{
+		{
+			name:       "root metadata",
+			path:       "/api/v3/collections/acme/name",
+			endpoint:   EndpointRootMetadata,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "versions list",
+			path:       "/api/v3/collections/acme/name/versions",
+			endpoint:   EndpointVersionsList,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "version detail",
+			path:       "/api/v3/collections/acme/name/versions/1.0.0/",
+			endpoint:   EndpointVersionDetail,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "artifact",
+			path:       "/download/acme-name-1.0.0.tar.gz",
+			endpoint:   EndpointArtifact,
+			wantStatus: http.StatusOK,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := New(t)
+			s.AddVersion("acme", "name", "1.0.0", nil)
+			s.Fail(tc.endpoint, "acme", "name", Fault{Status: http.StatusTooManyRequests, Count: 1})
+
+			url := s.URL() + tc.path
+			if status := getJSON(t, s.Client(), url, nil); status != http.StatusTooManyRequests {
+				t.Errorf("first request status = %d, want %d", status, http.StatusTooManyRequests)
+			}
+			if status := getJSON(t, s.Client(), url, nil); status != tc.wantStatus {
+				t.Errorf("second request status = %d, want %d", status, tc.wantStatus)
+			}
+		})
+	}
+}
+
+// TestFaultNoopFallsThroughToNormalResponse asserts a Fault with neither
+// Status nor Hang set is still consumed by consumeFault (its Count is
+// decremented) but enactFault treats it as a no-op, letting the request
+// fall through to the fake's normal response body.
+func TestFaultNoopFallsThroughToNormalResponse(t *testing.T) {
+	t.Parallel()
+	s := New(t)
+	s.AddVersion("acme", "name", "1.0.0", nil)
+	s.Fail(EndpointRootMetadata, "acme", "name", Fault{Count: 1})
+
+	var root types.GalaxyCollection
+	status := getJSON(t, s.Client(), s.URL()+"/api/v3/collections/acme/name", &root)
+	if status != http.StatusOK {
+		t.Errorf("status = %d, want %d", status, http.StatusOK)
+	}
+	if root.HighestVersion.Version != "1.0.0" {
+		t.Errorf("highest_version.version = %q, want %q", root.HighestVersion.Version, "1.0.0")
+	}
+}
+
+// TestCompareDottedVersionsAndComponents directly exercises
+// compareDottedComponent and compareDottedVersions: numeric components
+// compare by magnitude rather than lexically, non-numeric components fall
+// back to a lexical comparison, and a shorter version sorts before a longer
+// one that only adds trailing zero components.
+func TestCompareDottedVersionsAndComponents(t *testing.T) {
+	t.Parallel()
+
+	if got := compareDottedComponent("2", "10"); got != -1 {
+		t.Errorf(`compareDottedComponent("2", "10") = %d, want -1 (numeric, not lexical)`, got)
+	}
+	if got := compareDottedComponent("beta", "alpha"); got <= 0 {
+		t.Errorf(`compareDottedComponent("beta", "alpha") = %d, want > 0 (lexical fallback)`, got)
+	}
+	if got := compareDottedVersions("1.2", "1.2.0"); got >= 0 {
+		t.Errorf(`compareDottedVersions("1.2", "1.2.0") = %d, want < 0 (shorter arity sorts first)`, got)
+	}
+}
+
+// TestPaginateClamps directly exercises paginate's boundary clamps: a
+// negative offset, an offset past the slice's end, a negative limit, and an
+// offset/limit sum that overflows int and wraps to a value below offset -
+// the scenario paginate's final clamp guards against, since parseQueryInt
+// places no upper bound on a caller-supplied limit.
+func TestPaginateClamps(t *testing.T) {
+	t.Parallel()
+	versions := []string{"1.0.0", "1.1.0", "2.0.0"}
+
+	cases := []struct {
+		name   string
+		want   []string
+		offset int
+		limit  int
+	}{
+		{name: "negative offset clamped to zero", want: []string{"1.0.0", "1.1.0"}, offset: -5, limit: 2},
+		{name: "offset past end yields empty slice", want: []string{}, offset: 10, limit: 2},
+		{name: "negative limit returns through end of slice", want: []string{"1.1.0", "2.0.0"}, offset: 1, limit: -1},
+		{name: "overflowing sum wraps below offset", want: []string{}, offset: 1, limit: math.MaxInt},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := paginate(versions, tc.offset, tc.limit)
+			if got == nil {
+				t.Fatal("paginate returned a nil slice, want non-nil")
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("paginate(versions, %d, %d) = %v, want %v", tc.offset, tc.limit, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseDigitsAndQueryInt directly exercises parseDigits' rejection of
+// empty and non-purely-numeric input (with a plain digit string as a
+// positive control), and parseQueryInt's fallback to its default on a
+// malformed or altogether absent query parameter.
+func TestParseDigitsAndQueryInt(t *testing.T) {
+	t.Parallel()
+
+	digitCases := []struct {
+		name   string
+		input  string
+		wantN  int
+		wantOK bool
+	}{
+		{name: "empty string", input: "", wantN: 0, wantOK: false},
+		{name: "trailing non-digit", input: "12a", wantN: 0, wantOK: false},
+		{name: "plain digits", input: "42", wantN: 42, wantOK: true},
+	}
+	for _, tc := range digitCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			n, ok := parseDigits(tc.input)
+			if n != tc.wantN || ok != tc.wantOK {
+				t.Errorf("parseDigits(%q) = (%d, %v), want (%d, %v)", tc.input, n, ok, tc.wantN, tc.wantOK)
+			}
+		})
+	}
+
+	t.Run("malformed query value falls back to default", func(t *testing.T) {
+		t.Parallel()
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/?limit=abc", nil)
+		if got := parseQueryInt(req, "limit", 5); got != 5 {
+			t.Errorf("parseQueryInt = %d, want 5", got)
+		}
+	})
+	t.Run("absent query value falls back to default", func(t *testing.T) {
+		t.Parallel()
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+		if got := parseQueryInt(req, "limit", 7); got != 7 {
+			t.Errorf("parseQueryInt = %d, want 7", got)
+		}
+	})
 }
