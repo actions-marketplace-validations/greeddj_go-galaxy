@@ -55,6 +55,32 @@ func newClient(cfg config.S3CacheConfig, httpClient *http.Client) (*Client, erro
 	return &Client{cfg: cfg, client: httpClient}, nil
 }
 
+// s3ErrorResponse captures the fields S3 puts in the XML <Error> document
+// that many non-2xx responses carry in their body, alongside the HTTP status
+// line.
+type s3ErrorResponse struct {
+	Code    string `xml:"Code"`
+	Message string `xml:"Message"`
+}
+
+// s3StatusError builds an error wrapping sentinel that folds in the response
+// body's S3 error code and message when one is present, falling back to the
+// bare HTTP status line when the body is empty, is not XML, or lacks a Code
+// element. Reading or parsing the body never fails this call outright - a
+// malformed or truncated error body must not hide the original failure - and
+// the caller remains responsible for closing resp.Body afterward.
+func s3StatusError(sentinel error, resp *http.Response) error {
+	data, err := io.ReadAll(io.LimitReader(resp.Body, s3ErrorBodyLimit))
+	if err != nil {
+		return fmt.Errorf("%w: %s", sentinel, resp.Status)
+	}
+	var parsed s3ErrorResponse
+	if err := xml.Unmarshal(data, &parsed); err != nil || parsed.Code == "" {
+		return fmt.Errorf("%w: %s", sentinel, resp.Status)
+	}
+	return fmt.Errorf("%w: %s (%s: %s)", sentinel, resp.Status, parsed.Code, parsed.Message)
+}
+
 // getObject performs a GET request for the object key.
 func (c *Client) getObject(ctx context.Context, key string) (*http.Response, error) {
 	req, err := c.newRequest(ctx, http.MethodGet, key, nil, nil, emptySHA256, nil, false)
@@ -70,13 +96,17 @@ func (c *Client) getObject(ctx context.Context, key string) (*http.Response, err
 		return nil, errS3NotFound
 	}
 	if resp.StatusCode != http.StatusOK {
+		err := s3StatusError(errS3GetFailed, resp)
 		_ = resp.Body.Close()
-		return nil, fmt.Errorf("%w: %s", errS3GetFailed, resp.Status)
+		return nil, err
 	}
 	return resp, nil
 }
 
-// headObject performs a HEAD request for the object key.
+// headObject performs a HEAD request for the object key. HEAD responses
+// never carry a body (net/http elides it even if a handler writes one), so
+// the failure here stays status-only rather than going through
+// s3StatusError.
 func (c *Client) headObject(ctx context.Context, key string) (http.Header, error) {
 	req, err := c.newRequest(ctx, http.MethodHead, key, nil, nil, emptySHA256, nil, false)
 	if err != nil {
@@ -146,7 +176,7 @@ func (c *Client) deleteObject(ctx context.Context, key string) error {
 		return nil
 	}
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%w: %s", errS3DeleteFailed, resp.Status)
+		return s3StatusError(errS3DeleteFailed, resp)
 	}
 	return nil
 }
@@ -201,7 +231,7 @@ func handlePutResponse(resp *http.Response) error {
 	case http.StatusOK, http.StatusNoContent:
 		return nil
 	default:
-		return fmt.Errorf("%w: %s", errS3PutFailed, resp.Status)
+		return s3StatusError(errS3PutFailed, resp)
 	}
 }
 
@@ -250,7 +280,9 @@ func (c *Client) ensureBucket(ctx context.Context) error {
 	return nil
 }
 
-// headBucket checks whether the configured bucket exists.
+// headBucket checks whether the configured bucket exists. Like headObject,
+// this is a HEAD request with no response body, so its failure stays
+// status-only rather than going through s3StatusError.
 func (c *Client) headBucket(ctx context.Context) error {
 	req, err := c.newRequest(ctx, http.MethodHead, "", nil, nil, emptySHA256, nil, false)
 	if err != nil {
@@ -312,7 +344,7 @@ func (c *Client) createBucket(ctx context.Context) error {
 		return nil
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("%w: %s", errS3CreateBucketFailed, resp.Status)
+		return s3StatusError(errS3CreateBucketFailed, resp)
 	}
 	return nil
 }
@@ -332,8 +364,9 @@ func (c *Client) bucketRequest(ctx context.Context, method string, query url.Val
 		return nil, errS3BucketNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
+		err := s3StatusError(errS3BucketRequestFailed, resp)
 		_ = resp.Body.Close()
-		return nil, fmt.Errorf("%w: %s", errS3BucketRequestFailed, resp.Status)
+		return nil, err
 	}
 	return resp, nil
 }

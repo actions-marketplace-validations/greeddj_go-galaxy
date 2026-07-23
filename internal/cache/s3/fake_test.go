@@ -37,12 +37,14 @@ type fakeS3 struct {
 
 // forcedFailure is a fault-injection rule matched by object key and HTTP
 // method: while remaining is nonzero, a matching request receives status
-// instead of the fake's normal response, and remaining is decremented
-// (unless already negative, meaning "fail indefinitely"). It exists to
-// force error branches - HEAD/PUT/DELETE failures - that a conforming
-// in-memory fake would otherwise never produce on its own.
+// (and, if set, body) instead of the fake's normal response, and remaining
+// is decremented (unless already negative, meaning "fail indefinitely"). It
+// exists to force error branches - GET/HEAD/PUT/DELETE failures, optionally
+// carrying an S3-style XML error document - that a conforming in-memory fake
+// would otherwise never produce on its own.
 type forcedFailure struct {
-	method    string // http.MethodHead/Put/Delete, or "" to match any method
+	method    string // http.MethodHead/Get/Put/Delete, or "" to match any method
+	body      []byte // optional response body written alongside status, e.g. an S3 <Error> document
 	status    int
 	remaining int
 }
@@ -76,28 +78,37 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // instead of the fake's normal response. count == -1 fails every matching
 // request indefinitely, until failNext is called again for the same key.
 func (f *fakeS3) failNext(key, method string, status, count int) {
+	f.failNextWithBody(key, method, status, count, nil)
+}
+
+// failNextWithBody behaves like failNext but additionally arms a response
+// body to be written alongside the forced status code - for example an S3
+// <Error> XML document - so a test can assert that callers surface its Code
+// and Message.
+func (f *fakeS3) failNextWithBody(key, method string, status, count int, body []byte) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.fails == nil {
 		f.fails = make(map[string]*forcedFailure)
 	}
-	f.fails[key] = &forcedFailure{method: method, status: status, remaining: count}
+	f.fails[key] = &forcedFailure{method: method, status: status, remaining: count, body: body}
 }
 
 // shouldFail reports whether the request for key+method matches an armed
 // forced-failure rule, consuming one use of it (unless the rule fails
-// indefinitely). It locks mu itself; callers must not already hold mu.
-func (f *fakeS3) shouldFail(key, method string) (int, bool) {
+// indefinitely). It returns the status and body to write; body is nil when
+// none was armed. It locks mu itself; callers must not already hold mu.
+func (f *fakeS3) shouldFail(key, method string) (int, []byte, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	rule, ok := f.fails[key]
 	if !ok || rule.remaining == 0 || (rule.method != "" && rule.method != method) {
-		return 0, false
+		return 0, nil, false
 	}
 	if rule.remaining > 0 {
 		rule.remaining--
 	}
-	return rule.status, true
+	return rule.status, rule.body, true
 }
 
 // handleBucket answers bucket-level requests: existence probes (HEAD) and
@@ -172,7 +183,11 @@ func (f *fakeS3) handleObject(w http.ResponseWriter, r *http.Request, key string
 // (token/deadline verification never needs to transfer the body). A forced
 // failure armed via failNext takes precedence over the normal response.
 func (f *fakeS3) handleHead(w http.ResponseWriter, key string) {
-	if status, fail := f.shouldFail(key, http.MethodHead); fail {
+	// The body (if any) is deliberately not written here: real HTTP HEAD
+	// responses carry no entity body, and net/http's server elides one even
+	// if a handler attempts to write it, so arming a body on a HEAD rule
+	// would never reach the client anyway.
+	if status, _, fail := f.shouldFail(key, http.MethodHead); fail {
 		w.WriteHeader(status)
 		return
 	}
@@ -188,8 +203,16 @@ func (f *fakeS3) handleHead(w http.ResponseWriter, key string) {
 }
 
 // handleGet returns the stored object's metadata headers and body verbatim,
-// or 404 if absent.
+// or 404 if absent. A forced failure armed via failNext/failNextWithBody
+// takes precedence over the normal response.
 func (f *fakeS3) handleGet(w http.ResponseWriter, key string) {
+	if status, body, fail := f.shouldFail(key, http.MethodGet); fail {
+		w.WriteHeader(status)
+		if len(body) > 0 {
+			_, _ = w.Write(body)
+		}
+		return
+	}
 	f.mu.Lock()
 	obj, ok := f.objects[key]
 	f.mu.Unlock()
@@ -216,8 +239,11 @@ func (f *fakeS3) handlePut(w http.ResponseWriter, r *http.Request, key string) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if status, fail := f.shouldFail(key, http.MethodPut); fail {
+	if status, failBody, fail := f.shouldFail(key, http.MethodPut); fail {
 		w.WriteHeader(status)
+		if len(failBody) > 0 {
+			_, _ = w.Write(failBody)
+		}
 		return
 	}
 
@@ -268,8 +294,11 @@ func writeObjectHeaders(header http.Header, obj fakeObject) {
 // context and observe the resulting timeout. A forced failure armed via
 // failNext takes precedence over both of those behaviors.
 func (f *fakeS3) handleDelete(w http.ResponseWriter, r *http.Request, key string) {
-	if status, fail := f.shouldFail(key, http.MethodDelete); fail {
+	if status, body, fail := f.shouldFail(key, http.MethodDelete); fail {
 		w.WriteHeader(status)
+		if len(body) > 0 {
+			_, _ = w.Write(body)
+		}
 		return
 	}
 	f.mu.Lock()
@@ -298,6 +327,15 @@ func (f *fakeS3) handleDelete(w http.ResponseWriter, r *http.Request, key string
 func newTestBackend(t *testing.T) *Backend {
 	t.Helper()
 	return newTestBackendWithFake(t, newFakeS3())
+}
+
+// newTestBackendAndFake behaves like newTestBackend but also returns the
+// *fakeS3 backing it, so a test can arm fault injection via failNext or
+// failNextWithBody against the same server the returned Backend talks to.
+func newTestBackendAndFake(t *testing.T) (*Backend, *fakeS3) {
+	t.Helper()
+	fake := newFakeS3()
+	return newTestBackendWithFake(t, fake), fake
 }
 
 // newNonConformingTestBackend starts a fake S3 server with

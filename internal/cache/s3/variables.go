@@ -42,6 +42,11 @@ const (
 	peekBytes       = 2
 	headerLength    = 2
 
+	// s3ErrorBodyLimit bounds how much of a non-2xx response body is read
+	// when looking for an S3 XML <Error> document, so a misbehaving or
+	// unexpectedly large error body cannot force an unbounded read.
+	s3ErrorBodyLimit = 8 << 10
+
 	// conditionalProbeObject is the base name of the probe object written
 	// under the locks prefix at Open to verify the backend enforces
 	// conditional PUT (If-None-Match); a per-process random suffix is
