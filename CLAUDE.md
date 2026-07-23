@@ -51,7 +51,7 @@ The `cacheManager.Backend` interface in [internal/galaxy/cache/backend.go](inter
 
 1. `initInstall` — open backend, acquire backend lock, load `Store`, optionally clear caches, record this project.
 2. `prepareInstallPlan` — load + parse `requirements.yml`, resolve transitive deps (`resolve.go`), build `collections` map keyed by `<ns>.<name>@<version>`, kick off the prefetcher, then topologically split into `levels` (`buildInstallLevels`).
-3. `installLevels` — for each level, fan out installs to `cfg.Workers` goroutines (semaphore-bounded). On any failure within a level, the loop breaks before the next level. The prefetcher hands off downloaded artifact metadata via `prefetch.Wait(key)`.
+3. `installLevels` - for each level, fan out installs to `cfg.Workers` goroutines (semaphore-bounded). On any failure within a level, the loop breaks before the next level. The prefetcher hands off downloaded artifact metadata via `prefetch.Wait(key)`. A cache-hit artifact that fails its pin/hash check or fails to extract is evicted (tarball plus sidecar) and refetched exactly once, then re-verified and re-extracted; offline runs never evict.
 4. `finalizeInstall` — save the snapshot back to the backend; if any failures, return a wrapped `ErrInstallationFailed`.
 
 ### Cleanup pipeline (`internal/galaxy/cleanup`)

@@ -58,23 +58,18 @@ func installCollection(
 		return nil
 	}
 
-	payload, err := prepareInstall(ctx, deps, col, metaOverride, filename)
+	payload, err := prepareAndExtract(ctx, deps, col, metaOverride, filename, installPath)
 	if err != nil {
 		return err
 	}
+	// The winning payload (the one that made it past verify+extract) is
+	// cleaned up here by the caller; any losing attempt along the way was
+	// already cleaned inside prepareAndExtract, so there is neither a double
+	// cleanup nor a leaked temp file.
 	if payload.artifact.Cleanup != nil {
 		defer payload.artifact.Cleanup()
 	}
-	if err := verifyPinnedSHA(col, payload.artifactSHA); err != nil {
-		return err
-	}
 
-	extractStart := time.Now()
-	err = extractCollection(col, payload.artifact.Path, installPath, runtime, deps.extractStore, payload.artifactSHA)
-	if err != nil {
-		return fmt.Errorf("failed to extract %s: %w", filename, err)
-	}
-	runtime.Output.DebugSincef(extractStart, "%s", "extract "+col.key())
 	depsList, err := resolveDependencies(ctx, installPath, deps, resolvedDeps, col, filename)
 	if err != nil {
 		return err
@@ -114,20 +109,46 @@ type artifactData struct {
 	SHA     string
 }
 
+// isCacheHit reports whether col's artifact can be served straight from the
+// artifact cache: forceDownload was not requested (the corruption recovery
+// path forces a fresh download rather than trusting a hit that may still be
+// the very bytes that were just evicted), caching is enabled, an artifact
+// store is configured, and that store actually reports the key present.
+// Factored out of prepareInstall to keep its own branching under the
+// cyclomatic complexity budget.
+func isCacheHit(ctx context.Context, deps installDeps, col collection, forceDownload bool) bool {
+	if forceDownload || deps.cfg.NoCache || deps.artifacts == nil {
+		return false
+	}
+	return artifactExists(ctx, deps.artifacts, col)
+}
+
+// prepareInstall resolves metadata (if needed) and produces an installable
+// artifact for col, either from the artifact cache or by downloading. The
+// returned bool reports whether the artifact actually came from a cache hit
+// (servedFromCache), which the caller uses to decide whether a subsequent
+// verify/extract failure is worth one bounded eviction-and-refetch attempt.
+//
+// forceDownload skips the cache-hit check entirely, forcing a fresh download
+// regardless of what Has() would report. This is used by the corruption
+// recovery path after an eviction: rather than relying on Delete having
+// already physically removed the file (a backend detail this layer should
+// not depend on) or paying for a second Has() syscall on the hot no-eviction
+// path, the caller who just evicted simply says so directly.
 func prepareInstall(
 	ctx context.Context,
 	deps installDeps,
 	col collection,
 	metaOverride *types.GalaxyCollectionVersionInfo,
 	filename string,
-) (installPayload, error) {
+	forceDownload bool,
+) (installPayload, bool, error) {
 	cfg := deps.cfg
 	runtime := deps.runtime
-	artifacts := deps.artifacts
 
 	meta := metaOverride
 	useCache := !cfg.NoCache
-	cacheHit := useCache && artifacts != nil && artifactExists(ctx, artifacts, col)
+	cacheHit := isCacheHit(ctx, deps, col, forceDownload)
 
 	// Fast path: artifact is already in cache and the caller did not push
 	// metadata. We have everything required to install - namespace/name/version
@@ -135,26 +156,118 @@ func prepareInstall(
 	// the file - so we can skip the metadata roundtrip entirely.
 	if cacheHit && meta == nil {
 		runtime.Output.Printf("📦 Using cached %s", filename)
-		return prepareFromCache(ctx, deps, col)
+		payload, err := prepareFromCache(ctx, deps, col)
+		return payload, true, err
 	}
 
 	meta, err := resolveMetadata(ctx, deps.collectionDeps, col, meta, cacheHit)
 	if err != nil && !errors.Is(err, helpers.ErrMetadataUnavailable) {
-		return installPayload{}, err
+		return installPayload{}, cacheHit, err
 	}
 
 	artifact, err := fetchArtifact(ctx, deps, col, meta, cacheHit, useCache)
 	if err != nil {
-		return installPayload{}, err
+		return installPayload{}, cacheHit, err
 	}
 	artifactSHA, err := resolveArtifactSHA(artifact.Path, meta, artifact.Meta, artifact.SHA, col.SHA256)
 	if err != nil {
 		if artifact.Cleanup != nil {
 			artifact.Cleanup()
 		}
-		return installPayload{}, err
+		return installPayload{}, cacheHit, err
 	}
-	return installPayload{meta: meta, artifact: artifact, artifactSHA: artifactSHA}, nil
+	return installPayload{meta: meta, artifact: artifact, artifactSHA: artifactSHA}, cacheHit, nil
+}
+
+// verifyAndExtract enforces col's lockfile SHA256 pin (if any) against
+// payload's resolved artifact hash and then extracts the artifact into
+// installPath. This is the verify+extract step installCollection always ran
+// inline; it is factored out so prepareAndExtract can run it a second time
+// against a freshly downloaded replacement after evicting a corrupt cache
+// hit.
+func verifyAndExtract(_ context.Context, deps installDeps, col collection, payload installPayload, installPath, filename string) error {
+	if err := verifyPinnedSHA(col, payload.artifactSHA); err != nil {
+		return err
+	}
+	extractStart := time.Now()
+	err := extractCollection(col, payload.artifact.Path, installPath, deps.runtime, deps.extractStore, payload.artifactSHA)
+	if err != nil {
+		return fmt.Errorf("failed to extract %s: %w", filename, err)
+	}
+	deps.runtime.Output.DebugSincef(extractStart, "%s", "extract "+col.key())
+	return nil
+}
+
+// prepareAndExtract prepares an installable artifact for col and verifies +
+// extracts it into installPath, with one bounded eviction-and-refetch retry
+// when a cache-hit artifact turns out to be corrupt. Without this, a single
+// bad cached tarball - wrong hash, or bytes that fail to extract - would fail
+// every future install of that collection forever, since nothing else would
+// ever remove it. "Once" is enforced structurally, not by a counter: eviction
+// unconditionally sets forceDownload to true, and the next iteration's guard
+// (forceDownload is now true) returns on any failure instead of evicting
+// again, so this loop can run at most twice and never recurses.
+//
+// The eviction itself deletes ONLY the cached tarball and its sha256
+// sidecar (via the ArtifactStore.Delete interface method) and deliberately
+// never touches deps.extractStore. Deleting the tarball already removes the
+// only precondition for the extracted-store invariant this would otherwise
+// risk breaking: with no tarball on disk, a later cache hit has nothing left
+// to extract against the (already-trusted) sidecar, so the forbidden
+// "tarball present, CAS entry absent" state is never produced. When an
+// extracted store is configured, the forced refetch below repopulates both
+// stores consistently: the CAS tree via the ingest/promote pipeline and the
+// tarball+sidecar via Commit, both keyed by the freshly hashed sha. A CAS
+// tree is itself content-addressable state shared across every project that
+// happens to reference that sha, and remains correct for all of them, so
+// deleting it because one project's cache hit was corrupt would destroy
+// correct content the rest of the fleet still needs. It would also be
+// pointless: a failed extraction never leaves a ready CAS tree behind in the
+// first place, since extractInto/Ensure clean up their own tmp directory on
+// failure and leave any already-finalized final path untouched.
+//
+// Eviction is skipped, and the failure surfaces as-is, whenever retrying
+// would not help or would be destructive: this is already the retry
+// (forceDownload is set), the artifact never came from a cache hit in the
+// first place (so nothing stale to evict caused this), or the run is
+// offline, where deleting the only local copy with no way to refetch it
+// would be pure data loss for no benefit.
+//
+// Accepted tradeoff: every cache-hit verify/extract failure - regardless of
+// cause - spends exactly one evict-and-refetch attempt with no
+// classification of *why* it failed. A rare transient extraction failure
+// therefore costs one wasted refetch of otherwise-good bytes; that cost is
+// bounded to a single retry and the end result is still correct.
+func prepareAndExtract(
+	ctx context.Context,
+	deps installDeps,
+	col collection,
+	metaOverride *types.GalaxyCollectionVersionInfo,
+	filename, installPath string,
+) (installPayload, error) {
+	forceDownload := false
+	for {
+		payload, fromCache, err := prepareInstall(ctx, deps, col, metaOverride, filename, forceDownload)
+		if err != nil {
+			return installPayload{}, err
+		}
+		verifyErr := verifyAndExtract(ctx, deps, col, payload, installPath, filename)
+		if verifyErr == nil {
+			return payload, nil
+		}
+		if payload.artifact.Cleanup != nil {
+			payload.artifact.Cleanup()
+		}
+		if forceDownload || !fromCache || deps.cfg.Offline {
+			return installPayload{}, verifyErr
+		}
+
+		deps.runtime.Output.Printf("♻️ Evicting corrupt cached %s and refetching: %v", filename, verifyErr)
+		if deps.artifacts != nil {
+			_ = deps.artifacts.Delete(ctx, artifactKey(col))
+		}
+		forceDownload = true
+	}
 }
 
 func prepareFromCache(ctx context.Context, deps installDeps, col collection) (installPayload, error) {

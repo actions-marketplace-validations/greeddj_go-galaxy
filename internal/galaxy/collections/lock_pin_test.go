@@ -134,6 +134,13 @@ func TestInstallCollectionCacheHitPinMismatch(t *testing.T) {
 	} else if !os.IsNotExist(statErr) {
 		t.Fatalf("unexpected stat error on install path: %v", statErr)
 	}
+
+	// Offline mode must never evict: with no way to refetch, deleting the
+	// only local copy would be pure data loss, so the cached artifact must
+	// still be there after the failed, offline install.
+	if _, statErr := os.Stat(artifactPath); statErr != nil {
+		t.Fatalf("expected the cached artifact to survive an offline pin mismatch, stat error: %v", statErr)
+	}
 }
 
 // TestInstallCollectionCacheHitPinIgnoresSidecarAndHashesRealBytes is the

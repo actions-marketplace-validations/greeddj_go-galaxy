@@ -40,6 +40,15 @@ func FetchJSONWithCachePolicy(ctx context.Context, client *http.Client, url stri
 }
 
 // tryServeFromCache attempts to serve from cache and reports if handled.
+// The cached body is decoded into out exactly once, right here: that single
+// decode is also the corruption check. A body that fails to unmarshal -
+// whether freshly written or long expired - is corrupt, and the false return
+// sends the caller (FetchJSONWithCachePolicy) into fetchAndStore, which
+// issues an unconditional fetch (nil validators) and overwrites the entry
+// with fresh bytes. Routing a corrupt entry through revalidateCache's
+// conditional GET instead would be wrong: the server would see the same
+// ETag/Last-Modified it already served, reply 304, and hand the exact same
+// unusable bytes straight back, so the entry would never heal.
 func tryServeFromCache(
 	ctx context.Context,
 	client *http.Client,
@@ -53,10 +62,17 @@ func tryServeFromCache(
 	if !isValidCacheEntry(ok, entry, url) {
 		return false, nil
 	}
-	if ok := serveFreshCache(entry, out, policy); ok {
-		return true, nil
+	if err := json.Unmarshal(entry.Body, out); err != nil {
+		return false, nil
 	}
-	return revalidateCache(ctx, client, url, st, key, entry, out, policy)
+	if policy.TTL != 0 && time.Since(entry.FetchedAt) > policy.TTL {
+		// Accepted micro-cost: on the rare TTL-expired-and-changed path, the
+		// stale (but valid) body decoded above into out is simply overwritten
+		// by revalidateCache's fresh decode below. This second decode is
+		// bounded by a network round trip, so it is negligible next to it.
+		return revalidateCache(ctx, client, url, st, key, entry, out, policy)
+	}
+	return true, nil
 }
 
 func isValidCacheEntry(ok bool, entry store.APICacheEntry, url string) bool {
@@ -66,16 +82,10 @@ func isValidCacheEntry(ok bool, entry store.APICacheEntry, url string) bool {
 	return true
 }
 
-func serveFreshCache(entry store.APICacheEntry, out any, policy Policy) bool {
-	if policy.TTL != 0 && time.Since(entry.FetchedAt) > policy.TTL {
-		return false
-	}
-	if err := json.Unmarshal(entry.Body, out); err != nil {
-		return false
-	}
-	return true
-}
-
+// revalidateCache issues a conditional GET for an entry that tryServeFromCache
+// already decoded into out and found expired. On a 304, that decode is still
+// valid - the server confirmed the bytes are unchanged - so the response is
+// reported as handled without re-unmarshaling the same bytes a second time.
 func revalidateCache(
 	ctx context.Context,
 	client *http.Client,
@@ -94,7 +104,7 @@ func revalidateCache(
 		if policy.Write {
 			st.SetAPICache(key, refreshAPICacheEntry(entry, etag, lastModified))
 		}
-		return true, json.Unmarshal(entry.Body, out)
+		return true, nil
 	}
 	if policy.Write {
 		st.SetAPICache(key, newAPICacheEntry(url, body, etag, lastModified, policy.TTL))

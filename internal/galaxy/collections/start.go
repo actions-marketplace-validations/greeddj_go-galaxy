@@ -124,7 +124,8 @@ func warmCollections(
 }
 
 func warmOne(ctx context.Context, deps installDeps, col collection) error {
-	payload, err := prepareInstall(ctx, deps, col, nil, fmt.Sprintf("%s-%s-%s.tar.gz", col.Namespace, col.Name, col.Version))
+	filename := fmt.Sprintf("%s-%s-%s.tar.gz", col.Namespace, col.Name, col.Version)
+	payload, _, err := prepareInstall(ctx, deps, col, nil, filename, false)
 	if err != nil {
 		return err
 	}
