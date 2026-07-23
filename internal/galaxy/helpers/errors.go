@@ -79,6 +79,12 @@ var (
 	ErrVersionsPayloadEmpty = errors.New("versions payload is empty")
 	// ErrVersionsPayloadUnsupported indicates a versions payload is unsupported.
 	ErrVersionsPayloadUnsupported = errors.New("unsupported versions payload")
+	// ErrVersionsPagingExceeded indicates the versions list kept reporting
+	// more pages than the page ceiling allows. This is treated as a hard
+	// failure rather than a silent truncation, since a caller resolving
+	// against a truncated list could pick a version that does not actually
+	// satisfy the requested constraints.
+	ErrVersionsPagingExceeded = errors.New("versions pagination exceeded the page ceiling")
 	// ErrDownloadFailed indicates a download failed.
 	ErrDownloadFailed = errors.New("download failed")
 	// ErrMissingResolvedRoot indicates a resolved root is missing.

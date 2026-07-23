@@ -773,26 +773,63 @@ func constraintsSatisfiedByVersion(version string, constraints []string) (bool, 
 	return true, nil
 }
 
-// loadVersionsListCached loads the available versions list with caching.
+// loadVersionsListCached loads the available versions list with caching,
+// paging through the upstream API in bounded offset increments of
+// versionLimit entries per request. Each page still flows through
+// fetchJSONWithCachePolicy, so per-page ETag/cache behavior is unchanged.
+//
+// Pagination is bounded by maxVersionPages: a server that keeps reporting a
+// growing total forever (or lies about it) makes the loop fail hard via
+// helpers.ErrVersionsPagingExceeded instead of looping unboundedly or
+// silently truncating the list a caller then resolves constraints against.
 func loadVersionsListCached(
 	ctx context.Context,
 	deps collectionDeps,
 	versionsURL string,
-	limit int,
 	policy cacheManager.Policy,
 ) ([]string, error) {
 	if versions, ok := cachedVersionsList(deps.st, policy, versionsURL); ok {
 		return versions, nil
 	}
-	versions, total, err := fetchVersionsPage(ctx, deps, policy, versionsURL, limit)
-	if err != nil {
-		return nil, err
+
+	var all []string
+	offset := 0
+	for page := 0; ; page++ {
+		versions, total, err := fetchVersionsPage(ctx, deps, policy, versionsURL, versionLimit, offset)
+		if err != nil {
+			return nil, err
+		}
+		if page == 0 {
+			// Pre-size once, right after the first page is in: use the
+			// server's declared total when it reports one, so the common
+			// case (a handful of pages) never triggers append's internal
+			// growth; otherwise fall back to a single page's worth.
+			capacity := versionLimit
+			if total > 0 {
+				// Clamp to what the loop could ever collect before the
+				// maxVersionPages ceiling stops it: the server-declared total
+				// is untrusted, so a hostile or broken meta.count must not be
+				// allowed to drive the allocation (a huge value would panic
+				// make with "cap out of range" long before the ceiling fires).
+				capacity = min(total, maxVersionPages*versionLimit)
+			}
+			all = make([]string, 0, capacity)
+		}
+		all = append(all, versions...)
+		if len(versions) < versionLimit {
+			break
+		}
+		offset += versionLimit
+		if total > 0 && offset >= total {
+			break
+		}
+		if page+1 >= maxVersionPages {
+			return nil, fmt.Errorf("%w: %s", helpers.ErrVersionsPagingExceeded, versionsURL)
+		}
 	}
-	if total > limit {
-		return loadVersionsListCached(ctx, deps, versionsURL, total, policy)
-	}
-	cacheVersionsList(deps.st, policy, versionsURL, versions)
-	return versions, nil
+
+	cacheVersionsList(deps.st, policy, versionsURL, all)
+	return all, nil
 }
 
 func cachedVersionsList(st *store.Store, policy cacheManager.Policy, versionsURL string) ([]string, bool) {
@@ -806,14 +843,18 @@ func cachedVersionsList(st *store.Store, policy cacheManager.Policy, versionsURL
 	return versions, true
 }
 
+// fetchVersionsPage fetches one limit/offset page of the versions list and
+// returns its version strings alongside the server's declared total (from
+// meta.count or count, depending on payload shape), so the caller can decide
+// whether more pages remain.
 func fetchVersionsPage(
 	ctx context.Context,
 	deps collectionDeps,
 	policy cacheManager.Policy,
 	versionsURL string,
-	limit int,
+	limit, offset int,
 ) ([]string, int, error) {
-	url := fmt.Sprintf("%s?limit=%d&offset=0", versionsURL, limit)
+	url := fmt.Sprintf("%s?limit=%d&offset=%d", versionsURL, limit, offset)
 	var payload map[string]any
 	if err := fetchJSONWithCachePolicy(ctx, deps.runtime.HTTP, url, deps.st, &payload, policy); err != nil {
 		return nil, 0, err
@@ -854,7 +895,7 @@ func resolveNonExactVersion(
 		return version, nil
 	}
 	runtime.Output.Debugf("resolving versions list for %s", task.FQDN)
-	versionsMeta, err := loadVersionsListCached(ctx, deps, versionsURL, versionLimit, policy)
+	versionsMeta, err := loadVersionsListCached(ctx, deps, versionsURL, policy)
 	if err != nil {
 		return "", err
 	}

@@ -26,6 +26,13 @@ import (
 
 const versionLimit = 100
 
+// maxVersionPages bounds how many offset-paginated requests
+// loadVersionsListCached will issue for a single versions list (at
+// versionLimit entries per page, roughly 10,000 versions) before it gives up
+// and fails hard, rather than trusting an upstream server that keeps
+// reporting more pages forever.
+const maxVersionPages = 100
+
 // installCollection downloads, extracts, and records a collection install.
 func installCollection(
 	ctx context.Context,

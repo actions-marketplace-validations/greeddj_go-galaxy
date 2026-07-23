@@ -45,7 +45,7 @@ func loadCollectionMetadata(
 	}
 
 	if !exact && col.Version != "*" {
-		versions, err := loadVersionsListCached(ctx, deps, versionsURL, versionLimit, policy)
+		versions, err := loadVersionsListCached(ctx, deps, versionsURL, policy)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load versions list: %w", err)
 		}
