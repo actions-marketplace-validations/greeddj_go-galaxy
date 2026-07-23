@@ -96,6 +96,45 @@ func TestLoadStoreDropsV3ShapeAndRebuilds(t *testing.T) {
 	}
 }
 
+// TestLoadStoreCurrentSchemaCorruptDataErrors locks in the boundary between
+// LoadStore's two decode stages. The lightweight meta-only probe only ever
+// authorizes the drop-and-rebuild path for an OUTDATED schema (see
+// TestLoadStoreDropsV3ShapeAndRebuilds, which plants this exact corrupt
+// versions_cache shape under schema version 3). Here the same corrupt shape
+// is stamped with the CURRENT schema version instead: the probe reports a
+// match, so the full json.Unmarshal into *store.Store runs, and it must fail
+// on the malformed bucket. That failure has to surface as an error rather
+// than being swallowed into a silent, empty store.New() - a future edit that
+// widened the drop-and-rebuild path to cover decode failures at any schema
+// version would make genuine current-schema corruption indistinguishable
+// from a legitimately empty cache, silently masking data loss.
+func TestLoadStoreCurrentSchemaCorruptDataErrors(t *testing.T) {
+	t.Parallel()
+	b := newTestBackend(t)
+	ctx := t.Context()
+
+	rawJSON := fmt.Appendf(nil, `{
+		"meta": {"schema_version": %d, "last_snapshot": "2024-01-02T03:04:05Z"},
+		"api_cache": {},
+		"deps_cache": {},
+		"installed": {},
+		"graph": {},
+		"requirements": {},
+		"roots": {},
+		"resolved": {},
+		"versions_cache": {"a.b": ["1.0.0", "2.0.0"]}
+	}`, helpers.StoreSnapshotSchemaVersion)
+	putRawStoreObject(ctx, t, b, rawJSON)
+
+	loaded, err := b.LoadStore(ctx)
+	if err == nil {
+		t.Fatalf("expected an error decoding a current-schema snapshot with a corrupt versions_cache bucket, got a store: %#v", loaded)
+	}
+	if loaded != nil {
+		t.Fatalf("expected a nil store alongside the decode error, got %#v", loaded)
+	}
+}
+
 // TestLoadStoreLoadsCurrentSchema confirms a snapshot stamped with the
 // current schema version round-trips its data unchanged through LoadStore.
 func TestLoadStoreLoadsCurrentSchema(t *testing.T) {
