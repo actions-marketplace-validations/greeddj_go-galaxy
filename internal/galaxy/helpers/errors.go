@@ -138,6 +138,11 @@ var (
 
 	// ErrOfflineMode indicates a network operation was attempted in offline mode.
 	ErrOfflineMode = errors.New("offline mode is enabled, network access is forbidden")
+	// ErrReadStalled indicates a response body read made no progress within
+	// the configured timeout window while the request's own context was
+	// still live. A parent-context cancellation is reported as
+	// context.Canceled instead, never as ErrReadStalled.
+	ErrReadStalled = errors.New("network read stalled")
 	// ErrLockfileMismatch indicates the lockfile content does not match the resolution.
 	ErrLockfileMismatch = errors.New("lockfile does not match resolved requirements")
 	// ErrLockfileMissing indicates a lockfile was required but not found.
