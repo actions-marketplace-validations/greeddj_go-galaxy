@@ -4,11 +4,13 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 
+	"github.com/greeddj/go-galaxy/internal/galaxy/archive"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 )
 
@@ -22,7 +24,7 @@ func TestStoreEnsureExtractsOnce(t *testing.T) {
 	})
 
 	store := NewStore(filepath.Join(dir, "cache"))
-	const sha = "abc123"
+	sha := mustHash(t, tarPath)
 
 	got, err := store.Ensure(sha, tarPath)
 	if err != nil {
@@ -65,7 +67,7 @@ func TestStoreEnsureConcurrent(t *testing.T) {
 	writeTarball(t, tarPath, map[string]string{"file": "data"})
 	store := NewStore(filepath.Join(dir, "cache"))
 
-	const sha = "shared"
+	sha := mustHash(t, tarPath)
 	var wg sync.WaitGroup
 	errs := make(chan error, 8)
 	for range 8 {
@@ -92,7 +94,7 @@ func TestMaterializeUsesHardlinks(t *testing.T) {
 		"sub/bar.txt": "world",
 	})
 	store := NewStore(filepath.Join(dir, "cache"))
-	src, err := store.Ensure("sha", tarPath)
+	src, err := store.Ensure(mustHash(t, tarPath), tarPath)
 	if err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
@@ -126,19 +128,58 @@ func TestMaterializeUsesHardlinks(t *testing.T) {
 	}
 }
 
-func TestStoreSweep(t *testing.T) {
+// TestEnsureRejectsTarballNotMatchingSHA proves Ensure refuses to ingest a
+// tarball into the CAS tree under a sha its bytes do not actually hash to,
+// leaving neither a finalized entry nor a leftover tmp directory behind.
+func TestEnsureRejectsTarballNotMatchingSHA(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	tarPath := filepath.Join(dir, "src.tar.gz")
-	writeTarball(t, tarPath, map[string]string{"f": "x"})
+	writeTarball(t, tarPath, map[string]string{"foo.txt": "hello"})
 	store := NewStore(filepath.Join(dir, "cache"))
 
-	if _, err := store.Ensure("keep", tarPath); err != nil {
-		t.Fatalf("Ensure keep: %v", err)
+	// A well-formed but wrong sha256: valid-length (64) hex that is not
+	// tarPath's actual hash.
+	const wrongSHA = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+	if _, err := store.Ensure(wrongSHA, tarPath); !errors.Is(err, helpers.ErrSHA256Mismatch) {
+		t.Fatalf("expected errors.Is ErrSHA256Mismatch, got %v", err)
 	}
-	if _, err := store.Ensure("drop", tarPath); err != nil {
-		t.Fatalf("Ensure drop: %v", err)
+
+	if _, err := os.Stat(filepath.Join(store.Root(), wrongSHA)); !os.IsNotExist(err) {
+		t.Fatalf("expected no CAS tree for the rejected sha, stat err=%v", err)
 	}
+	if _, err := os.Stat(filepath.Join(store.Root(), wrongSHA+tmpSuffix)); !os.IsNotExist(err) {
+		t.Fatalf("expected no leftover tmp dir for the rejected sha, stat err=%v", err)
+	}
+}
+
+// TestEnsureAcceptsMatchingSHA proves Ensure succeeds and finalizes the CAS
+// tree when the supplied sha does match the tarball's actual bytes.
+func TestEnsureAcceptsMatchingSHA(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	tarPath := filepath.Join(dir, "src.tar.gz")
+	writeTarball(t, tarPath, map[string]string{"foo.txt": "hello"})
+	store := NewStore(filepath.Join(dir, "cache"))
+
+	sha := mustHash(t, tarPath)
+	got, err := store.Ensure(sha, tarPath)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(got, ReadyMarker)); err != nil {
+		t.Fatalf("ready marker missing: %v", err)
+	}
+}
+
+func TestStoreSweep(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	store := NewStore(filepath.Join(dir, "cache"))
+
+	seedFinalizedEntry(t, store, "keep")
+	seedFinalizedEntry(t, store, "drop")
 
 	if err := store.Sweep(map[string]bool{"keep": true}); err != nil {
 		t.Fatalf("Sweep: %v", err)
@@ -156,19 +197,11 @@ func TestStoreSweep(t *testing.T) {
 func TestStoreSweepPlan(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	tarPath := filepath.Join(dir, "src.tar.gz")
-	writeTarball(t, tarPath, map[string]string{"f": "x"})
 	store := NewStore(filepath.Join(dir, "cache"))
 
-	if _, err := store.Ensure("keep", tarPath); err != nil {
-		t.Fatalf("Ensure keep: %v", err)
-	}
-	if _, err := store.Ensure("drop-b", tarPath); err != nil {
-		t.Fatalf("Ensure drop-b: %v", err)
-	}
-	if _, err := store.Ensure("drop-a", tarPath); err != nil {
-		t.Fatalf("Ensure drop-a: %v", err)
-	}
+	seedFinalizedEntry(t, store, "keep")
+	seedFinalizedEntry(t, store, "drop-b")
+	seedFinalizedEntry(t, store, "drop-a")
 
 	planned, err := store.SweepPlan(map[string]bool{"keep": true})
 	if err != nil {
@@ -240,14 +273,9 @@ func TestStoreSweepPlanPropagatesRealReadDirError(t *testing.T) {
 func TestStoreSweepTempRemovesOrphanTempsKeepsFinalized(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	tarPath := filepath.Join(dir, "src.tar.gz")
-	writeTarball(t, tarPath, map[string]string{"f": "x"})
 	store := NewStore(filepath.Join(dir, "cache"))
 
-	finalized, err := store.Ensure("deadbeef", tarPath)
-	if err != nil {
-		t.Fatalf("Ensure: %v", err)
-	}
+	finalized := seedFinalizedEntry(t, store, "deadbeef")
 
 	ingestDir := filepath.Join(store.Root(), "ingest-orphan")
 	seedTempEntry(t, ingestDir)
@@ -271,6 +299,35 @@ func TestStoreSweepTempRemovesOrphanTempsKeepsFinalized(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(finalized, ReadyMarker)); err != nil {
 		t.Fatalf("finalized ready marker removed by SweepTemp: %v", err)
 	}
+}
+
+// mustHash returns the sha256 hex digest of the file at path, failing the
+// test on error. Used to derive the real hash of a fixture tarball rather
+// than hardcoding a value that Ensure's poisoning guard would now reject.
+func mustHash(t *testing.T, path string) string {
+	t.Helper()
+	sha, err := archive.FileHashSHA256(path)
+	if err != nil {
+		t.Fatalf("FileHashSHA256(%s): %v", path, err)
+	}
+	return sha
+}
+
+// seedFinalizedEntry creates a finalized CAS tree directly under store's
+// root - a bare directory named name carrying only the ReadyMarker - without
+// going through Ensure. This is used by tests (Sweep/SweepTemp) that only
+// need a finalized entry addressable by a readable, arbitrary name, decoupling
+// them from Ensure's sha-verification requirement.
+func seedFinalizedEntry(t *testing.T, store *Store, name string) string {
+	t.Helper()
+	dir := filepath.Join(store.Root(), name)
+	if err := os.MkdirAll(dir, helpers.DirMod); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ReadyMarker), []byte("ok"), helpers.FileMod); err != nil {
+		t.Fatalf("write ready marker in %s: %v", dir, err)
+	}
+	return dir
 }
 
 // seedTempEntry creates a directory at path containing a single file,

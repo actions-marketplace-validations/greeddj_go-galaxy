@@ -6,6 +6,7 @@ package extracted
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -85,7 +86,39 @@ func (s *Store) Ensure(sha, tarPath string) (string, error) {
 	if isReady(final) {
 		return final, nil
 	}
+	// The CAS tree for sha is absent, so we are about to ingest tarPath's bytes
+	// under sha as their content-addressable key. Verify the bytes actually
+	// hash to sha first: a rotted or tampered tarball whose sidecar-derived sha
+	// no longer matches its bytes must never be extracted into the shared store
+	// keyed by a sha its content does not produce, which would hand every other
+	// project that later references that sha content which does not hash to it.
+	//
+	// This costs one full read of tarPath ahead of extraction, but only on the
+	// CAS-absent ingest path taken at most once per sha (the lock above and the
+	// isReady checks bracketing it ensure that): the hot path where the CAS
+	// tree already exists short-circuits above before ever taking the lock, and
+	// a fresh download never reaches Ensure at all - it populates the CAS via
+	// Promote instead, whose sha is derived from a hash of the bytes just
+	// streamed, not from an unverified sidecar.
+	if err := verifyTarballSHA(tarPath, sha); err != nil {
+		return "", err
+	}
 	return s.extractInto(final, tarPath)
+}
+
+// verifyTarballSHA reports nil when the file at tarPath hashes to sha,
+// returning a helpers.ErrSHA256Mismatch-wrapped error otherwise so callers can
+// classify a corrupt cached tarball uniformly with the rest of the install
+// path's integrity checks.
+func verifyTarballSHA(tarPath, sha string) error {
+	actual, err := archive.FileHashSHA256(tarPath)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(actual, sha) {
+		return fmt.Errorf("%w: %s: %s != %s", helpers.ErrSHA256Mismatch, tarPath, actual, sha)
+	}
+	return nil
 }
 
 // IngestReader extracts a tar.gz stream into a fresh tmp directory under

@@ -198,15 +198,16 @@ func verifyAndExtract(_ context.Context, deps installDeps, col collection, paylo
 	return nil
 }
 
-// prepareAndExtract prepares an installable artifact for col and verifies +
-// extracts it into installPath, with one bounded eviction-and-refetch retry
-// when a cache-hit artifact turns out to be corrupt. Without this, a single
-// bad cached tarball - wrong hash, or bytes that fail to extract - would fail
-// every future install of that collection forever, since nothing else would
-// ever remove it. "Once" is enforced structurally, not by a counter: eviction
-// unconditionally sets forceDownload to true, and the next iteration's guard
-// (forceDownload is now true) returns on any failure instead of evicting
-// again, so this loop can run at most twice and never recurses.
+// prepareWithRecovery prepares an installable artifact for col and runs
+// action against it, with one bounded eviction-and-refetch retry when a
+// cache-hit artifact turns out to be corrupt. Without this, a single bad
+// cached tarball - wrong hash, bytes that fail to extract, or bytes that no
+// longer hash to the sha they are keyed under - would fail every future use
+// of that collection forever, since nothing else would ever remove it.
+// "Once" is enforced structurally, not by a counter: eviction unconditionally
+// sets forceDownload to true, and the next iteration's guard (forceDownload
+// is now true) returns on any failure instead of evicting again, so this
+// loop can run at most twice and never recurses.
 //
 // The eviction itself deletes ONLY the cached tarball and its sha256
 // sidecar (via the ArtifactStore.Delete interface method) and deliberately
@@ -233,17 +234,18 @@ func verifyAndExtract(_ context.Context, deps installDeps, col collection, paylo
 // offline, where deleting the only local copy with no way to refetch it
 // would be pure data loss for no benefit.
 //
-// Accepted tradeoff: every cache-hit verify/extract failure - regardless of
-// cause - spends exactly one evict-and-refetch attempt with no
-// classification of *why* it failed. A rare transient extraction failure
-// therefore costs one wasted refetch of otherwise-good bytes; that cost is
-// bounded to a single retry and the end result is still correct.
-func prepareAndExtract(
+// Accepted tradeoff: every cache-hit action failure - regardless of cause -
+// spends exactly one evict-and-refetch attempt with no classification of
+// *why* it failed. A rare transient failure therefore costs one wasted
+// refetch of otherwise-good bytes; that cost is bounded to a single retry and
+// the end result is still correct.
+func prepareWithRecovery(
 	ctx context.Context,
 	deps installDeps,
 	col collection,
 	metaOverride *types.GalaxyCollectionVersionInfo,
-	filename, installPath string,
+	filename string,
+	action func(installPayload) error,
 ) (installPayload, error) {
 	forceDownload := false
 	for {
@@ -251,23 +253,38 @@ func prepareAndExtract(
 		if err != nil {
 			return installPayload{}, err
 		}
-		verifyErr := verifyAndExtract(ctx, deps, col, payload, installPath, filename)
-		if verifyErr == nil {
+		actionErr := action(payload)
+		if actionErr == nil {
 			return payload, nil
 		}
 		if payload.artifact.Cleanup != nil {
 			payload.artifact.Cleanup()
 		}
 		if forceDownload || !fromCache || deps.cfg.Offline {
-			return installPayload{}, verifyErr
+			return installPayload{}, actionErr
 		}
 
-		deps.runtime.Output.Printf("♻️ Evicting corrupt cached %s and refetching: %v", filename, verifyErr)
+		deps.runtime.Output.Printf("♻️ Evicting corrupt cached %s and refetching: %v", filename, actionErr)
 		if deps.artifacts != nil {
 			_ = deps.artifacts.Delete(ctx, artifactKey(col))
 		}
 		forceDownload = true
 	}
+}
+
+// prepareAndExtract prepares an installable artifact for col and verifies +
+// extracts it into installPath, delegating the bounded eviction-and-refetch
+// retry to prepareWithRecovery.
+func prepareAndExtract(
+	ctx context.Context,
+	deps installDeps,
+	col collection,
+	metaOverride *types.GalaxyCollectionVersionInfo,
+	filename, installPath string,
+) (installPayload, error) {
+	return prepareWithRecovery(ctx, deps, col, metaOverride, filename, func(payload installPayload) error {
+		return verifyAndExtract(ctx, deps, col, payload, installPath, filename)
+	})
 }
 
 func prepareFromCache(ctx context.Context, deps installDeps, col collection) (installPayload, error) {
