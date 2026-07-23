@@ -36,6 +36,7 @@ The `cacheManager.Backend` interface in [internal/galaxy/cache/backend.go](inter
 
 - [internal/cache/local](internal/cache/local) — filesystem under `cfg.CacheDir`; uses Bolt files for state and a directory layout for tarballs.
 - [internal/cache/s3](internal/cache/s3) — S3-compatible object store (selected when `--s3-bucket` / `GO_GALAXY_S3_BUCKET` is set). Includes its own minimal S3 client, distributed locking via conditional `PUT` + lock TTL, and gzip-on-the-wire for the snapshot.
+- The S3 backend's `LoadStore` checks the persisted schema version via a lightweight meta-only probe before decoding the full payload, matching the local backend's schema-first `Load` order.
 
 `internal/cache/cache.go::New` is the factory that picks one based on `cfg.S3Cache.Enabled`. **Add new backends here**, and make sure they implement `Backend` and return an `ArtifactStore`.
 
@@ -43,6 +44,7 @@ The `cacheManager.Backend` interface in [internal/galaxy/cache/backend.go](inter
 [internal/galaxy/store](internal/galaxy/store) defines `Store` — the in-memory representation of cached state (API responses, deps cache, installed collections, dependency graph, resolved versions, project registry). It is bucket-mapped to BoltDB files locally and serialized as gzipped JSON for S3.
 
 - `helpers.StoreSnapshotSchemaVersion` gates compatibility; bumping it requires a migration path. `validateSnapshotSchema` rejects newer schemas.
+- The current snapshot schema version is 4. At persist time, entries in the `APICache`, `DepsCache`, and `Versions` buckets are age-evicted against `helpers.CacheEntryMaxAge` (30 days) and stamped at write time, all inside the shared `snapshotData()` copy path, so both the local Bolt `Save` and the S3 `MarshalSnapshot` inherit the same eviction. The migration path for this bump is drop-and-rebuild: a snapshot persisted under an older schema is dropped rather than migrated in place, and its caches rebuild cold on the next run.
 - All `Store` methods are protected by an internal `RWMutex`; do not access fields directly across goroutines.
 - `RecordProject` keeps a per-project registry consumed by `cleanup` to compute reachability across all known requirements files.
 

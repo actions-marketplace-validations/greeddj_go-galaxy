@@ -76,7 +76,14 @@ const (
 	FetchRetryBackoffCap = 5 * time.Second
 
 	// StoreSnapshotSchemaVersion is the current snapshot schema version.
-	StoreSnapshotSchemaVersion = 3
+	StoreSnapshotSchemaVersion = 4
+
+	// CacheEntryMaxAge is the retention window for persisted cache entries
+	// (API responses, resolved versions lists, and dependency constraints).
+	// At persist time, an entry last written longer ago than this - for API
+	// entries, last written or last revalidated - is pruned from the snapshot,
+	// bounding both the local Bolt file and the S3 object in size and age.
+	CacheEntryMaxAge = 30 * 24 * time.Hour
 
 	// StoreDBLock is the cache lock file name.
 	StoreDBLock = ".go-galaxy.lock"

@@ -111,7 +111,13 @@ func (b *Backend) Lock(ctx context.Context) (func() error, error) {
 // is reported as an error since this binary cannot safely interpret it, an
 // older-than-current version causes the snapshot to be dropped and rebuilt
 // (a fresh empty Store, nil error) rather than partially trusted, and a
-// matching version returns the loaded data as-is.
+// matching version returns the loaded data as-is. The schema version is
+// checked via a lightweight probe decode of just the meta object before the
+// full payload is unmarshaled into a *store.Store: an outdated schema's data
+// buckets can have a shape the current Store type can no longer decode (as
+// happened across the v3 -> v4 bump), so validating first means that case is
+// dropped and rebuilt like the local backend, instead of failing the full
+// unmarshal.
 func (b *Backend) LoadStore(ctx context.Context) (*store.Store, error) {
 	if err := b.Open(ctx); err != nil {
 		return nil, err
@@ -124,15 +130,23 @@ func (b *Backend) LoadStore(ctx context.Context) (*store.Store, error) {
 		}
 		return nil, err
 	}
-	st := store.New()
-	if err := json.Unmarshal(data, st); err != nil {
+
+	var probe struct {
+		Meta store.SnapshotMeta `json:"meta"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
 		return nil, err
 	}
-	switch verr := store.ValidateSchema(st.Meta.SchemaVersion); {
+	switch verr := store.ValidateSchema(probe.Meta.SchemaVersion); {
 	case errors.Is(verr, helpers.ErrOutdatedSchemaVersion):
 		return store.New(), nil
 	case verr != nil:
 		return nil, verr
+	}
+
+	st := store.New()
+	if err := json.Unmarshal(data, st); err != nil {
+		return nil, err
 	}
 	return st, nil
 }

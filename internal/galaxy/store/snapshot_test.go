@@ -1,7 +1,9 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,6 +17,10 @@ import (
 // errTestResolvedBucketMissing is a static test-only error used when the
 // resolved bucket is unexpectedly absent while corrupting a test fixture.
 var errTestResolvedBucketMissing = errors.New("resolved bucket missing")
+
+// testDepsConstraint is the shared dependency constraint value seeded across
+// several deps-cache test fixtures.
+const testDepsConstraint = ">=1.0.0"
 
 func TestSaveLoadRoundTrip(t *testing.T) {
 	t.Parallel()
@@ -51,13 +57,19 @@ func buildTestStore(fixed time.Time) *Store {
 	st := New()
 	st.SetMetaRequirements("req-hash", "https://example.com")
 	st.SetAPICache("api", APICacheEntry{
+		// FetchedAt uses the current time rather than the fixed fixture
+		// clock: APICache is now subject to CacheEntryMaxAge pruning at
+		// persist time, and fixed predates the retention window relative to
+		// the current wall clock, which would make this entry vanish on
+		// every Save/MarshalSnapshot round trip regardless of the behavior
+		// under test.
+		FetchedAt: time.Now().UTC(),
 		URL:       "https://example.com/api",
 		ETag:      "etag",
-		FetchedAt: fixed,
 		TTL:       time.Minute,
 		Body:      []byte(`{"ok":true}`),
 	})
-	st.SetDepsCache("deps", map[string]string{"a.b": ">=1.0.0"})
+	st.SetDepsCache("deps", map[string]string{"a.b": testDepsConstraint})
 	st.SetInstalled("a.b@1.0.0", InstalledEntry{
 		InstallPath:    "/tmp/a/b",
 		Source:         "https://example.com",
@@ -126,7 +138,7 @@ func assertAPICache(t *testing.T, loaded *Store) {
 func assertDepsCache(t *testing.T, loaded *Store) {
 	t.Helper()
 	deps, ok := loaded.GetDepsCache("deps")
-	if !ok || deps["a.b"] != ">=1.0.0" {
+	if !ok || deps["a.b"] != testDepsConstraint {
 		t.Fatalf("unexpected deps cache: %#v", deps)
 	}
 }
@@ -190,14 +202,18 @@ func TestSaveRollsBackWholeTransactionOnMidSaveFailure(t *testing.T) {
 	dbs := openTestDBs(t)
 
 	st := New()
-	st.SetAPICache("api", APICacheEntry{URL: "v1"})
+	// FetchedAt must be within the retention window, since api_cache is now
+	// subject to CacheEntryMaxAge pruning at persist time: a zero-value
+	// FetchedAt would make this entry vanish on every Save regardless of the
+	// rollback behavior under test.
+	st.SetAPICache("api", APICacheEntry{URL: "v1", FetchedAt: time.Now().UTC()})
 	st.SetInstalled("normal.key", InstalledEntry{Source: "v1"})
 	mustSave(t, dbs, st)
 
 	// Mutate api_cache (written before installed) and inject a key that
 	// exceeds bolt.MaxKeySize into installed (written after api_cache),
 	// forcing a mid-transaction failure in a non-first bucket.
-	st.SetAPICache("api", APICacheEntry{URL: "v2"})
+	st.SetAPICache("api", APICacheEntry{URL: "v2", FetchedAt: time.Now().UTC()})
 	giantKey := strings.Repeat("k", 40000)
 	st.SetInstalled(giantKey, InstalledEntry{Source: "v2"})
 
@@ -303,5 +319,255 @@ func TestLoadRejectsCorruptResolvedEntry(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "a.b") {
 		t.Fatalf("expected error to mention the corrupt key, got %v", err)
+	}
+}
+
+// TestSnapshotV4RoundTripLocal proves the schema-4 wire shape - APICache,
+// DepsCache, and Versions each carrying a FetchedAt stamp - round-trips
+// through Save/Load intact.
+func TestSnapshotV4RoundTripLocal(t *testing.T) {
+	t.Parallel()
+	dbs := openTestDBs(t)
+	// recent, not a fixed historical date: APICache is now subject to
+	// CacheEntryMaxAge pruning at persist time, so a stamp must fall within
+	// the retention window for the entry to survive the round trip this
+	// test exercises.
+	recent := time.Now().UTC().Add(-time.Hour)
+
+	st := New()
+	st.SetAPICache("api", APICacheEntry{URL: "https://example.com/api", FetchedAt: recent, Body: []byte("body")})
+	st.SetDepsCache("deps", map[string]string{"a.b": testDepsConstraint})
+	st.SetVersionsCache("versions", []string{"1.0.0", "2.0.0"})
+	mustSave(t, dbs, st)
+
+	loaded := mustLoad(t, dbs)
+	if loaded.Meta.SchemaVersion != 4 {
+		t.Fatalf("expected schema version 4, got %d", loaded.Meta.SchemaVersion)
+	}
+	assertV4APICacheEntry(t, loaded, recent)
+	assertV4DepsCacheEntry(t, loaded)
+	assertV4VersionsEntry(t, loaded)
+}
+
+// assertV4APICacheEntry confirms the "api" key survived a round trip with
+// its FetchedAt and Body intact.
+func assertV4APICacheEntry(t *testing.T, loaded *Store, wantFetchedAt time.Time) {
+	t.Helper()
+	apiEntry, ok := loaded.GetAPICache("api")
+	if !ok || !apiEntry.FetchedAt.Equal(wantFetchedAt) || string(apiEntry.Body) != "body" {
+		t.Fatalf("unexpected api cache entry after round trip: %#v (ok=%v)", apiEntry, ok)
+	}
+}
+
+// assertV4DepsCacheEntry confirms the "deps" key survived a round trip as a
+// DepsCacheEntry with a non-zero FetchedAt stamp.
+func assertV4DepsCacheEntry(t *testing.T, loaded *Store) {
+	t.Helper()
+	depsEntry, ok := loaded.DepsCache["deps"]
+	if !ok || depsEntry.Deps["a.b"] != testDepsConstraint || depsEntry.FetchedAt.IsZero() {
+		t.Fatalf("unexpected deps cache entry after round trip: %#v (ok=%v)", depsEntry, ok)
+	}
+}
+
+// assertV4VersionsEntry confirms the "versions" key survived a round trip as
+// a VersionsEntry with a non-zero FetchedAt stamp.
+func assertV4VersionsEntry(t *testing.T, loaded *Store) {
+	t.Helper()
+	versionsEntry, ok := loaded.Versions["versions"]
+	if !ok || len(versionsEntry.List) != 2 || versionsEntry.FetchedAt.IsZero() {
+		t.Fatalf("unexpected versions cache entry after round trip: %#v (ok=%v)", versionsEntry, ok)
+	}
+}
+
+// TestSnapshotV4RoundTripJSON proves MarshalSnapshot's schema-4 wire shape
+// round-trips through a plain json.Unmarshal, and that the raw JSON encodes
+// versions_cache and deps_cache values as objects (fetched_at plus the
+// payload), not the bare arrays/maps of the pre-v4 shape.
+func TestSnapshotV4RoundTripJSON(t *testing.T) {
+	t.Parallel()
+	st := New()
+	st.SetAPICache("api", APICacheEntry{URL: "https://example.com/api", Body: []byte("body")})
+	st.SetDepsCache("deps", map[string]string{"a.b": testDepsConstraint})
+	st.SetVersionsCache("versions", []string{"1.0.0", "2.0.0"})
+
+	payload, err := st.MarshalSnapshot()
+	if err != nil {
+		t.Fatalf("MarshalSnapshot error: %v", err)
+	}
+
+	var loaded Store
+	if err := json.Unmarshal(payload, &loaded); err != nil {
+		t.Fatalf("json.Unmarshal error: %v", err)
+	}
+	if loaded.Meta.SchemaVersion != 4 {
+		t.Fatalf("expected schema version 4, got %d", loaded.Meta.SchemaVersion)
+	}
+	depsEntry, ok := loaded.DepsCache["deps"]
+	if !ok || depsEntry.Deps["a.b"] != testDepsConstraint || depsEntry.FetchedAt.IsZero() {
+		t.Fatalf("unexpected deps cache entry after JSON round trip: %#v (ok=%v)", depsEntry, ok)
+	}
+	versionsEntry, ok := loaded.Versions["versions"]
+	if !ok || len(versionsEntry.List) != 2 || versionsEntry.FetchedAt.IsZero() {
+		t.Fatalf("unexpected versions cache entry after JSON round trip: %#v (ok=%v)", versionsEntry, ok)
+	}
+
+	assertObjectShape(t, payload, "versions_cache", "versions", "fetched_at", "list")
+	assertObjectShape(t, payload, "deps_cache", "deps", "fetched_at", "deps")
+}
+
+// assertObjectShape confirms that raw[bucket][key] decodes as a JSON object
+// carrying both expected field names, rather than a bare array or map (the
+// pre-v4 shape for versions_cache and deps_cache respectively).
+func assertObjectShape(t *testing.T, payload []byte, bucket, key, firstField, secondField string) {
+	t.Helper()
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		t.Fatalf("json.Unmarshal raw payload error: %v", err)
+	}
+	var entries map[string]json.RawMessage
+	if err := json.Unmarshal(raw[bucket], &entries); err != nil {
+		t.Fatalf("json.Unmarshal %s error: %v", bucket, err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(entries[key], &fields); err != nil {
+		t.Fatalf("%s[%q] is not a JSON object: %v", bucket, key, err)
+	}
+	if _, ok := fields[firstField]; !ok {
+		t.Fatalf("%s[%q] missing field %q: %s", bucket, key, firstField, entries[key])
+	}
+	if _, ok := fields[secondField]; !ok {
+		t.Fatalf("%s[%q] missing field %q: %s", bucket, key, secondField, entries[key])
+	}
+}
+
+// TestSnapshotPrunesStaleAcrossAllBuckets proves entries last written before
+// the CacheEntryMaxAge retention window are dropped from the persisted
+// snapshot in all three age-eviction buckets (APICache, DepsCache,
+// Versions), while entries within the window survive, across both persist
+// paths (local Bolt Save/Load and MarshalSnapshot/json.Unmarshal).
+func TestSnapshotPrunesStaleAcrossAllBuckets(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	stale := now.Add(-40 * 24 * time.Hour)
+	fresh := now.Add(-1 * 24 * time.Hour)
+
+	build := func() *Store {
+		st := New()
+		st.APICache["api-stale"] = APICacheEntry{URL: "stale", FetchedAt: stale}
+		st.APICache["api-fresh"] = APICacheEntry{URL: "fresh", FetchedAt: fresh}
+		st.DepsCache["deps-stale"] = DepsCacheEntry{FetchedAt: stale, Deps: map[string]string{"a.b": "1"}}
+		st.DepsCache["deps-fresh"] = DepsCacheEntry{FetchedAt: fresh, Deps: map[string]string{"a.b": "1"}}
+		st.Versions["versions-stale"] = VersionsEntry{FetchedAt: stale, List: []string{"1.0.0"}}
+		st.Versions["versions-fresh"] = VersionsEntry{FetchedAt: fresh, List: []string{"1.0.0"}}
+		return st
+	}
+
+	t.Run("bolt", func(t *testing.T) {
+		t.Parallel()
+		dbs := openTestDBs(t)
+		mustSave(t, dbs, build())
+		assertStalePruned(t, mustLoad(t, dbs))
+	})
+
+	t.Run("json", func(t *testing.T) {
+		t.Parallel()
+		payload, err := build().MarshalSnapshot()
+		if err != nil {
+			t.Fatalf("MarshalSnapshot error: %v", err)
+		}
+		var loaded Store
+		if err := json.Unmarshal(payload, &loaded); err != nil {
+			t.Fatalf("json.Unmarshal error: %v", err)
+		}
+		assertStalePruned(t, &loaded)
+	})
+}
+
+// assertStalePruned checks that every "-stale" entry seeded by
+// TestSnapshotPrunesStaleAcrossAllBuckets's build helper is gone and every
+// "-fresh" entry survived, across all three age-eviction buckets.
+func assertStalePruned(t *testing.T, loaded *Store) {
+	t.Helper()
+	if _, ok := loaded.APICache["api-stale"]; ok {
+		t.Fatalf("expected stale api cache entry to be pruned")
+	}
+	if _, ok := loaded.APICache["api-fresh"]; !ok {
+		t.Fatalf("expected fresh api cache entry to survive")
+	}
+	if _, ok := loaded.DepsCache["deps-stale"]; ok {
+		t.Fatalf("expected stale deps cache entry to be pruned")
+	}
+	if _, ok := loaded.DepsCache["deps-fresh"]; !ok {
+		t.Fatalf("expected fresh deps cache entry to survive")
+	}
+	if _, ok := loaded.Versions["versions-stale"]; ok {
+		t.Fatalf("expected stale versions cache entry to be pruned")
+	}
+	if _, ok := loaded.Versions["versions-fresh"]; !ok {
+		t.Fatalf("expected fresh versions cache entry to survive")
+	}
+}
+
+// TestSnapshotBoundaryEntryIsKept proves isStaleCacheEntry's exact-equality
+// boundary: an entry stamped exactly at the cutoff instant is kept
+// (FetchedAt.Before(cutoff) is false at equality), while an entry one
+// nanosecond earlier is pruned. This tests the comparison directly rather
+// than through a full Save/MarshalSnapshot round trip, since the real
+// cutoff is computed from the wall clock at persist time and cannot be
+// predicted precisely enough from a test goroutine to hit the boundary
+// deterministically.
+func TestSnapshotBoundaryEntryIsKept(t *testing.T) {
+	t.Parallel()
+	cutoff := time.Now().UTC()
+	if isStaleCacheEntry(cutoff, cutoff) {
+		t.Fatalf("expected an entry stamped exactly at the cutoff to be kept")
+	}
+	if !isStaleCacheEntry(cutoff.Add(-time.Nanosecond), cutoff) {
+		t.Fatalf("expected an entry stamped one nanosecond before the cutoff to be pruned")
+	}
+}
+
+// TestLoadDropsV3BoltAndRebuilds proves Load's schema check happens before
+// any data bucket is decoded: a v3-stamped snapshot whose versions_cache and
+// deps_cache buckets still hold the pre-schema-4 bare shapes (JSON arrays
+// and plain maps, without a fetched_at wrapper) is dropped and rebuilt
+// rather than failing to decode into the current wrapper structs.
+func TestLoadDropsV3BoltAndRebuilds(t *testing.T) {
+	t.Parallel()
+	dbs := openTestDBs(t)
+
+	err := dbs.db.Update(func(tx *bolt.Tx) error {
+		metaBucket, err := tx.CreateBucketIfNotExists([]byte(helpers.StoreBucketMeta))
+		if err != nil {
+			return err
+		}
+		if err := metaBucket.Put([]byte(helpers.StoreMetaSchemaVersion), []byte(strconv.Itoa(3))); err != nil {
+			return err
+		}
+
+		versionsBucket, err := tx.CreateBucketIfNotExists([]byte(helpers.StoreBucketVersions))
+		if err != nil {
+			return err
+		}
+		if err := versionsBucket.Put([]byte("versions"), []byte(`["1.0.0","2.0.0"]`)); err != nil {
+			return err
+		}
+
+		depsBucket, err := tx.CreateBucketIfNotExists([]byte(helpers.StoreBucketDepsCache))
+		if err != nil {
+			return err
+		}
+		return depsBucket.Put([]byte("deps"), []byte(`{"a.b":">=1.0.0"}`))
+	})
+	if err != nil {
+		t.Fatalf("failed to seed a v3-shape bolt file: %v", err)
+	}
+
+	loaded, err := Load(dbs)
+	if err != nil {
+		t.Fatalf("expected nil error dropping a v3 snapshot, got %v", err)
+	}
+	if !reflect.DeepEqual(loaded, New()) {
+		t.Fatalf("expected a fresh store after dropping a v3 snapshot, got %#v", loaded)
 	}
 }

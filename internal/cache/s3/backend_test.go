@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
@@ -52,6 +53,45 @@ func TestLoadStoreDropsOlderSchema(t *testing.T) {
 	}
 	if len(loaded.APICache) != 0 {
 		t.Fatalf("expected an empty store after dropping an outdated schema, got %#v", loaded)
+	}
+}
+
+// TestLoadStoreDropsV3ShapeAndRebuilds proves LoadStore's schema check
+// happens before the full payload is unmarshaled into a *store.Store: a
+// genuine v3-shape object (versions_cache as bare arrays, deps_cache as bare
+// maps, neither wrapped with a fetched_at stamp) is dropped and rebuilt with
+// a nil error, rather than failing json.Unmarshal against the current
+// wrapper structs. putStoreObject cannot exercise this: it always marshals
+// the current Store type (only the schema_version number overridden), so
+// its versions_cache/deps_cache are always already in the current shape.
+func TestLoadStoreDropsV3ShapeAndRebuilds(t *testing.T) {
+	t.Parallel()
+	b := newTestBackend(t)
+	ctx := t.Context()
+
+	rawJSON := []byte(`{
+		"meta": {"schema_version": 3, "last_snapshot": "2024-01-02T03:04:05Z"},
+		"api_cache": {},
+		"deps_cache": {"a.b": {"c.d": ">=1.0.0"}},
+		"installed": {},
+		"graph": {},
+		"requirements": {},
+		"roots": {},
+		"resolved": {},
+		"versions_cache": {"a.b": ["1.0.0", "2.0.0"]}
+	}`)
+	putRawStoreObject(ctx, t, b, rawJSON)
+
+	loaded, err := b.LoadStore(ctx)
+	if err != nil {
+		t.Fatalf("expected nil error dropping a v3-shape snapshot, got %v", err)
+	}
+	fresh := store.New()
+	if loaded.Meta.SchemaVersion != fresh.Meta.SchemaVersion {
+		t.Fatalf("expected fresh schema version %d, got %d", fresh.Meta.SchemaVersion, loaded.Meta.SchemaVersion)
+	}
+	if len(loaded.DepsCache) != 0 || len(loaded.Versions) != 0 {
+		t.Fatalf("expected an empty store after dropping a v3-shape snapshot, got %#v", loaded)
 	}
 }
 
@@ -164,7 +204,11 @@ func TestSaveStoreRoundTripsDataShape(t *testing.T) {
 	ctx := t.Context()
 
 	st := store.New()
-	st.SetAPICache("api", store.APICacheEntry{URL: "https://example.com/api", ETag: "etag"})
+	// FetchedAt must be within the retention window, since api_cache is now
+	// subject to CacheEntryMaxAge pruning at persist time: a zero-value
+	// FetchedAt would make this entry vanish from SaveStore's payload
+	// regardless of the shape-preservation behavior under test.
+	st.SetAPICache("api", store.APICacheEntry{URL: "https://example.com/api", ETag: "etag", FetchedAt: time.Now().UTC()})
 	st.SetInstalled("a.b@1.0.0", store.InstalledEntry{ArtifactSHA256: "abc"})
 
 	if err := b.SaveStore(ctx, st); err != nil {
@@ -266,6 +310,34 @@ func putStoreObject(ctx context.Context, t *testing.T, b *Backend, schemaVersion
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
 	if _, err := zw.Write(payload); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+
+	key := b.key(statePrefix, storeObject)
+	reader := bytes.NewReader(buf.Bytes())
+	if err := b.client.putObject(ctx, key, reader, int64(buf.Len()), "application/json", "gzip", nil, false, ""); err != nil {
+		t.Fatalf("putObject: %v", err)
+	}
+}
+
+// putRawStoreObject seeds the state/store.json.gz object with raw JSON
+// bytes, gzipped exactly as SaveStore would, without going through
+// store.New()/json.Marshal(*store.Store) - letting a test inject a wire
+// shape (such as a genuine pre-schema-4 snapshot) that the current Store
+// type could never produce by construction.
+func putRawStoreObject(ctx context.Context, t *testing.T, b *Backend, rawJSON []byte) {
+	t.Helper()
+
+	if err := b.Open(ctx); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(rawJSON); err != nil {
 		t.Fatalf("gzip write: %v", err)
 	}
 	if err := zw.Close(); err != nil {

@@ -32,6 +32,20 @@ type APICacheEntry struct {
 	TTL          time.Duration `json:"ttl"`
 }
 
+// VersionsEntry stores a cached versions list with the time it was written,
+// so age-based eviction can prune it from the persisted snapshot.
+type VersionsEntry struct {
+	FetchedAt time.Time `json:"fetched_at"`
+	List      []string  `json:"list"`
+}
+
+// DepsCacheEntry stores cached dependency constraints with the time they were
+// written, so age-based eviction can prune them from the persisted snapshot.
+type DepsCacheEntry struct {
+	FetchedAt time.Time         `json:"fetched_at"`
+	Deps      map[string]string `json:"deps"`
+}
+
 // InstalledEntry records an installed collection entry.
 type InstalledEntry struct {
 	InstallPath    string    `json:"install_path"`
@@ -43,16 +57,16 @@ type InstalledEntry struct {
 
 // Store holds cached state for collections and metadata.
 type Store struct {
-	APICache     map[string]APICacheEntry     `json:"api_cache"`
-	DepsCache    map[string]map[string]string `json:"deps_cache"`
-	Installed    map[string]InstalledEntry    `json:"installed"`
-	Graph        map[string][]string          `json:"graph"`
-	Requirements map[string]RequirementSpec   `json:"requirements"`
-	Roots        map[string][]string          `json:"roots"`
-	Resolved     map[string]ResolvedEntry     `json:"resolved"`
-	Versions     map[string][]string          `json:"versions_cache"`
-	Meta         SnapshotMeta                 `json:"meta"`
-	mu           sync.RWMutex                 `json:"-"`
+	APICache     map[string]APICacheEntry   `json:"api_cache"`
+	DepsCache    map[string]DepsCacheEntry  `json:"deps_cache"`
+	Installed    map[string]InstalledEntry  `json:"installed"`
+	Graph        map[string][]string        `json:"graph"`
+	Requirements map[string]RequirementSpec `json:"requirements"`
+	Roots        map[string][]string        `json:"roots"`
+	Resolved     map[string]ResolvedEntry   `json:"resolved"`
+	Versions     map[string]VersionsEntry   `json:"versions_cache"`
+	Meta         SnapshotMeta               `json:"meta"`
+	mu           sync.RWMutex               `json:"-"`
 }
 
 // New creates an initialized Store with empty maps.
@@ -62,13 +76,13 @@ func New() *Store {
 			SchemaVersion: helpers.StoreSnapshotSchemaVersion,
 		},
 		APICache:     make(map[string]APICacheEntry),
-		DepsCache:    make(map[string]map[string]string),
+		DepsCache:    make(map[string]DepsCacheEntry),
 		Installed:    make(map[string]InstalledEntry),
 		Graph:        make(map[string][]string),
 		Requirements: make(map[string]RequirementSpec),
 		Roots:        make(map[string][]string),
 		Resolved:     make(map[string]ResolvedEntry),
-		Versions:     make(map[string][]string),
+		Versions:     make(map[string]VersionsEntry),
 	}
 }
 
@@ -146,7 +160,9 @@ func (m *Store) InstalledArtifactSHAByKey() map[string]string {
 	return out
 }
 
-// GetDepsCache returns cached dependency constraints for a key.
+// GetDepsCache returns cached dependency constraints for a key. This is a
+// pure read under RLock: it does not bump the entry's FetchedAt, so a hit
+// here never requires upgrading to the write lock.
 func (m *Store) GetDepsCache(key string) (map[string]string, bool) {
 	if m == nil {
 		return nil, false
@@ -157,12 +173,20 @@ func (m *Store) GetDepsCache(key string) (map[string]string, bool) {
 	if !ok {
 		return nil, false
 	}
-	clone := make(map[string]string, len(entry))
-	maps.Copy(clone, entry)
+	clone := make(map[string]string, len(entry.Deps))
+	maps.Copy(clone, entry.Deps)
 	return clone, true
 }
 
-// SetDepsCache stores dependency constraints for a key.
+// SetDepsCache stores dependency constraints for a key, stamping the current
+// time as the entry's FetchedAt. The stamp marks when the entry was written,
+// not when it was last read: a key that stays referenced but is never
+// rewritten still ages out of the persisted snapshot CacheEntryMaxAge after
+// this write and gets refetched on a later run - an accepted, cheap
+// consequence, and the reason GetDepsCache above stays a pure read instead
+// of taking the write lock to bump FetchedAt on every hit. This differs from
+// APICache, whose FetchedAt is also bumped on a successful 304 revalidation
+// via refreshAPICacheEntry, not only on an initial fetch.
 func (m *Store) SetDepsCache(key string, deps map[string]string) {
 	if m == nil {
 		return
@@ -171,7 +195,7 @@ func (m *Store) SetDepsCache(key string, deps map[string]string) {
 	maps.Copy(clone, deps)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.DepsCache[key] = clone
+	m.DepsCache[key] = DepsCacheEntry{FetchedAt: time.Now().UTC(), Deps: clone}
 }
 
 // DeleteDepsCache removes cached dependency data for a key.
@@ -220,11 +244,13 @@ func (m *Store) ClearCaches() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.APICache = make(map[string]APICacheEntry)
-	m.DepsCache = make(map[string]map[string]string)
-	m.Versions = make(map[string][]string)
+	m.DepsCache = make(map[string]DepsCacheEntry)
+	m.Versions = make(map[string]VersionsEntry)
 }
 
-// GetVersionsCache returns cached versions for a key.
+// GetVersionsCache returns cached versions for a key. This is a pure read
+// under RLock: it does not bump the entry's FetchedAt, so a hit here never
+// requires upgrading to the write lock.
 func (m *Store) GetVersionsCache(key string) ([]string, bool) {
 	if m == nil {
 		return nil, false
@@ -235,12 +261,20 @@ func (m *Store) GetVersionsCache(key string) ([]string, bool) {
 	if !ok {
 		return nil, false
 	}
-	clone := make([]string, len(entry))
-	copy(clone, entry)
+	clone := make([]string, len(entry.List))
+	copy(clone, entry.List)
 	return clone, true
 }
 
-// SetVersionsCache stores cached versions for a key.
+// SetVersionsCache stores cached versions for a key, stamping the current
+// time as the entry's FetchedAt. The stamp marks when the entry was written,
+// not when it was last read: a key that stays referenced but is never
+// rewritten still ages out of the persisted snapshot CacheEntryMaxAge after
+// this write and gets refetched on a later run - an accepted, cheap
+// consequence, and the reason GetVersionsCache above stays a pure read
+// instead of taking the write lock to bump FetchedAt on every hit. This
+// differs from APICache, whose FetchedAt is also bumped on a successful 304
+// revalidation via refreshAPICacheEntry, not only on an initial fetch.
 func (m *Store) SetVersionsCache(key string, versions []string) {
 	if m == nil {
 		return
@@ -249,7 +283,7 @@ func (m *Store) SetVersionsCache(key string, versions []string) {
 	copy(clone, versions)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Versions[key] = clone
+	m.Versions[key] = VersionsEntry{FetchedAt: time.Now().UTC(), List: clone}
 }
 
 // SetResolvedAll replaces the resolved entries map.
@@ -404,13 +438,13 @@ func (m *Store) SetMetaRequirements(hash, server string) {
 // snapshotData is a serialized view of Store contents.
 type snapshotData struct {
 	APICache     map[string]APICacheEntry
-	DepsCache    map[string]map[string]string
+	DepsCache    map[string]DepsCacheEntry
 	Installed    map[string]InstalledEntry
 	Graph        map[string][]string
 	Requirements map[string]RequirementSpec
 	Roots        map[string][]string
 	Resolved     map[string]ResolvedEntry
-	Versions     map[string][]string
+	Versions     map[string]VersionsEntry
 	Meta         SnapshotMeta
 }
 
@@ -442,28 +476,56 @@ func (m *Store) MarshalSnapshot() ([]byte, error) {
 	return json.Marshal(snapshot)
 }
 
-// snapshotData builds a snapshot payload from the store.
+// isStaleCacheEntry reports whether fetchedAt is older than cutoff. It uses
+// strict Before so an entry written exactly at the cutoff instant is
+// retained rather than pruned, and is factored out (rather than inlined at
+// each of the three call sites below) so the exact-equality boundary
+// behavior can be exercised directly by a test without racing the wall
+// clock.
+func isStaleCacheEntry(fetchedAt, cutoff time.Time) bool {
+	return fetchedAt.Before(cutoff)
+}
+
+// snapshotData builds a snapshot payload from the store. Entries in
+// APICache, DepsCache, and Versions that were last written before the
+// CacheEntryMaxAge retention window are dropped from the payload: both
+// persist entrypoints (local Bolt Save and the S3 MarshalSnapshot) build
+// their payload through this method, so the age bound applies to both
+// without either caller having to know about it. The live maps themselves
+// are never pruned, only this RLock-protected copy - a still-warm entry
+// stays available for reads until it is naturally overwritten or the store
+// process restarts and reloads the (now-pruned) persisted snapshot.
 func (m *Store) snapshotData() snapshotData {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	cutoff := time.Now().UTC().Add(-helpers.CacheEntryMaxAge)
+
 	data := snapshotData{
 		Meta:         m.Meta,
 		APICache:     make(map[string]APICacheEntry, len(m.APICache)),
-		DepsCache:    make(map[string]map[string]string, len(m.DepsCache)),
+		DepsCache:    make(map[string]DepsCacheEntry, len(m.DepsCache)),
 		Installed:    make(map[string]InstalledEntry, len(m.Installed)),
 		Graph:        make(map[string][]string, len(m.Graph)),
 		Requirements: make(map[string]RequirementSpec, len(m.Requirements)),
 		Roots:        make(map[string][]string, len(m.Roots)),
 		Resolved:     make(map[string]ResolvedEntry, len(m.Resolved)),
-		Versions:     make(map[string][]string, len(m.Versions)),
+		Versions:     make(map[string]VersionsEntry, len(m.Versions)),
 	}
 
-	maps.Copy(data.APICache, m.APICache)
-	for key, deps := range m.DepsCache {
-		clone := make(map[string]string, len(deps))
-		maps.Copy(clone, deps)
-		data.DepsCache[key] = clone
+	for key, entry := range m.APICache {
+		if isStaleCacheEntry(entry.FetchedAt, cutoff) {
+			continue
+		}
+		data.APICache[key] = entry
+	}
+	for key, entry := range m.DepsCache {
+		if isStaleCacheEntry(entry.FetchedAt, cutoff) {
+			continue
+		}
+		clone := make(map[string]string, len(entry.Deps))
+		maps.Copy(clone, entry.Deps)
+		data.DepsCache[key] = DepsCacheEntry{FetchedAt: entry.FetchedAt, Deps: clone}
 	}
 	maps.Copy(data.Installed, m.Installed)
 	for key, deps := range m.Graph {
@@ -478,10 +540,13 @@ func (m *Store) snapshotData() snapshotData {
 		data.Roots[key] = clone
 	}
 	maps.Copy(data.Resolved, m.Resolved)
-	for key, versions := range m.Versions {
-		clone := make([]string, len(versions))
-		copy(clone, versions)
-		data.Versions[key] = clone
+	for key, entry := range m.Versions {
+		if isStaleCacheEntry(entry.FetchedAt, cutoff) {
+			continue
+		}
+		clone := make([]string, len(entry.List))
+		copy(clone, entry.List)
+		data.Versions[key] = VersionsEntry{FetchedAt: entry.FetchedAt, List: clone}
 	}
 
 	return data
@@ -662,7 +727,7 @@ func loadInstalled(tx *bolt.Tx, store *Store) error {
 
 func loadDepsCache(tx *bolt.Tx, store *Store) error {
 	return loadBucket(tx, helpers.StoreBucketDepsCache, func(k, v []byte) error {
-		var entry map[string]string
+		var entry DepsCacheEntry
 		if err := json.Unmarshal(v, &entry); err != nil {
 			return err
 		}
@@ -721,7 +786,7 @@ func loadResolved(tx *bolt.Tx, store *Store) error {
 
 func loadVersions(tx *bolt.Tx, store *Store) error {
 	return loadBucket(tx, helpers.StoreBucketVersions, func(k, v []byte) error {
-		var entry []string
+		var entry VersionsEntry
 		if err := json.Unmarshal(v, &entry); err != nil {
 			return err
 		}
@@ -761,7 +826,7 @@ func saveAPICache(tx *bolt.Tx, data snapshotData) error {
 }
 
 func saveDepsCache(tx *bolt.Tx, data snapshotData) error {
-	return saveBucket(tx, helpers.StoreBucketDepsCache, data.DepsCache, func(entry map[string]string) ([]byte, error) {
+	return saveBucket(tx, helpers.StoreBucketDepsCache, data.DepsCache, func(entry DepsCacheEntry) ([]byte, error) {
 		return json.Marshal(&entry)
 	})
 }
@@ -797,7 +862,7 @@ func saveResolved(tx *bolt.Tx, data snapshotData) error {
 }
 
 func saveVersions(tx *bolt.Tx, data snapshotData) error {
-	return saveBucket(tx, helpers.StoreBucketVersions, data.Versions, func(entry []string) ([]byte, error) {
+	return saveBucket(tx, helpers.StoreBucketVersions, data.Versions, func(entry VersionsEntry) ([]byte, error) {
 		return json.Marshal(&entry)
 	})
 }
