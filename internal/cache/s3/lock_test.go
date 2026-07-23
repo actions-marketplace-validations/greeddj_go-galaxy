@@ -523,7 +523,12 @@ func TestReleaseLockOnForeignTokenDoesNotDelete(t *testing.T) {
 
 // TestReleaseLockPropagatesHeadError directly unit-tests releaseLock's
 // non-not-found HEAD error branch: a genuine S3 failure (as opposed to a
-// 404) must propagate to the caller rather than being swallowed.
+// 404) must propagate to the caller rather than being swallowed. The
+// failure is armed indefinitely (500 is a retryable status, and
+// headObject now retries it internally) so it survives long enough to be
+// the terminal error rather than being consumed by a retry that then
+// observes the never-created key as a plain 404, which releaseLock treats
+// as an already-released lock.
 func TestReleaseLockPropagatesHeadError(t *testing.T) {
 	t.Parallel()
 	fake := newFakeS3()
@@ -534,7 +539,7 @@ func TestReleaseLockPropagatesHeadError(t *testing.T) {
 	}
 
 	key := b.key(locksPrefix, "lock-with-head-error")
-	fake.failNext(key, http.MethodHead, http.StatusInternalServerError, 1)
+	fake.failNext(key, http.MethodHead, http.StatusInternalServerError, -1)
 
 	if err := b.releaseLock(ctx, key, "token"); !errors.Is(err, errS3HeadFailed) {
 		t.Fatalf("expected errS3HeadFailed to propagate, got %v", err)

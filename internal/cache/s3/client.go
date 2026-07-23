@@ -81,54 +81,84 @@ func s3StatusError(sentinel error, resp *http.Response) error {
 	return fmt.Errorf("%w: %s (%s: %s)", sentinel, resp.Status, parsed.Code, parsed.Message)
 }
 
-// getObject performs a GET request for the object key.
+// getObject performs a GET request for the object key, retrying a
+// transient failure (a retryable HTTP status or a stalled body read) up to
+// s3RetryPolicy's bound. Each attempt builds a fresh request via newRequest
+// so its X-Amz-Date and signature are never stale by the time a retry
+// fires; a failed attempt's response body is closed before the next one, and
+// only the eventual successful response is returned open for the caller to
+// read and close.
 func (c *Client) getObject(ctx context.Context, key string) (*http.Response, error) {
-	req, err := c.newRequest(ctx, http.MethodGet, key, nil, nil, emptySHA256, nil, false)
+	var success *http.Response
+	err := helpers.Retry(ctx, s3RetryPolicy(), func() error {
+		req, err := c.newRequest(ctx, http.MethodGet, key, nil, nil, emptySHA256, nil, false)
+		if err != nil {
+			return err
+		}
+		resp, err := c.client.Do(req)
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode == http.StatusNotFound {
+			_ = resp.Body.Close()
+			return errS3NotFound
+		}
+		if resp.StatusCode != http.StatusOK {
+			statusErr := wrapRetryableStatus(resp.StatusCode, s3StatusError(errS3GetFailed, resp))
+			_ = resp.Body.Close()
+			return statusErr
+		}
+		success = resp
+		return nil
+	}, s3Retryable)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode == http.StatusNotFound {
-		_ = resp.Body.Close()
-		return nil, errS3NotFound
-	}
-	if resp.StatusCode != http.StatusOK {
-		err := s3StatusError(errS3GetFailed, resp)
-		_ = resp.Body.Close()
-		return nil, err
-	}
-	return resp, nil
+	return success, nil
 }
 
-// headObject performs a HEAD request for the object key. HEAD responses
-// never carry a body (net/http elides it even if a handler writes one), so
-// the failure here stays status-only rather than going through
-// s3StatusError.
+// headObject performs a HEAD request for the object key, retrying a
+// transient failure like getObject. HEAD responses never carry a body
+// (net/http elides it even if a handler writes one), so the failure here
+// stays status-only rather than going through s3StatusError.
 func (c *Client) headObject(ctx context.Context, key string) (http.Header, error) {
-	req, err := c.newRequest(ctx, http.MethodHead, key, nil, nil, emptySHA256, nil, false)
+	var headers http.Header
+	err := helpers.Retry(ctx, s3RetryPolicy(), func() error {
+		req, err := c.newRequest(ctx, http.MethodHead, key, nil, nil, emptySHA256, nil, false)
+		if err != nil {
+			return err
+		}
+		resp, err := c.client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			_ = resp.Body.Close()
+		}()
+		if resp.StatusCode == http.StatusNotFound {
+			return errS3NotFound
+		}
+		if resp.StatusCode != http.StatusOK {
+			return wrapRetryableStatus(resp.StatusCode, fmt.Errorf("%w: %s", errS3HeadFailed, resp.Status))
+		}
+		headers = resp.Header.Clone()
+		return nil
+	}, s3Retryable)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, errS3NotFound
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%w: %s", errS3HeadFailed, resp.Status)
-	}
-	return resp.Header.Clone(), nil
+	return headers, nil
 }
 
-// putObject uploads an object with optional metadata.
+// putObject uploads an object with optional metadata. A conditional
+// create-if-absent PUT (ifNoneMatch) is single-shot and never retried: a
+// lost-success retry would observe 412 (the object it just created now
+// exists) and misreport its own success as contention, which the
+// distributed lock's acquireLock loop cannot distinguish from a live
+// holder - see reclaimIfExpired/tryAcquireOnce, whose own loop is the sole
+// retrier of conditional PUTs. An unconditional overwrite is safe to retry:
+// each attempt reseeks body to its start and rebuilds the request (fresh
+// signature) before resending.
 func (c *Client) putObject(
 	ctx context.Context,
 	key string,
@@ -143,42 +173,57 @@ func (c *Client) putObject(
 	if err != nil {
 		return err
 	}
-	req, err := c.newRequest(ctx, http.MethodPut, key, nil, body, payloadHash, meta, ifNoneMatch)
-	if err != nil {
-		return err
+	attempt := func() error {
+		req, err := c.newRequest(ctx, http.MethodPut, key, nil, body, payloadHash, meta, ifNoneMatch)
+		if err != nil {
+			return err
+		}
+		req.ContentLength = size
+		applyContentHeaders(req, contentType, contentEncoding)
+		resp, err := c.client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			_ = resp.Body.Close()
+		}()
+		return handlePutResponse(resp)
 	}
-	req.ContentLength = size
-	applyContentHeaders(req, contentType, contentEncoding)
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return err
+	if ifNoneMatch {
+		return attempt()
 	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-	return handlePutResponse(resp)
+	return helpers.Retry(ctx, s3RetryPolicy(), func() error {
+		if _, err := body.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		return attempt()
+	}, s3Retryable)
 }
 
-// deleteObject deletes an object by key.
+// deleteObject deletes an object by key, retrying a transient failure like
+// getObject. A missing object (404) is treated as already deleted, matching
+// S3's own idempotent DELETE semantics.
 func (c *Client) deleteObject(ctx context.Context, key string) error {
-	req, err := c.newRequest(ctx, http.MethodDelete, key, nil, nil, emptySHA256, nil, false)
-	if err != nil {
-		return err
-	}
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-	if resp.StatusCode == http.StatusNotFound {
+	return helpers.Retry(ctx, s3RetryPolicy(), func() error {
+		req, err := c.newRequest(ctx, http.MethodDelete, key, nil, nil, emptySHA256, nil, false)
+		if err != nil {
+			return err
+		}
+		resp, err := c.client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			_ = resp.Body.Close()
+		}()
+		if resp.StatusCode == http.StatusNotFound {
+			return nil
+		}
+		if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+			return wrapRetryableStatus(resp.StatusCode, s3StatusError(errS3DeleteFailed, resp))
+		}
 		return nil
-	}
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-		return s3StatusError(errS3DeleteFailed, resp)
-	}
-	return nil
+	}, s3Retryable)
 }
 
 // listObjects returns object keys under the given prefix.
@@ -231,10 +276,17 @@ func handlePutResponse(resp *http.Response) error {
 	case http.StatusOK, http.StatusNoContent:
 		return nil
 	default:
-		return s3StatusError(errS3PutFailed, resp)
+		return wrapRetryableStatus(resp.StatusCode, s3StatusError(errS3PutFailed, resp))
 	}
 }
 
+// listObjectsPage fetches one ListObjectsV2 page, retrying the whole
+// request-read-parse cycle on a transient failure. bucketRequest is
+// single-shot, so this outer retry is the sole layer: it recovers both a
+// transient status (surfaced by bucketRequest as a retryable-classified
+// error) and a body-read stall (helpers.ErrReadStalled) during the io.ReadAll
+// here, which happens after bucketRequest has already returned a 200, within
+// one bounded attempt budget.
 func (c *Client) listObjectsPage(ctx context.Context, prefix, token string) (listBucketResult, error) {
 	query := url.Values{}
 	query.Set("list-type", "2")
@@ -244,17 +296,25 @@ func (c *Client) listObjectsPage(ctx context.Context, prefix, token string) (lis
 	if token != "" {
 		query.Set("continuation-token", token)
 	}
-	resp, err := c.bucketRequest(ctx, http.MethodGet, query)
-	if err != nil {
-		return listBucketResult{}, err
-	}
-	data, err := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-	if err != nil {
-		return listBucketResult{}, err
-	}
 	var result listBucketResult
-	if err := xml.Unmarshal(data, &result); err != nil {
+	err := helpers.Retry(ctx, s3RetryPolicy(), func() error {
+		resp, err := c.bucketRequest(ctx, http.MethodGet, query)
+		if err != nil {
+			return err
+		}
+		data, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			return err
+		}
+		var parsed listBucketResult
+		if err := xml.Unmarshal(data, &parsed); err != nil {
+			return err
+		}
+		result = parsed
+		return nil
+	}, s3Retryable)
+	if err != nil {
 		return listBucketResult{}, err
 	}
 	return result, nil
@@ -282,26 +342,29 @@ func (c *Client) ensureBucket(ctx context.Context) error {
 
 // headBucket checks whether the configured bucket exists. Like headObject,
 // this is a HEAD request with no response body, so its failure stays
-// status-only rather than going through s3StatusError.
+// status-only rather than going through s3StatusError. It retries a
+// transient failure like the other idempotent verbs.
 func (c *Client) headBucket(ctx context.Context) error {
-	req, err := c.newRequest(ctx, http.MethodHead, "", nil, nil, emptySHA256, nil, false)
-	if err != nil {
-		return err
-	}
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-	if resp.StatusCode == http.StatusNotFound {
-		return errS3BucketNotFound
-	}
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("%w: %s", errS3BucketHeadFailed, resp.Status)
-	}
-	return nil
+	return helpers.Retry(ctx, s3RetryPolicy(), func() error {
+		req, err := c.newRequest(ctx, http.MethodHead, "", nil, nil, emptySHA256, nil, false)
+		if err != nil {
+			return err
+		}
+		resp, err := c.client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			_ = resp.Body.Close()
+		}()
+		if resp.StatusCode == http.StatusNotFound {
+			return errS3BucketNotFound
+		}
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+			return wrapRetryableStatus(resp.StatusCode, fmt.Errorf("%w: %s", errS3BucketHeadFailed, resp.Status))
+		}
+		return nil
+	}, s3Retryable)
 }
 
 // createBucket sends a CreateBucket request with region configuration.
@@ -349,7 +412,12 @@ func (c *Client) createBucket(ctx context.Context) error {
 	return nil
 }
 
-// bucketRequest issues a request against the bucket root.
+// bucketRequest issues a single request against the bucket root. Its sole
+// caller, listObjectsPage, owns the retry, so a transient status (returned
+// here as a retryable-classified error via wrapRetryableStatus) and a
+// body-read stall during the listing share one bounded attempt budget rather
+// than nesting two. On a non-2xx it closes the response body and returns; on
+// 200 it returns the response with its body still open for the caller to read.
 func (c *Client) bucketRequest(ctx context.Context, method string, query url.Values) (*http.Response, error) {
 	req, err := c.newRequest(ctx, method, "", query, nil, emptySHA256, nil, false)
 	if err != nil {
@@ -364,9 +432,9 @@ func (c *Client) bucketRequest(ctx context.Context, method string, query url.Val
 		return nil, errS3BucketNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
-		err := s3StatusError(errS3BucketRequestFailed, resp)
+		statusErr := wrapRetryableStatus(resp.StatusCode, s3StatusError(errS3BucketRequestFailed, resp))
 		_ = resp.Body.Close()
-		return nil, err
+		return nil, statusErr
 	}
 	return resp, nil
 }

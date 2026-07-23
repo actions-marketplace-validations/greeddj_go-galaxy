@@ -29,6 +29,7 @@ type fakeObject struct {
 type fakeS3 struct {
 	objects           map[string]fakeObject
 	fails             map[string]*forcedFailure
+	requests          map[string]int
 	bucket            string
 	deleteDelay       time.Duration
 	mu                sync.Mutex
@@ -92,6 +93,29 @@ func (f *fakeS3) failNextWithBody(key, method string, status, count int, body []
 		f.fails = make(map[string]*forcedFailure)
 	}
 	f.fails[key] = &forcedFailure{method: method, status: status, remaining: count, body: body}
+}
+
+// countRequest records that key received one request via method, counting
+// every request that reaches an object handler regardless of whether a
+// forced-failure rule matches it. It exists purely as an observability hook
+// so a test can assert the exact number of attempts a retrying call made
+// (via requestCount) rather than inferring it indirectly from a
+// forcedFailure's remaining count.
+func (f *fakeS3) countRequest(key, method string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.requests == nil {
+		f.requests = make(map[string]int)
+	}
+	f.requests[method+" "+key]++
+}
+
+// requestCount reports how many requests key has received via method so
+// far, as recorded by countRequest.
+func (f *fakeS3) requestCount(key, method string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.requests[method+" "+key]
 }
 
 // shouldFail reports whether the request for key+method matches an armed
@@ -183,6 +207,7 @@ func (f *fakeS3) handleObject(w http.ResponseWriter, r *http.Request, key string
 // (token/deadline verification never needs to transfer the body). A forced
 // failure armed via failNext takes precedence over the normal response.
 func (f *fakeS3) handleHead(w http.ResponseWriter, key string) {
+	f.countRequest(key, http.MethodHead)
 	// The body (if any) is deliberately not written here: real HTTP HEAD
 	// responses carry no entity body, and net/http's server elides one even
 	// if a handler attempts to write it, so arming a body on a HEAD rule
@@ -206,6 +231,7 @@ func (f *fakeS3) handleHead(w http.ResponseWriter, key string) {
 // or 404 if absent. A forced failure armed via failNext/failNextWithBody
 // takes precedence over the normal response.
 func (f *fakeS3) handleGet(w http.ResponseWriter, key string) {
+	f.countRequest(key, http.MethodGet)
 	if status, body, fail := f.shouldFail(key, http.MethodGet); fail {
 		w.WriteHeader(status)
 		if len(body) > 0 {
@@ -234,6 +260,7 @@ func (f *fakeS3) handleGet(w http.ResponseWriter, key string) {
 // simulate another writer's create winning a race, regardless of what this
 // fake's own object map currently holds for key).
 func (f *fakeS3) handlePut(w http.ResponseWriter, r *http.Request, key string) {
+	f.countRequest(key, http.MethodPut)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -294,6 +321,7 @@ func writeObjectHeaders(header http.Header, obj fakeObject) {
 // context and observe the resulting timeout. A forced failure armed via
 // failNext takes precedence over both of those behaviors.
 func (f *fakeS3) handleDelete(w http.ResponseWriter, r *http.Request, key string) {
+	f.countRequest(key, http.MethodDelete)
 	if status, body, fail := f.shouldFail(key, http.MethodDelete); fail {
 		w.WriteHeader(status)
 		if len(body) > 0 {

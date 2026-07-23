@@ -77,4 +77,13 @@ const (
 	// backoff between failed acquisition attempts.
 	lockBackoffBase = 250 * time.Millisecond
 	lockBackoffCap  = 5 * time.Second
+
+	// s3RetryMaxAttempts bounds how many times an idempotent S3 verb (GET,
+	// HEAD, DELETE, list, and an unconditional PUT) is attempted before its
+	// last failure is returned as final.
+	s3RetryMaxAttempts = 4
+	// s3RetryBackoffBase and s3RetryBackoffCap bound the full-jitter
+	// exponential backoff between retried attempts of an idempotent S3 verb.
+	s3RetryBackoffBase = 200 * time.Millisecond
+	s3RetryBackoffCap  = 5 * time.Second
 )

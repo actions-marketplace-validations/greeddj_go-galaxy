@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -18,14 +19,16 @@ const slowDownErrorBody = `<?xml version="1.0" encoding="UTF-8"?>` +
 // TestGetObjectSurfacesXMLErrorDetails proves that a non-2xx GET response
 // carrying an S3 XML error body has its Code and Message folded into the
 // returned error, while the error stays matchable against errS3GetFailed via
-// errors.Is.
+// errors.Is. 503 is a retryable status, so the failure is armed
+// indefinitely: getObject now retries it internally, and this asserts the
+// enrichment still holds on the terminal error once retries are exhausted.
 func TestGetObjectSurfacesXMLErrorDetails(t *testing.T) {
 	t.Parallel()
 	b, fake := newTestBackendAndFake(t)
 	ctx := t.Context()
 
 	const key = "get-error-object"
-	fake.failNextWithBody(key, http.MethodGet, http.StatusServiceUnavailable, 1, []byte(slowDownErrorBody))
+	fake.failNextWithBody(key, http.MethodGet, http.StatusServiceUnavailable, -1, []byte(slowDownErrorBody))
 
 	if err := b.Open(ctx); err != nil {
 		t.Fatalf("Open: %v", err)
@@ -38,17 +41,25 @@ func TestGetObjectSurfacesXMLErrorDetails(t *testing.T) {
 		t.Fatalf("expected errors.Is(err, errS3GetFailed), got %v", err)
 	}
 	assertContainsCodeAndMessage(t, err, "SlowDown", "Please reduce your request rate.")
+	if got := fake.requestCount(key, http.MethodGet); got != s3RetryMaxAttempts {
+		t.Fatalf("expected exactly s3RetryMaxAttempts=%d GET attempts against a persistently failing key, got %d",
+			s3RetryMaxAttempts, got)
+	}
 }
 
 // TestDeleteObjectSurfacesXMLErrorDetails proves the same enrichment applies
-// to deleteObject, exercising a second call site beyond getObject.
+// to deleteObject, exercising a second call site beyond getObject. The
+// failure is armed indefinitely since deleteObject now retries a 503
+// internally; a bounded count would be consumed by the retries and the
+// final attempt would then observe a plain (never-created) key as already
+// deleted, masking the failure this test means to exercise.
 func TestDeleteObjectSurfacesXMLErrorDetails(t *testing.T) {
 	t.Parallel()
 	b, fake := newTestBackendAndFake(t)
 	ctx := t.Context()
 
 	const key = "delete-error-object"
-	fake.failNextWithBody(key, http.MethodDelete, http.StatusServiceUnavailable, 1, []byte(slowDownErrorBody))
+	fake.failNextWithBody(key, http.MethodDelete, http.StatusServiceUnavailable, -1, []byte(slowDownErrorBody))
 
 	if err := b.Open(ctx); err != nil {
 		t.Fatalf("Open: %v", err)
@@ -66,14 +77,17 @@ func TestDeleteObjectSurfacesXMLErrorDetails(t *testing.T) {
 // TestPutObjectSurfacesXMLErrorDetails proves handlePutResponse's default
 // (non-2xx, non-precondition, non-not-found) branch enriches its error the
 // same way, covering an overwrite PUT that the backend rejects with a
-// throttling response.
+// throttling response. This is an unconditional PUT, which now retries a
+// 503 internally, so the failure is armed indefinitely: a bounded count
+// would let a later retry attempt succeed in writing the object instead of
+// exercising the failure this test means to cover.
 func TestPutObjectSurfacesXMLErrorDetails(t *testing.T) {
 	t.Parallel()
 	b, fake := newTestBackendAndFake(t)
 	ctx := t.Context()
 
 	const key = "put-error-object"
-	fake.failNextWithBody(key, http.MethodPut, http.StatusServiceUnavailable, 1, []byte(slowDownErrorBody))
+	fake.failNextWithBody(key, http.MethodPut, http.StatusServiceUnavailable, -1, []byte(slowDownErrorBody))
 
 	if err := b.Open(ctx); err != nil {
 		t.Fatalf("Open: %v", err)
@@ -92,14 +106,16 @@ func TestPutObjectSurfacesXMLErrorDetails(t *testing.T) {
 // TestGetObjectFallsBackToStatusOnlyOnMalformedBody proves that a non-2xx
 // body that is not a valid S3 XML error document yields the original
 // status-only error form, without ever propagating the underlying
-// XML-parse failure, and without disturbing errors.Is matching.
+// XML-parse failure, and without disturbing errors.Is matching. 500 is a
+// retryable status, so the failure is armed indefinitely to survive
+// getObject's internal retries.
 func TestGetObjectFallsBackToStatusOnlyOnMalformedBody(t *testing.T) {
 	t.Parallel()
 	b, fake := newTestBackendAndFake(t)
 	ctx := t.Context()
 
 	const key = "get-malformed-body"
-	fake.failNextWithBody(key, http.MethodGet, http.StatusInternalServerError, 1, []byte("not xml at all"))
+	fake.failNextWithBody(key, http.MethodGet, http.StatusInternalServerError, -1, []byte("not xml at all"))
 
 	if err := b.Open(ctx); err != nil {
 		t.Fatalf("Open: %v", err)
@@ -121,14 +137,16 @@ func TestGetObjectFallsBackToStatusOnlyOnMalformedBody(t *testing.T) {
 
 // TestGetObjectFallsBackToStatusOnlyOnEmptyBody proves the same fallback for
 // a response with no body at all (the common case for many real S3 error
-// responses returned without a body, e.g. from a misconfigured proxy).
+// responses returned without a body, e.g. from a misconfigured proxy). 502
+// is a retryable status, so the failure is armed indefinitely to survive
+// getObject's internal retries.
 func TestGetObjectFallsBackToStatusOnlyOnEmptyBody(t *testing.T) {
 	t.Parallel()
 	b, fake := newTestBackendAndFake(t)
 	ctx := t.Context()
 
 	const key = "get-empty-body"
-	fake.failNext(key, http.MethodGet, http.StatusBadGateway, 1)
+	fake.failNext(key, http.MethodGet, http.StatusBadGateway, -1)
 
 	if err := b.Open(ctx); err != nil {
 		t.Fatalf("Open: %v", err)
@@ -149,14 +167,15 @@ func TestGetObjectFallsBackToStatusOnlyOnEmptyBody(t *testing.T) {
 // message even when a body is armed on the forced failure: HEAD responses
 // carry no entity body (net/http elides it), so headObject's error is the
 // status-only form by construction, not merely by the fake choosing not to
-// send one.
+// send one. The failure is armed indefinitely since headObject now retries
+// a 503 internally.
 func TestHeadObjectStaysStatusOnly(t *testing.T) {
 	t.Parallel()
 	b, fake := newTestBackendAndFake(t)
 	ctx := t.Context()
 
 	const key = "head-error-object"
-	fake.failNextWithBody(key, http.MethodHead, http.StatusServiceUnavailable, 1, []byte(slowDownErrorBody))
+	fake.failNextWithBody(key, http.MethodHead, http.StatusServiceUnavailable, -1, []byte(slowDownErrorBody))
 
 	if err := b.Open(ctx); err != nil {
 		t.Fatalf("Open: %v", err)
@@ -170,6 +189,214 @@ func TestHeadObjectStaysStatusOnly(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "(") {
 		t.Fatalf("expected a status-only error for a HEAD response, got %q", err.Error())
+	}
+}
+
+// TestGetObjectRetriesTransientFailureThenSucceeds proves getObject
+// transparently recovers from a bounded run of transient 503s: it seeds a
+// real object, arms exactly two forced failures on it, and confirms the
+// call still succeeds - reading back the object's real body - after
+// exactly three GET attempts (two failures plus the succeeding one), rather
+// than surfacing the second failure to the caller.
+func TestGetObjectRetriesTransientFailureThenSucceeds(t *testing.T) {
+	t.Parallel()
+	b, fake := newTestBackendAndFake(t)
+	ctx := t.Context()
+
+	const key = "get-retry-then-succeed"
+	payload := []byte("recovered payload")
+	if err := b.Open(ctx); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := b.client.putObject(ctx, key, bytes.NewReader(payload), int64(len(payload)), "text/plain", "", nil, false, ""); err != nil {
+		t.Fatalf("seed object: %v", err)
+	}
+
+	fake.failNext(key, http.MethodGet, http.StatusServiceUnavailable, 2)
+
+	resp, err := b.client.getObject(ctx, key)
+	if err != nil {
+		t.Fatalf("expected getObject to recover after two transient failures, got %v", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read recovered body: %v", err)
+	}
+	if !bytes.Equal(body, payload) {
+		t.Fatalf("expected the recovered body %q, got %q", payload, body)
+	}
+	if got := fake.requestCount(key, http.MethodGet); got != 3 {
+		t.Fatalf("expected exactly 3 GET attempts (2 failures + 1 success), got %d", got)
+	}
+}
+
+// TestHeadObjectRetriesTransientFailureThenSucceeds mirrors
+// TestGetObjectRetriesTransientFailureThenSucceeds for headObject.
+func TestHeadObjectRetriesTransientFailureThenSucceeds(t *testing.T) {
+	t.Parallel()
+	b, fake := newTestBackendAndFake(t)
+	ctx := t.Context()
+
+	const key = "head-retry-then-succeed"
+	payload := []byte("payload")
+	if err := b.Open(ctx); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := b.client.putObject(ctx, key, bytes.NewReader(payload), int64(len(payload)), "text/plain", "", nil, false, ""); err != nil {
+		t.Fatalf("seed object: %v", err)
+	}
+
+	fake.failNext(key, http.MethodHead, http.StatusServiceUnavailable, 2)
+
+	if _, err := b.client.headObject(ctx, key); err != nil {
+		t.Fatalf("expected headObject to recover after two transient failures, got %v", err)
+	}
+	if got := fake.requestCount(key, http.MethodHead); got != 3 {
+		t.Fatalf("expected exactly 3 HEAD attempts (2 failures + 1 success), got %d", got)
+	}
+}
+
+// TestDeleteObjectRetriesTransientFailureThenSucceeds mirrors
+// TestGetObjectRetriesTransientFailureThenSucceeds for deleteObject.
+func TestDeleteObjectRetriesTransientFailureThenSucceeds(t *testing.T) {
+	t.Parallel()
+	b, fake := newTestBackendAndFake(t)
+	ctx := t.Context()
+
+	const key = "delete-retry-then-succeed"
+	if err := b.Open(ctx); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	fake.failNext(key, http.MethodDelete, http.StatusServiceUnavailable, 2)
+
+	if err := b.client.deleteObject(ctx, key); err != nil {
+		t.Fatalf("expected deleteObject to recover after two transient failures, got %v", err)
+	}
+	if got := fake.requestCount(key, http.MethodDelete); got != 3 {
+		t.Fatalf("expected exactly 3 DELETE attempts (2 failures + 1 success), got %d", got)
+	}
+}
+
+// TestPutObjectUnconditionalRetriesTransientFailureThenSucceeds proves an
+// unconditional (overwrite) putObject recovers from a bounded run of
+// transient 503s, re-seeking and resending its body on each retry, and
+// confirms the object actually landed once the call succeeds.
+func TestPutObjectUnconditionalRetriesTransientFailureThenSucceeds(t *testing.T) {
+	t.Parallel()
+	b, fake := newTestBackendAndFake(t)
+	ctx := t.Context()
+
+	const key = "put-retry-then-succeed"
+	payload := []byte("recovered payload")
+	if err := b.Open(ctx); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	fake.failNext(key, http.MethodPut, http.StatusServiceUnavailable, 2)
+
+	if err := b.client.putObject(ctx, key, bytes.NewReader(payload), int64(len(payload)), "text/plain", "", nil, false, ""); err != nil {
+		t.Fatalf("expected putObject to recover after two transient failures, got %v", err)
+	}
+	if got := fake.requestCount(key, http.MethodPut); got != 3 {
+		t.Fatalf("expected exactly 3 PUT attempts (2 failures + 1 success), got %d", got)
+	}
+
+	resp, err := b.client.getObject(ctx, key)
+	if err != nil {
+		t.Fatalf("getObject after recovery: %v", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read written body: %v", err)
+	}
+	if !bytes.Equal(body, payload) {
+		t.Fatalf("expected the written body %q, got %q", payload, body)
+	}
+}
+
+// TestPutObjectConditionalDoesNotRetryOnTransientFailure is the core
+// lock-deadlock guard: a conditional create-if-absent PUT (ifNoneMatch)
+// must never be retried, even against a persistently failing transient
+// status. A lost-success retry would observe 412 (the object it just
+// created now exists) and misreport its own success as contention, which
+// the distributed lock's acquireLock loop cannot distinguish from a live
+// holder. This asserts the call is issued exactly once and returns the
+// failure as-is.
+func TestPutObjectConditionalDoesNotRetryOnTransientFailure(t *testing.T) {
+	t.Parallel()
+	b, fake := newTestBackendAndFake(t)
+	ctx := t.Context()
+
+	const key = "put-conditional-no-retry"
+	payload := []byte("payload")
+	if err := b.Open(ctx); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	fake.failNext(key, http.MethodPut, http.StatusServiceUnavailable, -1)
+
+	err := b.client.putObject(ctx, key, bytes.NewReader(payload), int64(len(payload)), "text/plain", "", nil, true, "")
+	if !errors.Is(err, errS3PutFailed) {
+		t.Fatalf("expected errors.Is(err, errS3PutFailed), got %v", err)
+	}
+	if got := fake.requestCount(key, http.MethodPut); got != 1 {
+		t.Fatalf("expected a conditional PUT to be issued exactly once despite a retryable status, got %d attempts", got)
+	}
+}
+
+// TestGetObjectNotFoundIsNotRetried confirms a plain 404 (no forced failure
+// needed - the key simply was never written) is reported as errS3NotFound
+// after exactly one attempt, never retried: errS3NotFound is a terminal,
+// non-transient outcome.
+func TestGetObjectNotFoundIsNotRetried(t *testing.T) {
+	t.Parallel()
+	b, fake := newTestBackendAndFake(t)
+	ctx := t.Context()
+
+	const key = "get-never-written"
+	if err := b.Open(ctx); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	err := getObjectError(ctx, t, b, key)
+	if !errors.Is(err, errS3NotFound) {
+		t.Fatalf("expected errors.Is(err, errS3NotFound), got %v", err)
+	}
+	if got := fake.requestCount(key, http.MethodGet); got != 1 {
+		t.Fatalf("expected exactly 1 GET attempt for a not-found key, got %d", got)
+	}
+}
+
+// TestPutObjectPreconditionFailedIsNotRetried confirms a 412 on a
+// conditional PUT is reported as errS3PreconditionFailed after exactly one
+// attempt: it is both a non-retryable status and, independently, a
+// conditional PUT is never retried regardless of status.
+func TestPutObjectPreconditionFailedIsNotRetried(t *testing.T) {
+	t.Parallel()
+	b, fake := newTestBackendAndFake(t)
+	ctx := t.Context()
+
+	const key = "put-precondition-no-retry"
+	payload := []byte("payload")
+	if err := b.Open(ctx); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	fake.failNext(key, http.MethodPut, http.StatusPreconditionFailed, 1)
+
+	err := b.client.putObject(ctx, key, bytes.NewReader(payload), int64(len(payload)), "text/plain", "", nil, true, "")
+	if !errors.Is(err, errS3PreconditionFailed) {
+		t.Fatalf("expected errors.Is(err, errS3PreconditionFailed), got %v", err)
+	}
+	if got := fake.requestCount(key, http.MethodPut); got != 1 {
+		t.Fatalf("expected exactly 1 PUT attempt for a precondition failure, got %d", got)
 	}
 }
 

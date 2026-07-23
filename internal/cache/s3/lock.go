@@ -8,13 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	mathrand "math/rand/v2"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 )
 
 // lockTiming holds the tunable timing parameters of the distributed lock
@@ -253,7 +254,7 @@ func waitCeilingErr(parent context.Context) error {
 // waitCeilingErr(parent) once waitCtx (the shared wait-ceiling context
 // derived from parent) expires.
 func (b *Backend) lockBackoff(parent, waitCtx context.Context, attempt int) error {
-	timer := time.NewTimer(backoffDelay(b.lock.backoffBase, b.lock.backoffCap, attempt))
+	timer := time.NewTimer(helpers.BackoffDelay(b.lock.backoffBase, b.lock.backoffCap, attempt))
 	defer timer.Stop()
 	select {
 	case <-waitCtx.Done():
@@ -261,28 +262,6 @@ func (b *Backend) lockBackoff(parent, waitCtx context.Context, attempt int) erro
 	case <-timer.C:
 		return nil
 	}
-}
-
-// backoffDelay returns a full-jitter exponential backoff duration: a
-// uniformly random value in [0, min(backoffCap, base*2^attempt)).
-func backoffDelay(base, backoffCap time.Duration, attempt int) time.Duration {
-	if base <= 0 {
-		return 0
-	}
-	delayCeiling := backoffCap
-	// Guard against shifting a duration into overflow for large attempt
-	// counts: once the shifted value would meet or exceed backoffCap,
-	// clamp immediately instead of computing an undefined/negative shift.
-	if attempt >= 0 && attempt < 63 {
-		if scaled := base << uint(attempt); scaled > 0 && scaled < backoffCap {
-			delayCeiling = scaled
-		}
-	}
-	if delayCeiling <= 0 {
-		return 0
-	}
-	//nolint:gosec // G404: jitter timing only, not security sensitive.
-	return time.Duration(mathrand.Int64N(int64(delayCeiling)))
 }
 
 // startHeartbeat launches the lock's background lifecycle goroutine and
