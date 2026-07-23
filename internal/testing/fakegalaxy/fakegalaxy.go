@@ -158,10 +158,24 @@ type Version struct {
 // each match until it reaches zero, at which point the rule stops matching;
 // a negative Count matches indefinitely; a Count of zero (the zero value)
 // never matches, so a Fault must set a positive or negative Count to fire.
+//
+// StallAfterBytes only applies to the artifact endpoint: on a request there,
+// a matching Fault with StallAfterBytes > 0 writes exactly that many bytes of
+// the real artifact, flushes them onto the wire, and then blocks until the
+// request's context is done, writing nothing further - a mid-body stall,
+// distinct from Hang's before-any-byte stall. On any other endpoint,
+// StallAfterBytes is a no-op: the fault still consumes one Count, but
+// enactFault then falls through to that endpoint's normal response. A
+// well-formed Fault sets exactly one of Status, Hang, or StallAfterBytes; on
+// the artifact endpoint, StallAfterBytes is checked before Status/Hang, so it
+// takes precedence if more than one is set. StallAfterBytes composes with
+// Count exactly like Status and Hang: Count 1 stalls only the next matching
+// request, a negative Count stalls every one.
 type Fault struct {
-	Status int
-	Count  int
-	Hang   bool
+	Status          int
+	Count           int
+	StallAfterBytes int
+	Hang            bool
 }
 
 // New starts an in-memory fake Galaxy v3 API server and registers its
@@ -433,7 +447,10 @@ func (s *Server) handleVersionDetail(w http.ResponseWriter, r *http.Request, nam
 }
 
 // handleArtifact answers "download/{file}" with the raw tarball bytes and
-// no cache validators, unlike the JSON endpoints.
+// no cache validators, unlike the JSON endpoints. A StallAfterBytes fault is
+// handled here rather than in applyFault/enactFault, since it needs the
+// artifact's own bytes (art.data) to serve a real prefix before blocking,
+// which those two shared helpers do not have access to.
 func (s *Server) handleArtifact(w http.ResponseWriter, r *http.Request, filename string) {
 	s.mu.Lock()
 	art, ok := s.artifacts[filename]
@@ -442,8 +459,14 @@ func (s *Server) handleArtifact(w http.ResponseWriter, r *http.Request, filename
 	// A fault targeting a namespace/name is matched against the artifact's
 	// registered identity, since the download URL itself carries only a
 	// flat filename, not namespace/name path segments.
-	if s.applyFault(w, r, EndpointArtifact, art.namespace, art.name) {
-		return
+	if fault, matched := s.consumeFault(EndpointArtifact, art.namespace, art.name); matched {
+		if fault.StallAfterBytes > 0 && ok {
+			serveArtifactStall(w, r, art.data, fault.StallAfterBytes)
+			return
+		}
+		if enactFault(w, r, fault) {
+			return
+		}
 	}
 	if !ok {
 		http.NotFound(w, r)
@@ -452,6 +475,22 @@ func (s *Server) handleArtifact(w http.ResponseWriter, r *http.Request, filename
 	w.Header().Set("Content-Type", "application/gzip")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(art.data)
+}
+
+// serveArtifactStall writes the first StallAfterBytes bytes of a real artifact,
+// flushes them onto the wire (forcing chunked encoding so the client cannot
+// infer completion from a Content-Length), then blocks until the request
+// context is canceled. It relies only on the client aborting the request - no
+// timer, no wall clock - so it stays deterministic under -race.
+func serveArtifactStall(w http.ResponseWriter, r *http.Request, data []byte, after int) {
+	n := min(after, len(data))
+	w.Header().Set("Content-Type", "application/gzip")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data[:n])
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	<-r.Context().Done()
 }
 
 // applyFault consumes the first armed fault rule matching ep/namespace/name,

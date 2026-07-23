@@ -313,6 +313,60 @@ func TestFaultHangUnblocksOnContextCancellation(t *testing.T) {
 	}
 }
 
+// TestFaultStallAfterBytesDeliversRealPrefixThenBlocks asserts a
+// StallAfterBytes artifact fault delivers exactly that many real artifact
+// bytes, then blocks until the request context ends, and consumes its Count
+// so a later request serves the full artifact.
+func TestFaultStallAfterBytesDeliversRealPrefixThenBlocks(t *testing.T) {
+	t.Parallel()
+	s := New(t)
+	s.AddVersion("ns", "name", "1.0.0", nil)
+	s.Fail(EndpointArtifact, "ns", "name", Fault{StallAfterBytes: 4, Count: 1})
+
+	url := s.URL() + "/download/ns-name-1.0.0.tar.gz"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	resp, err := s.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// The 4-byte prefix arrives on loopback in microseconds, well before the
+	// 100ms deadline: this read must succeed.
+	prefix := make([]byte, 4)
+	if _, err := io.ReadFull(resp.Body, prefix); err != nil {
+		t.Fatalf("read stalled prefix: %v", err)
+	}
+
+	// A further read must block until the context's deadline ends the
+	// request, surfacing as a non-nil error rather than more data.
+	if n, err := resp.Body.Read(make([]byte, 1)); err == nil {
+		t.Fatalf("read past the stalled prefix: n=%d, err=nil, want a non-nil error", n)
+	}
+
+	// The fault's Count was consumed by the first request, so a second
+	// request serves the full, unstalled artifact, whose first 4 bytes must
+	// match the prefix already observed above.
+	full := doGet(t, s.Client(), url)
+	fullBody, err := io.ReadAll(full.Body)
+	_ = full.Body.Close()
+	if err != nil {
+		t.Fatalf("read full artifact body: %v", err)
+	}
+	if full.StatusCode != http.StatusOK {
+		t.Fatalf("second GET status = %d, want %d", full.StatusCode, http.StatusOK)
+	}
+	if !bytes.Equal(fullBody[:len(prefix)], prefix) {
+		t.Errorf("fullBody[:4] = %x, want %x (the stalled prefix)", fullBody[:len(prefix)], prefix)
+	}
+}
+
 // TestCounters asserts per-endpoint and total request counts, and ResetCounts
 // zeroing them.
 func TestCounters(t *testing.T) {
