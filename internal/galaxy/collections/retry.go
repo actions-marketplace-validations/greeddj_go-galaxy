@@ -70,6 +70,13 @@ func downloadRetryable(err error) bool {
 	if errors.Is(err, helpers.ErrSHA256Mismatch) {
 		return false
 	}
+	// An oversized artifact is terminal by the same reasoning as a sha256
+	// mismatch, but the default-deny fallthrough below would already cover
+	// it: this check is explicit so a future reordering of the classifier
+	// cannot accidentally start retrying a hostile or broken oversized body.
+	if errors.Is(err, helpers.ErrArtifactTooLarge) {
+		return false
+	}
 	var attemptErr *downloadAttemptError
 	if errors.As(err, &attemptErr) {
 		if attemptErr.status == 0 {

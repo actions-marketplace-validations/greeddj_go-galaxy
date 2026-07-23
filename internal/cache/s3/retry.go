@@ -94,6 +94,14 @@ func s3Retryable(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
+	// An oversized artifact download is terminal by the same reasoning as a
+	// sha256 mismatch, but the default-deny fallthrough below would already
+	// cover it: this check is explicit so a future reordering of the
+	// classifier cannot accidentally start retrying a hostile or broken
+	// oversized body.
+	if errors.Is(err, helpers.ErrArtifactTooLarge) {
+		return false
+	}
 	var statusErr *retryableStatusError
 	return errors.As(err, &statusErr)
 }

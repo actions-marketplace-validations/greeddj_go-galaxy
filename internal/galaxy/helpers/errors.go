@@ -178,4 +178,11 @@ var (
 	// still treated as neither a reachability source nor a deletion
 	// candidate.
 	ErrCorruptManifest = errors.New("corrupt manifest")
+
+	// ErrArtifactTooLarge indicates an artifact download exceeded
+	// ArtifactMaxDownloadSize before it finished streaming. It is never
+	// retried: a server that streams past the ceiling once will do so again,
+	// so retrying would only spend the retry budget re-downloading a
+	// hostile or broken response.
+	ErrArtifactTooLarge = errors.New("artifact download exceeds the maximum allowed size")
 )

@@ -464,7 +464,8 @@ func streamDownloadAndExtract(
 	}()
 
 	hasher := sha256.New()
-	_, copyErr := io.Copy(io.MultiWriter(tmpFile, hasher, pw), body)
+	limited := helpers.NewSizeLimitedReader(body, helpers.ArtifactMaxDownloadSize)
+	_, copyErr := io.Copy(io.MultiWriter(tmpFile, hasher, pw), limited)
 	if copyErr != nil {
 		_ = pw.CloseWithError(copyErr)
 	} else {
@@ -529,7 +530,8 @@ func writeDownloadToTemp(ctx context.Context, artifacts cacheManager.ArtifactSto
 	}
 	hasher := sha256.New()
 	writer := io.MultiWriter(tmpFile, hasher)
-	if _, err := io.Copy(writer, body); err != nil {
+	limited := helpers.NewSizeLimitedReader(body, helpers.ArtifactMaxDownloadSize)
+	if _, err := io.Copy(writer, limited); err != nil {
 		_ = tmpFile.Close()
 		return "", cleanup, "", err
 	}

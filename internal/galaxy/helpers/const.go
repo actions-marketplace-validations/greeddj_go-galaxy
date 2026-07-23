@@ -22,6 +22,20 @@ const (
 	// ArchiveMaxTotalSize caps total extracted bytes per archive.
 	ArchiveMaxTotalSize = int64(4 << 30) // 4 GiB per archive
 
+	// ArtifactMaxDownloadSize caps the raw (compressed, on-the-wire) bytes
+	// read from an artifact download before it is rejected. It bounds the
+	// same disk-exhaustion risk that ArchiveMaxTotalSize bounds for the
+	// extracted tree, but earlier: it caps what a server-controlled download
+	// URL can make the client stream to a temp file, before extraction ever
+	// runs (and even when extraction is skipped entirely). It is set equal
+	// to ArchiveMaxTotalSize rather than some smaller figure: a legitimate
+	// gzip+tar collection artifact is always smaller, usually far smaller,
+	// than the extracted tree it decompresses to, so a real collection
+	// never gets close to this ceiling, and a raw stream that does is
+	// already pathological regardless of what it eventually decompresses
+	// to.
+	ArtifactMaxDownloadSize = ArchiveMaxTotalSize
+
 	// FetchDefaultTimeout is the overall HTTP client timeout.
 	FetchDefaultTimeout = 30 * time.Second
 	// FetchDialContextTimeout is the dial timeout for outbound connections.

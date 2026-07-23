@@ -41,6 +41,7 @@ func TestS3Retryable(t *testing.T) {
 		},
 		{name: "not found is not retryable", err: errS3NotFound, want: false},
 		{name: "precondition failed is not retryable", err: errS3PreconditionFailed, want: false},
+		{name: "an oversized artifact download is never retried", err: helpers.ErrArtifactTooLarge, want: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

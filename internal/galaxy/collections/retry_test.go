@@ -49,6 +49,7 @@ func TestDownloadRetryable(t *testing.T) {
 		{name: "raw context.Canceled is not retryable", err: context.Canceled, want: false},
 		{name: "raw context.DeadlineExceeded is not retryable", err: context.DeadlineExceeded, want: false},
 		{name: "sha256 mismatch after a complete read is terminal", err: shaMismatch, want: false},
+		{name: "an oversized artifact download is never retried", err: helpers.ErrArtifactTooLarge, want: false},
 		{
 			name: "retryable status is retryable",
 			err:  &downloadAttemptError{err: fmt.Errorf("%w: boom", helpers.ErrDownloadFailed), status: http.StatusServiceUnavailable},

@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	cacheManager "github.com/greeddj/go-galaxy/internal/galaxy/cache"
+	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 )
 
 // Artifacts implements ArtifactStore backed by S3 objects.
@@ -184,7 +185,8 @@ func (s *Artifacts) downloadToFile(ctx context.Context, key string, file *os.Fil
 	}()
 	hasher := sha256.New()
 	writer := io.MultiWriter(file, hasher)
-	if _, err := io.Copy(writer, resp.Body); err != nil {
+	limited := helpers.NewSizeLimitedReader(resp.Body, helpers.ArtifactMaxDownloadSize)
+	if _, err := io.Copy(writer, limited); err != nil {
 		return nil, nil, err
 	}
 	return metaFromHeaders(resp.Header), hasher.Sum(nil), nil
