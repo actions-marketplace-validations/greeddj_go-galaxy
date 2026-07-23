@@ -1,6 +1,9 @@
 package helpers
 
-import "time"
+import (
+	"net/http"
+	"time"
+)
 
 const (
 	// DirMod is the default permission for created directories.
@@ -39,6 +42,17 @@ const (
 	FetchTLSHandshakeTimeout = 3 * time.Second
 	// FetchExpectContinueTimeout is the expect-continue timeout.
 	FetchExpectContinueTimeout = 1 * time.Second
+
+	// FetchRetryMaxAttempts bounds how many times a Galaxy API GET or an
+	// artifact download is attempted before its last failure is returned as
+	// final.
+	FetchRetryMaxAttempts = 4
+	// FetchRetryBackoffBase bounds the initial full-jitter backoff between
+	// retried attempts of a Galaxy API GET or artifact download.
+	FetchRetryBackoffBase = 200 * time.Millisecond
+	// FetchRetryBackoffCap bounds the full-jitter backoff ceiling between
+	// retried attempts of a Galaxy API GET or artifact download.
+	FetchRetryBackoffCap = 5 * time.Second
 
 	// StoreSnapshotSchemaVersion is the current snapshot schema version.
 	StoreSnapshotSchemaVersion = 3
@@ -105,3 +119,26 @@ const (
 	// StoreMetaServer is the metadata key for the Galaxy server.
 	StoreMetaServer = "server"
 )
+
+// FetchRetryPolicy is the fixed retry policy shared by every Galaxy API GET
+// and artifact download: a small bounded number of attempts with a
+// full-jitter exponential backoff between them. It is not configurable per
+// call site, unlike some cache backends' own contention loops, since these
+// calls run on the ordinary resolve/install path rather than a lock's own
+// retry loop.
+func FetchRetryPolicy() RetryPolicy {
+	return RetryPolicy{Base: FetchRetryBackoffBase, Cap: FetchRetryBackoffCap, MaxAttempts: FetchRetryMaxAttempts}
+}
+
+// IsRetryableHTTPStatus reports whether status is one of the small set of
+// transient HTTP statuses (rate limiting and server-side failures) that are
+// safe to retry on an idempotent Galaxy API GET or artifact download.
+func IsRetryableHTTPStatus(status int) bool {
+	switch status {
+	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway,
+		http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}

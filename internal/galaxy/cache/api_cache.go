@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
 )
 
@@ -137,8 +138,40 @@ func refreshAPICacheEntry(entry store.APICacheEntry, etag, lastModified string) 
 	return entry
 }
 
-// fetchJSONBody fetches JSON bytes and validation headers for a URL.
+// fetchJSONBody fetches JSON bytes and validation headers for a URL,
+// retrying a transient failure (a retryable HTTP status or a stalled body
+// read, per fetchRetryable) up to helpers.FetchRetryPolicy's bound. Each
+// attempt builds a fresh request and resends any conditional headers, so a
+// retry is never served a stale If-None-Match/If-Modified-Since pair. A 304
+// is treated as success and returned immediately, never retried.
 func fetchJSONBody(ctx context.Context, client *http.Client, url string, entry *store.APICacheEntry) ([]byte, string, string, bool, error) {
+	var (
+		body               []byte
+		etag, lastModified string
+		notModified        bool
+	)
+	err := helpers.Retry(ctx, helpers.FetchRetryPolicy(), func() error {
+		var attemptErr error
+		body, etag, lastModified, notModified, attemptErr = fetchJSONBodyOnce(ctx, client, url, entry)
+		return attemptErr
+	}, fetchRetryable)
+	if err != nil {
+		return nil, "", "", false, err
+	}
+	return body, etag, lastModified, notModified, nil
+}
+
+// fetchJSONBodyOnce performs a single build+Do+status-classify+io.ReadAll
+// cycle for url, the one attempt fetchJSONBody's retry loop repeats on a
+// transient failure. The response body is always closed before returning,
+// since every path here either reads it to completion or (on a 304) never
+// needed it in the first place.
+func fetchJSONBodyOnce(
+	ctx context.Context,
+	client *http.Client,
+	url string,
+	entry *store.APICacheEntry,
+) ([]byte, string, string, bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return nil, "", "", false, err

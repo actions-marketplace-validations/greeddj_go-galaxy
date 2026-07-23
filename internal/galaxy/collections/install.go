@@ -325,7 +325,13 @@ func canSkipInstall(cfg *config.Config, col collection, installPath string, st *
 	return true
 }
 
-// downloadCollection fetches an artifact and returns the HTTP response.
+// downloadCollection performs a single attempt at fetching an artifact and
+// returns the HTTP response. It never retries itself: a transport-level
+// failure (client.Do returning an error before any response arrives) and a
+// non-200 status are both wrapped in a *downloadAttemptError so the caller's
+// outer helpers.Retry loop - which re-runs this whole establish step
+// together with the stream-to-temp and sha verify that follow it - can
+// classify whether the failure is worth repeating.
 func downloadCollection(ctx context.Context, runtime *infra.Infra, collectionURL string) (*http.Response, error) {
 	runtime.Output.Printf("🌐 Downloading %s", collectionURL)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, collectionURL, http.NoBody)
@@ -334,11 +340,14 @@ func downloadCollection(ctx context.Context, runtime *infra.Infra, collectionURL
 	}
 	resp, err := runtime.HTTP.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, &downloadAttemptError{err: err}
 	}
 	if resp.StatusCode != http.StatusOK {
 		_ = resp.Body.Close()
-		return nil, fmt.Errorf("%w: %s (%s)", helpers.ErrDownloadFailed, collectionURL, resp.Status)
+		return nil, &downloadAttemptError{
+			err:    fmt.Errorf("%w: %s (%s)", helpers.ErrDownloadFailed, collectionURL, resp.Status),
+			status: resp.StatusCode,
+		}
 	}
 	return resp, nil
 }
@@ -350,10 +359,12 @@ type downloadResult struct {
 	SHA     string
 }
 
-// downloadCollectionToCache downloads an artifact and optionally stores it.
-// When deps.extractStore is configured, the body is teed into a sha256
-// hasher, the artifact tmp file, and a tar.gz extraction pipeline that
-// populates the content-addressable extracted store, all in a single pass.
+// downloadCollectionToCache downloads an artifact and optionally stores it,
+// retrying the whole establish+stream-to-temp+verify attempt (per
+// downloadRetryable) up to helpers.FetchRetryPolicy's bound. Each retried
+// attempt opens a fresh HTTP response and a fresh temporary file (or
+// extraction session), via attemptDownloadToCache, so nothing from a failed
+// attempt - including any temp file it created - survives into the next one.
 func downloadCollectionToCache(
 	ctx context.Context,
 	deps installDeps,
@@ -364,6 +375,39 @@ func downloadCollectionToCache(
 	if err := validateDownloadInputs(deps.cfg, deps.artifacts, meta); err != nil {
 		return downloadResult{}, err
 	}
+
+	var result downloadResult
+	err := helpers.Retry(ctx, helpers.FetchRetryPolicy(), func() error {
+		attempted, attemptErr := attemptDownloadToCache(ctx, deps, key, meta, useCache)
+		if attemptErr != nil {
+			return attemptErr
+		}
+		result = attempted
+		return nil
+	}, downloadRetryable)
+	if err != nil {
+		return downloadResult{}, err
+	}
+	return result, nil
+}
+
+// attemptDownloadToCache performs one full download attempt: it opens a
+// fresh HTTP response via downloadCollection, then either tees it through
+// streamDownloadAndExtract (when an extracted store is configured) or writes
+// it to a fresh temp file and verifies its sha256 directly. Every failure
+// path below already cleans up whatever it created, so a caller retrying a
+// failed attempt never leaks a temp file or partial extraction across
+// attempts. When deps.extractStore is configured, the body is teed into a
+// sha256 hasher, the artifact tmp file, and a tar.gz extraction pipeline
+// that populates the content-addressable extracted store, all in a single
+// pass.
+func attemptDownloadToCache(
+	ctx context.Context,
+	deps installDeps,
+	key string,
+	meta *types.GalaxyCollectionVersionInfo,
+	useCache bool,
+) (downloadResult, error) {
 	resp, err := downloadCollection(ctx, deps.runtime, meta.DownloadURL)
 	if err != nil {
 		return downloadResult{}, err
