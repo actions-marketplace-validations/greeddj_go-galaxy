@@ -155,8 +155,9 @@ type Version struct {
 // matching request until its context is done, then returns without writing
 // anything (Status takes precedence if both are set). Count bounds how
 // many matching requests are affected: a positive Count is decremented on
-// each match until it reaches zero, at which point the rule stops
-// matching; a zero or negative Count matches indefinitely.
+// each match until it reaches zero, at which point the rule stops matching;
+// a negative Count matches indefinitely; a Count of zero (the zero value)
+// never matches, so a Fault must set a positive or negative Count to fire.
 type Fault struct {
 	Status int
 	Count  int
@@ -467,7 +468,7 @@ func (s *Server) applyFault(w http.ResponseWriter, r *http.Request, ep Endpoint,
 // consumeFault scans armed fault rules, in the order Fail registered them,
 // for the first one matching ep/namespace/name whose Count has not been
 // exhausted, and consumes one use of it (unless it fails indefinitely,
-// Count <= 0). It reports the matched Fault and true, or a zero Fault and
+// Count < 0). It reports the matched Fault and true, or a zero Fault and
 // false when nothing matches.
 func (s *Server) consumeFault(ep Endpoint, namespace, name string) (Fault, bool) {
 	s.mu.Lock()
@@ -487,7 +488,9 @@ func (s *Server) consumeFault(ep Endpoint, namespace, name string) (Fault, bool)
 }
 
 // ruleMatches reports whether rule fires for a request to ep/namespace/name:
-// its endpoint must match, its Count must not already be exhausted, and its
+// its endpoint must match, its Count must be nonzero (a zero Count is the
+// disabled zero value and never fires; a positive Count fires until it is
+// decremented to zero, a negative Count fires indefinitely), and its
 // namespace/name must either be a wildcard (empty) or match exactly.
 func ruleMatches(rule *faultRule, ep Endpoint, namespace, name string) bool {
 	if rule.ep != ep || rule.fault.Count == 0 {
