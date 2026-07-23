@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -278,6 +279,98 @@ func TestBackendSweepTempNoOp(t *testing.T) {
 	if err := b.SweepTemp(ctx); err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
+}
+
+// TestReadAllCappedRejectsOversizedRaw confirms the compressed-size ceiling
+// applies on the non-gzip path: a plain body longer than compressedCap must
+// fail with helpers.ErrArtifactTooLarge before it is fully buffered.
+func TestReadAllCappedRejectsOversizedRaw(t *testing.T) {
+	t.Parallel()
+
+	const compressedCap = 16
+	data := bytes.Repeat([]byte("x"), compressedCap*4)
+
+	_, err := readAllCapped(bytes.NewReader(data), http.Header{}, "state/store.json", compressedCap, helpers.StateObjectMaxDecompressedSize)
+	if !errors.Is(err, helpers.ErrArtifactTooLarge) {
+		t.Fatalf("readAllCapped() error = %v, want ErrArtifactTooLarge", err)
+	}
+}
+
+// TestReadAllCappedRejectsGzipBomb confirms the decompressed-size ceiling
+// applies on the gzip path independently of the compressed-size ceiling: a
+// gzip stream well under compressedCap that inflates past a tiny
+// decompressedCap must fail with helpers.ErrArtifactTooLarge.
+func TestReadAllCappedRejectsGzipBomb(t *testing.T) {
+	t.Parallel()
+
+	const decompressedCap = 64
+	// A few KB of zeros compresses to well under any reasonable compressedCap,
+	// while comfortably exceeding decompressedCap once inflated, so the
+	// decompressed ceiling - not the compressed one - is what trips.
+	payload := make([]byte, 8<<10)
+	gz := gzipBytes(t, payload)
+	if int64(len(gz)) >= helpers.StateObjectMaxCompressedSize {
+		t.Fatalf("test setup: gzip payload (%d bytes) is not comfortably under the compressed cap", len(gz))
+	}
+
+	header := http.Header{"Content-Encoding": []string{"gzip"}}
+	_, err := readAllCapped(bytes.NewReader(gz), header, "state/store.json.gz", helpers.StateObjectMaxCompressedSize, decompressedCap)
+	if !errors.Is(err, helpers.ErrArtifactTooLarge) {
+		t.Fatalf("readAllCapped() error = %v, want ErrArtifactTooLarge", err)
+	}
+}
+
+// TestReadAllCappedAcceptsNormal confirms both the gzip and non-gzip paths
+// still round-trip their exact bytes through readAllCapped when the input
+// stays comfortably under both ceilings.
+func TestReadAllCappedAcceptsNormal(t *testing.T) {
+	t.Parallel()
+
+	t.Run("gzip", func(t *testing.T) {
+		t.Parallel()
+		want := []byte("a small cache-state payload")
+		gz := gzipBytes(t, want)
+
+		header := http.Header{"Content-Encoding": []string{"gzip"}}
+		got, err := readAllCapped(bytes.NewReader(gz), header, "state/store.json.gz", 64, 64)
+		if err != nil {
+			t.Fatalf("readAllCapped() error = %v, want nil", err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("readAllCapped() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("raw", func(t *testing.T) {
+		t.Parallel()
+		want := []byte("a small non-gzip payload")
+
+		got, err := readAllCapped(bytes.NewReader(want), http.Header{}, "state/store.json", 64, 64)
+		if err != nil {
+			t.Fatalf("readAllCapped() error = %v, want nil", err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("readAllCapped() = %q, want %q", got, want)
+		}
+	})
+}
+
+// gzipBytes gzip-encodes data using the standard library's compress/gzip,
+// which produces the same on-the-wire format klauspost/pgzip reads, so it
+// stands in for a real state object without pulling the production gzip
+// writer into the test.
+func gzipBytes(t *testing.T, data []byte) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(data); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	return buf.Bytes()
 }
 
 // putProjectsObject seeds the state/projects.json object with raw bytes,

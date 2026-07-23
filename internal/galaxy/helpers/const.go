@@ -36,6 +36,17 @@ const (
 	// to.
 	ArtifactMaxDownloadSize = ArchiveMaxTotalSize
 
+	// StateObjectMaxCompressedSize caps the raw (on-the-wire) bytes read for a
+	// persisted cache-state object (the S3 snapshot and the project registry).
+	// A real state object is far smaller; anything past this is pathological, so
+	// this bounds what a malicious or corrupt object can buffer into memory
+	// before it is rejected, mirroring ArtifactMaxDownloadSize for downloads.
+	StateObjectMaxCompressedSize = int64(256 << 20) // 256 MiB
+	// StateObjectMaxDecompressedSize caps the inflated size of a gzip-encoded
+	// cache-state object, so a high-ratio gzip bomb that stays under the
+	// compressed ceiling cannot expand without bound.
+	StateObjectMaxDecompressedSize = int64(1 << 30) // 1 GiB
+
 	// ArtifactSHASidecarSuffix names the sidecar file written next to a
 	// locally cached artifact tarball, holding its sha256 digest. A later
 	// non-pinned cache hit reads this sidecar instead of re-hashing the whole

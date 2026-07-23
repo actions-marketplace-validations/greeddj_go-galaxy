@@ -307,7 +307,10 @@ func (b *Backend) probeConditionalPut(ctx context.Context) error {
 	}
 }
 
-// readObject downloads an object and transparently inflates gzip data if needed.
+// readObject downloads a cache-state object (the S3 snapshot or the project
+// registry) and transparently inflates gzip data if needed, bounding both the
+// raw and inflated size so a planted oversized or high-ratio gzip object
+// cannot be buffered whole into memory.
 func (b *Backend) readObject(ctx context.Context, key string) ([]byte, error) {
 	resp, err := b.client.getObject(ctx, key)
 	if err != nil {
@@ -316,11 +319,35 @@ func (b *Backend) readObject(ctx context.Context, key string) ([]byte, error) {
 	defer func() {
 		_ = resp.Body.Close()
 	}()
-	shouldGzip := isGzip(resp.Header) || strings.HasSuffix(key, ".gz")
-	if !shouldGzip {
-		return io.ReadAll(resp.Body)
+	data, err := readAllCapped(resp.Body, resp.Header, key,
+		helpers.StateObjectMaxCompressedSize, helpers.StateObjectMaxDecompressedSize)
+	if err != nil {
+		// Name the offending key on the size ceiling specifically: it is the
+		// one failure mode here that is actionable (a planted or corrupt
+		// object), so it is worth the extra context. errors.Is still finds
+		// helpers.ErrArtifactTooLarge through the %w wrap.
+		if errors.Is(err, helpers.ErrArtifactTooLarge) {
+			return nil, fmt.Errorf("state object %s: %w", key, err)
+		}
+		return nil, err
 	}
-	buffered := bufio.NewReader(resp.Body)
+	return data, nil
+}
+
+// readAllCapped reads an object body into memory, transparently inflating
+// gzip, while bounding both the compressed read (so an oversized object
+// cannot be buffered whole) and the decompressed size (so a gzip bomb cannot
+// inflate without bound). Either ceiling being crossed surfaces
+// helpers.ErrArtifactTooLarge. Gzip detection mirrors readObject's own
+// pre-cap logic (isGzip/isGzipStream), so the caps are layered on top of the
+// existing decision of whether to gunzip rather than changing it.
+func readAllCapped(body io.Reader, header http.Header, key string, compressedCap, decompressedCap int64) ([]byte, error) {
+	limited := helpers.NewSizeLimitedReader(body, compressedCap)
+	shouldGzip := isGzip(header) || strings.HasSuffix(key, ".gz")
+	if !shouldGzip {
+		return io.ReadAll(limited)
+	}
+	buffered := bufio.NewReader(limited)
 	if isGzipStream(buffered) {
 		gz, err := gzip.NewReader(buffered)
 		if err != nil {
@@ -329,7 +356,7 @@ func (b *Backend) readObject(ctx context.Context, key string) ([]byte, error) {
 		defer func() {
 			_ = gz.Close()
 		}()
-		return io.ReadAll(gz)
+		return io.ReadAll(helpers.NewSizeLimitedReader(gz, decompressedCap))
 	}
 	return io.ReadAll(buffered)
 }
