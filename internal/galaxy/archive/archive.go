@@ -49,11 +49,11 @@ func ExtractTarGzStream(r io.Reader, dstDir string) error {
 	}()
 
 	tarReader := tar.NewReader(uncompressedStream)
-	return extractTarEntries(tarReader, dstDir)
+	return extractTarEntries(tarReader, dstDir, helpers.ArchiveMaxEntryCount)
 }
 
-func extractTarEntries(tarReader *tar.Reader, dstDir string) error {
-	var extracted int64
+func extractTarEntries(tarReader *tar.Reader, dstDir string, maxEntries int64) error {
+	var extracted, entries int64
 	// verifiedDirs memoizes parent-chain components already confirmed, this
 	// extraction, to be real (non-symlink) directories. It is scoped to one
 	// extraction (one goroutine, one dstDir) and never shared, so a plain
@@ -67,6 +67,16 @@ func extractTarEntries(tarReader *tar.Reader, dstDir string) error {
 		}
 		if err != nil {
 			return fmt.Errorf("error reading tar archive: %w", err)
+		}
+		// entries counts every header regardless of typeflag, so a tarbomb of
+		// many zero-byte directories or hardlinks - which never trips the
+		// byte caps in extractRegularFile - is still rejected. The check
+		// runs before handleTarEntry, so the (maxEntries+1)th entry is
+		// rejected before it is ever extracted: at most maxEntries inodes get
+		// created before the caller discards the whole destination.
+		entries++
+		if entries > maxEntries {
+			return fmt.Errorf("%w: %d", helpers.ErrArchiveTooManyEntries, maxEntries)
 		}
 		if err := handleTarEntry(tarReader, header, dstDir, &extracted, verifiedDirs); err != nil {
 			return err

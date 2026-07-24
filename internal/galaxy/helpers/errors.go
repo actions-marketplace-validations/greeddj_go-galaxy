@@ -30,6 +30,9 @@ var (
 	ErrArchiveEntryIsAbsolutePath = errors.New("archive entry is absolute path")
 	// ErrArchiveEntryHasEmptyName indicates an archive entry has an empty name.
 	ErrArchiveEntryHasEmptyName = errors.New("archive entry has empty name")
+	// ErrArchiveTooManyEntries indicates an archive contains more entries
+	// than ArchiveMaxEntryCount allows.
+	ErrArchiveTooManyEntries = errors.New("archive contains too many entries")
 
 	// ErrHardlinkTargetIsEmpty indicates a hardlink target is empty.
 	ErrHardlinkTargetIsEmpty = errors.New("hardlink target is empty")

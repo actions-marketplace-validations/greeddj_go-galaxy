@@ -253,6 +253,212 @@ func TestExtractHardlinkWithMemoizedParentChain(t *testing.T) {
 	}
 }
 
+// buildEntriesArchive builds n flat tar entries of the given typeflag, named
+// entry0, entry1, ..., entry<n-1>. tar.TypeDir entries get a trailing slash
+// and zero size, per tar convention. This drives extractTarEntries' entry-
+// count cap directly, with a tiny injected cap, instead of needing a real
+// 100,001-entry archive to exercise the boundary.
+func buildEntriesArchive(tb testing.TB, n int, typeflag byte) []byte {
+	tb.Helper()
+
+	// entriesModTime stamps every generated entry so these tests never
+	// depend on wall-clock time.
+	entriesModTime := time.Date(2024, time.January, 1, 0, 0, 0, 0, time.UTC)
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+
+	content := []byte("x")
+	for i := range n {
+		name := fmt.Sprintf("entry%d", i)
+		var size int64
+		if typeflag == tar.TypeDir {
+			name += "/"
+		} else {
+			size = int64(len(content))
+		}
+		header := &tar.Header{
+			Typeflag: typeflag,
+			Name:     name,
+			Size:     size,
+			Mode:     0o644,
+			ModTime:  entriesModTime,
+		}
+		if err := tw.WriteHeader(header); err != nil {
+			tb.Fatalf("failed to write tar header: %v", err)
+		}
+		if size > 0 {
+			if _, err := tw.Write(content); err != nil {
+				tb.Fatalf("failed to write tar content: %v", err)
+			}
+		}
+	}
+
+	if err := tw.Close(); err != nil {
+		tb.Fatalf("failed to close tar writer: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		tb.Fatalf("failed to close gzip writer: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// tarReaderFrom decompresses gzip-encoded archive bytes into a *tar.Reader,
+// for tests that call the unexported extractTarEntries directly with an
+// injected cap rather than going through the public gzip-wrapping API.
+func tarReaderFrom(t *testing.T, archiveBytes []byte) *tar.Reader {
+	t.Helper()
+
+	gzr, err := gzip.NewReader(bytes.NewReader(archiveBytes))
+	if err != nil {
+		t.Fatalf("failed to create gzip reader: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = gzr.Close()
+	})
+	return tar.NewReader(gzr)
+}
+
+// TestExtractEntryCountUnderCap asserts that an archive with fewer entries
+// than the injected cap extracts every entry normally.
+func TestExtractEntryCountUnderCap(t *testing.T) {
+	t.Parallel()
+
+	const maxEntries = 5
+	archiveBytes := buildEntriesArchive(t, 4, tar.TypeReg)
+
+	dst := t.TempDir()
+	if err := extractTarEntries(tarReaderFrom(t, archiveBytes), dst, maxEntries); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for i := range 4 {
+		name := fmt.Sprintf("entry%d", i)
+		if _, err := os.Stat(filepath.Join(dst, name)); err != nil {
+			t.Fatalf("expected %s to exist: %v", name, err)
+		}
+	}
+}
+
+// TestExtractEntryCountAtCap pins the boundary: exactly maxEntries entries
+// must succeed, since the cap check is entries > maxEntries, not >=.
+func TestExtractEntryCountAtCap(t *testing.T) {
+	t.Parallel()
+
+	const maxEntries = 5
+	archiveBytes := buildEntriesArchive(t, maxEntries, tar.TypeReg)
+
+	dst := t.TempDir()
+	if err := extractTarEntries(tarReaderFrom(t, archiveBytes), dst, maxEntries); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for i := range maxEntries {
+		name := fmt.Sprintf("entry%d", i)
+		if _, err := os.Stat(filepath.Join(dst, name)); err != nil {
+			t.Fatalf("expected %s to exist: %v", name, err)
+		}
+	}
+}
+
+// TestExtractEntryCountOverCapFailsClosed asserts that one entry past the
+// cap is rejected with ErrArchiveTooManyEntries, at the (maxEntries+1)th
+// header.
+func TestExtractEntryCountOverCapFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	const maxEntries = 5
+	archiveBytes := buildEntriesArchive(t, maxEntries+1, tar.TypeReg)
+
+	dst := t.TempDir()
+	err := extractTarEntries(tarReaderFrom(t, archiveBytes), dst, maxEntries)
+	if !errors.Is(err, helpers.ErrArchiveTooManyEntries) {
+		t.Fatalf("expected %v, got %v", helpers.ErrArchiveTooManyEntries, err)
+	}
+}
+
+// TestExtractEntryCountCountsNonRegularEntries proves the entry-count cap
+// counts every typeflag, not just regular files: four zero-byte directory
+// entries against a cap of three must be rejected, even though a zero-byte
+// directory never trips either byte cap in extractRegularFile. This is the
+// defense against an empty-directory (or hardlink) inode-exhaustion
+// tarbomb.
+func TestExtractEntryCountCountsNonRegularEntries(t *testing.T) {
+	t.Parallel()
+
+	const maxEntries = 3
+	archiveBytes := buildEntriesArchive(t, maxEntries+1, tar.TypeDir)
+
+	dst := t.TempDir()
+	err := extractTarEntries(tarReaderFrom(t, archiveBytes), dst, maxEntries)
+	if !errors.Is(err, helpers.ErrArchiveTooManyEntries) {
+		t.Fatalf("expected %v, got %v", helpers.ErrArchiveTooManyEntries, err)
+	}
+}
+
+// TestExtractEntryCountCountsHardlinkEntries is the hardlink variant of the
+// non-regular-entry coverage above: a regular target file plus hardlinks to
+// it are each counted, so the fourth entry (also a hardlink) trips the cap
+// before it is linked. The first three entries must extract successfully
+// (proving the cap does not fire early), and only the fourth is rejected.
+func TestExtractEntryCountCountsHardlinkEntries(t *testing.T) {
+	t.Parallel()
+
+	const maxEntries = 3
+	entries := []testArchiveEntry{
+		{typeflag: tar.TypeReg, name: "target.txt", content: []byte("hello")},
+		{typeflag: tar.TypeLink, name: "link1.txt", linkname: "target.txt"},
+		{typeflag: tar.TypeLink, name: "link2.txt", linkname: "target.txt"},
+		{typeflag: tar.TypeLink, name: "link3.txt", linkname: "target.txt"},
+	}
+	archiveBytes := buildTestArchive(t, entries)
+
+	dst := t.TempDir()
+	err := extractTarEntries(tarReaderFrom(t, archiveBytes), dst, maxEntries)
+	if !errors.Is(err, helpers.ErrArchiveTooManyEntries) {
+		t.Fatalf("expected %v, got %v", helpers.ErrArchiveTooManyEntries, err)
+	}
+
+	// The first three entries (the target file and two hardlinks) must have
+	// been extracted before the fourth tripped the cap.
+	if _, statErr := os.Stat(filepath.Join(dst, "target.txt")); statErr != nil {
+		t.Fatalf("expected target.txt to exist: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dst, "link1.txt")); statErr != nil {
+		t.Fatalf("expected link1.txt to exist: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dst, "link2.txt")); statErr != nil {
+		t.Fatalf("expected link2.txt to exist: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dst, "link3.txt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected link3.txt to not exist, stat error: %v", statErr)
+	}
+}
+
+// TestExtractLegitMultiFileArchiveStillExtracts proves the cap causes no
+// false positive on an ordinary collection-sized archive: a flat 50-file
+// archive extracted through the public ExtractTarGzStream API, using the
+// real ArchiveMaxEntryCount rather than an injected cap, must still succeed.
+func TestExtractLegitMultiFileArchiveStillExtracts(t *testing.T) {
+	t.Parallel()
+
+	const files = 50
+	archiveBytes := buildEntriesArchive(t, files, tar.TypeReg)
+
+	dst := t.TempDir()
+	if err := ExtractTarGzStream(bytes.NewReader(archiveBytes), dst); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for i := range files {
+		name := fmt.Sprintf("entry%d", i)
+		if _, err := os.Stat(filepath.Join(dst, name)); err != nil {
+			t.Fatalf("expected %s to exist: %v", name, err)
+		}
+	}
+}
+
 // TestExtractOverlongPathComponentFailsClosed drives
 // checkPathComponentNotSymlink's non-ErrNotExist Lstat error arm: a tar
 // entry whose path has a component exceeding the filesystem's name limit

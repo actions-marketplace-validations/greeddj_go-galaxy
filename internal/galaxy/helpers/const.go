@@ -21,6 +21,14 @@ const (
 	ArchiveMaxEntrySize = int64(512 << 20) // 512 MiB per file
 	// ArchiveMaxTotalSize caps total extracted bytes per archive.
 	ArchiveMaxTotalSize = int64(4 << 30) // 4 GiB per archive
+	// ArchiveMaxEntryCount caps the number of entries extracted from a single
+	// archive. It complements the byte caps above by bounding inode
+	// exhaustion: a tarbomb of many zero-byte directories or hardlinks never
+	// trips ArchiveMaxEntrySize or ArchiveMaxTotalSize but can still exhaust
+	// filesystem inodes one cheap entry at a time. It is set well above any
+	// real collection (typically a few thousand to ~10-20k files) and well
+	// below a count that would meaningfully exhaust inodes.
+	ArchiveMaxEntryCount = int64(100_000)
 
 	// ArtifactMaxDownloadSize caps the raw (compressed, on-the-wire) bytes
 	// read from an artifact download before it is rejected. It bounds the
