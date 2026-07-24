@@ -524,11 +524,17 @@ func (c *Client) requestURL(key string, query url.Values) (string, string, strin
 		objectPath = "/" + key
 	}
 
-	canonicalURI := encodePath(objectPath)
+	// escapedPath is used for BOTH the signed canonical URI and the sent
+	// wire path below, so they are byte-identical: signing and sending
+	// through two different encoders (net/url's escaping vs. this one) is
+	// exactly what let a reserved character in a key produce a
+	// SignatureDoesNotMatch (403) - see awsURIEncode's doc comment.
+	escapedPath := encodePath(objectPath)
+	canonicalURI := escapedPath
 	canonicalQuery := canonicalizeQuery(query)
-	reqURL := endpoint + objectPath
+	reqURL := endpoint + escapedPath
 	if !c.cfg.PathStyle && parsed.Scheme != "" {
-		reqURL = parsed.Scheme + "://" + host + objectPath
+		reqURL = parsed.Scheme + "://" + host + escapedPath
 	}
 	if canonicalQuery != "" {
 		reqURL += "?" + canonicalQuery
@@ -645,24 +651,52 @@ func awsEncode(value string) string {
 	return escaped
 }
 
-// encodePath encodes each path segment for signature calculations.
+// encodePath encodes a path for signature calculations and, since requestURL
+// now builds the sent URL from this same result, for the wire request too.
+// It defers to awsURIEncode with slashes left literal, so "/" segment
+// boundaries survive untouched while every other byte gets S3's exact
+// percent-encoding.
 func encodePath(value string) string {
 	if value == "" {
 		return "/"
 	}
-	segments := strings.Split(value, "/")
-	for i, segment := range segments {
-		segments[i] = pathEscape(segment)
-	}
-	return strings.Join(segments, "/")
+	return awsURIEncode(value, false)
 }
 
-// pathEscape escapes a path segment while preserving slashes.
-func pathEscape(value string) string {
-	if value == "" {
-		return ""
+// upperHex is the hex digit alphabet AWS SigV4 requires for percent-encoding:
+// uppercase, unlike net/url's lowercase output.
+const upperHex = "0123456789ABCDEF"
+
+// awsURIEncode percent-encodes s per AWS SigV4 UriEncode: A-Za-z0-9 and -._~
+// stay literal; "/" stays literal when encodeSlash is false (path) and becomes
+// %2F otherwise (query); every other byte is percent-encoded with UPPERCASE
+// hex. It iterates raw UTF-8 bytes, so a multibyte rune becomes its individual
+// %XX bytes. Stricter than url.PathEscape (which leaves +$&,;=:@ literal);
+// matching S3's exact encoding on both the signed canonical URI and the wire
+// path is what stops a reserved character producing a SignatureDoesNotMatch.
+func awsURIEncode(s string, encodeSlash bool) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	// Range over the integer length, not the string itself: ranging over a
+	// string decodes UTF-8 and would skip the byte indices of a multibyte
+	// rune's continuation bytes, which is exactly what this loop must not
+	// do - it needs every raw byte, since a multibyte rune must become its
+	// individual %XX escapes.
+	for i := range len(s) {
+		c := s[i]
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9',
+			c == '-', c == '.', c == '_', c == '~':
+			b.WriteByte(c)
+		case c == '/' && !encodeSlash:
+			b.WriteByte('/')
+		default:
+			b.WriteByte('%')
+			b.WriteByte(upperHex[c>>4])
+			b.WriteByte(upperHex[c&0x0f])
+		}
 	}
-	return strings.ReplaceAll(url.PathEscape(value), "%2F", "/")
+	return b.String()
 }
 
 // deriveSigningKey derives the signing key for the given date and region.
