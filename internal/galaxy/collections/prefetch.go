@@ -10,10 +10,12 @@ import (
 
 // prefetcher coordinates background metadata and artifact downloads.
 type prefetcher struct {
-	meta map[string]*types.GalaxyCollectionVersionInfo
-	errs map[string]error
-	done map[string]chan struct{}
-	mu   sync.Mutex
+	meta   map[string]*types.GalaxyCollectionVersionInfo
+	errs   map[string]error
+	done   map[string]chan struct{}
+	cancel context.CancelFunc
+	mu     sync.Mutex
+	wg     sync.WaitGroup
 }
 
 // startPrefetcher schedules prefetch tasks for collections.
@@ -34,8 +36,14 @@ func startPrefetcher(ctx context.Context, deps prefetchDeps, collections map[str
 		return p
 	}
 
+	// Derive a cancellable child context so Close can abort every in-flight
+	// worker download without waiting for the caller's own ctx to end - the
+	// worker pool must never outlive runInstall's backend lock.
+	pfCtx, cancel := context.WithCancel(ctx)
+	p.cancel = cancel
+
 	taskCh := makeTaskChannel(tasks)
-	startPrefetchWorkers(ctx, deps, p, taskCh)
+	startPrefetchWorkers(pfCtx, deps, p, taskCh)
 	return p
 }
 
@@ -76,19 +84,19 @@ func makeTaskChannel(tasks []collection) chan collection {
 }
 
 func startPrefetchWorkers(
-	ctx context.Context,
+	pfCtx context.Context,
 	deps prefetchDeps,
 	p *prefetcher,
 	taskCh chan collection,
 ) {
 	cfg := deps.cfg
 	for range max(cfg.Workers, 1) {
-		go func() {
+		p.wg.Go(func() {
 			for col := range taskCh {
-				meta, err := prefetchOne(ctx, deps, col)
+				meta, err := prefetchOne(pfCtx, deps, col)
 				p.finish(col.key(), meta, err)
 			}
-		}()
+		})
 	}
 }
 
@@ -127,6 +135,23 @@ func (p *prefetcher) Wait(key string) (*types.GalaxyCollectionVersionInfo, bool,
 	err := p.errs[key]
 	p.mu.Unlock()
 	return meta, true, err
+}
+
+// Close cancels any in-flight prefetch downloads and blocks until every
+// prefetch worker has returned. It is idempotent and safe to call on a
+// prefetcher that was constructed disabled (no cancel func, no workers).
+//
+// cancel() itself is safe to call more than once and unblocks any worker
+// parked in an artifact GET; downloadRetryable already returns false for
+// context.Canceled/DeadlineExceeded, and helpers.Retry bails on a canceled
+// ctx during backoff, so a canceled worker drains its remaining taskCh tasks
+// fast (each fails closed, non-retryable) and returns. finish is still
+// called for every task even on cancellation, so no Wait(key) can deadlock.
+func (p *prefetcher) Close() {
+	if p.cancel != nil {
+		p.cancel()
+	}
+	p.wg.Wait()
 }
 
 // register allocates a completion channel for a key.

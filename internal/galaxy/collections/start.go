@@ -228,6 +228,12 @@ func runInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) e
 	if err != nil {
 		return err
 	}
+	// Registered after the lock-release and backend-close defers above, so by
+	// LIFO it runs first: every prefetch worker is canceled and joined before
+	// the backend is closed and the lock released, so a late worker can never
+	// call backend.Artifacts().Commit (or mutate the Store) after the lock is
+	// gone.
+	defer plan.prefetch.Close()
 	failures, err := installLevels(
 		ctx,
 		cfg,
@@ -282,6 +288,9 @@ func prepareInstallPlan(ctx context.Context, cfg *config.Config, runtime *infra.
 	levelStart := time.Now()
 	levels, err := buildInstallLevels(graph)
 	if err != nil {
+		// The prefetcher was already scheduled above; a level-build failure
+		// here must not leak its workers, so join them before returning.
+		prefetch.Close()
 		return nil, err
 	}
 	runtime.Output.DebugSincef(levelStart, "%s", "build install levels")
