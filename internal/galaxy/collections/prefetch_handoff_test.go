@@ -58,7 +58,12 @@ type s3StyleArtifacts struct {
 	committed    map[string]string
 	tmpBase      string
 	bucketDir    string
-	mu           sync.Mutex
+	// commitOrder records the key argument of every Commit call in call order,
+	// letting a test observe the sequence in which artifacts were committed to
+	// the stub bucket - the signal TestPrefetchQueueOrderedByLevel uses to prove
+	// the prefetch queue is level-ordered rather than raced in map order.
+	commitOrder []string
+	mu          sync.Mutex
 }
 
 // newS3StyleArtifacts builds an s3StyleArtifacts rooted at two fresh
@@ -125,6 +130,7 @@ func (a *s3StyleArtifacts) Commit(_ context.Context, key, tmpPath string, meta m
 	}
 	a.mu.Lock()
 	a.committed[key] = tmpPath
+	a.commitOrder = append(a.commitOrder, key)
 	a.mu.Unlock()
 	return cacheManager.ArtifactFile{Path: tmpPath, Meta: meta, Cleanup: a.countingCleanup(key, tmpPath)}, nil
 }
@@ -200,6 +206,17 @@ func (a *s3StyleArtifacts) committedPath(key string) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.committed[key]
+}
+
+// commitOrderSnapshot returns a copy of the keys passed to Commit, in call
+// order, so a test can assert on commit sequencing without racing a
+// concurrent Commit call.
+func (a *s3StyleArtifacts) commitOrderSnapshot() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	order := make([]string, len(a.commitOrder))
+	copy(order, a.commitOrder)
+	return order
 }
 
 // copyFile copies src's bytes to dst, creating (or truncating) dst with
@@ -284,7 +301,7 @@ func (f *prefetchHandoffFixture) runLevels(
 	graph map[string][]string,
 	levels [][]string,
 ) (*prefetcher, int32, error) {
-	prefetch := startPrefetcher(context.Background(), newPrefetchDeps(f.cfg, f.runtime, f.st, f.artifacts), collections)
+	prefetch := startPrefetcher(context.Background(), newPrefetchDeps(f.cfg, f.runtime, f.st, f.artifacts), collections, levels)
 	failures, err := installLevels(
 		context.Background(),
 		f.cfg,

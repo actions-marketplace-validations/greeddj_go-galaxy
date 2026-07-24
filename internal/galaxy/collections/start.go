@@ -278,23 +278,25 @@ func prepareInstallPlan(ctx context.Context, cfg *config.Config, runtime *infra.
 	}
 	state.store.SetRoots("last_run", roots)
 
+	// Compute install levels before scheduling the prefetcher: a level-build
+	// failure (a dependency cycle) now surfaces before any prefetch worker
+	// exists, and the level assignment lets the prefetch queue be ordered to
+	// match the level-ordered install consumer.
+	levelStart := time.Now()
+	levels, err := buildInstallLevels(graph)
+	if err != nil {
+		return nil, err
+	}
+	runtime.Output.DebugSincef(levelStart, "%s", "build install levels")
+
 	prefetchStart := time.Now()
 	prefetch := startPrefetcher(
 		ctx,
 		newPrefetchDeps(cfg, runtime, state.store, state.backend.Artifacts()),
 		collections,
+		levels,
 	)
 	runtime.Output.DebugSincef(prefetchStart, "%s", "prefetch schedule")
-
-	levelStart := time.Now()
-	levels, err := buildInstallLevels(graph)
-	if err != nil {
-		// The prefetcher was already scheduled above; a level-build failure
-		// here must not leak its workers, so join them before returning.
-		prefetch.Close()
-		return nil, err
-	}
-	runtime.Output.DebugSincef(levelStart, "%s", "build install levels")
 
 	return &installPlan{
 		collections: collections,

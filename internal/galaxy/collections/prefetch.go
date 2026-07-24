@@ -3,6 +3,7 @@ package collections
 import (
 	"context"
 	"path/filepath"
+	"sort"
 	"sync"
 
 	"github.com/psvmcc/hub/pkg/types"
@@ -23,8 +24,10 @@ type prefetcher struct {
 	wg         sync.WaitGroup
 }
 
-// startPrefetcher schedules prefetch tasks for collections.
-func startPrefetcher(ctx context.Context, deps prefetchDeps, collections map[string]collection) *prefetcher {
+// startPrefetcher schedules prefetch tasks for collections. levels orders the
+// surviving tasks so background downloads track the level-ordered install
+// consumer instead of racing in map order.
+func startPrefetcher(ctx context.Context, deps prefetchDeps, collections map[string]collection, levels [][]string) *prefetcher {
 	cfg := deps.cfg
 	artifacts := deps.artifacts
 	p := &prefetcher{
@@ -41,6 +44,7 @@ func startPrefetcher(ctx context.Context, deps prefetchDeps, collections map[str
 	if len(tasks) == 0 {
 		return p
 	}
+	sortTasksByLevel(tasks, buildLevelIndex(levels))
 
 	// Derive a cancellable child context so Close can abort every in-flight
 	// worker download without waiting for the caller's own ctx to end - the
@@ -51,6 +55,41 @@ func startPrefetcher(ctx context.Context, deps prefetchDeps, collections map[str
 	taskCh := makeTaskChannel(tasks)
 	startPrefetchWorkers(pfCtx, deps, p, taskCh)
 	return p
+}
+
+// buildLevelIndex maps each install key to its zero-based install level, so the
+// prefetcher can order its download queue to match the level-ordered install
+// consumer. Pre-sized to the total key count.
+func buildLevelIndex(levels [][]string) map[string]int {
+	total := 0
+	for _, level := range levels {
+		total += len(level)
+	}
+	index := make(map[string]int, total)
+	for i, level := range levels {
+		for _, key := range level {
+			index[key] = i
+		}
+	}
+	return index
+}
+
+// sortTasksByLevel orders prefetch tasks by ascending install level, with the
+// collection key as a deterministic tie-break within a level, so background
+// downloads track the level-ordered install consumer instead of racing in map
+// order. Prefetch order is a latency optimization only and never affects
+// correctness: each install worker blocks on Wait(key) for its own artifact
+// regardless of the order it was fetched. A key absent from levelIndex - which
+// cannot happen while collections and levels derive from the same graph -
+// therefore just defaults to level 0 and is fetched early, which is harmless.
+func sortTasksByLevel(tasks []collection, levelIndex map[string]int) {
+	sort.Slice(tasks, func(i, j int) bool {
+		ki, kj := tasks[i].key(), tasks[j].key()
+		if li, lj := levelIndex[ki], levelIndex[kj]; li != lj {
+			return li < lj
+		}
+		return ki < kj
+	})
 }
 
 // buildPrefetchTasks decides, for every candidate collection, whether it
