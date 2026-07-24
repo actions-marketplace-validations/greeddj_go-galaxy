@@ -119,7 +119,7 @@ func TestInstallCollectionCacheHitExtractFailureRefetchesOnce(t *testing.T) {
 	}
 	deps := newTestInstallDepsWithExtractStore(t, cfg)
 
-	if err := installCollection(context.Background(), col, deps, nil, meta); err != nil {
+	if err := installCollection(context.Background(), col, deps, nil, meta, downloadResult{}); err != nil {
 		t.Fatalf("expected the corrupt cache hit to recover via a single refetch, got %v", err)
 	}
 	if got := hits.Load(); got != 1 {
@@ -179,7 +179,7 @@ func TestInstallCollectionCacheHitExtractFailureRefetchOnceThenFails(t *testing.
 	// come from the direct archive.ExtractTarGz path, not the CAS path.
 	deps := newTestInstallDeps(t, cfg)
 
-	err := installCollection(context.Background(), col, deps, nil, meta)
+	err := installCollection(context.Background(), col, deps, nil, meta, downloadResult{})
 	if err == nil {
 		t.Fatalf("expected the refetch to also fail extraction, got nil")
 	}
@@ -236,7 +236,7 @@ func TestInstallCollectionCacheHitPinMismatchRefetchesOnce(t *testing.T) {
 	}
 	deps := newTestInstallDeps(t, cfg)
 
-	if err := installCollection(context.Background(), col, deps, nil, meta); err != nil {
+	if err := installCollection(context.Background(), col, deps, nil, meta, downloadResult{}); err != nil {
 		t.Fatalf("expected the pin-mismatch cache hit to recover via a single refetch, got %v", err)
 	}
 	if got := hits.Load(); got != 1 {

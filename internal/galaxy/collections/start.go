@@ -125,7 +125,8 @@ func warmCollections(
 
 func warmOne(ctx context.Context, deps installDeps, col collection) error {
 	filename := fmt.Sprintf("%s-%s-%s.tar.gz", col.Namespace, col.Name, col.Version)
-	payload, err := prepareWithRecovery(ctx, deps, col, nil, filename, func(payload installPayload) error {
+	// warm has no prefetcher, so there is never a prefetched temp to hand off.
+	payload, err := prepareWithRecovery(ctx, deps, col, nil, downloadResult{}, filename, func(payload installPayload) error {
 		return warmVerifyAndEnsure(deps, col, payload)
 	})
 	if err != nil {
@@ -526,11 +527,11 @@ func installLevels(
 			sem <- struct{}{}
 			wg.Go(func() {
 				defer func() { <-sem }()
-				meta, ok, prefetchErr := prefetch.Wait(col.key())
+				meta, prefetched, ok, prefetchErr := prefetch.Wait(col.key())
 				if ok && prefetchErr != nil {
 					runtime.Output.Printf("⚠️ Prefetch failed for %s: %v", col.key(), prefetchErr)
 				}
-				if err := installCollection(ctx, col, depsCtx, depKeys, meta); err != nil {
+				if err := installCollection(ctx, col, depsCtx, depKeys, meta, prefetched); err != nil {
 					runtime.Output.Errorf("Failed: %s.%s error: %s", col.Namespace, col.Name, err)
 					atomic.AddInt32(&failures, 1)
 				} else {

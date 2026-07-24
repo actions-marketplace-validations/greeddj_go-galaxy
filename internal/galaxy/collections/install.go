@@ -40,6 +40,7 @@ func installCollection(
 	deps installDeps,
 	resolvedDeps []string,
 	metaOverride *types.GalaxyCollectionVersionInfo,
+	prefetched downloadResult,
 ) error {
 	cfg := deps.cfg
 	runtime := deps.runtime
@@ -55,10 +56,18 @@ func installCollection(
 
 	if canSkipInstall(cfg, col, installPath, st) {
 		runtime.Output.Printf("⏭️ Skipping install, already installed: %s/%s/%s", col.Namespace, col.Name, col.Version)
+		// installCollection may be handed a prefetched temp on a path that skips the install; release it here rather than
+		// leave it unclaimed until Close. In today's dispatch this branch is not live: a schedulable prefetch task is never
+		// already installed, and an already-installed collection is never scheduled, so its handoff would be empty. This is
+		// a defensive guard preserving the exactly-once cleanup contract for any future caller that hands a live temp into
+		// an already-installed collection.
+		if prefetched.Cleanup != nil {
+			prefetched.Cleanup()
+		}
 		return nil
 	}
 
-	payload, err := prepareAndExtract(ctx, deps, col, metaOverride, filename, installPath)
+	payload, err := prepareAndExtract(ctx, deps, col, metaOverride, prefetched, filename, installPath)
 	if err != nil {
 		return err
 	}
@@ -140,9 +149,20 @@ func prepareInstall(
 	deps installDeps,
 	col collection,
 	metaOverride *types.GalaxyCollectionVersionInfo,
+	prefetched downloadResult,
 	filename string,
 	forceDownload bool,
 ) (installPayload, bool, error) {
+	// A temp the prefetcher already downloaded and committed takes priority
+	// over every other path: its bytes are already fresh, verified origin
+	// bytes, so there is nothing left to fetch. forceDownload (set only by
+	// the corruption-recovery retry below) still wins over it: a prefetched
+	// temp was never evicted, so retrying against the very same bytes that
+	// just failed would only reproduce the same failure.
+	if prefetched.Path != "" && !forceDownload {
+		return payloadFromPrefetched(col, metaOverride, prefetched)
+	}
+
 	cfg := deps.cfg
 	runtime := deps.runtime
 
@@ -253,12 +273,13 @@ func prepareWithRecovery(
 	deps installDeps,
 	col collection,
 	metaOverride *types.GalaxyCollectionVersionInfo,
+	prefetched downloadResult,
 	filename string,
 	action func(installPayload) error,
 ) (installPayload, error) {
 	forceDownload := false
 	for {
-		payload, fromCache, err := prepareInstall(ctx, deps, col, metaOverride, filename, forceDownload)
+		payload, fromCache, err := prepareInstall(ctx, deps, col, metaOverride, prefetched, filename, forceDownload)
 		if err != nil {
 			// A cache-resident integrity failure surfaced by prepareInstall
 			// itself - the S3 backend verifies a fetched object's sha256 on
@@ -316,11 +337,41 @@ func prepareAndExtract(
 	deps installDeps,
 	col collection,
 	metaOverride *types.GalaxyCollectionVersionInfo,
+	prefetched downloadResult,
 	filename, installPath string,
 ) (installPayload, error) {
-	return prepareWithRecovery(ctx, deps, col, metaOverride, filename, func(payload installPayload) error {
+	return prepareWithRecovery(ctx, deps, col, metaOverride, prefetched, filename, func(payload installPayload) error {
 		return verifyAndExtract(ctx, deps, col, payload, installPath, filename)
 	})
+}
+
+// payloadFromPrefetched builds an installable payload from an artifact the
+// prefetcher already downloaded and committed. Its bytes are the origin bytes,
+// already sha-verified against meta during the prefetch download, so there is
+// nothing to re-fetch. resolveArtifactSHA returns the download hash directly
+// (prefetched.SHA is non-empty), so a pinned collection's verifyPinnedSHA
+// still compares the pin against a hash of the real bytes - the reuse never
+// bypasses the pin. servedFromCache is reported false: these are fresh origin
+// bytes, not a stale cache hit, so prepareWithRecovery must not spend an
+// evict-and-refetch on a verify/extract failure here.
+func payloadFromPrefetched(
+	col collection,
+	meta *types.GalaxyCollectionVersionInfo,
+	prefetched downloadResult,
+) (installPayload, bool, error) {
+	artifact := artifactData{Path: prefetched.Path, Cleanup: prefetched.Cleanup, SHA: prefetched.SHA}
+	artifactSHA, err := resolveArtifactSHA(artifact.Path, meta, artifact.Meta, artifact.SHA, col.SHA256)
+	// Every handed-off downloadResult carries a non-empty SHA - hashed during the prefetch download itself - so
+	// resolveArtifactSHA always returns through its artifactSHA != "" arm here, and this error path is not reached
+	// in practice. It is kept for symmetry with resolveArtifactSHA's other callers, and to fail closed rather than
+	// silently install unhashed bytes if a handoff ever carried an empty SHA.
+	if err != nil {
+		if artifact.Cleanup != nil {
+			artifact.Cleanup()
+		}
+		return installPayload{}, false, err
+	}
+	return installPayload{meta: meta, artifact: artifact, artifactSHA: artifactSHA}, false, nil
 }
 
 func prepareFromCache(ctx context.Context, deps installDeps, col collection) (installPayload, error) {
@@ -851,7 +902,10 @@ func installDependencies(ctx context.Context, installPath string, depsCtx instal
 		depCol := collection{Namespace: parts[0], Name: parts[1], Version: version, Source: cfg.Server}
 		deps = append(deps, depCol.key())
 		runtime.Output.Printf("🔁 Installing dependency: %s %s", fqdn, version)
-		if err := installCollection(ctx, depCol, depsCtx, nil, nil); err != nil {
+		// MANIFEST-discovered dependencies were never prefetched - only the
+		// top-level resolved collections map is - so there is nothing to hand
+		// off here.
+		if err := installCollection(ctx, depCol, depsCtx, nil, nil, downloadResult{}); err != nil {
 			return nil, fmt.Errorf("failed to install dependency %s: %w", fqdn, err)
 		}
 	}

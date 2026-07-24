@@ -109,7 +109,7 @@ func TestInstallCollectionS3CacheFetchMismatchEvictsAndRefetches(t *testing.T) {
 		artifacts:      artifacts,
 	}
 
-	if err := installCollection(context.Background(), col, deps, nil, nil); err != nil {
+	if err := installCollection(context.Background(), col, deps, nil, nil, downloadResult{}); err != nil {
 		t.Fatalf("expected the corrupt cache-resident artifact to recover via a single refetch, got %v", err)
 	}
 	if got := srv.Count(fakegalaxy.EndpointArtifact); got != 1 {

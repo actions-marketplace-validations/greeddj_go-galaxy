@@ -120,7 +120,7 @@ func TestInstallCollectionCacheHitPinMismatch(t *testing.T) {
 	}
 	deps := newTestInstallDeps(t, cfg)
 
-	err := installCollection(context.Background(), col, deps, nil, nil)
+	err := installCollection(context.Background(), col, deps, nil, nil, downloadResult{})
 	if err == nil {
 		t.Fatalf("expected pin mismatch error, got nil")
 	}
@@ -188,7 +188,7 @@ func TestInstallCollectionCacheHitPinIgnoresSidecarAndHashesRealBytes(t *testing
 	}
 	deps := newTestInstallDeps(t, cfg)
 
-	err := installCollection(context.Background(), col, deps, nil, nil)
+	err := installCollection(context.Background(), col, deps, nil, nil, downloadResult{})
 	if err == nil {
 		t.Fatalf("expected pin mismatch error, got nil")
 	}
@@ -241,7 +241,7 @@ func TestInstallCollectionCacheHitPinIntactBytesSucceeds(t *testing.T) {
 	}
 	deps := newTestInstallDeps(t, cfg)
 
-	if err := installCollection(context.Background(), col, deps, nil, nil); err != nil {
+	if err := installCollection(context.Background(), col, deps, nil, nil, downloadResult{}); err != nil {
 		t.Fatalf("expected the pinned install to succeed, got %v", err)
 	}
 
@@ -307,7 +307,7 @@ func TestInstallCollectionFreshDownloadPinMismatch(t *testing.T) {
 	}
 	deps := newTestInstallDeps(t, cfg)
 
-	err := installCollection(context.Background(), col, deps, nil, meta)
+	err := installCollection(context.Background(), col, deps, nil, meta, downloadResult{})
 	if err == nil {
 		t.Fatalf("expected pin mismatch error, got nil")
 	}

@@ -174,7 +174,7 @@ func runOffHostInstall(t *testing.T, cfgServer string, server *httptest.Server, 
 		artifacts:      local.NewArtifacts(cfg.CacheDir),
 	}
 
-	if err := installCollection(context.Background(), col, deps, nil, meta); err != nil {
+	if err := installCollection(context.Background(), col, deps, nil, meta, downloadResult{}); err != nil {
 		t.Fatalf("installCollection: %v", err)
 	}
 	return printer, filepath.Join(downloadPath, "ansible_collections", col.Namespace, col.Name)
