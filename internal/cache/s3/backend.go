@@ -181,22 +181,14 @@ func (b *Backend) SaveStore(ctx context.Context, st *store.Store) error {
 	return b.client.putObject(ctx, key, reader, int64(buf.Len()), "application/json", "gzip", nil, false, "")
 }
 
-// ClearFiles removes cached artifacts from S3.
+// ClearFiles removes cached artifacts from S3, batching the deletes via
+// DeleteObjects (one batch per list page) rather than issuing one DELETE per
+// object.
 func (b *Backend) ClearFiles(ctx context.Context) error {
 	if err := b.Open(ctx); err != nil {
 		return err
 	}
-	prefix := b.key(artifactsPrefix)
-	keys, err := b.client.listObjects(ctx, prefix)
-	if err != nil {
-		return err
-	}
-	for _, key := range keys {
-		if err := b.client.deleteObject(ctx, key); err != nil {
-			return err
-		}
-	}
-	return nil
+	return b.client.deleteAllUnderPrefix(ctx, b.key(artifactsPrefix))
 }
 
 // RecordProject records the project metadata in S3.

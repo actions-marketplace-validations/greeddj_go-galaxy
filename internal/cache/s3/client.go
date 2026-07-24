@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/md5" //nolint:gosec // used only for the S3-mandated Content-MD5 integrity header, not as a security primitive
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/xml"
 	"errors"
@@ -244,6 +246,144 @@ func (c *Client) deleteObject(ctx context.Context, key string) error {
 	}, s3Retryable)
 }
 
+// deleteObjectsMaxKeys is the maximum number of keys S3's Multi-Object
+// Delete (DeleteObjects) accepts in a single request.
+const deleteObjectsMaxKeys = 1000
+
+// deleteAllUnderPrefix lists and deletes every object under prefix, one
+// DeleteObjects batch per list page, so memory stays bounded to a single page
+// (<=1000 keys) rather than the whole key set. A page is chunked to
+// deleteObjectsMaxKeys defensively, in case a non-standard endpoint returns a
+// larger page than S3's 1000 default.
+func (c *Client) deleteAllUnderPrefix(ctx context.Context, prefix string) error {
+	var token string
+	for {
+		page, err := c.listObjectsPage(ctx, prefix, token)
+		if err != nil {
+			return err
+		}
+		if err := c.deleteObjects(ctx, keysFrom(page.Contents), deleteObjectsMaxKeys); err != nil {
+			return err
+		}
+		if !page.IsTruncated || page.NextContinuationToken == "" {
+			break
+		}
+		token = page.NextContinuationToken
+	}
+	return nil
+}
+
+// deleteObjects deletes keys via one or more DeleteObjects batches of at most
+// maxKeys each, so a page larger than S3's own 1000-key ceiling still gets
+// chunked correctly. maxKeys is an injectable test seam; production always
+// passes deleteObjectsMaxKeys.
+func (c *Client) deleteObjects(ctx context.Context, keys []string, maxKeys int) error {
+	for start := 0; start < len(keys); start += maxKeys {
+		end := min(start+maxKeys, len(keys))
+		if err := c.deleteObjectsBatch(ctx, keys[start:end]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// deleteRequest is the S3 Multi-Object Delete request body. Quiet suppresses
+// per-key <Deleted> entries in the response, so only <Error> entries come
+// back - all deleteObjectsBatch needs to detect a partial failure.
+type deleteRequest struct {
+	XMLName xml.Name            `xml:"Delete"`
+	Objects []deleteObjectEntry `xml:"Object"`
+	Quiet   bool                `xml:"Quiet"`
+}
+
+// deleteObjectEntry names one object key in a deleteRequest. It is named
+// deleteObjectEntry, rather than deleteObject, to avoid clashing with the
+// Client's existing single-object deleteObject method.
+type deleteObjectEntry struct {
+	Key string `xml:"Key"`
+}
+
+// deleteResult is the S3 Multi-Object Delete response body in Quiet mode:
+// only failed keys are reported, each as an <Error> entry.
+type deleteResult struct {
+	XMLName xml.Name      `xml:"DeleteResult"`
+	Errors  []deleteError `xml:"Error"`
+}
+
+// deleteError is one per-key failure reported by a DeleteObjects call.
+type deleteError struct {
+	Key     string `xml:"Key"`
+	Code    string `xml:"Code"`
+	Message string `xml:"Message"`
+}
+
+// deleteObjectsBatch issues one DeleteObjects (POST ?delete) request for up
+// to deleteObjectsMaxKeys keys, retrying a transient failure like the other
+// idempotent verbs. The request body is built with encoding/xml rather than
+// string templating: an object key is bucket-derived (a trust boundary - see
+// the package's trust-model notes), so templating it into the XML body would
+// be an XML-injection vector. A 200 status is never itself treated as
+// success: S3 reports a per-key failure as an <Error> element inside a 200
+// body, so the body is always parsed and any <Error> is surfaced as a
+// terminal failure via errS3DeleteFailed (s3Retryable's default-deny
+// classifies a plain error as non-retryable, so a per-key failure fails this
+// call closed rather than being silently retried).
+func (c *Client) deleteObjectsBatch(ctx context.Context, keys []string) error {
+	objects := make([]deleteObjectEntry, len(keys))
+	for i, key := range keys {
+		objects[i] = deleteObjectEntry{Key: key}
+	}
+	body, err := xml.Marshal(deleteRequest{Quiet: true, Objects: objects})
+	if err != nil {
+		return err
+	}
+	payload := append([]byte(xml.Header), body...)
+
+	hash := sha256.Sum256(payload)
+	payloadHash := hex.EncodeToString(hash[:])
+	// Content-MD5 is the S3-mandated protocol integrity header for
+	// DeleteObjects (S3 rejects a request missing it), not a security
+	// primitive - the payload is already authenticated via the SigV4
+	// signature over its sha256 hash.
+	sum := md5.Sum(payload) //nolint:gosec // see the Content-MD5 comment above
+	contentMD5 := base64.StdEncoding.EncodeToString(sum[:])
+
+	return helpers.Retry(ctx, s3RetryPolicy(), func() error {
+		req, err := c.newRequest(ctx, http.MethodPost, "", url.Values{"delete": {""}},
+			bytes.NewReader(payload), payloadHash, nil, false)
+		if err != nil {
+			return err
+		}
+		req.ContentLength = int64(len(payload))
+		req.Header.Set("Content-Type", "application/xml")
+		req.Header.Set("Content-MD5", contentMD5)
+		resp, err := c.client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			_ = resp.Body.Close()
+		}()
+		if resp.StatusCode != http.StatusOK {
+			return wrapRetryableStatus(resp.StatusCode, s3StatusError(errS3DeleteFailed, resp))
+		}
+		data, err := io.ReadAll(helpers.NewSizeLimitedReader(resp.Body, helpers.S3ListMaxSize))
+		if err != nil {
+			return err
+		}
+		var result deleteResult
+		if err := xml.Unmarshal(data, &result); err != nil {
+			return err
+		}
+		if len(result.Errors) > 0 {
+			e := result.Errors[0]
+			return fmt.Errorf("%w: %d of %d keys failed (first: %q %s: %s)",
+				errS3DeleteFailed, len(result.Errors), len(keys), e.Key, e.Code, e.Message)
+		}
+		return nil
+	}, s3Retryable)
+}
+
 // listObjects returns object keys under the given prefix.
 func (c *Client) listObjects(ctx context.Context, prefix string) ([]string, error) {
 	keys := []string{}
@@ -345,6 +485,21 @@ func appendKeys(dst []string, contents []listBucketContent) []string {
 		}
 	}
 	return dst
+}
+
+// keysFrom extracts each entry's key from a single ListObjectsV2 page's
+// Contents, skipping any empty key (mirrors appendKeys's same defensive
+// skip). Unlike appendKeys, which accumulates across every page of a full
+// listing, this is scoped to one page's worth of keys - deleteAllUnderPrefix
+// deletes a page at a time precisely so it never needs the accumulated form.
+func keysFrom(contents []listBucketContent) []string {
+	keys := make([]string, 0, len(contents))
+	for _, item := range contents {
+		if item.Key != "" {
+			keys = append(keys, item.Key)
+		}
+	}
+	return keys
 }
 
 // ensureBucket creates the bucket when it does not exist.

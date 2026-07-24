@@ -2,6 +2,7 @@ package s3
 
 import (
 	"bytes"
+	"encoding/xml"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -22,6 +23,10 @@ import (
 // slash-delimited path.
 const bucketListKey = "list-objects-v2"
 
+// bucketDeleteObjectsKey is bucketListKey's counterpart for a Multi-Object
+// Delete (POST ?delete) request.
+const bucketDeleteObjectsKey = "delete-objects"
+
 // fakeObject is one stored object: its body, the X-Amz-Meta-* headers it was
 // last written with (captured verbatim, keyed by canonical header name), and
 // the time it was last written, which stands in for S3's Last-Modified.
@@ -36,18 +41,29 @@ type fakeObject struct {
 // SigV4 verification (the client always signs requests, but this fake never
 // checks the Authorization header).
 type fakeS3 struct {
-	objects           map[string]fakeObject
-	fails             map[string]*forcedFailure
-	requests          map[string]int
-	bucket            string
-	deleteDelay       time.Duration
-	mu                sync.Mutex
-	ignoreIfNoneMatch bool
-	// oversizedList, when set, makes handleList ignore the fake's normal
-	// object listing and instead stream a body well past
-	// helpers.S3ListMaxSize, so a test can drive listObjectsPage's
-	// size-limited read into rejecting an oversized ListObjectsV2 response.
-	oversizedList bool
+	objects               map[string]fakeObject
+	fails                 map[string]*forcedFailure
+	requests              map[string]int
+	failDeleteObjects     *deleteObjectsFailure
+	lastDeleteHeaders     http.Header
+	bucket                string
+	lastDeleteReq         deleteRequest
+	deleteDelay           time.Duration
+	mu                    sync.Mutex
+	ignoreIfNoneMatch     bool
+	oversizedList         bool
+	oversizedDeleteResult bool
+}
+
+// deleteObjectsFailure is a fault-injection rule for handleDeleteObjects: it
+// reports key as a single <Error> entry in the DeleteResult (with the given
+// code/message) instead of deleting it, while every other key in the same
+// batch is still deleted normally - simulating a real per-key partial
+// failure that DeleteObjects can report even under an overall 200 status.
+type deleteObjectsFailure struct {
+	key     string
+	code    string
+	message string
 }
 
 // forcedFailure is a fault-injection rule matched by object key and HTTP
@@ -163,6 +179,12 @@ func (f *fakeS3) handleBucket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
+	case http.MethodPost:
+		if r.URL.Query().Has("delete") {
+			f.handleDeleteObjects(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusMethodNotAllowed)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
@@ -231,6 +253,116 @@ func (f *fakeS3) writeOversizedList(w http.ResponseWriter) {
 			break
 		}
 	}
+}
+
+// handleDeleteObjects answers a Multi-Object Delete (POST ?delete) request:
+// a forced failure armed via failNext(bucketDeleteObjectsKey, ...) takes
+// precedence over everything below, exactly like the object-level handlers,
+// so a test can drive deleteObjectsBatch's own transient-failure retry path.
+// Absent that, it parses the <Delete> body via encoding/xml - never by
+// string matching, so an object key carrying XML metacharacters round-trips
+// as a single literal <Object> entry exactly like a conforming S3 endpoint
+// would rather than being reinterpreted as extra markup - deletes every
+// listed key that is not the armed failDeleteObjects key, and renders a
+// Quiet-mode <DeleteResult> reporting only that one key (if any) as an
+// <Error>. When oversizedDeleteResult is armed, the normal response is
+// skipped entirely in favor of writeOversizedDeleteResult. The parsed
+// request and its headers are captured for
+// deleteObjectsRequest/deleteObjectsHeaders so a test can assert what
+// deleteObjectsBatch actually sent.
+func (f *fakeS3) handleDeleteObjects(w http.ResponseWriter, r *http.Request) {
+	f.countRequest(bucketDeleteObjectsKey, http.MethodPost)
+	if status, _, fail := f.shouldFail(bucketDeleteObjectsKey, http.MethodPost); fail {
+		w.WriteHeader(status)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var req deleteRequest
+	if err := xml.Unmarshal(body, &req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	f.mu.Lock()
+	f.lastDeleteReq = req
+	f.lastDeleteHeaders = r.Header.Clone()
+	oversized := f.oversizedDeleteResult
+	fail := f.failDeleteObjects
+	f.mu.Unlock()
+	if oversized {
+		f.writeOversizedDeleteResult(w)
+		return
+	}
+
+	var result deleteResult
+	f.mu.Lock()
+	for _, obj := range req.Objects {
+		if fail != nil && obj.Key == fail.key {
+			result.Errors = append(result.Errors, deleteError{Key: fail.key, Code: fail.code, Message: fail.message})
+			continue
+		}
+		delete(f.objects, obj.Key)
+	}
+	f.mu.Unlock()
+
+	payload, err := xml.Marshal(result)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(append([]byte(xml.Header), payload...))
+}
+
+// writeOversizedDeleteResult streams a DeleteResult-shaped body well past
+// helpers.S3ListMaxSize using a single reused chunk, mirroring
+// writeOversizedList, so a test can drive deleteObjectsBatch's size-limited
+// response read into rejecting an oversized body.
+func (f *fakeS3) writeOversizedDeleteResult(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(http.StatusOK)
+	chunk := bytes.Repeat([]byte("a"), 64<<10)
+	var written int64
+	for written <= helpers.S3ListMaxSize {
+		n, err := w.Write(chunk)
+		written += int64(n)
+		if err != nil {
+			break
+		}
+	}
+}
+
+// failDeleteObjectsFor arms handleDeleteObjects to report key as a single
+// <Error> entry (with the given code/message) instead of deleting it.
+func (f *fakeS3) failDeleteObjectsFor(key, code, message string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failDeleteObjects = &deleteObjectsFailure{key: key, code: code, message: message}
+}
+
+// deleteObjectsRequest returns the most recently received Multi-Object
+// Delete request body, so a test can assert exactly which <Object> entries
+// deleteObjectsBatch sent.
+func (f *fakeS3) deleteObjectsRequest() deleteRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastDeleteReq
+}
+
+// deleteObjectsHeaders returns the most recently received Multi-Object
+// Delete request's headers, so a test can assert deleteObjectsBatch signs
+// and content-hashes the batch (Content-MD5, X-Amz-Content-Sha256,
+// Content-Type) without re-deriving SigV4 verification in the fake.
+func (f *fakeS3) deleteObjectsHeaders() http.Header {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastDeleteHeaders
 }
 
 // handleObject answers object-level requests: HEAD, GET, PUT, and DELETE.
