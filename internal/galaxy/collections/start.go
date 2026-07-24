@@ -514,40 +514,61 @@ func installLevels(
 	depsCtx := newInstallDeps(cfg, runtime, st, artifacts, nil, extractStore)
 	var failures int32
 	for _, level := range levels {
-		var wg sync.WaitGroup
-		sem := make(chan struct{}, cfg.Workers)
-
-		for _, key := range level {
-			col, ok := collections[key]
-			if !ok {
-				return failures, fmt.Errorf("%w for: %s", helpers.ErrMissingCollection, key)
-			}
-			depKeys := graph[key]
-			if depKeys == nil {
-				depKeys = []string{}
-			}
-			sem <- struct{}{}
-			wg.Go(func() {
-				defer func() { <-sem }()
-				meta, prefetched, ok, prefetchErr := prefetch.Wait(col.key())
-				if ok && prefetchErr != nil {
-					runtime.Output.Printf("⚠️ Prefetch failed for %s: %v", col.key(), prefetchErr)
-				}
-				if err := installCollection(ctx, col, depsCtx, depKeys, meta, prefetched); err != nil {
-					runtime.Output.Errorf("Failed: %s.%s error: %s", col.Namespace, col.Name, err)
-					atomic.AddInt32(&failures, 1)
-				} else {
-					runtime.Output.Okf("Installed: %s.%s", col.Namespace, col.Name)
-				}
-			})
+		if err := runInstallLevel(ctx, depsCtx, collections, graph, level, prefetch, &failures); err != nil {
+			return atomic.LoadInt32(&failures), err
 		}
-
-		wg.Wait()
 		if atomic.LoadInt32(&failures) > 0 {
 			break
 		}
 	}
 	return atomic.LoadInt32(&failures), nil
+}
+
+// runInstallLevel dispatches installs for one level's keys onto a
+// Workers-bounded pool and joins them before returning. wg.Wait is deferred
+// ahead of the loop so every exit - including the ErrMissingCollection guard,
+// which can trip after earlier keys in this level were already dispatched -
+// waits the in-flight workers rather than leaking them past installLevels (and
+// past runInstall's backend-lock release). failures is shared across levels and
+// updated atomically by the workers.
+func runInstallLevel(
+	ctx context.Context,
+	depsCtx installDeps,
+	collections map[string]collection,
+	graph map[string][]string,
+	level []string,
+	prefetch *prefetcher,
+	failures *int32,
+) error {
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, depsCtx.cfg.Workers)
+	defer wg.Wait()
+
+	for _, key := range level {
+		col, ok := collections[key]
+		if !ok {
+			return fmt.Errorf("%w for: %s", helpers.ErrMissingCollection, key)
+		}
+		depKeys := graph[key]
+		if depKeys == nil {
+			depKeys = []string{}
+		}
+		sem <- struct{}{}
+		wg.Go(func() {
+			defer func() { <-sem }()
+			meta, prefetched, ok, prefetchErr := prefetch.Wait(col.key())
+			if ok && prefetchErr != nil {
+				depsCtx.runtime.Output.Printf("⚠️ Prefetch failed for %s: %v", col.key(), prefetchErr)
+			}
+			if err := installCollection(ctx, col, depsCtx, depKeys, meta, prefetched); err != nil {
+				depsCtx.runtime.Output.Errorf("Failed: %s.%s error: %s", col.Namespace, col.Name, err)
+				atomic.AddInt32(failures, 1)
+			} else {
+				depsCtx.runtime.Output.Okf("Installed: %s.%s", col.Namespace, col.Name)
+			}
+		})
+	}
+	return nil
 }
 
 func finalizeInstall(
