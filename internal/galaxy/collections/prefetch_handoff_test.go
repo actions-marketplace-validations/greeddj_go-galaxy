@@ -54,6 +54,7 @@ const wrongPinSHA256 = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef
 type s3StyleArtifacts struct {
 	fetchCount   map[string]int
 	cleanupCount map[string]int
+	hasCount     map[string]int
 	committed    map[string]string
 	tmpBase      string
 	bucketDir    string
@@ -79,12 +80,19 @@ func newS3StyleArtifacts(t *testing.T) *s3StyleArtifacts {
 		bucketDir:    bucketDir,
 		fetchCount:   make(map[string]int),
 		cleanupCount: make(map[string]int),
+		hasCount:     make(map[string]int),
 		committed:    make(map[string]string),
 	}
 }
 
-// Has reports whether key has already been committed to the stub bucket.
+// Has reports whether key has already been committed to the stub bucket,
+// counting the call (keyed by key) so a test can assert exactly how many Has
+// probes a given key saw - the signal Test C uses to prove the prefetch
+// scan's single probe replaced the old scan-plus-reprobe pair.
 func (a *s3StyleArtifacts) Has(_ context.Context, key string) (bool, error) {
+	a.mu.Lock()
+	a.hasCount[key]++
+	a.mu.Unlock()
 	_, err := os.Stat(filepath.Join(a.bucketDir, key))
 	if err == nil {
 		return true, nil
@@ -177,6 +185,13 @@ func (a *s3StyleArtifacts) cleanupCountFor(key string) int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.cleanupCount[key]
+}
+
+// hasCountFor reports how many times Has has been called for key.
+func (a *s3StyleArtifacts) hasCountFor(key string) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.hasCount[key]
 }
 
 // committedPath returns the tmpPath Commit last recorded for key, or "" if
@@ -297,6 +312,12 @@ func (f *prefetchHandoffFixture) runLevels(
 // cache-hit branch and calling artifacts.Fetch - so fetchCountFor would read
 // 1, not 0. This test's fetchCountFor(key) == 0 assertion is exactly the line
 // that would fail without this change.
+//
+// The hasCountFor(key) == 1 assertion below additionally proves the scan/
+// re-probe consolidation: buildPrefetchTasks' parallel scan issues the sole
+// Has probe for this key, prefetchOne no longer re-probes it, and the install
+// worker never probes a prefetched key either (that path was already removed
+// earlier). With the prefetchOne re-probe still present this would read 2.
 func TestPrefetchedArtifactReusedNotRefetched(t *testing.T) {
 	t.Parallel()
 	srv := fakegalaxy.New(t)
@@ -326,6 +347,9 @@ func TestPrefetchedArtifactReusedNotRefetched(t *testing.T) {
 	key := artifactKey(col)
 	if got := fx.artifacts.fetchCountFor(key); got != 0 {
 		t.Fatalf("fetchCount = %d, want 0 (the prefetched temp must be reused, not refetched)", got)
+	}
+	if got := fx.artifacts.hasCountFor(key); got != 1 {
+		t.Fatalf("hasCount = %d, want exactly 1 (one scan probe, no prefetchOne re-probe, no install-worker probe)", got)
 	}
 
 	prefetch.Close()

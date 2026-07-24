@@ -53,31 +53,61 @@ func startPrefetcher(ctx context.Context, deps prefetchDeps, collections map[str
 	return p
 }
 
+// buildPrefetchTasks decides, for every candidate collection, whether it
+// needs a prefetch task, probing the artifact cache in parallel (bounded by
+// cfg.Workers) since Has is the dominant per-collection cost. The parallel
+// phase only writes to disjoint keep[i] slice elements, so no result mutex is
+// needed; the survivor collection afterward is sequential, which keeps
+// p.register calls and the returned task order single-threaded and
+// deterministic given the input snapshot.
 func buildPrefetchTasks(
 	ctx context.Context,
 	deps prefetchDeps,
 	collections map[string]collection,
 	p *prefetcher,
 ) []collection {
-	cfg := deps.cfg
-	st := deps.st
-	artifacts := deps.artifacts
-	tasks := make([]collection, 0, len(collections))
+	cols := make([]collection, 0, len(collections))
 	for _, col := range collections {
-		if !isGalaxyType(col.Type) {
-			continue
+		cols = append(cols, col)
+	}
+
+	keep := make([]bool, len(cols))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, max(deps.cfg.Workers, 1))
+	for i := range cols {
+		sem <- struct{}{}
+		wg.Go(func() {
+			defer func() { <-sem }()
+			keep[i] = shouldSchedulePrefetch(ctx, deps, cols[i])
+		})
+	}
+	wg.Wait()
+
+	tasks := make([]collection, 0, len(cols))
+	for i, col := range cols {
+		if keep[i] {
+			p.register(col.key())
+			tasks = append(tasks, col)
 		}
-		installPath := filepath.Join(cfg.DownloadPath, "ansible_collections", col.Namespace, col.Name)
-		if canSkipInstall(cfg, col, installPath, st) {
-			continue
-		}
-		if ok, err := artifacts.Has(ctx, artifactKey(col)); err == nil && ok {
-			continue
-		}
-		p.register(col.key())
-		tasks = append(tasks, col)
 	}
 	return tasks
+}
+
+// shouldSchedulePrefetch reports whether col needs a prefetch task: a
+// Galaxy-type source that is neither already installed nor already present in
+// the artifact cache. A Has() error is treated as "schedule it" - the same
+// fail-open behavior the original sequential scan had, where a probe error fell
+// through to scheduling rather than silently skipping the collection.
+func shouldSchedulePrefetch(ctx context.Context, deps prefetchDeps, col collection) bool {
+	if !isGalaxyType(col.Type) {
+		return false
+	}
+	installPath := filepath.Join(deps.cfg.DownloadPath, "ansible_collections", col.Namespace, col.Name)
+	if canSkipInstall(deps.cfg, col, installPath, deps.st) {
+		return false
+	}
+	ok, err := deps.artifacts.Has(ctx, artifactKey(col))
+	return err != nil || !ok
 }
 
 func makeTaskChannel(tasks []collection) chan collection {
@@ -106,13 +136,12 @@ func startPrefetchWorkers(
 	}
 }
 
-// prefetchOne loads metadata for col and, unless the artifact is already
-// cached, downloads it ahead of time. The returned downloadResult is the
-// same value downloadCollectionToCache produces for the main install path
-// (its temp path, verified sha, and cleanup), handed back so the install
-// worker can reuse it instead of fetching the artifact a second time; a
-// metadata error, a Has() error, or an already-cached artifact all return a
-// zero downloadResult, since there is nothing new to hand off in those cases.
+// prefetchOne loads metadata for col and downloads its artifact ahead of
+// time. The returned downloadResult is the same value downloadCollectionToCache
+// produces for the main install path (its temp path, verified sha, and
+// cleanup), handed back so the install worker can reuse it instead of
+// fetching the artifact a second time; a metadata error returns a zero
+// downloadResult, since there is nothing new to hand off in that case.
 func prefetchOne(
 	ctx context.Context,
 	deps prefetchDeps,
@@ -122,18 +151,20 @@ func prefetchOne(
 	if err != nil {
 		return nil, downloadResult{}, err
 	}
-	key := artifactKey(col)
-	ok, statErr := deps.artifacts.Has(ctx, key)
-	if statErr != nil {
-		return meta, downloadResult{}, statErr
-	}
-	if ok {
-		return meta, downloadResult{}, nil
-	}
+	// No Has() re-probe: buildPrefetchTasks already established this key was
+	// absent, and within a single run this prefetcher is the only committer of
+	// the key - each key maps to exactly one task, and the key's own install
+	// worker blocks on this prefetch via Wait before it could commit - so the
+	// key cannot have appeared in the cache between the scan and now. The single
+	// case the old re-probe still caught (the scan's Has erroring while the key
+	// was in fact cached) now costs one byte-identical redundant re-download,
+	// which is safe (same origin bytes, idempotent commit and ingest) and far
+	// rarer than the per-prefetch Has it removes from the critical path.
 	// useCache stays true: the artifact must still be committed to the shared
 	// cache for every other consumer (a different project, a later run), on
 	// top of handing its temp off to this run's own install worker.
-	result, err := downloadCollectionToCache(ctx, newInstallDeps(deps.cfg, deps.runtime, deps.st, deps.artifacts, nil, nil), key, meta, true)
+	downloadDeps := newInstallDeps(deps.cfg, deps.runtime, deps.st, deps.artifacts, nil, nil)
+	result, err := downloadCollectionToCache(ctx, downloadDeps, artifactKey(col), meta, true)
 	if err != nil {
 		return meta, downloadResult{}, err
 	}
