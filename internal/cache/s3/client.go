@@ -14,16 +14,30 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 )
 
+// signingKeyCache memoizes the SigV4 signing key for the current UTC date.
+// Secret and region are immutable for the client's lifetime, so date is the
+// only cache key; a plain mutex protects the string compare and the slice
+// swap, both cheap enough that an RWMutex would add overhead without benefit.
+type signingKeyCache struct {
+	date string
+	key  []byte
+	mu   sync.Mutex
+}
+
 // Client implements minimal S3 operations with SigV4 signing.
 type Client struct {
-	client *http.Client
-	cfg    config.S3CacheConfig
+	client         *http.Client
+	endpointHost   string
+	endpointScheme string
+	cfg            config.S3CacheConfig
+	signing        signingKeyCache
 }
 
 // newClient constructs an S3 client from configuration.
@@ -51,8 +65,12 @@ func newClient(cfg config.S3CacheConfig, httpClient *http.Client) (*Client, erro
 	if parsed.Host == "" {
 		return nil, fmt.Errorf("%w: %s", errS3InvalidEndpoint, endpoint)
 	}
+	// cfg.Endpoint is trimmed of a trailing "/" below, but that trim never
+	// touches the host or scheme components, so parsed.Host/parsed.Scheme
+	// here are exactly what requestURL would have derived from the trimmed
+	// cfg.Endpoint on every request - safe to cache once and reuse.
 	cfg.Endpoint = strings.TrimRight(endpoint, "/")
-	return &Client{cfg: cfg, client: httpClient}, nil
+	return &Client{cfg: cfg, client: httpClient, endpointHost: parsed.Host, endpointScheme: parsed.Scheme}, nil
 }
 
 // s3ErrorResponse captures the fields S3 puts in the XML <Error> document
@@ -508,8 +526,7 @@ func (c *Client) newRequest(
 // requestURL builds the request URL and canonical components.
 func (c *Client) requestURL(key string, query url.Values) (string, string, string, string) {
 	endpoint := c.cfg.Endpoint
-	parsed, _ := url.Parse(endpoint)
-	host := parsed.Host
+	host := c.endpointHost
 	key = strings.TrimLeft(key, "/")
 
 	var objectPath string
@@ -533,13 +550,30 @@ func (c *Client) requestURL(key string, query url.Values) (string, string, strin
 	canonicalURI := escapedPath
 	canonicalQuery := canonicalizeQuery(query)
 	reqURL := endpoint + escapedPath
-	if !c.cfg.PathStyle && parsed.Scheme != "" {
-		reqURL = parsed.Scheme + "://" + host + escapedPath
+	if !c.cfg.PathStyle && c.endpointScheme != "" {
+		reqURL = c.endpointScheme + "://" + host + escapedPath
 	}
 	if canonicalQuery != "" {
 		reqURL += "?" + canonicalQuery
 	}
 	return reqURL, host, canonicalURI, canonicalQuery
+}
+
+// signingKeyForDate returns the SigV4 signing key for date, deriving it once
+// per UTC date and reusing it for every request on the same date. Secret and
+// region are immutable for the client's lifetime, so date is the only cache
+// key; the key is recomputed when the date rolls over at UTC midnight, since a
+// key for the wrong date signs the wrong scope and the request would 403. The
+// cached slice is never mutated after derivation, so returning it directly
+// (no copy) is race-free once the field access is guarded.
+func (c *Client) signingKeyForDate(date string) []byte {
+	c.signing.mu.Lock()
+	defer c.signing.mu.Unlock()
+	if c.signing.key == nil || c.signing.date != date {
+		c.signing.key = deriveSigningKey(c.cfg.SecretKey, date, c.cfg.Region)
+		c.signing.date = date
+	}
+	return c.signing.key
 }
 
 // signRequest builds the AWS SigV4 Authorization header value.
@@ -570,7 +604,7 @@ func (c *Client) signRequest(
 		hex.EncodeToString(hash[:]),
 	}, "\n")
 
-	signingKey := deriveSigningKey(c.cfg.SecretKey, date, c.cfg.Region)
+	signingKey := c.signingKeyForDate(date)
 	signature := hmacSHA256Hex(signingKey, stringToSign)
 	return fmt.Sprintf(
 		"AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s",
