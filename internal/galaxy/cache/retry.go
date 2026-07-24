@@ -39,6 +39,11 @@ func fetchRetryable(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
+	// A response that overran its size cap is terminal: retrying would just
+	// re-fetch the same oversized body.
+	if errors.Is(err, helpers.ErrArtifactTooLarge) {
+		return false
+	}
 	var statusErr *HTTPStatusError
 	if errors.As(err, &statusErr) {
 		return helpers.IsRetryableHTTPStatus(statusErr.Code)

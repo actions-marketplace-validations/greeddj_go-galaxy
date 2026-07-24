@@ -55,6 +55,15 @@ const (
 	// compressed ceiling cannot expand without bound.
 	StateObjectMaxDecompressedSize = int64(1 << 30) // 1 GiB
 
+	// MetadataMaxSize caps the raw bytes read for a single Galaxy API
+	// metadata response before it is rejected. Realistic Galaxy metadata JSON
+	// is KB to low MB - a root document is ~1-2 KB, a versions page is
+	// ~15-20 KB, a version-detail document is well under 1 MB, and even a
+	// 10,000-version list is only ~1.5 MB - so 16 MiB bounds the per-fetch
+	// io.ReadAll allocation and rejects a hostile giant or endless body
+	// without ever false-positiving on a legitimate response.
+	MetadataMaxSize = int64(16 << 20) // 16 MiB
+
 	// ArtifactSHASidecarSuffix names the sidecar file written next to a
 	// locally cached artifact tarball, holding its sha256 digest. A later
 	// non-pinned cache hit reads this sidecar instead of re-hashing the whole

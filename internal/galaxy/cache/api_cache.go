@@ -209,7 +209,7 @@ func fetchJSONBodyOnce(
 		return nil, "", "", false, &HTTPStatusError{URL: url, Status: resp.Status, Code: resp.StatusCode}
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(helpers.NewSizeLimitedReader(resp.Body, helpers.MetadataMaxSize))
 	return body, resp.Header.Get("ETag"), resp.Header.Get("Last-Modified"), false, err
 }
 
