@@ -1,6 +1,7 @@
 package s3
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,7 +12,15 @@ import (
 	"time"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
+	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 )
+
+// bucketListKey is the pseudo object key countRequest/requestCount use for a
+// bucket-level ListObjectsV2 request, which - unlike GET/PUT/HEAD/DELETE -
+// has no per-object key of its own. It can never collide with a real object
+// key, since every real key under this fake's buckets is a non-empty
+// slash-delimited path.
+const bucketListKey = "list-objects-v2"
 
 // fakeObject is one stored object: its body, the X-Amz-Meta-* headers it was
 // last written with (captured verbatim, keyed by canonical header name), and
@@ -34,6 +43,11 @@ type fakeS3 struct {
 	deleteDelay       time.Duration
 	mu                sync.Mutex
 	ignoreIfNoneMatch bool
+	// oversizedList, when set, makes handleList ignore the fake's normal
+	// object listing and instead stream a body well past
+	// helpers.S3ListMaxSize, so a test can drive listObjectsPage's
+	// size-limited read into rejecting an oversized ListObjectsV2 response.
+	oversizedList bool
 }
 
 // forcedFailure is a fault-injection rule matched by object key and HTTP
@@ -156,8 +170,20 @@ func (f *fakeS3) handleBucket(w http.ResponseWriter, r *http.Request) {
 
 // handleList renders a minimal ListObjectsV2 XML response for keys under
 // the requested prefix. Pagination is not simulated: every matching key is
-// returned in one page (IsTruncated is always false).
+// returned in one page (IsTruncated is always false). When oversizedList is
+// armed, the normal listing is skipped entirely in favor of
+// writeOversizedList.
 func (f *fakeS3) handleList(w http.ResponseWriter, r *http.Request) {
+	f.countRequest(bucketListKey, http.MethodGet)
+
+	f.mu.Lock()
+	oversized := f.oversizedList
+	f.mu.Unlock()
+	if oversized {
+		f.writeOversizedList(w)
+		return
+	}
+
 	prefix := r.URL.Query().Get("prefix")
 
 	f.mu.Lock()
@@ -184,6 +210,27 @@ func (f *fakeS3) handleList(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, body.String())
+}
+
+// writeOversizedList streams a ListObjectsV2-shaped body well past
+// helpers.S3ListMaxSize using a single reused chunk, so the fake itself
+// never allocates anywhere near that size; only the cumulative transferred
+// byte count grows across repeated writes of the same buffer. It stops as
+// soon as a write fails, which is expected once the client's size-limited
+// reader aborts the read and closes the response body after crossing the
+// cap.
+func (f *fakeS3) writeOversizedList(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(http.StatusOK)
+	chunk := bytes.Repeat([]byte("a"), 64<<10)
+	var written int64
+	for written <= helpers.S3ListMaxSize {
+		n, err := w.Write(chunk)
+		written += int64(n)
+		if err != nil {
+			break
+		}
+	}
 }
 
 // handleObject answers object-level requests: HEAD, GET, PUT, and DELETE.

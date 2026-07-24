@@ -302,7 +302,7 @@ func (c *Client) listObjectsPage(ctx context.Context, prefix, token string) (lis
 		if err != nil {
 			return err
 		}
-		data, err := io.ReadAll(resp.Body)
+		data, err := io.ReadAll(helpers.NewSizeLimitedReader(resp.Body, helpers.S3ListMaxSize))
 		_ = resp.Body.Close()
 		if err != nil {
 			return err

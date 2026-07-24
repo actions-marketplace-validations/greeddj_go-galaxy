@@ -64,6 +64,16 @@ const (
 	// without ever false-positiving on a legitimate response.
 	MetadataMaxSize = int64(16 << 20) // 16 MiB
 
+	// S3ListMaxSize caps the raw bytes read for a single ListObjectsV2 XML
+	// page response. A page is bounded by max-keys (1000 by default, which
+	// renders to roughly 1 MB of XML), and pagination reads a large bucket
+	// page by page, each a separately-bounded read, so a single list read
+	// never scales with total bucket size. 16 MiB gives roughly 16x headroom
+	// over a standard page while still bounding per-page memory and
+	// rejecting a hostile or broken oversized single-page response (or a
+	// gzip bomb, if the transport happens to be decompressing transparently).
+	S3ListMaxSize = int64(16 << 20) // 16 MiB
+
 	// ArtifactSHASidecarSuffix names the sidecar file written next to a
 	// locally cached artifact tarball, holding its sha256 digest. A later
 	// non-pinned cache hit reads this sidecar instead of re-hashing the whole
