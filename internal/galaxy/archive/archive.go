@@ -54,6 +54,12 @@ func ExtractTarGzStream(r io.Reader, dstDir string) error {
 
 func extractTarEntries(tarReader *tar.Reader, dstDir string) error {
 	var extracted int64
+	// verifiedDirs memoizes parent-chain components already confirmed, this
+	// extraction, to be real (non-symlink) directories. It is scoped to one
+	// extraction (one goroutine, one dstDir) and never shared, so a plain
+	// map needs no synchronization. See ensureNoSymlinkParents for the
+	// correctness argument.
+	verifiedDirs := make(map[string]struct{})
 	for {
 		header, err := tarReader.Next()
 		if errors.Is(err, io.EOF) {
@@ -62,13 +68,13 @@ func extractTarEntries(tarReader *tar.Reader, dstDir string) error {
 		if err != nil {
 			return fmt.Errorf("error reading tar archive: %w", err)
 		}
-		if err := handleTarEntry(tarReader, header, dstDir, &extracted); err != nil {
+		if err := handleTarEntry(tarReader, header, dstDir, &extracted, verifiedDirs); err != nil {
 			return err
 		}
 	}
 }
 
-func handleTarEntry(tarReader *tar.Reader, header *tar.Header, dstDir string, extracted *int64) error {
+func handleTarEntry(tarReader *tar.Reader, header *tar.Header, dstDir string, extracted *int64, verifiedDirs map[string]struct{}) error {
 	relPath, err := sanitizeArchivePath(header.Name)
 	if err != nil {
 		return err
@@ -77,7 +83,7 @@ func handleTarEntry(tarReader *tar.Reader, header *tar.Header, dstDir string, ex
 		return nil
 	}
 	targetPath := filepath.Join(dstDir, relPath)
-	if err := ensureNoSymlinkParents(dstDir, relPath); err != nil {
+	if err := ensureNoSymlinkParents(dstDir, relPath, verifiedDirs); err != nil {
 		return err
 	}
 
@@ -89,7 +95,7 @@ func handleTarEntry(tarReader *tar.Reader, header *tar.Header, dstDir string, ex
 	case tar.TypeSymlink:
 		return extractSymlink(relPath, targetPath, header)
 	case tar.TypeLink:
-		return extractHardlink(dstDir, targetPath, header)
+		return extractHardlink(dstDir, targetPath, header, verifiedDirs)
 	default:
 		return nil
 	}
@@ -147,7 +153,7 @@ func extractSymlink(relPath, targetPath string, header *tar.Header) error {
 	return nil
 }
 
-func extractHardlink(dstDir, targetPath string, header *tar.Header) error {
+func extractHardlink(dstDir, targetPath string, header *tar.Header, verifiedDirs map[string]struct{}) error {
 	linkRel, err := sanitizeArchivePath(header.Linkname)
 	if err != nil {
 		return err
@@ -155,7 +161,7 @@ func extractHardlink(dstDir, targetPath string, header *tar.Header) error {
 	if linkRel == "" {
 		return fmt.Errorf("%w for %s", helpers.ErrHardlinkTargetIsEmpty, header.Name)
 	}
-	if err := ensureNoSymlinkParents(dstDir, linkRel); err != nil {
+	if err := ensureNoSymlinkParents(dstDir, linkRel, verifiedDirs); err != nil {
 		return err
 	}
 	target := filepath.Join(dstDir, linkRel)
@@ -205,7 +211,45 @@ func sanitizeArchivePath(name string) (string, error) {
 }
 
 // ensureNoSymlinkParents rejects paths that traverse symlink parents.
-func ensureNoSymlinkParents(baseDir, relPath string) error {
+//
+// verifiedDirs memoizes parent-chain components already confirmed, earlier
+// in this extraction, to be real (non-symlink) directories, so a deeply
+// nested collection does not re-Lstat its whole ancestor chain for every
+// entry.
+//
+// Correctness theorem: without the memo, this function calls os.Lstat(C)
+// for every parent component C and rejects only if C is an existing
+// symlink (nonexistent, a real directory, or a regular file all pass). The
+// memo skips os.Lstat(C) ONLY when C was already Lstat'd earlier in this
+// extraction and found to be a real, non-symlink directory. By the
+// no-overwrite invariant below, C is therefore still a real directory at
+// the time it is skipped, so a fresh Lstat(C) would still pass. Skipping
+// yields the identical decision. Components that are symlinks, nonexistent,
+// or non-directories are never memoized, so they are always Lstat'd exactly
+// as before. Therefore the memo produces the identical accept/reject
+// outcome for every entry, for every component.
+//
+// Load-bearing invariant: a directory confirmed non-symlink during an
+// extraction stays a non-symlink directory for the rest of that extraction,
+// because the extractor never overwrites an existing path - os.Symlink and
+// os.Link return EEXIST, os.OpenFile on a directory target and os.MkdirAll
+// over a non-directory both fail, and all of these abort the extraction.
+// So a memoized component can never be turned into a symlink after it is
+// memoized. THIS MEMO'S SAFETY DEPENDS ON THAT no-overwrite/abort-on-EEXIST
+// behavior; a future change that made extraction remove-then-recreate or
+// overwrite existing entries would invalidate the memo and must re-audit
+// this function.
+//
+// The leaf component of relPath - the entry's own path - is never memoized
+// here, since it is typically nonexistent at this point (see the
+// non-directory guard below), so it is always freshly Lstat'd, preserving
+// the symlink-overwrite defense on the entry's own path.
+func ensureNoSymlinkParents(baseDir, relPath string, verifiedDirs map[string]struct{}) error {
+	// Defensive: sanitizeArchivePath normalizes empty and "." path elements
+	// away before any caller reaches this function, so this early return and
+	// the per-component empty/"." skip below are unreachable via the current
+	// callers; both are kept as defense-in-depth for any future caller that
+	// passes an unsanitized relPath.
 	if relPath == "" || relPath == "." {
 		return nil
 	}
@@ -215,16 +259,36 @@ func ensureNoSymlinkParents(baseDir, relPath string) error {
 			continue
 		}
 		current = filepath.Join(current, part)
-		info, err := os.Lstat(current)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			return fmt.Errorf("failed to stat path %s: %w", current, err)
+		if err := checkPathComponentNotSymlink(current, verifiedDirs); err != nil {
+			return err
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("%w: %s", helpers.ErrArchivePathContainsSymlinkComponent, current)
+	}
+	return nil
+}
+
+// checkPathComponentNotSymlink is the per-component check inside
+// ensureNoSymlinkParents' loop, split into its own function to keep both
+// functions under the cyclomatic-complexity budget; it carries no
+// independent logic beyond what is documented on ensureNoSymlinkParents.
+// It memoizes current in verifiedDirs (and skips the Lstat if already
+// memoized) using exactly the memo rules from that comment: only a
+// confirmed, non-symlink directory is memoized.
+func checkPathComponentNotSymlink(current string, verifiedDirs map[string]struct{}) error {
+	if _, ok := verifiedDirs[current]; ok {
+		return nil
+	}
+	info, err := os.Lstat(current)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
 		}
+		return fmt.Errorf("failed to stat path %s: %w", current, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: %s", helpers.ErrArchivePathContainsSymlinkComponent, current)
+	}
+	if info.IsDir() {
+		verifiedDirs[current] = struct{}{}
 	}
 	return nil
 }
