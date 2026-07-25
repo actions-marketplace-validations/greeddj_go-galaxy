@@ -474,6 +474,63 @@ func TestReclaimIfExpiredRetriesImmediatelyWhenObjectVanished(t *testing.T) {
 	}
 }
 
+// TestLockAcquireBoundsImmediateRetrySpin forces the pathological PUT/HEAD
+// inconsistency that acquireLock's retryNow handoff exists to survive: a
+// misbehaving S3-compatible backend that answers the create-if-absent PUT
+// with 412 (precondition failed) while a follow-up HEAD on the very same key
+// keeps reporting the object as missing. Before maxImmediateLockRetries
+// bounded this, acquireLock would spin PUT+HEAD with no backoff sleep at all
+// for the entire waitCeiling window; this test shrinks waitCeiling so the
+// spin (if unbounded) would produce a very large number of requests in a
+// short, deterministic window, and confirms both that Lock still terminates
+// with errS3LockWaitTimeout (not a raw transport/context error leaking out)
+// and that the number of PUT attempts against the lock key stays in the tens
+// rather than growing to the thousands an unbounded spin would produce over
+// the same window.
+func TestLockAcquireBoundsImmediateRetrySpin(t *testing.T) {
+	t.Parallel()
+	fake := newFakeS3()
+	b := newTestBackendWithFake(t, fake)
+	timing := testLockTiming(time.Minute)
+	timing.waitCeiling = 300 * time.Millisecond
+	b.lock = timing
+	ctx := context.Background()
+
+	// Arm both halves of the inconsistency indefinitely: every create
+	// attempt sees the key as already present (412), while every
+	// follow-up HEAD sees it as absent (404). A conforming backend can
+	// never produce this combination in steady state, only transiently;
+	// this fake sustains it for the whole test to exercise the acquirer's
+	// own bound rather than relying on the backend to behave.
+	key := b.key(locksPrefix, lockObject)
+	fake.failNext(key, http.MethodPut, http.StatusPreconditionFailed, -1)
+	fake.failNext(key, http.MethodHead, http.StatusNotFound, -1)
+
+	start := time.Now()
+	_, err := b.Lock(ctx)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, errS3LockWaitTimeout) {
+		t.Fatalf("expected errS3LockWaitTimeout, got %v", err)
+	}
+	// A generous upper margin over waitCeiling: it only needs to catch a
+	// genuine hang regression, not pin down the exact backoff-jitter tail.
+	if elapsed > timing.waitCeiling+2*time.Second {
+		t.Fatalf("expected Lock to terminate close to the wait ceiling (%v), took %v", timing.waitCeiling, elapsed)
+	}
+
+	// maxRequestBudget is deliberately generous - order-of-magnitude
+	// headroom above what the bounded spin plus its subsequent
+	// backoff-gated attempts could plausibly produce in waitCeiling - so
+	// the assertion is about the spin being bounded at all (tens, not the
+	// thousands an unbounded immediate-retry loop would rack up in the
+	// same 300ms window), not about pinning an exact count.
+	const maxRequestBudget = 300
+	if puts := fake.requestCount(key, http.MethodPut); puts > maxRequestBudget {
+		t.Fatalf("expected the PUT spin to stay bounded (budget %d), got %d requests", maxRequestBudget, puts)
+	}
+}
+
 // TestReleaseLockOnMissingObjectReturnsNil directly unit-tests releaseLock's
 // not-found branch: a key that was never written is treated as an already
 // released lock, not an error.

@@ -79,6 +79,17 @@ func (b *Backend) acquireLock(ctx context.Context, key string) (func() error, er
 		return nil, err
 	}
 
+	// consecutiveRetryNow counts consecutive retryNow handoffs from
+	// tryAcquireOnce/reclaimIfExpired without an intervening backoff sleep.
+	// A conforming backend only ever produces one such handoff in a row
+	// (the object vanished right after our failed create; the next attempt
+	// either succeeds or observes a live/expired object), so bounding this
+	// counter guards against a misbehaving backend that answers the
+	// create-if-absent PUT with 412 while HEAD keeps reporting the object
+	// as missing, which would otherwise spin PUT+HEAD with no backoff at
+	// all for the entire waitCeiling window.
+	var consecutiveRetryNow int
+
 	for attempt := 0; ; attempt++ {
 		release, retryNow, err := b.tryAcquireOnce(waitCtx, key, token)
 		switch {
@@ -97,7 +108,18 @@ func (b *Backend) acquireLock(ctx context.Context, key string) (func() error, er
 		case release != nil:
 			return release, nil
 		case retryNow:
-			continue
+			consecutiveRetryNow++
+			if consecutiveRetryNow <= maxImmediateLockRetries {
+				continue
+			}
+			// The immediate-retry budget is exhausted: exhausting it
+			// means a misbehaving backend (repeatedly answering the
+			// create-if-absent PUT with 412 while HEAD keeps reporting
+			// the object as missing), so degrade to the same backoff
+			// sleep the normal-miss branch takes below instead of
+			// spinning without one.
+		default:
+			consecutiveRetryNow = 0
 		}
 		if err := b.lockBackoff(ctx, waitCtx, attempt); err != nil {
 			return nil, err

@@ -41,7 +41,13 @@ type fakeObject struct {
 // SigV4 verification (the client always signs requests, but this fake never
 // checks the Authorization header).
 type fakeS3 struct {
-	objects               map[string]fakeObject
+	objects map[string]fakeObject
+	// fails is keyed exactly like requests ("METHOD key"), plus a wildcard
+	// entry keyed " key" (empty method) that matches any method for that
+	// key. Keying by method (not by key alone) lets a test arm independent
+	// rules for two different methods against the very same key at once -
+	// e.g. a PUT that always reports precondition-failed together with a
+	// HEAD that always reports not-found on the same lock object key.
 	fails                 map[string]*forcedFailure
 	requests              map[string]int
 	failDeleteObjects     *deleteObjectsFailure
@@ -74,7 +80,6 @@ type deleteObjectsFailure struct {
 // carrying an S3-style XML error document - that a conforming in-memory fake
 // would otherwise never produce on its own.
 type forcedFailure struct {
-	method    string // http.MethodHead/Get/Put/Delete, or "" to match any method
 	body      []byte // optional response body written alongside status, e.g. an S3 <Error> document
 	status    int
 	remaining int
@@ -107,7 +112,10 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // failNext arms a forced-failure rule for key: the next count requests to
 // key matching method (or every method, if method == "") receive status
 // instead of the fake's normal response. count == -1 fails every matching
-// request indefinitely, until failNext is called again for the same key.
+// request indefinitely, until failNext is called again for the same
+// key+method pair. Rules for different methods on the same key are
+// independent: arming one for http.MethodPut does not replace or interact
+// with one already armed for http.MethodHead on that same key.
 func (f *fakeS3) failNext(key, method string, status, count int) {
 	f.failNextWithBody(key, method, status, count, nil)
 }
@@ -122,7 +130,7 @@ func (f *fakeS3) failNextWithBody(key, method string, status, count int, body []
 	if f.fails == nil {
 		f.fails = make(map[string]*forcedFailure)
 	}
-	f.fails[key] = &forcedFailure{method: method, status: status, remaining: count, body: body}
+	f.fails[method+" "+key] = &forcedFailure{status: status, remaining: count, body: body}
 }
 
 // countRequest records that key received one request via method, counting
@@ -150,19 +158,26 @@ func (f *fakeS3) requestCount(key, method string) int {
 
 // shouldFail reports whether the request for key+method matches an armed
 // forced-failure rule, consuming one use of it (unless the rule fails
-// indefinitely). It returns the status and body to write; body is nil when
-// none was armed. It locks mu itself; callers must not already hold mu.
+// indefinitely). It checks the method-specific rule first, falling back to
+// a wildcard rule armed for every method on key (method == "" when armed),
+// so a test can combine a method-specific rule and a wildcard rule - or two
+// method-specific rules for different methods - on the same key at once. It
+// returns the status and body to write; body is nil when none was armed. It
+// locks mu itself; callers must not already hold mu.
 func (f *fakeS3) shouldFail(key, method string) (int, []byte, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	rule, ok := f.fails[key]
-	if !ok || rule.remaining == 0 || (rule.method != "" && rule.method != method) {
-		return 0, nil, false
+	for _, k := range [2]string{method + " " + key, " " + key} {
+		rule, ok := f.fails[k]
+		if !ok || rule.remaining == 0 {
+			continue
+		}
+		if rule.remaining > 0 {
+			rule.remaining--
+		}
+		return rule.status, rule.body, true
 	}
-	if rule.remaining > 0 {
-		rule.remaining--
-	}
-	return rule.status, rule.body, true
+	return 0, nil, false
 }
 
 // handleBucket answers bucket-level requests: existence probes (HEAD) and

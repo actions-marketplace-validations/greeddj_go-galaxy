@@ -76,6 +76,16 @@ const (
 	lockBackoffBase = 250 * time.Millisecond
 	lockBackoffCap  = 5 * time.Second
 
+	// maxImmediateLockRetries bounds how many consecutive retryNow handoffs
+	// acquireLock's loop honors with an immediate retry (no backoff sleep)
+	// before it degrades to the normal backoff path. It exists purely as an
+	// acquirer-side guard against a misbehaving S3-compatible backend that
+	// answers the create-if-absent PUT with 412 (precondition failed) while
+	// a follow-up HEAD keeps reporting the object as missing: without this
+	// bound, that inconsistency would drive a continuous PUT+HEAD spin with
+	// no backoff at all, up to the full waitCeiling.
+	maxImmediateLockRetries = 8
+
 	// s3RetryMaxAttempts bounds how many times an idempotent S3 verb (GET,
 	// HEAD, DELETE, list, and an unconditional PUT) is attempted before its
 	// last failure is returned as final.
