@@ -263,7 +263,10 @@ func TestVersionOrderingV3(t *testing.T) {
 // genuinely conflicting pair of exact versions surfaces
 // helpers.ErrConflictingExactVersions, a mixed exact-plus-exclusion
 // constraint is correctly reported as non-exact rather than mis-parsed, and
-// "===" (never rewritten) still fails as a malformed version/constraint.
+// "===" (never rewritten) still fails as a malformed version/constraint. It
+// also covers the library-based classification's x-range and wildcard
+// handling ("1.x", "1.2.x", uppercase "1.X", and ">=1.0.0"), which a
+// hand-maintained character guard could not recognize as non-exact.
 func TestExactVersionFromConstraints(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -293,6 +296,10 @@ func TestExactVersionFromConstraints(t *testing.T) {
 			wantVersion: "", wantExact: false,
 		},
 		{name: "=== is a malformed guard", constraints: []string{"===1.2.3"}, wantAnyErr: true},
+		{name: "1.x is a non-exact x-range", constraints: []string{"1.x"}, wantVersion: "", wantExact: false},
+		{name: "1.2.x is a non-exact x-range", constraints: []string{"1.2.x"}, wantVersion: "", wantExact: false},
+		{name: "1.X uppercase is a non-exact x-range", constraints: []string{"1.X"}, wantVersion: "", wantExact: false},
+		{name: ">=1.0.0 stays non-exact", constraints: []string{">=1.0.0"}, wantVersion: "", wantExact: false},
 	}
 
 	for _, tt := range tests {

@@ -1050,6 +1050,14 @@ func requirementSpecEqual(a, b requirementSpec) bool {
 }
 
 // exactVersionFromConstraints returns a single exact version if specified.
+//
+// Classification is delegated to the semver library rather than a
+// hand-maintained character guard: a constraint is exact only if it parses
+// as a bare semver.Version once a single leading "=" is stripped. Anything
+// that fails as a version but succeeds as semver.NewConstraint is a genuine
+// range or wildcard (including ansible's "1.x" / "1.2.x" x-ranges, which a
+// char guard cannot recognize) and contributes no exact pin. A string that
+// is neither a valid version nor a valid constraint is malformed.
 func exactVersionFromConstraints(constraints []string) (string, bool, error) {
 	exact := ""
 	for _, raw := range constraints {
@@ -1057,22 +1065,24 @@ func exactVersionFromConstraints(constraints []string) (string, bool, error) {
 		if normalized == "" {
 			continue
 		}
-		if after, contains := strings.CutPrefix(normalized, "="); contains {
-			normalized = strings.TrimSpace(after)
+		candidate := normalized
+		if after, hasPrefix := strings.CutPrefix(normalized, "="); hasPrefix {
+			candidate = strings.TrimSpace(after)
 		}
-		if strings.ContainsAny(normalized, "<>~^!*|") || strings.Contains(normalized, " ") {
-			return "", false, nil
-		}
-		_, err := semver.NewVersion(normalized)
-		if err != nil {
-			return "", false, fmt.Errorf("invalid version %q: %w", normalized, err)
-		}
-		if exact == "" {
-			exact = normalized
+		if _, err := semver.NewVersion(candidate); err != nil {
+			if _, cErr := semver.NewConstraint(normalized); cErr != nil {
+				return "", false, fmt.Errorf("invalid version constraint %q: %w", raw, cErr)
+			}
+			// A valid range/wildcard constraint (e.g. ">=1.0.0" or "1.x") is
+			// non-exact by definition; it contributes no pin.
 			continue
 		}
-		if exact != normalized {
-			return "", false, fmt.Errorf("%w: %s vs %s", helpers.ErrConflictingExactVersions, exact, normalized)
+		if exact == "" {
+			exact = candidate
+			continue
+		}
+		if exact != candidate {
+			return "", false, fmt.Errorf("%w: %s vs %s", helpers.ErrConflictingExactVersions, exact, candidate)
 		}
 	}
 	if exact == "" {
