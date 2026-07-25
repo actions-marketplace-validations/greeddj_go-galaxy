@@ -161,9 +161,9 @@ func runOffHostInstall(t *testing.T, cfgServer string, server *httptest.Server, 
 		CacheDir:     cacheDir,
 		DownloadPath: downloadPath,
 		Workers:      1,
-		// NoDeps skips reading MANIFEST.json for transitive dependencies:
-		// buildMinimalTarGz's artifact carries none, matching the existing
-		// lock_pin_test.go fixtures that reuse the same helper.
+		// NoDeps set purely for symmetry with the other fixtures in this
+		// package that reuse buildMinimalTarGz, whose artifact carries no
+		// dependencies.
 		NoDeps: true,
 	}
 

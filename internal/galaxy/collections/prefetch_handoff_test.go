@@ -262,9 +262,9 @@ type prefetchHandoffFixture struct {
 }
 
 // newPrefetchHandoffFixture builds a fixture wired to srv with workers
-// installer/prefetch workers, NoDeps set so resolveDependencies never reads a
-// MANIFEST.json (this file only asserts the temp-handoff behavior, not
-// dependency resolution).
+// installer/prefetch workers, NoDeps set purely for symmetry with the other
+// fixtures in this package (this file only asserts the temp-handoff behavior,
+// not dependency resolution).
 func newPrefetchHandoffFixture(t *testing.T, srv *fakegalaxy.Server, workers int) *prefetchHandoffFixture {
 	t.Helper()
 	root := t.TempDir()

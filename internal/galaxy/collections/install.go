@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -79,12 +78,8 @@ func installCollection(
 		defer payload.artifact.Cleanup()
 	}
 
-	depsList, err := resolveDependencies(ctx, installPath, deps, resolvedDeps, col, filename)
-	if err != nil {
-		return err
-	}
 	writeGalaxyInfoIfPresent(runtime, cfg, col, payload.meta)
-	recordInstall(st, col, installPath, payload.artifactSHA, depsList)
+	recordInstall(st, col, installPath, payload.artifactSHA, resolvedDeps)
 	return nil
 }
 
@@ -387,29 +382,6 @@ func prepareFromCache(ctx context.Context, deps installDeps, col collection) (in
 		return installPayload{}, err
 	}
 	return installPayload{meta: nil, artifact: artifact, artifactSHA: artifactSHA}, nil
-}
-
-func resolveDependencies(
-	ctx context.Context,
-	installPath string,
-	deps installDeps,
-	resolvedDeps []string,
-	col collection,
-	filename string,
-) ([]string, error) {
-	cfg := deps.cfg
-	runtime := deps.runtime
-
-	if resolvedDeps != nil || cfg.NoDeps {
-		return resolvedDeps, nil
-	}
-	depsStart := time.Now()
-	depsList, err := installDependencies(ctx, installPath, deps)
-	if err != nil {
-		return nil, fmt.Errorf("failed to install dependencies for %s: %w", filename, err)
-	}
-	runtime.Output.DebugSincef(depsStart, "%s", "deps "+col.key())
-	return depsList, nil
 }
 
 func writeGalaxyInfoIfPresent(
@@ -870,44 +842,4 @@ func resolveMetadata(
 		return nil, fmt.Errorf("failed to load metadata: %w", err)
 	}
 	return meta, nil
-}
-
-// installDependencies installs dependent collections from MANIFEST.json.
-func installDependencies(ctx context.Context, installPath string, depsCtx installDeps) ([]string, error) {
-	cfg := depsCtx.cfg
-	runtime := depsCtx.runtime
-
-	manifestPath := filepath.Join(installPath, "MANIFEST.json")
-	//nolint:gosec // manifestPath is derived from install path and is trusted.
-	data, err := os.ReadFile(manifestPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, err
-	}
-
-	var parsed types.GalaxyCollectionVersionInfoManifest
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		return nil, fmt.Errorf("invalid MANIFEST.json: %w", err)
-	}
-
-	deps := make([]string, 0, len(parsed.CollectionInfo.Dependencies))
-	for fqdn, version := range parsed.CollectionInfo.Dependencies {
-		parts := strings.Split(fqdn, ".")
-		if len(parts) != helpers.CollectionNameParts {
-			runtime.Output.Printf("⚠️ Skipping invalid dependency: %s", fqdn)
-			continue
-		}
-		depCol := collection{Namespace: parts[0], Name: parts[1], Version: version, Source: cfg.Server}
-		deps = append(deps, depCol.key())
-		runtime.Output.Printf("🔁 Installing dependency: %s %s", fqdn, version)
-		// MANIFEST-discovered dependencies were never prefetched - only the
-		// top-level resolved collections map is - so there is nothing to hand
-		// off here.
-		if err := installCollection(ctx, depCol, depsCtx, nil, nil, downloadResult{}); err != nil {
-			return nil, fmt.Errorf("failed to install dependency %s: %w", fqdn, err)
-		}
-	}
-	return deps, nil
 }
