@@ -90,3 +90,35 @@ func TestConservativeRelationFence(t *testing.T) {
 		t.Fatalf("Solve error is not a *ConflictError: %v (%T)", err, err)
 	}
 }
+
+// TestExtractResultGuardFiresOnIncompleteResolution pins the interim
+// fail-closed behavior of extractResult's completeness guard against a
+// known, separately-tracked solver defect: this exact input currently
+// backtracks from acme.foo@2.0.0 (whose only dependency, acme.bar>=5.0.0,
+// no registered acme.bar version satisfies) to acme.foo@1.0.0, but the
+// final result still carries a Graph edge to acme.bar without acme.bar
+// itself ever landing in Versions - the silent, incomplete resolution the
+// guard exists to catch. Once the underlying defect is fixed, this exact
+// input is expected to resolve cleanly instead (acme.foo@1.0.0 with
+// acme.bar@1.0.0 present in both Versions and Graph); this test should be
+// updated to assert that success at that point, not deleted, since the
+// guard itself must stay exercised by something.
+func TestExtractResultGuardFiresOnIncompleteResolution(t *testing.T) {
+	t.Parallel()
+	p := newFakeProvider().
+		withVersions("acme.foo", "1.0.0", "2.0.0").
+		withVersions("acme.bar", "1.0.0").
+		withDeps("acme.foo", "2.0.0", map[string]string{"acme.bar": ">=5.0.0"}).
+		withDeps("acme.foo", "1.0.0", map[string]string{"acme.bar": "*"})
+
+	_, err := Solve([]Requirement{{Package: "acme.foo", Constraint: ">=1.0.0"}}, p)
+	if err == nil {
+		t.Fatalf("Solve succeeded; want the completeness guard to fire on this known-incomplete input")
+	}
+	if !errors.Is(err, errSolverBug) {
+		t.Fatalf("error = %v, want errors.Is(err, errSolverBug) (the completeness guard's own sentinel)", err)
+	}
+	if !strings.Contains(err.Error(), "acme.bar") {
+		t.Fatalf("error = %q, want it to name the undecided package acme.bar", err.Error())
+	}
+}

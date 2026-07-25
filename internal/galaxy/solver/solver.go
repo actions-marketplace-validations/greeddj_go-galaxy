@@ -63,7 +63,7 @@ func Solve(reqs []Requirement, p Provider) (*Result, error) {
 			return nil, err
 		}
 		if done {
-			return s.extractResult(), nil
+			return s.extractResult()
 		}
 		next = pkg
 	}
@@ -137,7 +137,15 @@ func (s *solveState) materializePkg(pkg string) error {
 // root: Versions maps each package to its decided version's original
 // string, and Graph maps each package to the sorted dependency names of its
 // causeDependency incompatibilities for that decided (package, version).
-func (s *solveState) extractResult() *Result {
+//
+// Before returning, it asserts every Graph edge target is itself a key in
+// Versions - Result's own documented invariant ("every edge target is
+// itself a key in Versions"). A miss means the solve finished with an edge
+// pointing at a package that was never actually decided: a silent,
+// incomplete resolution that would otherwise under-install a real
+// dependency. Failing loudly here, rather than handing the caller a Result
+// that violates its own contract, is strictly safer than staying silent.
+func (s *solveState) extractResult() (*Result, error) {
 	versions := make(Resolution, len(s.ps.packages))
 	graph := make(map[string][]string, len(s.ps.packages))
 
@@ -150,7 +158,15 @@ func (s *solveState) extractResult() *Result {
 		graph[pkg] = s.decidedDependencyNames(pkg, v)
 	}
 
-	return &Result{Versions: versions, Graph: graph}
+	for pkg, deps := range graph {
+		for _, dep := range deps {
+			if _, ok := versions[dep]; !ok {
+				return nil, fmt.Errorf("resolution graph references an undecided package %q (via %s): %w", dep, pkg, errSolverBug)
+			}
+		}
+	}
+
+	return &Result{Versions: versions, Graph: graph}, nil
 }
 
 // decidedDependencyNames returns the sorted dependency package names
