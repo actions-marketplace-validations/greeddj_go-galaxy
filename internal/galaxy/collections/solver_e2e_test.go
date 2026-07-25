@@ -1,0 +1,198 @@
+package collections_test
+
+// This file (continued from e2e_test.go) closes the end-to-end coverage
+// gaps left after the production resolver switched to the version solver:
+// a plain install whose resolved version is checked directly against the
+// solver's own independent answer, an offline install whose only possible
+// resolution genuinely conflicts and must carry the offline note, and a
+// fully unsatisfiable requirement set surfacing the solver's own proof all
+// the way out of collections.Start.
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/greeddj/go-galaxy/cmd/go-galaxy/exitcode"
+	"github.com/greeddj/go-galaxy/internal/galaxy/collections"
+	"github.com/greeddj/go-galaxy/internal/galaxy/config"
+	"github.com/greeddj/go-galaxy/internal/galaxy/fetch"
+	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
+	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
+	"github.com/greeddj/go-galaxy/internal/galaxy/solver"
+	"github.com/greeddj/go-galaxy/internal/galaxy/store"
+	"github.com/greeddj/go-galaxy/internal/testing/fakegalaxy"
+)
+
+// e2eVersion200 is this file's dominant test fixture version literal,
+// pulled out as a const purely to satisfy goconst.
+const e2eVersion200 = "2.0.0"
+
+// writeRequirementsWithConstraint writes a requirements.yml at path
+// requiring name at the given constraint - the single-collection variant of
+// writeRequirements with a caller-chosen constraint instead of the fixed
+// "*".
+func writeRequirementsWithConstraint(t *testing.T, path, name, constraint string) {
+	t.Helper()
+	content := "collections:\n  - name: " + name + "\n    version: \"" + constraint + "\"\n"
+	if err := os.WriteFile(path, []byte(content), helpers.FileMod); err != nil {
+		t.Fatalf("write requirements.yml: %v", err)
+	}
+}
+
+// TestPlainInstallResolvesThroughSolverVersionSelection asserts a plain
+// install with a real version choice (acme.lib registers three versions,
+// all satisfying acme.app's ">=1.0.0" dependency) installs the highest one,
+// and cross-checks the installed version directly against an independent
+// solver.Solve call driven through the same MetadataProvider the pipeline
+// itself uses - proving the pipeline's resolution is exactly the solver's
+// own answer, not some other selection logic.
+func TestPlainInstallResolvesThroughSolverVersionSelection(t *testing.T) {
+	t.Parallel()
+	f := newE2EFixture(t)
+	f.server.AddVersion("acme", "lib", "1.5.0", nil)
+	f.server.AddVersion("acme", "lib", e2eVersion200, nil)
+
+	if err := collections.Start(context.Background(), f.cfg, f.runtime); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	assertManifestInstalled(t, f.downloadPath, "app")
+	assertManifestInstalled(t, f.downloadPath, "lib")
+	installedLibVersion := readManifestVersion(t, f.downloadPath, "lib")
+
+	provider := collections.NewMetadataProvider(context.Background(), f.cfg, f.runtime, store.New(), nil)
+	result, err := solver.Solve([]solver.Requirement{{Package: "acme.app", Constraint: "*"}}, provider)
+	if err != nil {
+		t.Fatalf("solver.Solve: %v", err)
+	}
+	wantLibVersion := result.Versions["acme.lib"]
+	if wantLibVersion == "" {
+		t.Fatalf("solver.Solve did not resolve acme.lib at all: %v", result.Versions)
+	}
+	if installedLibVersion != wantLibVersion {
+		t.Fatalf("installed acme.lib version = %q, want the solver's own choice %q", installedLibVersion, wantLibVersion)
+	}
+	if installedLibVersion != e2eVersion200 {
+		t.Fatalf("installed acme.lib version = %q, want 2.0.0 (the highest registered version satisfying >=1.0.0)", installedLibVersion)
+	}
+}
+
+// TestConflictingRequirementsSurfaceSolverProof asserts a fully unsatisfiable
+// requirement set (two roots depending on the same package through
+// mutually-exclusive version ranges) makes collections.Start fail with the
+// solver's own *solver.ConflictError, classifiable as
+// helpers.ErrNoVersionSatisfiesConstraints and exitcode.ExitResolution, and
+// carrying a proof ending in "version solving failed" - before anything is
+// installed.
+func TestConflictingRequirementsSurfaceSolverProof(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cacheDir := filepath.Join(root, "cache")
+	downloadPath := filepath.Join(root, "install")
+	reqPath := filepath.Join(root, "requirements.yml")
+	writeRequirementsMulti(t, reqPath, "acme.x", "acme.y")
+
+	s := fakegalaxy.New(t)
+	s.AddVersion("acme", "x", "1.0.0", map[string]string{"acme.z": "^1.0.0"})
+	s.AddVersion("acme", "y", "1.0.0", map[string]string{"acme.z": "^2.0.0"})
+	s.AddVersion("acme", "z", "1.0.0", nil)
+	s.AddVersion("acme", "z", e2eVersion200, nil)
+
+	cfg := &config.Config{
+		Server:           s.URL(),
+		CacheDir:         cacheDir,
+		DownloadPath:     downloadPath,
+		RequirementsFile: reqPath,
+		Workers:          4,
+		Timeout:          e2eTimeout,
+	}
+	runtime := infra.New(noopPrinter{}, s.Client())
+
+	err := collections.Start(context.Background(), cfg, runtime)
+	if err == nil {
+		t.Fatal("expected a conflict, got a successful install")
+	}
+	var conflictErr *solver.ConflictError
+	if !errors.As(err, &conflictErr) {
+		t.Fatalf("Start error is not a *solver.ConflictError: %v (%T)", err, err)
+	}
+	if !errors.Is(err, helpers.ErrNoVersionSatisfiesConstraints) {
+		t.Fatalf("errors.Is(err, ErrNoVersionSatisfiesConstraints) = false")
+	}
+	if got := exitcode.FromError(err); got != exitcode.ExitResolution {
+		t.Fatalf("exitcode.FromError(err) = %d, want ExitResolution (%d)", got, exitcode.ExitResolution)
+	}
+	if proof := conflictErr.Error(); !strings.Contains(proof, "version solving failed") {
+		t.Fatalf("proof %q does not contain \"version solving failed\"", proof)
+	}
+	assertPathAbsent(t, installPathFor(downloadPath, "x"))
+	assertPathAbsent(t, installPathFor(downloadPath, "y"))
+}
+
+// TestOfflineConflictCarriesTheOfflineNote asserts that an offline install
+// whose only possible resolution is genuinely unsatisfiable, using nothing
+// but already-cached metadata, fails with a *solver.ConflictError annotated
+// with the offline note, while staying classifiable as
+// helpers.ErrNoVersionSatisfiesConstraints and exitcode.ExitResolution.
+func TestOfflineConflictCarriesTheOfflineNote(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cacheDir := filepath.Join(root, "cache")
+	downloadPath := filepath.Join(root, "install")
+	reqPath := filepath.Join(root, "requirements.yml")
+
+	s := fakegalaxy.New(t)
+	s.AddVersion("acme", "thing", "1.0.0", nil)
+	s.AddVersion("acme", "thing", "1.5.0", nil)
+
+	cfg := &config.Config{
+		Server:           s.URL(),
+		CacheDir:         cacheDir,
+		DownloadPath:     downloadPath,
+		RequirementsFile: reqPath,
+		Workers:          4,
+		Timeout:          e2eTimeout,
+	}
+	runtime := infra.New(noopPrinter{}, s.Client())
+
+	// Warm the cache online: acme.thing's highest_version (1.5.0) does not
+	// satisfy "!=1.5.0", forcing a full versions-list fetch (not just the
+	// highest_version probe) that caches every registered version's own
+	// existence before the requirement changes below.
+	writeRequirementsWithConstraint(t, reqPath, "acme.thing", "!=1.5.0")
+	if err := collections.Start(context.Background(), cfg, runtime); err != nil {
+		t.Fatalf("first Start (online, populate the cache): %v", err)
+	}
+	assertManifestInstalled(t, downloadPath, "thing")
+
+	// Now require a version no cached candidate satisfies, and go offline:
+	// the solver must determine this is unsatisfiable using only the
+	// already-cached versions list, never touching the network.
+	writeRequirementsWithConstraint(t, reqPath, "acme.thing", ">=2.0.0")
+	cfg.Offline = true
+	runtime.HTTP = fetch.NewOffline(cfg.Timeout)
+	if err := os.RemoveAll(downloadPath); err != nil {
+		t.Fatalf("remove downloadPath before the offline conflict run: %v", err)
+	}
+
+	err := collections.Start(context.Background(), cfg, runtime)
+	if err == nil {
+		t.Fatal("expected an offline conflict, got a successful install")
+	}
+	var conflictErr *solver.ConflictError
+	if !errors.As(err, &conflictErr) {
+		t.Fatalf("Start error is not a *solver.ConflictError: %v (%T)", err, err)
+	}
+	if !strings.Contains(err.Error(), "offline mode restricts resolution to cached metadata") {
+		t.Fatalf("error %q does not carry the offline note", err.Error())
+	}
+	if !errors.Is(err, helpers.ErrNoVersionSatisfiesConstraints) {
+		t.Fatalf("errors.Is(err, ErrNoVersionSatisfiesConstraints) = false")
+	}
+	if got := exitcode.FromError(err); got != exitcode.ExitResolution {
+		t.Fatalf("exitcode.FromError(err) = %d, want ExitResolution (%d)", got, exitcode.ExitResolution)
+	}
+}
