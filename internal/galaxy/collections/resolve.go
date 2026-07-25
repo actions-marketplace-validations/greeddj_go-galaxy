@@ -455,7 +455,7 @@ func resolveOne(ctx context.Context, deps collectionDeps, task resolveTask) reso
 		return resolveResult{FQDN: task.FQDN, Namespace: task.Namespace, Name: task.Name, Err: err}
 	}
 
-	depMap, err := parseDependencies(extractDependencies(versionInfo), err)
+	depMap, err := parseDependencies(extractDependencies(versionInfo))
 	if err != nil {
 		return resolveResult{
 			FQDN:      task.FQDN,
@@ -548,11 +548,11 @@ func extractDependencies(info *types.GalaxyCollectionVersionInfo) map[string]str
 	return info.Manifest.CollectionInfo.Dependencies
 }
 
-func parseDependencies(deps map[string]string, baseErr error) (map[string]string, error) {
-	parsedDeps := make(map[string]string)
+func parseDependencies(deps map[string]string) (map[string]string, error) {
+	parsedDeps := make(map[string]string, len(deps))
 	for dep, constraint := range deps {
 		if _, _, ok := helpers.SplitFQDN(dep); !ok {
-			return nil, fmt.Errorf("invalid dependency key %q: %w", dep, baseErr)
+			return nil, fmt.Errorf("%w: %q", helpers.ErrInvalidDependencyKey, dep)
 		}
 		parsedDeps[dep] = strings.TrimSpace(constraint)
 	}

@@ -183,6 +183,29 @@ func TestSelectVersionLenientFullSatisfactionWins(t *testing.T) {
 	}
 }
 
+func TestParseDependenciesMalformedKey(t *testing.T) {
+	t.Parallel()
+	_, err := parseDependencies(map[string]string{"notanfqdn": ">=1.0.0"})
+	if err == nil {
+		t.Fatalf("expected error for malformed dependency key")
+	}
+	if !errors.Is(err, helpers.ErrInvalidDependencyKey) {
+		t.Fatalf("expected ErrInvalidDependencyKey, got %v", err)
+	}
+}
+
+func TestParseDependenciesWellFormed(t *testing.T) {
+	t.Parallel()
+	got, err := parseDependencies(map[string]string{"ns.name": "  >=1.0.0  "})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := map[string]string{"ns.name": ">=1.0.0"}
+	if len(got) != len(want) || got["ns.name"] != want["ns.name"] {
+		t.Fatalf("expected %v, got %v", want, got)
+	}
+}
+
 func assertLevel(t *testing.T, got []string, want []string) {
 	t.Helper()
 	if len(got) != len(want) {

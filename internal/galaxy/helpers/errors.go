@@ -110,6 +110,9 @@ var (
 	ErrUnsupportedCollectionFormat = errors.New("unsupported collection format")
 	// ErrInvalidCollectionName indicates a collection name is invalid.
 	ErrInvalidCollectionName = errors.New("invalid collection name")
+	// ErrInvalidDependencyKey indicates a dependency map key is not a valid
+	// "namespace.name" FQDN.
+	ErrInvalidDependencyKey = errors.New("invalid dependency key")
 	// ErrConflictingNamespaceName indicates an explicit namespace was given
 	// alongside a dotted collection name, which would otherwise silently
 	// install a different collection than either field implies alone.
