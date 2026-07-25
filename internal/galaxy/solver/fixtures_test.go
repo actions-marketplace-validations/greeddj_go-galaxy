@@ -281,6 +281,41 @@ func TestFixtureUnknownPackage(t *testing.T) {
 	}
 }
 
+// unknownPackageTransitiveProvider builds a provider where root's own
+// dependency resolves fine, but that dependency in turn requires a package
+// the provider has never heard of.
+func unknownPackageTransitiveProvider() *fakeProvider {
+	return newFakeProvider().
+		withVersions("foo", "1.0.0").
+		withDeps("foo", "1.0.0", map[string]string{"ghost": "^2.0.0"})
+}
+
+// TestFixtureUnknownPackageTransitive pins that a transitively-required
+// unknown package still resolves to a *ConflictError whose proof names the
+// no-published-versions leaf exactly once, not the degenerate
+// self-resolution's duplicate.
+func TestFixtureUnknownPackageTransitive(t *testing.T) {
+	t.Parallel()
+	p := unknownPackageTransitiveProvider()
+	_, err := Solve([]Requirement{{Package: "foo", Constraint: "^1.0.0"}}, p)
+	var conflictErr *ConflictError
+	if !errors.As(err, &conflictErr) {
+		t.Fatalf("Solve error is not a *ConflictError: %v (%T)", err, err)
+	}
+	if !errors.Is(err, helpers.ErrNoVersionSatisfiesConstraints) {
+		t.Fatalf("errors.Is(err, ErrNoVersionSatisfiesConstraints) = false")
+	}
+	proof := strings.Join(conflictErr.ProofLines(), "\n")
+	requireContains(t, proof, "ghost has no published versions")
+	if strings.Contains(proof, "versions and ghost has no published versions") {
+		t.Fatalf("proof still duplicates the no-versions leaf:\n%s", proof)
+	}
+	last := lastNonEmpty(conflictErr.ProofLines())
+	if !strings.HasPrefix(last, "So,") || !strings.HasSuffix(last, "version solving failed.") {
+		t.Fatalf("final proof line = %q, want prefix \"So,\" and suffix \"version solving failed.\"", last)
+	}
+}
+
 // TestHintPrereleaseOnly covers the prerelease-only hint: a package that
 // publishes exclusively prereleases can never satisfy a plain constraint.
 func TestHintPrereleaseOnly(t *testing.T) {
@@ -389,6 +424,11 @@ func TestDeterminism(t *testing.T) {
 		{
 			name: "unknown-package", build: newFakeProvider,
 			reqs:    []Requirement{{Package: "ghost", Constraint: "^1.0.0"}},
+			wantErr: true,
+		},
+		{
+			name: "unknown-transitive", build: unknownPackageTransitiveProvider,
+			reqs:    []Requirement{{Package: "foo", Constraint: "^1.0.0"}},
 			wantErr: true,
 		},
 	}

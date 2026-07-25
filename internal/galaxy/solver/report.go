@@ -205,7 +205,7 @@ func (b *reportBuilder) renderNode(s *solveState, inc *incompatibility, final bo
 		}
 		line = b.renderOneDerived(s, inc, derived, external)
 	default:
-		line = fmt.Sprintf("Because %s and %s, %s.", s.describe(cc.Left), s.describe(cc.Right), s.describe(inc))
+		line = renderBothExternal(s, cc, inc)
 	}
 
 	b.rendered[inc] = true
@@ -218,6 +218,21 @@ func (b *reportBuilder) renderNode(s *solveState, inc *incompatibility, final bo
 		b.lineOf[inc] = b.nextLine
 		b.lines[len(b.lines)-1] = fmt.Sprintf("%s (%d)", line, b.nextLine)
 	}
+}
+
+// renderBothExternal renders inc's line when both of cc's causes are
+// external: the ordinary two-cause conjunction, or - when cc.Left and
+// cc.Right are the very same incompatibility (a degenerate self-resolution,
+// e.g. an unknown-package leaf whose own derived negation re-conflicts with
+// it) - the single cause once, instead of "<X> and <X>". This relies on
+// incompatStore's content dedup making two content-identical
+// incompatibilities the same pointer, so the equality check is exact
+// pointer identity, never describe-string equality.
+func renderBothExternal(s *solveState, cc causeConflict, inc *incompatibility) string {
+	if cc.Left == cc.Right {
+		return fmt.Sprintf("Because %s, %s.", s.describe(cc.Left), s.describe(inc))
+	}
+	return fmt.Sprintf("Because %s and %s, %s.", s.describe(cc.Left), s.describe(cc.Right), s.describe(inc))
 }
 
 // renderBothDerived implements the numbered algorithm's case 1: inc is

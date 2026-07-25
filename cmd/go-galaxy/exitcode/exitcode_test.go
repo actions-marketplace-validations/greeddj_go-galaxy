@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
+	"github.com/greeddj/go-galaxy/internal/galaxy/solver"
 )
 
 // errTestGeneric is an unrecognized sentinel used to exercise the default
@@ -80,6 +81,20 @@ func TestFromError(t *testing.T) {
 				t.Errorf("FromError(%v) = %d, want %d", tt.err, got, tt.wantCode)
 			}
 		})
+	}
+}
+
+// TestSolverConflictMapsToResolution pins that a *solver.ConflictError, the
+// error type the version solver returns for an unsatisfiable requirement
+// set, classifies as ExitResolution - both bare and wrapped, matching
+// through errors.Is via ConflictError's own Is method.
+func TestSolverConflictMapsToResolution(t *testing.T) {
+	err := error(&solver.ConflictError{})
+	if got := FromError(err); got != ExitResolution {
+		t.Fatalf("FromError(*solver.ConflictError) = %d, want ExitResolution (%d)", got, ExitResolution)
+	}
+	if got := FromError(fmt.Errorf("resolve: %w", err)); got != ExitResolution {
+		t.Fatalf("FromError(wrapped) = %d, want ExitResolution (%d)", got, ExitResolution)
 	}
 }
 
