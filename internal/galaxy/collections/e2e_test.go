@@ -447,3 +447,88 @@ func findLockEntry(t *testing.T, lf *lockfile.File, name string) lockfile.Entry 
 	t.Fatalf("lockfile has no entry named %q", name)
 	return lockfile.Entry{}
 }
+
+// writeRequirementsMulti writes a requirements.yml at path listing every name
+// in names at version "*" - the multi-collection variant of
+// writeRequirements, used to force requirements to change between two runs
+// that share a cache.
+func writeRequirementsMulti(t *testing.T, path string, names ...string) {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString("collections:\n")
+	for _, name := range names {
+		b.WriteString("  - name: ")
+		b.WriteString(name)
+		b.WriteString("\n    version: \"*\"\n")
+	}
+	if err := os.WriteFile(path, []byte(b.String()), helpers.FileMod); err != nil {
+		t.Fatalf("write requirements.yml: %v", err)
+	}
+}
+
+// TestNoDepsSnapshotNotReusedByDepsRun proves the full-match snapshot-reuse
+// path (loadResolvedFromSnapshot, gated by RequirementsHash) cannot serve a
+// --no-deps snapshot - roots only, nil graph edges - to a later run that
+// resolves the full dependency graph. Before the fix, requirementsSignatureFromSpec
+// did not encode the --no-deps mode, so the second run's identical (in every
+// field the old signature hashed) requirements matched the stored hash and
+// reused the --no-deps graph verbatim, silently skipping acme.lib.
+func TestNoDepsSnapshotNotReusedByDepsRun(t *testing.T) {
+	t.Parallel()
+	f := newE2EFixture(t)
+	f.cfg.NoDeps = true
+
+	if err := collections.Start(context.Background(), f.cfg, f.runtime); err != nil {
+		t.Fatalf("first Start (--no-deps, populate the snapshot): %v", err)
+	}
+	assertManifestInstalled(t, f.downloadPath, "app")
+	assertPathAbsent(t, installPathFor(f.downloadPath, "lib"))
+
+	if err := os.RemoveAll(f.downloadPath); err != nil {
+		t.Fatalf("remove downloadPath before the deps-following run: %v", err)
+	}
+	f.cfg.NoDeps = false
+
+	if err := collections.Start(context.Background(), f.cfg, f.runtime); err != nil {
+		t.Fatalf("second Start (deps-following, must not reuse the --no-deps snapshot): %v", err)
+	}
+
+	assertManifestInstalled(t, f.downloadPath, "app")
+	assertManifestInstalled(t, f.downloadPath, "lib")
+}
+
+// TestNoDepsSnapshotNotReusedIncrementally proves the incremental snapshot-
+// reuse path (tryIncrementalResolve) cannot preserve a --no-deps root's
+// nil-deps graph entry across a mode change either. Adding acme.tool as a
+// second, previously-unseen root alongside the unchanged acme.app root is
+// what routes resolution through tryIncrementalResolve rather than
+// loadResolvedFromSnapshot: before the fix, tryIncrementalResolve checked
+// only per-root spec equality against RequirementsSnapshot and never
+// consulted RequirementsHash, so it happily preserved acme.app's --no-deps
+// (nil-deps) snapshot entry, silently skipping acme.lib.
+func TestNoDepsSnapshotNotReusedIncrementally(t *testing.T) {
+	t.Parallel()
+	f := newE2EFixture(t)
+	f.server.AddVersion("acme", "tool", "1.0.0", nil)
+	f.cfg.NoDeps = true
+
+	if err := collections.Start(context.Background(), f.cfg, f.runtime); err != nil {
+		t.Fatalf("first Start (--no-deps, populate the snapshot): %v", err)
+	}
+	assertManifestInstalled(t, f.downloadPath, "app")
+	assertPathAbsent(t, installPathFor(f.downloadPath, "lib"))
+
+	writeRequirementsMulti(t, f.cfg.RequirementsFile, "acme.app", "acme.tool")
+	if err := os.RemoveAll(f.downloadPath); err != nil {
+		t.Fatalf("remove downloadPath before the deps-following run: %v", err)
+	}
+	f.cfg.NoDeps = false
+
+	if err := collections.Start(context.Background(), f.cfg, f.runtime); err != nil {
+		t.Fatalf("second Start (deps-following, must not incrementally reuse the --no-deps snapshot): %v", err)
+	}
+
+	assertManifestInstalled(t, f.downloadPath, "app")
+	assertManifestInstalled(t, f.downloadPath, "lib")
+	assertManifestInstalled(t, f.downloadPath, "tool")
+}

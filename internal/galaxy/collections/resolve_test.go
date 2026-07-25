@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 )
 
@@ -219,5 +220,48 @@ func assertLevel(t *testing.T, got []string, want []string) {
 		if gotCopy[i] != wantCopy[i] {
 			t.Fatalf("expected %v, got %v", want, got)
 		}
+	}
+}
+
+// TestRequirementsSignatureModePartition proves the requirements signature
+// partitions --no-deps snapshots from deps-following ones, and stays
+// order-independent within a single mode. This is what makes a --no-deps
+// resolve unable to satisfy (or be satisfied by) a deps-following resolve's
+// RequirementsHash check.
+func TestRequirementsSignatureModePartition(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Server: "https://galaxy.example.com"}
+	rootsForward := []collection{
+		{Namespace: "acme", Name: "app", Constraint: ">=1.0.0"},
+		{Namespace: "acme", Name: "lib", Constraint: ">=2.0.0"},
+	}
+	rootsReversed := []collection{
+		{Namespace: "acme", Name: "lib", Constraint: ">=2.0.0"},
+		{Namespace: "acme", Name: "app", Constraint: ">=1.0.0"},
+	}
+
+	specForward := buildRequirementsSpec(cfg, rootsForward)
+	specReversed := buildRequirementsSpec(cfg, rootsReversed)
+
+	depsSigForward := requirementsSignatureFromSpec(specForward, false)
+	depsSigReversed := requirementsSignatureFromSpec(specReversed, false)
+	if depsSigForward != depsSigReversed {
+		t.Fatalf("deps-mode signature is order-dependent: %q != %q", depsSigForward, depsSigReversed)
+	}
+	if depsSigForward != requirementsSignatureFromSpec(specForward, false) {
+		t.Fatalf("deps-mode signature is not deterministic across repeated calls")
+	}
+
+	noDepsSigForward := requirementsSignatureFromSpec(specForward, true)
+	noDepsSigReversed := requirementsSignatureFromSpec(specReversed, true)
+	if noDepsSigForward != noDepsSigReversed {
+		t.Fatalf("no-deps-mode signature is order-dependent: %q != %q", noDepsSigForward, noDepsSigReversed)
+	}
+	if noDepsSigForward != requirementsSignatureFromSpec(specForward, true) {
+		t.Fatalf("no-deps-mode signature is not deterministic across repeated calls")
+	}
+
+	if depsSigForward == noDepsSigForward {
+		t.Fatalf("expected --no-deps and deps-following signatures to differ, both got %q", depsSigForward)
 	}
 }

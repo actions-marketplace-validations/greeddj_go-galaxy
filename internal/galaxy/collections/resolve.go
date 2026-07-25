@@ -55,7 +55,7 @@ func resolveCollectionsInternal(
 	}
 
 	reqSpec := buildRequirementsSpec(cfg, roots)
-	reqHash := requirementsSignatureFromSpec(reqSpec)
+	reqHash := requirementsSignatureFromSpec(reqSpec, cfg.NoDeps)
 
 	snapshotAllowed := allowSnapshot && st != nil
 	if snapshotAllowed {
@@ -166,7 +166,7 @@ func resolveWithoutDeps(
 
 	if record && st != nil {
 		spec := buildRequirementsSpec(cfg, roots)
-		recordResolution(st, resolved, graph, requirementsSignatureFromSpec(spec), cfg.Server, spec)
+		recordResolution(st, resolved, graph, requirementsSignatureFromSpec(spec, cfg.NoDeps), cfg.Server, spec)
 	}
 	return resolved, graph, nil
 }
@@ -1281,6 +1281,17 @@ func tryIncrementalResolve(
 		return nil, nil, false, nil
 	}
 
+	// The stored spec alone does not carry the --no-deps mode it was resolved
+	// under (RequirementsSnapshot is just the per-root spec map), so recompute
+	// its signature in the CURRENT run's mode and require it to match the
+	// persisted hash. A --no-deps snapshot (roots only, nil graph edges) then
+	// never matches a deps-following recompute, and vice versa: the mismatch
+	// falls through to a fresh resolve instead of silently preserving a graph
+	// shape from the other mode.
+	if requirementsSignatureFromSpec(prevSpec, deps.cfg.NoDeps) != deps.st.MetaSnapshot().RequirementsHash {
+		return nil, nil, false, nil
+	}
+
 	unchangedRoots, changedRoots := splitRootsByChange(roots, currentSpec, prevSpec)
 	if len(unchangedRoots) == 0 || len(changedRoots) == 0 {
 		return nil, nil, false, nil
@@ -1562,7 +1573,14 @@ func buildRequirementsSpec(cfg *config.Config, roots []collection) map[string]re
 }
 
 // requirementsSignatureFromSpec returns a stable signature of requirements.
-func requirementsSignatureFromSpec(spec map[string]requirementSpec) string {
+// noDeps folds the --no-deps resolution mode into the signature via a
+// fixed-position header line, so a snapshot resolved without following
+// dependencies (roots only, nil graph edges) can never match - and therefore
+// never be reused by - a later run that resolves the full dependency graph,
+// and vice versa. The header has zero "|" separators, unlike every per-root
+// line (which has four), so it cannot collide with one; it is prepended
+// rather than sorted into parts so the per-root ordering stays deterministic.
+func requirementsSignatureFromSpec(spec map[string]requirementSpec, noDeps bool) string {
 	parts := make([]string, 0, len(spec))
 	for fqdn, entry := range spec {
 		constraint := entry.Constraint
@@ -1573,7 +1591,8 @@ func requirementsSignatureFromSpec(spec map[string]requirementSpec) string {
 		parts = append(parts, fmt.Sprintf("%s|%s|%s|%s|%s", fqdn, constraint, entry.Source, entry.Type, signatureKey))
 	}
 	sort.Strings(parts)
-	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	header := fmt.Sprintf("no-deps=%t", noDeps)
+	sum := sha256.Sum256([]byte(header + "\n" + strings.Join(parts, "\n")))
 	return hex.EncodeToString(sum[:])
 }
 
