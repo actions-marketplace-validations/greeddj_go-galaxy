@@ -36,10 +36,10 @@ type Backend struct {
 // New creates an S3-backed cache backend for the given config.
 func New(cfg config.S3CacheConfig, httpClient *http.Client, tempDir string) (*Backend, error) {
 	if cfg.Bucket == "" {
-		return nil, errS3BucketIsEmpty
+		return nil, errS3BucketEmpty
 	}
 	if httpClient == nil {
-		return nil, errS3HttpClientIsNil
+		return nil, errS3HTTPClientNil
 	}
 	if tempDir == "" {
 		tempDir = os.TempDir()

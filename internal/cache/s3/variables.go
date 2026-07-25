@@ -6,8 +6,6 @@ import (
 )
 
 var (
-	errS3BucketIsEmpty             = errors.New("s3 bucket is empty")
-	errS3HttpClientIsNil           = errors.New("s3 http client is nil")
 	errS3LockLost                  = errors.New("s3 lock ownership was lost to another holder")
 	errS3LockWaitTimeout           = errors.New("s3 lock wait ceiling exceeded")
 	errS3TokenGeneration           = errors.New("s3 lock token generation failed")
