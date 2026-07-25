@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Masterminds/semver"
+	"github.com/Masterminds/semver/v3"
 	cacheManager "github.com/greeddj/go-galaxy/internal/galaxy/cache"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
@@ -907,7 +907,7 @@ func resolveNonExactVersion(
 func parseConstraints(list []string) ([]*semver.Constraints, error) {
 	result := make([]*semver.Constraints, 0, len(list))
 	for _, raw := range list {
-		normalized := normalizeConstraint(raw)
+		normalized := helpers.NormalizeConstraint(raw)
 		if normalized == "" {
 			continue
 		}
@@ -922,7 +922,7 @@ func parseConstraints(list []string) ([]*semver.Constraints, error) {
 
 // addRootConstraint records a constraint for a root collection.
 func addRootConstraint(depConstraints map[string]map[string]string, fqdn, version string) error {
-	constraint := normalizeConstraint(version)
+	constraint := helpers.NormalizeConstraint(version)
 	if constraint == "" {
 		return nil
 	}
@@ -1002,15 +1002,6 @@ func collectionVersionsURL(col collection) string {
 	return fmt.Sprintf("%s/api/v3/collections/%s/%s/versions/", base, col.Namespace, col.Name)
 }
 
-// normalizeConstraint trims and normalizes a version constraint.
-func normalizeConstraint(value string) string {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" || trimmed == "*" {
-		return ""
-	}
-	return trimmed
-}
-
 // normalizeSignatures trims, sorts, and filters signatures.
 func normalizeSignatures(signatures []string) []string {
 	if len(signatures) == 0 {
@@ -1033,7 +1024,7 @@ func normalizeSignatures(signatures []string) []string {
 
 // normalizeRequirementConstraint normalizes a constraint for hashing.
 func normalizeRequirementConstraint(value string) string {
-	normalized := normalizeConstraint(value)
+	normalized := helpers.NormalizeConstraint(value)
 	if normalized == "" {
 		return "*"
 	}
@@ -1062,7 +1053,7 @@ func requirementSpecEqual(a, b requirementSpec) bool {
 func exactVersionFromConstraints(constraints []string) (string, bool, error) {
 	exact := ""
 	for _, raw := range constraints {
-		normalized := normalizeConstraint(raw)
+		normalized := helpers.NormalizeConstraint(raw)
 		if normalized == "" {
 			continue
 		}
@@ -1581,7 +1572,7 @@ func filterGraphSnapshot(graphSnapshot map[string][]string, resolved map[string]
 
 // constraintSatisfied reports whether version satisfies constraint.
 func constraintSatisfied(version, constraint string) (bool, error) {
-	normalized := normalizeConstraint(constraint)
+	normalized := helpers.NormalizeConstraint(constraint)
 	if normalized == "" {
 		return true, nil
 	}

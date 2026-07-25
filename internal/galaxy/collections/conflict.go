@@ -71,7 +71,7 @@ func constraintSourcesFor(depConstraints map[string]map[string]string, fqdn stri
 	}
 	out := make([]constraintSource, 0, len(sources))
 	for source, c := range sources {
-		normalized := normalizeConstraint(c)
+		normalized := helpers.NormalizeConstraint(c)
 		if normalized == "" {
 			continue
 		}

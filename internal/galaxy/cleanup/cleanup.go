@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Masterminds/semver"
+	"github.com/Masterminds/semver/v3"
 	cacheBackend "github.com/greeddj/go-galaxy/internal/cache"
 	cacheManager "github.com/greeddj/go-galaxy/internal/galaxy/cache"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
@@ -435,15 +435,6 @@ func extractDeps(manifest types.GalaxyCollectionVersionInfoManifest) map[string]
 	return map[string]string{}
 }
 
-// normalizeConstraint normalizes semver constraints for matching.
-func normalizeConstraint(value string) string {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" || trimmed == "*" {
-		return ""
-	}
-	return trimmed
-}
-
 // selectInstalled filters installed collections by constraint. constraints
 // caches each raw constraint string's parsed *semver.Constraints (or nil for
 // an unparseable one) across the whole BFS, so the same requirement string
@@ -459,7 +450,7 @@ func selectInstalled(
 	if len(items) == 0 {
 		return nil
 	}
-	normalized := normalizeConstraint(constraint)
+	normalized := helpers.NormalizeConstraint(constraint)
 	if normalized == "" {
 		return items
 	}
