@@ -10,8 +10,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -341,4 +343,107 @@ func TestOfflineInstall(t *testing.T) {
 			t.Errorf("Total() after the offline warm reinstall = %d, want 0", got)
 		}
 	})
+}
+
+// TestNoDepsUnpinnedInstallsResolvedVersion asserts that --no-deps resolves
+// an unpinned root to a concrete version - the highest registered - rather
+// than keeping the literal "*" constraint as the collection's Version. That
+// concrete version must then flow, as the single source of truth, into the
+// installed MANIFEST.json, the artifact cache key on disk, and a
+// subsequently generated lockfile entry.
+func TestNoDepsUnpinnedInstallsResolvedVersion(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cacheDir := filepath.Join(root, "cache")
+	downloadPath := filepath.Join(root, "install")
+	reqPath := filepath.Join(root, "requirements.yml")
+	writeRequirements(t, reqPath, "acme.solo")
+
+	s := fakegalaxy.New(t)
+	s.AddVersion("acme", "solo", "1.0.0", nil)
+	s.AddVersion("acme", "solo", "2.0.0", nil)
+
+	cfg := &config.Config{
+		Server:           s.URL(),
+		CacheDir:         cacheDir,
+		DownloadPath:     downloadPath,
+		RequirementsFile: reqPath,
+		Workers:          4,
+		Timeout:          e2eTimeout,
+		NoDeps:           true,
+	}
+	runtime := infra.New(noopPrinter{}, s.Client())
+
+	if err := collections.Start(context.Background(), cfg, runtime); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if got := readManifestVersion(t, downloadPath, "solo"); got != "2.0.0" {
+		t.Errorf("installed acme.solo collection_info.version = %q, want %q (the highest registered)", got, "2.0.0")
+	}
+
+	assertNoWildcardArtifactFilenames(t, cacheDir)
+	assertArtifactFilePresent(t, cacheDir, "acme-solo-2.0.0.tar.gz")
+
+	if err := collections.Lock(context.Background(), cfg, runtime); err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+	lockPath := lockfile.ResolveDefaultPath(cfg.RequirementsFile, cfg.LockFile)
+	lf, err := lockfile.Load(lockPath)
+	if err != nil {
+		t.Fatalf("load lockfile: %v", err)
+	}
+	entry := findLockEntry(t, lf, "acme.solo")
+	if entry.Version != "2.0.0" {
+		t.Errorf("lockfile entry version = %q, want %q, not the literal %q constraint", entry.Version, "2.0.0", "*")
+	}
+}
+
+// assertNoWildcardArtifactFilenames walks cacheDir recursively and fails the
+// test if any file name contains a percent-escaped or literal "*" - the
+// telltale sign of an unresolved "*" version constraint having leaked into an
+// artifact cache key (see artifactKey, which url.QueryEscapes the
+// namespace-name-version filename).
+func assertNoWildcardArtifactFilenames(t *testing.T, cacheDir string) {
+	t.Helper()
+	err := filepath.WalkDir(cacheDir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		name := d.Name()
+		if strings.Contains(name, "%2A") || strings.Contains(name, "*") {
+			t.Errorf("found wildcard artifact filename %q under %s", name, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk cacheDir %s: %v", cacheDir, err)
+	}
+}
+
+// assertArtifactFilePresent fails the test unless a file named filename
+// exists directly under cacheDir, where the local artifact backend keys a
+// cached tarball by its (query-escaped) filename.
+func assertArtifactFilePresent(t *testing.T, cacheDir, filename string) {
+	t.Helper()
+	path := filepath.Join(cacheDir, filename)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected cached artifact %s to exist, stat error: %v", path, err)
+	}
+}
+
+// findLockEntry returns the lockfile.Entry named name from lf, failing the
+// test if no such entry exists.
+func findLockEntry(t *testing.T, lf *lockfile.File, name string) lockfile.Entry {
+	t.Helper()
+	for _, e := range lf.Collections {
+		if e.Name == name {
+			return e
+		}
+	}
+	t.Fatalf("lockfile has no entry named %q", name)
+	return lockfile.Entry{}
 }
