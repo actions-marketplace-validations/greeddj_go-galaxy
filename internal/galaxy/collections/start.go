@@ -104,7 +104,7 @@ func warmCollections(
 	collections map[string]collection,
 ) int32 {
 	var failures atomic.Int32
-	depsCtx := newInstallDeps(cfg, runtime, state.store, state.backend.Artifacts(), nil, state.extractStore)
+	depsCtx := newInstallDeps(cfg, runtime, state.store, state.backend.Artifacts(), state.extractStore)
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, cfg.Workers)
 	for _, col := range collections {
@@ -511,7 +511,7 @@ func installLevels(
 	levels [][]string,
 	prefetch *prefetcher,
 ) (int32, error) {
-	depsCtx := newInstallDeps(cfg, runtime, st, artifacts, nil, extractStore)
+	depsCtx := newInstallDeps(cfg, runtime, st, artifacts, extractStore)
 	var failures int32
 	for _, level := range levels {
 		if err := runInstallLevel(ctx, depsCtx, collections, graph, level, prefetch, &failures); err != nil {

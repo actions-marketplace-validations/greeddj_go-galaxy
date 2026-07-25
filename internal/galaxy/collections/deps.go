@@ -6,7 +6,6 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/extracted"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
-	bolt "go.etcd.io/bbolt"
 )
 
 type collectionDeps struct {
@@ -25,7 +24,6 @@ type installDeps struct {
 	collectionDeps
 
 	artifacts    cacheManager.ArtifactStore
-	db           *bolt.DB
 	extractStore *extracted.Store
 }
 
@@ -44,13 +42,11 @@ func newInstallDeps(
 	runtime *infra.Infra,
 	st *store.Store,
 	artifacts cacheManager.ArtifactStore,
-	db *bolt.DB,
 	extractStore *extracted.Store,
 ) installDeps {
 	return installDeps{
 		collectionDeps: newCollectionDeps(cfg, runtime, st),
 		artifacts:      artifacts,
-		db:             db,
 		extractStore:   extractStore,
 	}
 }

@@ -202,7 +202,7 @@ func prefetchOne(
 	// useCache stays true: the artifact must still be committed to the shared
 	// cache for every other consumer (a different project, a later run), on
 	// top of handing its temp off to this run's own install worker.
-	downloadDeps := newInstallDeps(deps.cfg, deps.runtime, deps.st, deps.artifacts, nil, nil)
+	downloadDeps := newInstallDeps(deps.cfg, deps.runtime, deps.st, deps.artifacts, nil)
 	result, err := downloadCollectionToCache(ctx, downloadDeps, artifactKey(col), meta, true)
 	if err != nil {
 		return meta, downloadResult{}, err
