@@ -1,6 +1,7 @@
 package cleanup
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/Masterminds/semver"
 	cacheBackend "github.com/greeddj/go-galaxy/internal/cache"
+	cacheManager "github.com/greeddj/go-galaxy/internal/galaxy/cache"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/extracted"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
@@ -1234,6 +1236,160 @@ func TestRemoveInstalledRemovesInfoDir(t *testing.T) {
 	}
 	if _, statErr := os.Stat(infoDir); !os.IsNotExist(statErr) {
 		t.Fatalf("expected the .info directory to be removed, stat error: %v", statErr)
+	}
+}
+
+// TestRemoveInstalledRefusesNamespaceSymlinkSwap proves the symlink-swap
+// TOCTOU fix: if the namespace directory scanInstalledCollections indexed is
+// replaced by a symlink pointing outside collections_path before
+// removeInstalled runs - exactly the race a concurrent, locally-writable
+// attacker could win against the old, purely lexical os.RemoveAll(
+// inst.InstallPath) call - removeInstalled must not follow it. The lexical
+// WithinDir check alone cannot catch this: the joined InstallPath is still
+// textually inside CollectionsDir even though "ns" now resolves elsewhere on
+// disk. os.Root is what actually closes it: RemoveAll refuses to traverse a
+// symlink that escapes its root, so the outside decoy's sentinel file must
+// survive untouched.
+func TestRemoveInstalledRefusesNamespaceSymlinkSwap(t *testing.T) {
+	t.Parallel()
+	collectionsDir := t.TempDir()
+	seedInstallTree(t, collectionsDir) // real ansible_collections/ns/name/MANIFEST.json
+
+	outsideRoot := t.TempDir()
+	sentinelFile := writeOutsideSentinel(t, outsideRoot, "ns-decoy")
+
+	// Simulate the scan-to-removal race: the real "ns" directory the scan
+	// saw is gone by the time removeInstalled runs, replaced by a symlink to
+	// a directory entirely outside collectionsDir.
+	nsDir := filepath.Join(collectionsDir, "ansible_collections", "ns")
+	if err := os.RemoveAll(nsDir); err != nil {
+		t.Fatalf("failed to remove the real ns dir before swapping it: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(outsideRoot, "ns-decoy"), nsDir); err != nil {
+		t.Fatalf("failed to symlink ns to the outside decoy: %v", err)
+	}
+
+	inst := installedCollection{
+		Key:            "ns.name@1.0.0",
+		FQDN:           "ns.name",
+		Version:        "1.0.0",
+		InstallPath:    filepath.Join(nsDir, "name"),
+		CollectionsDir: collectionsDir,
+	}
+
+	if err := removeInstalled(t.Context(), inst, nil); err == nil {
+		t.Fatalf("expected removeInstalled to refuse to follow the swapped ns symlink, got nil error")
+	}
+	if _, statErr := os.Stat(sentinelFile); statErr != nil {
+		t.Fatalf("expected the outside decoy's sentinel file to survive, stat error: %v", statErr)
+	}
+}
+
+// TestRemoveInstalledRefusesAnsibleCollectionsSymlinkSwap is the sibling of
+// TestRemoveInstalledRefusesNamespaceSymlinkSwap for the other symlink-swap
+// point that matters: the ansible_collections directory itself. Rooting
+// os.Root at inst.CollectionsDir - not at its ansible_collections
+// subdirectory - is what catches this case too: a Root opened one level
+// deeper would never even see this swap, since the escape happens before
+// reaching that deeper root.
+func TestRemoveInstalledRefusesAnsibleCollectionsSymlinkSwap(t *testing.T) {
+	t.Parallel()
+	collectionsDir := t.TempDir()
+
+	outsideRoot := t.TempDir()
+	sentinelFile := writeOutsideSentinel(t, outsideRoot, "ac-decoy")
+
+	// ansible_collections itself never exists as a real directory here - it
+	// is a symlink to a directory entirely outside collectionsDir from the
+	// start, standing in for the moment right after an attacker's swap.
+	acDir := filepath.Join(collectionsDir, "ansible_collections")
+	if err := os.Symlink(filepath.Join(outsideRoot, "ac-decoy"), acDir); err != nil {
+		t.Fatalf("failed to symlink ansible_collections to the outside decoy: %v", err)
+	}
+
+	inst := installedCollection{
+		Key:            "ns.name@1.0.0",
+		FQDN:           "ns.name",
+		Version:        "1.0.0",
+		InstallPath:    filepath.Join(acDir, "ns", "name"),
+		CollectionsDir: collectionsDir,
+	}
+
+	if err := removeInstalled(t.Context(), inst, nil); err == nil {
+		t.Fatalf("expected removeInstalled to refuse to follow the swapped ansible_collections symlink, got nil error")
+	}
+	if _, statErr := os.Stat(sentinelFile); statErr != nil {
+		t.Fatalf("expected the outside decoy's sentinel file to survive, stat error: %v", statErr)
+	}
+}
+
+// errArtifactStoreStubNotImplemented is returned by recordingArtifactStore
+// methods that TestRemoveInstalledDeletesArtifactWhenWorkspaceAbsent never
+// exercises, so an unexpected call fails the test loudly instead of
+// returning a misleadingly successful zero value.
+var errArtifactStoreStubNotImplemented = errors.New("stub: method not implemented")
+
+// recordingArtifactStore is a minimal cacheManager.ArtifactStore test double
+// that records every key passed to Delete. removeInstalled only ever calls
+// Delete on an ArtifactStore, so the other methods are never exercised here.
+type recordingArtifactStore struct {
+	deleted []string
+}
+
+func (a *recordingArtifactStore) Has(context.Context, string) (bool, error) {
+	return false, errArtifactStoreStubNotImplemented
+}
+
+func (a *recordingArtifactStore) Fetch(context.Context, string) (cacheManager.ArtifactFile, error) {
+	return cacheManager.ArtifactFile{}, errArtifactStoreStubNotImplemented
+}
+
+func (a *recordingArtifactStore) TempFile(context.Context, string) (*os.File, func(), error) {
+	return nil, nil, errArtifactStoreStubNotImplemented
+}
+
+func (a *recordingArtifactStore) Commit(
+	context.Context, string, string, map[string]string,
+) (cacheManager.ArtifactFile, error) {
+	return cacheManager.ArtifactFile{}, errArtifactStoreStubNotImplemented
+}
+
+// Delete records key and always succeeds, matching a real ArtifactStore's
+// best-effort use from removeInstalled (its error is ignored there).
+func (a *recordingArtifactStore) Delete(_ context.Context, key string) error {
+	a.deleted = append(a.deleted, key)
+	return nil
+}
+
+// TestRemoveInstalledDeletesArtifactWhenWorkspaceAbsent proves the artifact
+// purge is not gated on the on-disk workspace's presence: when
+// inst.CollectionsDir does not exist at all - e.g. its project's workspace
+// was already removed, or never existed this run - removeInstalled must
+// still call artifacts.Delete with the collection's artifact key rather than
+// returning early before ever reaching the purge. This is the regression a
+// naive "os.IsNotExist -> return nil" placed directly in removeInstalled
+// (instead of in the workspace-only helper) would reintroduce: pre-os.Root,
+// os.RemoveAll on an absent path was itself a silent no-op, so the artifact
+// purge always ran regardless of workspace presence.
+func TestRemoveInstalledDeletesArtifactWhenWorkspaceAbsent(t *testing.T) {
+	t.Parallel()
+	collectionsDir := filepath.Join(t.TempDir(), "does-not-exist")
+	inst := installedCollection{
+		Key:            "ns.name@1.0.0",
+		FQDN:           "ns.name",
+		Version:        "1.0.0",
+		InstallPath:    filepath.Join(collectionsDir, "ansible_collections", "ns", "name"),
+		CollectionsDir: collectionsDir,
+	}
+	artifacts := &recordingArtifactStore{}
+
+	if err := removeInstalled(t.Context(), inst, artifacts); err != nil {
+		t.Fatalf("expected nil error for an absent workspace, got %v", err)
+	}
+
+	wantKey := artifactKey("ns", "name", "1.0.0")
+	if len(artifacts.deleted) != 1 || artifacts.deleted[0] != wantKey {
+		t.Fatalf("expected Delete to be called once with key %q, got %v", wantKey, artifacts.deleted)
 	}
 }
 

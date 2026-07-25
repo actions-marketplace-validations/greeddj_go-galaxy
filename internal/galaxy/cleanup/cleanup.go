@@ -511,12 +511,34 @@ func markReachable(
 
 // removeInstalled deletes collection files and cached artifacts.
 //
-// This is a defense-in-depth check: buildInstalledRecord already rejects any
+// The WithinDir checks in removeInstallPath/removeInfoDir are
+// defense-in-depth: buildInstalledRecord already rejects any
 // namespace/name/version that cannot be safely used as a path element at
-// ingestion, so the containment failures below should never trigger on a
-// record built through the normal scan. If they do, the in-memory state is
+// ingestion, so these containment failures should never trigger on a record
+// built through the normal scan. If they do, the in-memory state is
 // anomalous (e.g. constructed directly rather than scanned), and the safest
 // action is to abort rather than guess which part of the path is untrusted.
+//
+// The load-bearing escape prevention is os.Root, opened in
+// removeWorkspaceFiles: both on-disk deletions are rooted at
+// inst.CollectionsDir (the operator-configured, trusted collections_path)
+// rather than at its ansible_collections subdirectory, so a local attacker
+// who swaps either the ansible_collections directory or the namespace
+// component for a symlink between the scan and this call cannot make either
+// RemoveAll follow it out of the tree - os.Root refuses to traverse a
+// symlink that escapes its root, closing a TOCTOU that a purely lexical
+// WithinDir check cannot catch. A symlink placed deeper - e.g. redirecting
+// the collection's own <ns>/<name> directory to another location still
+// inside collections_path - is not defended here: the attacker already needs
+// workspace write access to plant it, and could just as easily delete that
+// same target directly, so os.Root's guarantee (no escape outside the root)
+// is the property that actually matters.
+//
+// The artifact purge runs after removeWorkspaceFiles regardless of whether
+// the workspace itself was present: the artifact store is independent of the
+// on-disk collections tree, so an absent (or already-swept) workspace must
+// not gate it - otherwise a cached tarball for an unreachable collection
+// would leak whenever its project's workspace happens to be gone this run.
 func removeInstalled(ctx context.Context, inst installedCollection, artifacts cacheManager.ArtifactStore) error {
 	parts := strings.Split(inst.FQDN, ".")
 	if len(parts) != helpers.CollectionNameParts {
@@ -528,31 +550,79 @@ func removeInstalled(ctx context.Context, inst installedCollection, artifacts ca
 		return fmt.Errorf("%w: ns=%q name=%q version=%q", helpers.ErrUnsafeRemovalPath, namespace, name, inst.Version)
 	}
 
-	acRoot := filepath.Join(inst.CollectionsDir, "ansible_collections")
-	if inst.InstallPath != "" {
-		if !helpers.WithinDir(inst.CollectionsDir, inst.InstallPath) {
-			return fmt.Errorf("%w: install path %q escapes %q", helpers.ErrUnsafeRemovalPath, inst.InstallPath, inst.CollectionsDir)
-		}
-		if err := os.RemoveAll(inst.InstallPath); err != nil {
-			return err
-		}
+	if err := removeWorkspaceFiles(inst, namespace, name); err != nil {
+		return err
 	}
-
-	infoDir := filepath.Join(acRoot, fmt.Sprintf("%s.%s-%s.info", namespace, name, inst.Version))
-	// Unreachable by construction (belt-and-suspenders): namespace, name, and
-	// inst.Version were already IsPathElement-checked above, so infoDir is
-	// always a clean single element under acRoot; kept because a future
-	// refactor breaking that containment right before os.RemoveAll would be
-	// catastrophic.
-	if !helpers.WithinDir(acRoot, infoDir) {
-		return fmt.Errorf("%w: info dir %q escapes %q", helpers.ErrUnsafeRemovalPath, infoDir, acRoot)
-	}
-	_ = os.RemoveAll(infoDir)
 
 	if artifacts != nil {
 		key := artifactKey(namespace, name, inst.Version)
 		_ = artifacts.Delete(ctx, key)
 	}
+	return nil
+}
+
+// removeWorkspaceFiles removes the collection's on-disk install directory
+// and .info sidecar, both rooted at inst.CollectionsDir via a single
+// os.Root (see removeInstalled's doc comment for why that root prevents a
+// symlink-swap escape). namespace and name are the already-validated path
+// elements from removeInstalled's caller.
+func removeWorkspaceFiles(inst installedCollection, namespace, name string) error {
+	root, err := os.OpenRoot(inst.CollectionsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// No on-disk workspace files to remove: the collections dir this
+			// record refers to is already gone. The caller still proceeds to
+			// purge the cached artifact - that store is independent of this
+			// workspace's presence.
+			return nil
+		}
+		return err
+	}
+	defer func() { _ = root.Close() }()
+
+	if err := removeInstallPath(root, inst, namespace, name); err != nil {
+		return err
+	}
+	return removeInfoDir(root, inst, namespace, name)
+}
+
+// removeInstallPath removes the collection's own install directory
+// (ansible_collections/<namespace>/<name>) through root, rooted at
+// inst.CollectionsDir, so a symlink swap of either the ansible_collections
+// directory or the namespace component cannot make the removal escape the
+// collections tree. namespace and name are the already-validated path
+// elements from removeInstalled's caller, not derived from inst.InstallPath,
+// so this is what root actually resolves regardless of what InstallPath's
+// raw string looks like.
+func removeInstallPath(root *os.Root, inst installedCollection, namespace, name string) error {
+	if inst.InstallPath == "" {
+		return nil
+	}
+	if !helpers.WithinDir(inst.CollectionsDir, inst.InstallPath) {
+		return fmt.Errorf("%w: install path %q escapes %q", helpers.ErrUnsafeRemovalPath, inst.InstallPath, inst.CollectionsDir)
+	}
+	installRel := filepath.Join("ansible_collections", namespace, name)
+	return root.RemoveAll(installRel)
+}
+
+// removeInfoDir best-effort removes the collection's .info sidecar
+// directory (ansible_collections/<namespace>.<name>-<version>.info) through
+// root, the same way removeInstallPath does. Only the WithinDir containment
+// failure is surfaced as an error; a RemoveAll failure itself is ignored,
+// preserving this call's pre-existing best-effort semantics.
+func removeInfoDir(root *os.Root, inst installedCollection, namespace, name string) error {
+	acRoot := filepath.Join(inst.CollectionsDir, "ansible_collections")
+	infoName := fmt.Sprintf("%s.%s-%s.info", namespace, name, inst.Version)
+	infoDir := filepath.Join(acRoot, infoName)
+	// Unreachable by construction (belt-and-suspenders): namespace, name, and
+	// inst.Version were already IsPathElement-checked by removeInstalled, so
+	// infoDir is always a clean single element under acRoot; kept because a
+	// future refactor breaking that containment right before RemoveAll would
+	// be catastrophic.
+	if !helpers.WithinDir(acRoot, infoDir) {
+		return fmt.Errorf("%w: info dir %q escapes %q", helpers.ErrUnsafeRemovalPath, infoDir, acRoot)
+	}
+	_ = root.RemoveAll(filepath.Join("ansible_collections", infoName))
 	return nil
 }
 
