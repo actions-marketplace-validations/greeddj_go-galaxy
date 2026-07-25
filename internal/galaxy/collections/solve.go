@@ -15,7 +15,8 @@ import (
 // (collection.key()), graph mapping a parent key to its dependency keys. It
 // is not wired into any production path yet - callers opt in explicitly.
 func solveCollections(ctx context.Context, deps collectionDeps, roots []collection) (map[string]collection, map[string][]string, error) {
-	var provider solver.Provider = NewMetadataProvider(ctx, deps.cfg, deps.runtime, deps.st)
+	sources := rootSourceMap(roots, deps.cfg)
+	var provider solver.Provider = NewMetadataProvider(ctx, deps.cfg, deps.runtime, deps.st, sources)
 	if deps.cfg.NoDeps {
 		provider = NewNoDepsProvider(provider)
 	}
@@ -30,6 +31,30 @@ func solveCollections(ctx context.Context, deps collectionDeps, roots []collecti
 		return nil, nil, err
 	}
 	return solverResultToResolvedGraph(result, roots, deps.cfg)
+}
+
+// rootSourceMap builds a root fqdn -> source map from roots: a root's own
+// explicit Source when non-empty, else cfg.Server. This is the reference
+// source mapping (mirroring resolverState.enqueueRoots' own sourceByFQDN
+// seeding): passed straight through to NewMetadataProvider so the version
+// solver fetches every root from the exact server the greedy resolver
+// would, and reused by solverResultToResolvedGraph (via sourceFor) so the
+// resolved collection's own recorded Source always agrees with whichever
+// server actually served it. A transitive dependency is deliberately never
+// a key in the returned map - see sourceFor and MetadataProvider.sourceOf,
+// both of which fall back to cfg.Server for anything absent here, matching
+// greedy's own no-inheritance-from-parent behavior.
+func rootSourceMap(roots []collection, cfg *config.Config) map[string]string {
+	sources := make(map[string]string, len(roots))
+	for _, root := range roots {
+		fqdn := fmt.Sprintf("%s.%s", root.Namespace, root.Name)
+		source := root.Source
+		if source == "" {
+			source = cfg.Server
+		}
+		sources[fqdn] = source
+	}
+	return sources
 }
 
 // buildSolverRequirements builds one solver.Requirement per unique root
@@ -85,6 +110,7 @@ func solverResultToResolvedGraph(
 	roots []collection,
 	cfg *config.Config,
 ) (map[string]collection, map[string][]string, error) {
+	sources := rootSourceMap(roots, cfg)
 	resolved := make(map[string]collection, len(result.Versions))
 	for fqdn, version := range result.Versions {
 		ns, name, ok := helpers.SplitFQDN(fqdn)
@@ -95,7 +121,7 @@ func solverResultToResolvedGraph(
 			Namespace: ns,
 			Name:      name,
 			Version:   version,
-			Source:    sourceFor(fqdn, roots, cfg),
+			Source:    sourceFor(fqdn, sources, cfg),
 		}
 	}
 
@@ -122,15 +148,16 @@ func solverResultToResolvedGraph(
 	return resolved, graph, nil
 }
 
-// sourceFor returns fqdn's install source: the matching root's own explicit
-// Source when one is set, or cfg.Server otherwise. This is a harness-only
-// mapping for the solver slot-in; a non-root dependency's own registry
-// source is not modeled here.
-func sourceFor(fqdn string, roots []collection, cfg *config.Config) string {
-	for _, root := range roots {
-		if fmt.Sprintf("%s.%s", root.Namespace, root.Name) == fqdn && root.Source != "" {
-			return root.Source
-		}
+// sourceFor returns fqdn's install source given the precomputed root source
+// map (rootSourceMap): that map's own entry when fqdn is a root, or
+// cfg.Server otherwise - the same reference mapping MetadataProvider's
+// sourceOf uses, so the server that actually served fqdn and the Source
+// recorded on its resolved collection always agree. A transitive dependency
+// (any fqdn absent from sources) always resolves to cfg.Server; there is no
+// source inheritance from whichever parent(s) require it.
+func sourceFor(fqdn string, sources map[string]string, cfg *config.Config) string {
+	if source, ok := sources[fqdn]; ok {
+		return source
 	}
 	return cfg.Server
 }

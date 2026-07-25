@@ -30,14 +30,27 @@ type MetadataProvider struct {
 	//nolint:containedctx // required: solver.Provider has no ctx parameter of its own to thread through instead.
 	ctx  context.Context
 	deps collectionDeps
+	// sources maps a root fqdn to its explicit install source, mirroring
+	// greedy resolution's own reference behavior (see sourceOf): a nil or
+	// empty map means every fqdn - root or transitive dependency alike -
+	// resolves against deps.cfg.Server, the prior (pre-source-aware) behavior.
+	sources map[string]string
 }
 
 // NewMetadataProvider builds a MetadataProvider sharing cfg/runtime/st with
 // the rest of the install pipeline, so its cache reads and writes land in
 // the exact same Store buckets resolveOne and loadCollectionMetadata use -
-// a warm entry written by either path satisfies the other.
-func NewMetadataProvider(ctx context.Context, cfg *config.Config, runtime *infra.Infra, st *store.Store) *MetadataProvider {
-	return &MetadataProvider{ctx: ctx, deps: newCollectionDeps(cfg, runtime, st)}
+// a warm entry written by either path satisfies the other. sources maps a
+// root fqdn to its explicit install source (see sourceOf); passing nil (or
+// an empty map) means every fqdn resolves against cfg.Server.
+func NewMetadataProvider(
+	ctx context.Context,
+	cfg *config.Config,
+	runtime *infra.Infra,
+	st *store.Store,
+	sources map[string]string,
+) *MetadataProvider {
+	return &MetadataProvider{ctx: ctx, deps: newCollectionDeps(cfg, runtime, st), sources: sources}
 }
 
 // Highest returns fqdn's registry-reported highest_version, with no
@@ -112,7 +125,7 @@ func (p *MetadataProvider) Dependencies(fqdn string, v solver.Version) (map[stri
 		return canonicalizeDependencies(fqdn, raw)
 	}
 
-	col := collection{Namespace: ns, Name: name}
+	col := collection{Namespace: ns, Name: name, Source: p.sourceOf(fqdn)}
 	_, versionsURL, err := resolveRootMetadata(p.ctx, p.deps, col, policy, fqdn)
 	if err != nil {
 		return nil, err
@@ -129,8 +142,23 @@ func (p *MetadataProvider) Dependencies(fqdn string, v solver.Version) (map[stri
 	return canonicalizeDependencies(fqdn, raw)
 }
 
-// resolveRoot loads fqdn's root metadata (built from ns/name, with no
-// explicit source), translating a 404 or an exhausted-candidate-list
+// sourceOf returns fqdn's install source: its own entry in sources when one
+// was recorded (a root with an explicit source), or deps.cfg.Server
+// otherwise. This is the reference behavior greedy resolution's
+// resolverState.applyResult implements: a transitive dependency is never
+// recorded in sources, so it always falls through to cfg.Server regardless
+// of which parent(s) required it or what source those parents themselves
+// have - there is no source inheritance from a requiring parent to its
+// dependencies.
+func (p *MetadataProvider) sourceOf(fqdn string) string {
+	if s, ok := p.sources[fqdn]; ok {
+		return s
+	}
+	return p.deps.cfg.Server
+}
+
+// resolveRoot loads fqdn's root metadata (built from ns/name, with fqdn's
+// own source per sourceOf), translating a 404 or an exhausted-candidate-list
 // failure into known=false rather than an error, so Highest/Universe can
 // both report "unknown package" instead of aborting the solve. Any other
 // failure (a genuine network/offline error, or a non-404 HTTP status)
@@ -139,7 +167,7 @@ func (p *MetadataProvider) resolveRoot(
 	fqdn, ns, name string,
 	policy cacheManager.Policy,
 ) (*types.GalaxyCollection, string, bool, error) {
-	col := collection{Namespace: ns, Name: name}
+	col := collection{Namespace: ns, Name: name, Source: p.sourceOf(fqdn)}
 	rootMeta, versionsURL, err := resolveRootMetadata(p.ctx, p.deps, col, policy, fqdn)
 	if err != nil {
 		if isUnknownPackageError(err) {
@@ -152,10 +180,14 @@ func (p *MetadataProvider) resolveRoot(
 
 // isUnknownPackageError reports whether err represents "this package does
 // not exist in the registry" rather than a genuine failure: either
-// loadRootMetadataCached exhausted every candidate (helpers.
-// ErrLoadMetadataFailed, the normal outcome for our always-empty-Source
-// collection), or a raw 404 surfaced directly (defensive: not reachable
-// today given an empty Source, but cheap to also recognize).
+// loadRootMetadataCached exhausted every fallback candidate (helpers.
+// ErrLoadMetadataFailed, the outcome for an fqdn with no explicit source, or
+// a source shared with other collections that legitimately falls back
+// through the v3/v2/bare-API candidate list), or a raw 404 surfaced
+// directly (loadRootMetadataCached's hasExplicitSource path returns a 404
+// immediately rather than falling through candidates, which is exactly what
+// happens once sourceOf resolves fqdn to its own explicit root source - so
+// this branch is genuinely reachable, not merely defensive).
 func isUnknownPackageError(err error) bool {
 	if errors.Is(err, helpers.ErrLoadMetadataFailed) {
 		return true

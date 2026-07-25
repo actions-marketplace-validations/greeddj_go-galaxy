@@ -88,7 +88,7 @@ func TestProviderDependenciesWarmPinIsZeroNetwork(t *testing.T) {
 	st := store.New()
 	st.SetDepsCache("acme.widgets@1.0.0", map[string]string{"acme.other": "^2.0.0"})
 
-	p := NewMetadataProvider(context.Background(), testConfig(srv), testRuntime(srv), st)
+	p := NewMetadataProvider(context.Background(), testConfig(srv), testRuntime(srv), st, nil)
 	deps, err := p.Dependencies("acme.widgets", mustSolverVersion(t))
 	if err != nil {
 		t.Fatalf("Dependencies: unexpected error: %v", err)
@@ -109,7 +109,7 @@ func TestProviderOfflineMissReturnsErrOfflineMode(t *testing.T) {
 	t.Parallel()
 	cfg := &config.Config{Server: "http://offline.example.invalid", Offline: true}
 	runtime := infra.New(noopPrinter{}, fetch.NewOffline(0))
-	p := NewMetadataProvider(context.Background(), cfg, runtime, store.New())
+	p := NewMetadataProvider(context.Background(), cfg, runtime, store.New(), nil)
 
 	if _, err := p.Universe("acme.widgets"); !errors.Is(err, helpers.ErrOfflineMode) {
 		t.Fatalf("Universe error = %v, want errors.Is(err, ErrOfflineMode)", err)
@@ -277,7 +277,7 @@ func TestProviderHighestEmptyFallsBackToUniverse(t *testing.T) {
 
 	cfg := &config.Config{Server: srv.URL}
 	runtime := infra.New(noopPrinter{}, srv.Client())
-	p := NewMetadataProvider(context.Background(), cfg, runtime, store.New())
+	p := NewMetadataProvider(context.Background(), cfg, runtime, store.New(), nil)
 
 	_, ok, err := p.Highest("acme.widgets")
 	if err != nil || ok {
@@ -326,7 +326,7 @@ func newEmptyHighestVersionServer(t *testing.T) *httptest.Server {
 // newTestMetadataProvider builds a MetadataProvider pointed at srv.
 func newTestMetadataProvider(t *testing.T, srv *fakegalaxy.Server) *MetadataProvider {
 	t.Helper()
-	return NewMetadataProvider(context.Background(), testConfig(srv), testRuntime(srv), store.New())
+	return NewMetadataProvider(context.Background(), testConfig(srv), testRuntime(srv), store.New(), nil)
 }
 
 func testConfig(srv *fakegalaxy.Server) *config.Config {
