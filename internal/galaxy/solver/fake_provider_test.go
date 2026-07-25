@@ -1,0 +1,149 @@
+package solver
+
+import (
+	"fmt"
+	"maps"
+	"math/rand"
+	"sync"
+)
+
+// fakeProvider is the in-memory test double for Provider: a table-driven
+// fake keyed by package name (for versions and an optional Highest
+// override) and by "pkg@version" (for dependencies), with call counters so
+// tests can assert laziness (zero Universe calls on a fast path).
+//
+// Universe deliberately returns its versions in a freshly shuffled order on
+// every call (on top of Go's own per-process map iteration randomization
+// elsewhere in this fake), so a test that only passes when the core
+// re-sorts the universe itself - rather than trusting provider order -
+// exercises that defense in depth for real.
+type fakeProvider struct {
+	versions      map[string][]string
+	deps          map[string]map[string]string
+	highestOf     map[string]string
+	noHighest     map[string]bool
+	universeCalls map[string]int
+	highestCalls  map[string]int
+	depsCalls     map[string]int
+	mu            sync.Mutex
+}
+
+func newFakeProvider() *fakeProvider {
+	return &fakeProvider{
+		versions:      make(map[string][]string),
+		deps:          make(map[string]map[string]string),
+		highestOf:     make(map[string]string),
+		noHighest:     make(map[string]bool),
+		universeCalls: make(map[string]int),
+		highestCalls:  make(map[string]int),
+		depsCalls:     make(map[string]int),
+	}
+}
+
+func (f *fakeProvider) Highest(pkg string) (Version, bool, error) {
+	f.mu.Lock()
+	f.highestCalls[pkg]++
+	f.mu.Unlock()
+
+	if f.noHighest[pkg] {
+		return Version{}, false, nil
+	}
+	if raw, ok := f.highestOf[pkg]; ok {
+		v, err := NewVersion(raw)
+		if err != nil {
+			return Version{}, false, fmt.Errorf("fakeProvider: bad highest override %q for %s: %w", raw, pkg, err)
+		}
+		return v, true, nil
+	}
+
+	raw := f.versions[pkg]
+	if len(raw) == 0 {
+		return Version{}, false, nil
+	}
+	parsed := make([]Version, 0, len(raw))
+	for _, r := range raw {
+		v, err := NewVersion(r)
+		if err != nil {
+			continue
+		}
+		parsed = append(parsed, v)
+	}
+	if len(parsed) == 0 {
+		return Version{}, false, nil
+	}
+	ordered := buildUniverse(parsed)
+	return ordered[0], true, nil
+}
+
+func (f *fakeProvider) Universe(pkg string) ([]Version, error) {
+	f.mu.Lock()
+	f.universeCalls[pkg]++
+	f.mu.Unlock()
+
+	raw := append([]string{}, f.versions[pkg]...)
+	rand.Shuffle(len(raw), func(i, j int) { raw[i], raw[j] = raw[j], raw[i] })
+
+	out := make([]Version, 0, len(raw))
+	for _, r := range raw {
+		v, err := NewVersion(r)
+		if err != nil {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}
+
+func (f *fakeProvider) Dependencies(pkg string, v Version) (map[string]Constraint, error) {
+	key := pkg + "@" + v.Original()
+	f.mu.Lock()
+	f.depsCalls[key]++
+	f.mu.Unlock()
+
+	d, ok := f.deps[key]
+	if !ok {
+		return map[string]Constraint{}, nil
+	}
+	out := make(map[string]Constraint, len(d))
+	maps.Copy(out, d)
+	return out, nil
+}
+
+// withVersions registers pkg's published versions.
+func (f *fakeProvider) withVersions(pkg string, versions ...string) *fakeProvider {
+	f.versions[pkg] = append([]string{}, versions...)
+	return f
+}
+
+// withDeps registers pkg@version's dependency map.
+func (f *fakeProvider) withDeps(pkg, version string, deps map[string]string) *fakeProvider {
+	f.deps[pkg+"@"+version] = deps
+	return f
+}
+
+// withHighest overrides the registry-reported highest_version probe result
+// for pkg, independent of its true universe maximum - modeling a registry
+// field that a test can point at whatever value it needs to exercise the
+// probe/materialize fork.
+func (f *fakeProvider) withHighest(pkg, version string) *fakeProvider {
+	f.highestOf[pkg] = version
+	return f
+}
+
+// withNoHighest makes the Highest probe report ok=false for pkg, forcing
+// the core to fall back to a full Universe fetch.
+func (f *fakeProvider) withNoHighest(pkg string) *fakeProvider {
+	f.noHighest[pkg] = true
+	return f
+}
+
+// totalUniverseCalls sums every package's Universe call count.
+func (f *fakeProvider) totalUniverseCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	total := 0
+	for _, n := range f.universeCalls {
+		total += n
+	}
+	return total
+}
