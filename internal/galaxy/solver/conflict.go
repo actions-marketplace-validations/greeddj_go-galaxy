@@ -179,28 +179,25 @@ func negatedDifferenceTerm(satisfierTerm, incTerm term, uni *packageUniverse) te
 // non-nil - representing a satisfier pinned in regardless of prefix
 // length), and returns, for every package named in inc, the index of the
 // first assignment after which that package's running intersection
-// satisfies inc's term for it. A package already satisfied before any
-// assignment is scanned (by the seed alone, or vacuously by the full
-// extended universe - a term whose permitted set already spans every
-// boundary and point cell before that package ever appears) maps to the -1
-// sentinel. A package genuinely never satisfied within the scanned prefix
-// is absent from the result.
+// satisfies inc's term for it. When seed is non-nil (the previousSatisfier
+// computation), a package already satisfied by the seed alone - before any
+// prefix assignment is scanned - maps to the -1 sentinel directly: the seed
+// is a real assignment, so "satisfied by the seed alone" is the legitimate
+// no-earlier-satisfier answer. When seed is nil (the forward satisfier
+// scan), a term the full extended universe already satisfies before any
+// real assignment exists is only ever true for a tautological term (one
+// whose permitted set spans every cell, as causeUnknownPackage's "in any"
+// leaf does) - such a term still needs a real assignment establishing it
+// before it can map to -1, so it is tracked separately and only falls back
+// to the sentinel once the forward scan finishes without ever satisfying it
+// through a real assignment. A package genuinely never satisfied within the
+// scanned prefix, and never vacuous, is absent from the result.
 func (s *solveState) computeFirstSatisfied(inc *incompatibility, seed *term, limit int) map[string]int {
 	firstIdx := make(map[string]int, len(inc.Terms))
 	done := make(map[string]bool, len(inc.Terms))
 	running := make(map[string][]uint64, len(inc.Terms))
-	for _, t := range inc.Terms {
-		u := s.uniFor(t.Package)
-		rb := fullExtBits(u)
-		running[t.Package] = rb
-		if seed != nil && seed.Package == t.Package {
-			intersectExtAssignmentInto(rb, *seed, u)
-		}
-		if subsetOfPermittedExt(rb, t, u) {
-			firstIdx[t.Package] = -1
-			done[t.Package] = true
-		}
-	}
+	vacuous := s.seedRunningIntersections(inc, seed, running, firstIdx, done)
+
 	for i := range limit {
 		a := &s.ps.assignments[i]
 		t, ok := inc.termForPackage(a.term.Package)
@@ -215,7 +212,59 @@ func (s *solveState) computeFirstSatisfied(inc *incompatibility, seed *term, lim
 			done[t.Package] = true
 		}
 	}
+	for pkg := range vacuous {
+		if !done[pkg] {
+			firstIdx[pkg] = -1
+		}
+	}
 	return firstIdx
+}
+
+// seedRunningIntersections initializes running with every inc term's
+// package's full-extended-universe intersection (folding in seed's own
+// contribution, if seed names that package), and reports which packages are
+// vacuous: already satisfied before any real assignment is scanned, purely
+// by the full universe's own permitted set.
+//
+// A positive term is only vacuously satisfiable when it is tautological
+// (its permitted set spans every cell, as causeUnknownPackage's "in any"
+// leaf does), and the reference algorithm's semantics require a positive
+// term to be satisfied by a real positive assignment, not by the empty
+// prefix. So when seed is nil (the forward satisfier scan), a vacuous
+// package is only recorded in the returned set, not settled into
+// firstIdx/done at once: computeFirstSatisfied's forward scan still gets a
+// chance to find a real assignment establishing the term, falling back to
+// the -1 sentinel only once that scan finishes without ever satisfying it.
+// When seed is non-nil (the previousSatisfier computation), a vacuous
+// package is instead recorded into firstIdx/done immediately: the seed
+// itself is a real assignment, so "satisfied by the seed alone" is the
+// legitimate no-earlier-satisfier answer that computation exists to report.
+func (s *solveState) seedRunningIntersections(
+	inc *incompatibility,
+	seed *term,
+	running map[string][]uint64,
+	firstIdx map[string]int,
+	done map[string]bool,
+) map[string]bool {
+	vacuous := make(map[string]bool, len(inc.Terms))
+	for _, t := range inc.Terms {
+		u := s.uniFor(t.Package)
+		rb := fullExtBits(u)
+		running[t.Package] = rb
+		if seed != nil && seed.Package == t.Package {
+			intersectExtAssignmentInto(rb, *seed, u)
+		}
+		if !subsetOfPermittedExt(rb, t, u) {
+			continue
+		}
+		if seed != nil {
+			firstIdx[t.Package] = -1
+			done[t.Package] = true
+		} else {
+			vacuous[t.Package] = true
+		}
+	}
+	return vacuous
 }
 
 // earliestSatisfier finds the earliest assignment such that the partial

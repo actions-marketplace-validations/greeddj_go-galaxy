@@ -253,6 +253,34 @@ func scanProofShape(lines []string) (bool, bool) {
 	return hasBlank, hasLineNumber
 }
 
+// TestFixtureUnknownPackage pins that a full Solve for a package the provider
+// reports zero published versions for carries CauseUnknownPackage through
+// conflict resolution to a *ConflictError, rather than the internal-invariant
+// defect it used to trigger under the boundary-extended universe.
+func TestFixtureUnknownPackage(t *testing.T) {
+	t.Parallel()
+	p := newFakeProvider() // "ghost" has no registered versions
+	reqs := []Requirement{{Package: "ghost", Constraint: "^1.0.0"}}
+
+	_, err := Solve(reqs, p)
+	if err == nil {
+		t.Fatalf("Solve: expected a conflict for an unknown package, got a resolution")
+	}
+	var conflictErr *ConflictError
+	if !errors.As(err, &conflictErr) {
+		t.Fatalf("Solve error is not a *ConflictError: %v (%T)", err, err)
+	}
+	if !errors.Is(err, helpers.ErrNoVersionSatisfiesConstraints) {
+		t.Fatalf("errors.Is(err, ErrNoVersionSatisfiesConstraints) = false")
+	}
+	proof := strings.Join(conflictErr.ProofLines(), "\n")
+	requireContains(t, proof, "ghost has no published versions")
+	last := lastNonEmpty(conflictErr.ProofLines())
+	if !strings.HasPrefix(last, "So,") || !strings.HasSuffix(last, "version solving failed.") {
+		t.Fatalf("final proof line = %q, want prefix \"So,\" and suffix \"version solving failed.\"", last)
+	}
+}
+
 // TestHintPrereleaseOnly covers the prerelease-only hint: a package that
 // publishes exclusively prereleases can never satisfy a plain constraint.
 func TestHintPrereleaseOnly(t *testing.T) {
@@ -356,6 +384,11 @@ func TestDeterminism(t *testing.T) {
 		{
 			name: "branching-error", build: branchingErrorProvider,
 			reqs:    []Requirement{{Package: "foo", Constraint: "^1.0.0"}},
+			wantErr: true,
+		},
+		{
+			name: "unknown-package", build: newFakeProvider,
+			reqs:    []Requirement{{Package: "ghost", Constraint: "^1.0.0"}},
 			wantErr: true,
 		},
 	}
