@@ -451,7 +451,7 @@ func resolveOrLoadLockfile(
 		true,
 	)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to resolve dependencies: %w", err)
+		return nil, nil, annotateOfflineConflict(cfg, fmt.Errorf("failed to resolve dependencies: %w", err))
 	}
 	runtime.Output.DebugSincef(resolveStart, "%s", "resolve dependencies")
 	return resolved, graph, nil

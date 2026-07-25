@@ -50,9 +50,6 @@ func resolveCollectionsInternal(
 ) (map[string]collection, map[string][]string, error) {
 	cfg := deps.cfg
 	st := deps.st
-	if cfg.NoDeps {
-		return resolveWithoutDeps(ctx, deps, roots, record)
-	}
 
 	reqSpec := buildRequirementsSpec(cfg, roots)
 	reqHash := requirementsSignatureFromSpec(reqSpec, cfg.NoDeps)
@@ -65,19 +62,29 @@ func resolveCollectionsInternal(
 		}
 	}
 
-	state, err := newResolverState(cfg, roots)
+	resolved, graph, err := solveCollections(ctx, deps, roots)
+	if err != nil {
+		return nil, nil, err
+	}
+	recordResolutionIfNeeded(st, record, resolved, graph, reqHash, cfg.Server, reqSpec)
+	return resolved, graph, nil
+}
+
+// greedyResolve resolves roots via the original greedy, wave-pipelined
+// resolver (newResolverState + resolveQueue + buildGraph) - the cold-path
+// body resolveCollectionsInternal used before the version solver became the
+// production resolver. It is kept only so the differential test suite can
+// still compare the solver's resolutions against it; no production caller
+// reaches this function anymore.
+func greedyResolve(ctx context.Context, deps collectionDeps, roots []collection) (map[string]collection, map[string][]string, error) {
+	state, err := newResolverState(deps.cfg, roots)
 	if err != nil {
 		return nil, nil, err
 	}
 	if err := state.resolveQueue(ctx, deps); err != nil {
 		return nil, nil, err
 	}
-	resolved, graph, err := state.buildGraph(roots)
-	if err != nil {
-		return nil, nil, err
-	}
-	recordResolutionIfNeeded(st, record, resolved, graph, reqHash, cfg.Server, reqSpec)
-	return resolved, graph, nil
+	return state.buildGraph(roots)
 }
 
 func shouldReturnSnapshot(ok bool, err error) bool {
@@ -107,119 +114,6 @@ type resolverState struct {
 	sourceByFQDN   map[string]string
 	queued         map[string]bool
 	queue          []string
-}
-
-// resolveWithoutDeps resolves every root to a single concrete version without
-// following any dependency edges - the --no-deps fast path. Each root is
-// resolved independently and concurrently via resolveTaskVersion: an
-// already-pinned root returns immediately with zero I/O, while an unpinned or
-// ranged root goes through the same root-metadata/version-selection helpers
-// the normal (deps-following) resolver uses. This keeps the resulting
-// version - and therefore the artifact cache key, the extracted-store key,
-// and any lockfile entry derived from it - a concrete version rather than a
-// literal "*" (or other non-exact) constraint.
-func resolveWithoutDeps(
-	ctx context.Context,
-	deps collectionDeps,
-	roots []collection,
-	record bool,
-) (map[string]collection, map[string][]string, error) {
-	cfg := deps.cfg
-	st := deps.st
-
-	// versions/errs are pre-sized and index-aligned with roots: each slot is
-	// written by exactly one goroutine (its own root's index), so no mutex is
-	// needed despite the slices being shared across the worker pool.
-	versions := make([]string, len(roots))
-	errs := make([]error, len(roots))
-
-	workers := max(cfg.Workers, 1)
-	sem := make(chan struct{}, workers)
-	var wg sync.WaitGroup
-	for i, root := range roots {
-		sem <- struct{}{}
-		wg.Go(func() {
-			defer func() { <-sem }()
-			versions[i], errs[i] = resolveRootVersion(ctx, deps, root)
-		})
-	}
-	wg.Wait()
-
-	for _, err := range errs {
-		if err != nil {
-			return nil, nil, err
-		}
-	}
-
-	resolved := make(map[string]collection, len(roots))
-	graph := make(map[string][]string, len(roots))
-	for i, root := range roots {
-		fqdn := fmt.Sprintf("%s.%s", root.Namespace, root.Name)
-		source := root.Source
-		if source == "" {
-			source = cfg.Server
-		}
-		col := collection{Namespace: root.Namespace, Name: root.Name, Version: versions[i], Source: source}
-		resolved[fqdn] = col
-		graph[col.key()] = nil
-	}
-
-	if record && st != nil {
-		spec := buildRequirementsSpec(cfg, roots)
-		recordResolution(st, resolved, graph, requirementsSignatureFromSpec(spec, cfg.NoDeps), cfg.Server, spec)
-	}
-	return resolved, graph, nil
-}
-
-// resolveRootVersion builds a single-constraint resolveTask for root and
-// resolves it to a concrete version via resolveTaskVersion.
-func resolveRootVersion(ctx context.Context, deps collectionDeps, root collection) (string, error) {
-	fqdn := fmt.Sprintf("%s.%s", root.Namespace, root.Name)
-	source := root.Source
-	if source == "" {
-		source = deps.cfg.Server
-	}
-	constraint := root.Constraint
-	if constraint == "" {
-		constraint = root.Version
-	}
-	task := resolveTask{
-		FQDN:              fqdn,
-		Namespace:         root.Namespace,
-		Name:              root.Name,
-		Source:            source,
-		Constraints:       []string{constraint},
-		ConstraintSources: []constraintSource{{Constraint: constraint, Source: "root"}},
-	}
-	col := collection{Namespace: root.Namespace, Name: root.Name, Source: source}
-	return resolveTaskVersion(ctx, deps, task, col)
-}
-
-// resolveTaskVersion resolves task's constraint(s) to a single concrete
-// version, without resolving or caching any dependencies - the piece of
-// resolveOne's work that --no-deps actually needs. An exact pin
-// (exactVersionFromConstraints) short-circuits before any I/O; otherwise it
-// composes the same root-metadata and version-selection helpers resolveOne
-// uses (cachePolicyForConstraint, resolveRootMetadata, resolveFinalVersion),
-// so an unpinned or ranged root is resolved consistently with the normal
-// resolver. resolveOne itself is left untouched: this is a new, narrower
-// function built from the same lower-level pieces, not an extraction out of
-// it.
-func resolveTaskVersion(ctx context.Context, deps collectionDeps, task resolveTask, col collection) (string, error) {
-	version, exact, err := exactVersionFromConstraints(task.Constraints)
-	if err != nil {
-		return "", err
-	}
-	if exact {
-		return version, nil
-	}
-
-	policy := cachePolicyForConstraint(deps.cfg, exact)
-	rootMeta, versionsURL, err := resolveRootMetadata(ctx, deps, col, policy, task.FQDN)
-	if err != nil {
-		return "", err
-	}
-	return resolveFinalVersion(ctx, deps, task, policy, version, exact, rootMeta, versionsURL)
 }
 
 func resolveFromSnapshots(

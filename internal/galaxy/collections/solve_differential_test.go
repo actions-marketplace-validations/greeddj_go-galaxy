@@ -185,8 +185,8 @@ func TestSolverGreedyDifferential(t *testing.T) {
 			runtime := infra.New(noopPrinter{}, srv.Client())
 			ctx := context.Background()
 
-			greedyResolved, _, greedyErr := resolveCollectionsInternal(
-				ctx, newCollectionDeps(cfg, runtime, store.New()), tc.roots, false, false,
+			greedyResolved, _, greedyErr := greedyResolve(
+				ctx, newCollectionDeps(cfg, runtime, store.New()), tc.roots,
 			)
 			solverResolved, _, solverErr := solveCollections(
 				ctx, newCollectionDeps(cfg, runtime, store.New()), tc.roots,

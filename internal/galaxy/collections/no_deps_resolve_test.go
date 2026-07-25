@@ -1,10 +1,12 @@
 package collections
 
-// This file drives resolveWithoutDeps directly - the --no-deps fast path -
-// against a real fakegalaxy stand-in, proving the fix at its source: an
+// This file drives resolveCollectionsInternal directly under cfg.NoDeps -
+// the --no-deps fast path, which now goes through the version solver's
+// NewNoDepsProvider wrapping rather than the deleted resolveWithoutDeps -
+// proving the same two guarantees at the production entry point: an
 // unpinned root resolves to a concrete version rather than keeping the
-// literal "*" constraint, and an exactly pinned root short-circuits inside
-// resolveTaskVersion before any metadata HTTP request.
+// literal "*" constraint, and an exactly pinned root resolves with zero
+// HTTP requests.
 
 import (
 	"context"
@@ -16,12 +18,12 @@ import (
 	"github.com/greeddj/go-galaxy/internal/testing/fakegalaxy"
 )
 
-// TestResolveWithoutDepsUnpinnedRootResolvesConcreteVersion asserts that an
-// unpinned (version "*") root resolved through resolveWithoutDeps lands on a
-// concrete version - the highest registered - instead of keeping "*" as its
-// Version, which would otherwise flow verbatim into the artifact cache key
-// and lockfile entry.
-func TestResolveWithoutDepsUnpinnedRootResolvesConcreteVersion(t *testing.T) {
+// TestNoDepsUnpinnedRootResolvesConcreteVersion asserts that an unpinned
+// (version "*") root resolved through resolveCollectionsInternal under
+// cfg.NoDeps lands on a concrete version - the highest registered - instead
+// of keeping "*" as its Version, which would otherwise flow verbatim into
+// the artifact cache key and lockfile entry.
+func TestNoDepsUnpinnedRootResolvesConcreteVersion(t *testing.T) {
 	t.Parallel()
 	srv := fakegalaxy.New(t)
 	srv.AddVersion("acme", "solo", "1.0.0", nil)
@@ -32,9 +34,9 @@ func TestResolveWithoutDepsUnpinnedRootResolvesConcreteVersion(t *testing.T) {
 	deps := newCollectionDeps(cfg, runtime, store.New())
 
 	root := collection{Namespace: "acme", Name: "solo", Version: "*", Constraint: "*", Source: srv.URL()}
-	resolved, graph, err := resolveWithoutDeps(context.Background(), deps, []collection{root}, false)
+	resolved, graph, err := resolveCollectionsInternal(context.Background(), deps, []collection{root}, false, false)
 	if err != nil {
-		t.Fatalf("resolveWithoutDeps: %v", err)
+		t.Fatalf("resolveCollectionsInternal: %v", err)
 	}
 
 	got, ok := resolved["acme.solo"]
@@ -49,12 +51,13 @@ func TestResolveWithoutDepsUnpinnedRootResolvesConcreteVersion(t *testing.T) {
 	}
 }
 
-// TestResolveWithoutDepsPinnedRootSkipsMetadataFetch asserts that a root
-// pinned to an exact version resolves with zero HTTP requests: the common
-// --no-deps case (a pinned requirements.yml entry) must stay network-free,
-// short-circuiting inside resolveTaskVersion before resolveRootMetadata is
-// ever called.
-func TestResolveWithoutDepsPinnedRootSkipsMetadataFetch(t *testing.T) {
+// TestNoDepsPinnedRootSkipsMetadataFetch asserts that a root pinned to an
+// exact version resolves with zero HTTP requests: the common --no-deps case
+// (a pinned requirements.yml entry) must stay network-free. This exercises
+// both the solver's own Highest-probe/exact-pin fast path and
+// NewNoDepsProvider's guarantee that Dependencies never contributes an
+// edge (and therefore never triggers a metadata fetch of its own).
+func TestNoDepsPinnedRootSkipsMetadataFetch(t *testing.T) {
 	t.Parallel()
 	srv := fakegalaxy.New(t)
 	srv.AddVersion("acme", "pinned", "1.0.0", nil)
@@ -64,9 +67,9 @@ func TestResolveWithoutDepsPinnedRootSkipsMetadataFetch(t *testing.T) {
 	deps := newCollectionDeps(cfg, runtime, store.New())
 
 	root := collection{Namespace: "acme", Name: "pinned", Version: "1.0.0", Constraint: "1.0.0", Source: srv.URL()}
-	resolved, _, err := resolveWithoutDeps(context.Background(), deps, []collection{root}, false)
+	resolved, _, err := resolveCollectionsInternal(context.Background(), deps, []collection{root}, false, false)
 	if err != nil {
-		t.Fatalf("resolveWithoutDeps: %v", err)
+		t.Fatalf("resolveCollectionsInternal: %v", err)
 	}
 
 	got, ok := resolved["acme.pinned"]
