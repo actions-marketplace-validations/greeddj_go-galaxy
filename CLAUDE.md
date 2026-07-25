@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The project uses `just` (Justfile) as the task runner.
 
-- `just deps` — `go mod tidy && go mod vendor`. The repo is **vendored**; commit `vendor/` updates with dependency changes.
+- `just deps` — `go mod tidy && go mod vendor`. The repo is **vendored** locally, but `vendor/` is git-ignored and never committed - a dependency change commits `go.mod`/`go.sum` only, and CI builds in module mode with no committed vendor tree.
 - `just lint` — `golangci-lint run ./... --timeout=5m`.
 - `just test` — `go test ./...`.
 - `just check` — runs `go vet`, `staticcheck`, `govulncheck`, and `fieldalignment` (all wired through `go tool` directives in `go.mod`).
@@ -113,4 +113,4 @@ Permissions and a `gofmt` post-edit hook are pre-wired in [.claude/settings.json
 ## Things that look stale but aren't
 
 - The README's TODO mentions "мигрировать на github.com/urfave/cli/v3" but the project already uses `urfave/cli/v3`. The TODO line is outdated — verify before acting on it.
-- `vendor/` is checked in. CI builds expect it; `just deps` regenerates it.
+- `vendor/` is git-ignored and not committed, even though the repo is fully vendored locally. CI builds in module mode and downloads dependencies via the proxy, with `go.sum` as the reproducibility anchor; `just deps` regenerates the local `vendor/` tree used by `just check`/`build`/`oci`.

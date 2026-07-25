@@ -1,6 +1,6 @@
 ---
 name: go-galaxy-deps
-description: Run mutating maintenance commands for the go-galaxy Go repo — go mod tidy/vendor sync and automated fixers (go fix, fieldalignment -fix). Use ONLY when the user explicitly asks to update dependencies, re-vendor, or apply automated code fixes. These commands rewrite tracked files (vendor/, go.mod, go.sum, source files) — do not invoke them as part of routine validation.
+description: Run mutating maintenance commands for the go-galaxy Go repo — go mod tidy/vendor sync and automated fixers (go fix, fieldalignment -fix). Use ONLY when the user explicitly asks to update dependencies, re-vendor, or apply automated code fixes. These commands rewrite go.mod, go.sum, and source files (and regenerate the git-ignored local vendor/ tree) — do not invoke them as part of routine validation.
 ---
 
 # go-galaxy — Dependency Sync & Auto-Fix (mutating)
@@ -11,13 +11,13 @@ description: Run mutating maintenance commands for the go-galaxy Go repo — go 
 - "примени fieldalignment -fix" / "apply auto-fix"
 - After `go get` of a new module, before lint
 
-**Do not run these as part of routine checks.** They mutate tracked files. Note that `just check`, `just build`, `just build_linux`, and `just run` *implicitly* run `just deps` already — call out vendor churn before invoking those if the user is mid-PR.
+**Do not run these as part of routine checks.** They mutate go.mod, go.sum, and source files, and regenerate the git-ignored local vendor/ tree. Note that `just check`, `just build`, `just build_linux`, and `just run` *implicitly* run `just deps` already — call out vendor churn before invoking those if the user is mid-PR.
 
 ## Commands
 
 | Intent | Command | Mutates |
 |---|---|---|
-| Sync go.mod and vendor/ | `just deps` | `go.mod`, `go.sum`, `vendor/` |
+| Sync go.mod and vendor/ | `just deps` | `go.mod`, `go.sum`, `vendor/` (local, git-ignored) |
 | Apply `go fix` + `fieldalignment -fix` | `just fix` | source files across the repo |
 
 `just deps` runs:
