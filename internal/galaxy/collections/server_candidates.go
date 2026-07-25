@@ -31,31 +31,66 @@ func serverBaseCandidates(cfg *config.Config, col collection) []string {
 	return out
 }
 
-// rootMetadataURLCandidates builds candidate root metadata URLs.
-func rootMetadataURLCandidates(cfg *config.Config, col collection) []string {
-	seen := make(map[string]bool)
-	var out []string
+// rootMetaCandidate is a single root-metadata URL candidate together with
+// the server base and API root it was derived from. loadRootMetadataCached
+// uses the (base, apiRoot) pair to record the winning apiRoot in the memo
+// once a candidate's fetch succeeds.
+type rootMetaCandidate struct {
+	url     string
+	base    string
+	apiRoot string
+}
 
-	add := func(url string) {
+// rootMetadataURLCandidates builds candidate root metadata URLs.
+//
+// If memo already knows the winning apiRoot for a server base (a prior
+// collection resolved it in this same phase), only that apiRoot's two
+// trailing-slash variants are emitted for that base, skipping the losing
+// variants entirely. Otherwise all apiRoot variants are emitted, exactly as
+// before memoization existed - so an empty memo produces the identical
+// candidate set as today.
+func rootMetadataURLCandidates(cfg *config.Config, col collection, memo *apiRootMemo) []rootMetaCandidate {
+	seen := make(map[string]bool)
+	var out []rootMetaCandidate
+
+	add := func(url, base, apiRoot string) {
 		if url == "" || seen[url] {
 			return
 		}
 		seen[url] = true
-		out = append(out, url)
+		out = append(out, rootMetaCandidate{url: url, base: base, apiRoot: apiRoot})
 	}
 
-	addWithVariants := func(url string) {
-		add(url)
-		add(strings.TrimRight(url, "/"))
+	addWithVariants := func(base, apiRoot string) {
+		url := fmt.Sprintf("%s/collections/%s/%s/", apiRoot, col.Namespace, col.Name)
+		add(url, base, apiRoot)
+		add(strings.TrimRight(url, "/"), base, apiRoot)
 	}
 
 	for _, base := range serverBaseCandidates(cfg, col) {
+		if winningRoot, ok := memo.winner(base); ok {
+			addWithVariants(base, winningRoot)
+			continue
+		}
 		for _, apiRoot := range apiRootCandidates(base) {
-			addWithVariants(fmt.Sprintf("%s/collections/%s/%s/", apiRoot, col.Namespace, col.Name))
+			addWithVariants(base, apiRoot)
 		}
 	}
 
 	return out
+}
+
+// joinCandidateURLs renders a candidate list's URLs as a comma-joined string
+// for debug logging, without allocating an intermediate []string.
+func joinCandidateURLs(candidates []rootMetaCandidate) string {
+	var b strings.Builder
+	for i, cand := range candidates {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(cand.url)
+	}
+	return b.String()
 }
 
 // apiRootCandidates derives API root candidates from a base URL.

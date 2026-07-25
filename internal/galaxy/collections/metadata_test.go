@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	cacheManager "github.com/greeddj/go-galaxy/internal/galaxy/cache"
@@ -136,5 +137,91 @@ func TestLoadRootMetadataCachedAllCandidates404ReturnsLastError(t *testing.T) {
 	}
 	if statusErr.Code != http.StatusNotFound {
 		t.Fatalf("expected status code %d, got %d", http.StatusNotFound, statusErr.Code)
+	}
+}
+
+// TestLoadRootMetadataCachedMemoizesWinningAPIRootAcrossCollections asserts
+// the memoization behavior: once a phase's apiRootMemo learns a server's
+// winning API root from one collection, a second collection under the same
+// server base must not re-probe the losing v3 candidate at all. The first
+// collection legitimately probes both of the v3 apiRoot's trailing-slash
+// variants (both 404) before falling through to v2 and succeeding, so the
+// v3 request count is captured after the first fetch rather than hardcoded;
+// what matters is that the count does not grow at all after the second
+// fetch - i.e. zero further v3 requests once the memo is populated.
+func TestLoadRootMetadataCachedMemoizesWinningAPIRootAcrossCollections(t *testing.T) {
+	t.Parallel()
+	var v3Requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/api/v3/"):
+			v3Requests.Add(1)
+			w.WriteHeader(http.StatusNotFound)
+		case strings.Contains(r.URL.Path, "/api/v2/"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(v2FallThroughBody))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg := &config.Config{Server: srv.URL}
+	runtime := infra.New(noopPrinter{}, srv.Client())
+	// One collectionDeps (and therefore one apiRootMemo) is shared across
+	// both fetches below, mirroring how a single phase's memo is shared by
+	// value-copy across every worker resolving collections on the same server.
+	deps := newCollectionDeps(cfg, runtime, store.New())
+
+	first := collection{Namespace: "acme", Name: "widgets", Version: "1.0.0"}
+	if _, err := loadRootMetadataCached(context.Background(), deps, first, cacheManager.Policy{}); err != nil {
+		t.Fatalf("first collection: unexpected error: %v", err)
+	}
+	afterFirst := v3Requests.Load()
+	if afterFirst == 0 {
+		t.Fatal("expected the first collection to probe v3 at least once before falling through to v2")
+	}
+
+	second := collection{Namespace: "acme", Name: "gadgets", Version: "1.0.0"}
+	if _, err := loadRootMetadataCached(context.Background(), deps, second, cacheManager.Policy{}); err != nil {
+		t.Fatalf("second collection: unexpected error: %v", err)
+	}
+	if afterSecond := v3Requests.Load(); afterSecond != afterFirst {
+		t.Fatalf(
+			"expected no additional v3 probes for a second collection under the same server "+
+				"(the memoized apiRoot should skip the v3 probe entirely): had %d after the first fetch, %d after the second",
+			afterFirst, afterSecond,
+		)
+	}
+}
+
+// TestLoadRootMetadataCachedExplicitSourceFastFailsOnFirstError asserts that
+// the hasExplicitSource fast-fail path is unchanged by memoization: a
+// collection with an explicit source returns on the very first candidate's
+// error, whatever its status, instead of falling through to the remaining
+// candidates.
+func TestLoadRootMetadataCachedExplicitSourceFastFailsOnFirstError(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg := &config.Config{}
+	col := collection{Namespace: "acme", Name: "widgets", Version: "1.0.0", Source: srv.URL}
+	runtime := infra.New(noopPrinter{}, srv.Client())
+	deps := newCollectionDeps(cfg, runtime, store.New())
+
+	root, err := loadRootMetadataCached(context.Background(), deps, col, cacheManager.Policy{})
+	if err == nil {
+		t.Fatal("expected an error from the explicit-source fast-fail path, got nil")
+	}
+	if root != nil {
+		t.Fatalf("expected a nil root on failure, got %+v", root)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("expected exactly 1 request (no fallback to other candidates) for an explicit source, got %d", got)
 	}
 }

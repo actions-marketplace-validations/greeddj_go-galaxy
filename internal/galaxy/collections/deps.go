@@ -13,6 +13,12 @@ type collectionDeps struct {
 	cfg     *config.Config
 	runtime *infra.Infra
 	st      *store.Store
+
+	// apiRoots memoizes, per server base, the API root that already answered
+	// successfully for this phase, so a non-v3-first server is not
+	// re-probed on every collection. Scoped to one collectionDeps: resolve,
+	// install, and prefetch each get their own memo (see newCollectionDeps).
+	apiRoots *apiRootMemo
 }
 
 type installDeps struct {
@@ -30,7 +36,7 @@ type prefetchDeps struct {
 }
 
 func newCollectionDeps(cfg *config.Config, runtime *infra.Infra, st *store.Store) collectionDeps {
-	return collectionDeps{cfg: cfg, runtime: runtime, st: st}
+	return collectionDeps{cfg: cfg, runtime: runtime, st: st, apiRoots: newAPIRootMemo()}
 }
 
 func newInstallDeps(

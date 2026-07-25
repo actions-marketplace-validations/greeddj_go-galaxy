@@ -81,25 +81,33 @@ func loadRootMetadataCached(
 
 	var lastErr error
 	hasExplicitSource := strings.TrimSpace(col.Source) != ""
-	candidates := rootMetadataURLCandidates(cfg, col)
-	runtime.Output.Debugf("root metadata candidates for %s: %s", col.key(), strings.Join(candidates, ", "))
+	candidates := rootMetadataURLCandidates(cfg, col, deps.apiRoots)
+	runtime.Output.Debugf("root metadata candidates for %s: %s", col.key(), joinCandidateURLs(candidates))
 
-	for _, url := range candidates {
-		runtime.Output.Debugf("root metadata GET %s", url)
+	for _, cand := range candidates {
+		runtime.Output.Debugf("root metadata GET %s", cand.url)
 		var root types.GalaxyCollection
-		if err := fetchJSONWithCachePolicy(ctx, runtime.HTTP, url, st, &root, policy); err != nil {
+		if err := fetchJSONWithCachePolicy(ctx, runtime.HTTP, cand.url, st, &root, policy); err != nil {
 			var statusErr *cacheManager.HTTPStatusError
 			if hasExplicitSource {
 				return nil, err
 			}
 			if errors.As(err, &statusErr) && statusErr.Code == http.StatusNotFound {
-				runtime.Output.Debugf("root metadata 404 %s", url)
+				runtime.Output.Debugf("root metadata 404 %s", cand.url)
 				lastErr = err
 				continue
 			}
 			return nil, err
 		}
-		runtime.Output.Debugf("root metadata OK %s", url)
+		runtime.Output.Debugf("root metadata OK %s", cand.url)
+		// Record the winner only on success: a 404 here means only that this
+		// collection is absent under this apiRoot, not that the apiRoot is
+		// wrong, so a 404 must never blacklist an apiRoot for the server.
+		// One benign, intended behavior change: once a winner is known, a
+		// later collection's 404 surfaces as the winner root's 404 rather
+		// than the last candidate's, since the losing candidates are no
+		// longer probed - same error class, fewer round trips.
+		deps.apiRoots.recordWinner(cand.base, cand.apiRoot)
 		return &root, nil
 	}
 	if lastErr != nil {
