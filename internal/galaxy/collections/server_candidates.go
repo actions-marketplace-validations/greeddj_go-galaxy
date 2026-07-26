@@ -46,9 +46,11 @@ type rootMetaCandidate struct {
 // If memo already knows the winning apiRoot for a server base (a prior
 // collection resolved it in this same phase), only that apiRoot's two
 // trailing-slash variants are emitted for that base, skipping the losing
-// variants entirely. Otherwise all apiRoot variants are emitted, exactly as
-// before memoization existed - so an empty memo produces the identical
-// candidate set as today.
+// variants entirely. Otherwise every apiRoot variant apiRootCandidates
+// derives for that base is emitted, in apiRootCandidates' own priority
+// order - so an empty memo always probes /api/v3 first, matching the common
+// case's shape, and only reaches the Galaxy NG / Automation Hub shaped /v3
+// and /v2 fallbacks (and the legacy bare /api) if that first probe 404s.
 func rootMetadataURLCandidates(cfg *config.Config, col collection, memo *apiRootMemo) []rootMetaCandidate {
 	seen := make(map[string]bool)
 	var out []rootMetaCandidate
@@ -93,7 +95,15 @@ func joinCandidateURLs(candidates []rootMetaCandidate) string {
 	return b.String()
 }
 
-// apiRootCandidates derives API root candidates from a base URL.
+// apiRootCandidates derives API root candidates from a base URL, in priority
+// order: /api/v3, /v3, /api/v2, /v2, /api. The bare /v3 and /v2 candidates
+// exist for a Galaxy NG / Automation Hub shaped deployment, which mounts the
+// v3 API directly under its own base path (e.g.
+// "https://console.redhat.com/api/automation-hub" serves v3 collections at
+// "<base>/v3/collections/...", not "<base>/api/v3/collections/..."). /api/v3
+// stays first since it is galaxy.ansible.com's shape and therefore the
+// overwhelmingly common case: the fallback candidates only cost anything
+// when the first probe 404s.
 func apiRootCandidates(base string) []string {
 	trimmed := strings.TrimSpace(strings.Trim(base, "\""))
 	trimmed = strings.TrimRight(trimmed, "/")
@@ -110,19 +120,27 @@ func apiRootCandidates(base string) []string {
 		out = append(out, value)
 	}
 
-	lower := trimmed
+	// A base already ending in one of these suffixes names its own API root
+	// unambiguously, so it is used as-is rather than appended to - appending
+	// would otherwise double up the suffix (e.g. ".../api/v3/api/v3").
 	switch {
-	case strings.HasSuffix(lower, "/api/v3"):
+	case strings.HasSuffix(trimmed, "/api/v3"):
 		add(trimmed)
-	case strings.HasSuffix(lower, "/api/v2"):
+	case strings.HasSuffix(trimmed, "/api/v2"):
 		add(trimmed)
-	case strings.HasSuffix(lower, "/api"):
+	case strings.HasSuffix(trimmed, "/v3"):
+		add(trimmed)
+	case strings.HasSuffix(trimmed, "/v2"):
+		add(trimmed)
+	case strings.HasSuffix(trimmed, "/api"):
 		add(trimmed + "/v3")
 		add(trimmed + "/v2")
 		add(trimmed)
 	default:
 		add(trimmed + "/api/v3")
+		add(trimmed + "/v3")
 		add(trimmed + "/api/v2")
+		add(trimmed + "/v2")
 		add(trimmed + "/api")
 	}
 

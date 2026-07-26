@@ -178,15 +178,15 @@ func (p *MetadataProvider) resolveRoot(
 }
 
 // isUnknownPackageError reports whether err represents "this package does
-// not exist in the registry" rather than a genuine failure: either
-// loadRootMetadataCached exhausted every fallback candidate (helpers.
-// ErrLoadMetadataFailed, the outcome for an fqdn with no explicit source, or
-// a source shared with other collections that legitimately falls back
-// through the v3/v2/bare-API candidate list), or a raw 404 surfaced
-// directly (loadRootMetadataCached's hasExplicitSource path returns a 404
-// immediately rather than falling through candidates, which is exactly what
-// happens once sourceOf resolves fqdn to its own explicit root source - so
-// this branch is genuinely reachable, not merely defensive).
+// not exist in the registry" rather than a genuine failure. Every fqdn -
+// root or transitive dependency, with or without an explicit source - now
+// falls through loadRootMetadataCached's full v3/v2/bare-API candidate list
+// on a 404 instead of failing on the first one, so the common outcome for an
+// unknown package is that every candidate 404s and loadRootMetadataCached
+// returns the last of those 404s as-is (a raw *cacheManager.HTTPStatusError).
+// helpers.ErrLoadMetadataFailed is only reached in the narrower case of an
+// empty candidate list (no server configured and no explicit source), so
+// both forms must be recognized here.
 func isUnknownPackageError(err error) bool {
 	if errors.Is(err, helpers.ErrLoadMetadataFailed) {
 		return true

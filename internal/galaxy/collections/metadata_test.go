@@ -14,6 +14,7 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
+	"github.com/greeddj/go-galaxy/internal/testing/fakegalaxy"
 )
 
 // v2FallThroughVersionsURL is a marker only the v2 candidate's response body
@@ -27,12 +28,18 @@ const v2FallThroughVersionsURL = "http://v2-candidate.example/versions/"
 const v2FallThroughBody = `{"versions_url":"` + v2FallThroughVersionsURL +
 	`","highest_version":{"href":"http://v2-candidate.example/versions/9.9.9/","version":"9.9.9"}}`
 
-// newRootMetadataFallThroughServer starts an httptest.Server that answers 404
-// for any candidate URL under "/api/v3/" and 200 with v2FallThroughBody for
-// any candidate under "/api/v2/" (any other path also 404s). It records
-// every request path it receives, in order, guarded by a mutex since the
-// handler runs on the server's own goroutine.
-func newRootMetadataFallThroughServer(t *testing.T) (*httptest.Server, func() []string) {
+// newFallThroughServer starts an httptest.Server that answers 404 for any
+// candidate URL under "/api/v3/" and 200 with body for any candidate under
+// successMatch - checked only once the "/api/v3/" case has not already
+// matched, so successMatch may itself be a substring of an "/api/v3/" path
+// (e.g. "/v3/") without misrouting one of those 404s into a false success -
+// any other path also 404s. It records every request path it receives, in
+// order, guarded by a mutex since the handler runs on the server's own
+// goroutine. Shared by newRootMetadataFallThroughServer (the standard
+// galaxy.ansible.com v3-then-v2 fallback) and newHubShapedServer (the Galaxy
+// NG / Automation Hub v3-then-bare-v3 fallback), which differ only in which
+// candidate succeeds and with what body.
+func newFallThroughServer(t *testing.T, successMatch, body string) (*httptest.Server, func() []string) {
 	t.Helper()
 	var mu sync.Mutex
 	var paths []string
@@ -45,9 +52,9 @@ func newRootMetadataFallThroughServer(t *testing.T) (*httptest.Server, func() []
 		switch {
 		case strings.Contains(r.URL.Path, "/api/v3/"):
 			w.WriteHeader(http.StatusNotFound)
-		case strings.Contains(r.URL.Path, "/api/v2/"):
+		case strings.Contains(r.URL.Path, successMatch):
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(v2FallThroughBody))
+			_, _ = w.Write([]byte(body))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -62,10 +69,141 @@ func newRootMetadataFallThroughServer(t *testing.T) (*httptest.Server, func() []
 	return srv, seen
 }
 
-// TestLoadRootMetadataCachedFallsThroughOn404 asserts that when a collection
-// has no explicit source, a 404 on the v3 root-metadata candidate is treated
-// as "try the next candidate" rather than a hard failure: the loader must
-// advance to the v2 candidate and return its root metadata.
+// newRootMetadataFallThroughServer starts an httptest.Server that answers 404
+// for any candidate URL under "/api/v3/" and 200 with v2FallThroughBody for
+// any candidate under "/api/v2/" (any other path also 404s).
+func newRootMetadataFallThroughServer(t *testing.T) (*httptest.Server, func() []string) {
+	t.Helper()
+	return newFallThroughServer(t, "/api/v2/", v2FallThroughBody)
+}
+
+// hubShapeVersionsURL is a marker only the hub-shaped bare-/v3 candidate's
+// response body carries, so a test can prove the returned root came from
+// that candidate and not from any other one that might otherwise satisfy
+// the request.
+const hubShapeVersionsURL = "http://hub-shape-candidate.example/versions/"
+
+// hubShapeBody is a minimal but valid types.GalaxyCollection root metadata
+// document, just enough for loadRootMetadataCached to unmarshal and return
+// without error.
+const hubShapeBody = `{"versions_url":"` + hubShapeVersionsURL +
+	`","highest_version":{"href":"http://hub-shape-candidate.example/versions/9.9.9/","version":"9.9.9"}}`
+
+// newHubShapedServer starts an httptest.Server simulating a Galaxy NG /
+// Automation Hub deployment whose v3 API is mounted directly under its own
+// base path - "<base>/v3/collections/...", not the galaxy.ansible.com shape
+// "<base>/api/v3/collections/..." - by 404ing any candidate under "/api/v3/"
+// and answering any candidate under "/v3/" (that is not also under
+// "/api/v3/") with hubShapeBody. This shape cannot be reproduced with
+// fakegalaxy.NewAtBasePath: that server's routing unconditionally requires
+// the literal segments "api", "v3", "collections" adjacent to each other
+// regardless of its configured base path, so it can only ever serve
+// "<prefix>/api/v3/collections/...", never the bare "<prefix>/v3/collections/..."
+// this apiRootCandidates fallback exists for.
+func newHubShapedServer(t *testing.T) (*httptest.Server, func() []string) {
+	t.Helper()
+	return newFallThroughServer(t, "/v3/", hubShapeBody)
+}
+
+// TestLoadRootMetadataCachedResolvesHubShapedBase asserts that a base whose
+// v3 API is mounted directly under its own path (no "/api" immediately
+// before "/v3", the Galaxy NG / Automation Hub shape) resolves via the bare
+// "/v3" fallback candidate rather than failing outright.
+func TestLoadRootMetadataCachedResolvesHubShapedBase(t *testing.T) {
+	t.Parallel()
+	srv, seenPaths := newHubShapedServer(t)
+
+	cfg := &config.Config{Server: srv.URL}
+	col := collection{Namespace: "acme", Name: "widgets", Version: "1.0.0"}
+	runtime := infra.New(noopPrinter{}, srv.Client())
+	deps := newCollectionDeps(cfg, runtime, store.New())
+
+	root, err := loadRootMetadataCached(context.Background(), deps, col, cacheManager.Policy{})
+	if err != nil {
+		t.Fatalf("expected the hub-shaped base to resolve via the bare /v3 candidate, got error: %v", err)
+	}
+	if root == nil {
+		t.Fatal("expected a non-nil root, got nil")
+	}
+	if root.VersionsURL != hubShapeVersionsURL {
+		t.Fatalf("expected the root served by the bare /v3 candidate (versions_url=%q), got versions_url=%q",
+			hubShapeVersionsURL, root.VersionsURL)
+	}
+
+	var winningPath string
+	for _, p := range seenPaths() {
+		if strings.Contains(p, "/v3/") && !strings.Contains(p, "/api/v3/") {
+			winningPath = p
+			break
+		}
+	}
+	if winningPath == "" {
+		t.Fatalf("expected a request to hit the bare /v3 candidate, got requests: %v", seenPaths())
+	}
+}
+
+// TestLoadRootMetadataCachedFallsThroughOn404ToHubShape asserts the fallback
+// mechanics behind TestLoadRootMetadataCachedResolvesHubShapedBase: the
+// candidate walk tries the galaxy.ansible.com-shaped "/api/v3" candidate
+// first (and 404s), then falls through to the bare "/v3" candidate that
+// succeeds, rather than skipping straight to it or failing on the first 404.
+func TestLoadRootMetadataCachedFallsThroughOn404ToHubShape(t *testing.T) {
+	t.Parallel()
+	srv, seenPaths := newHubShapedServer(t)
+
+	cfg := &config.Config{Server: srv.URL}
+	col := collection{Namespace: "acme", Name: "widgets", Version: "1.0.0"}
+	runtime := infra.New(noopPrinter{}, srv.Client())
+	deps := newCollectionDeps(cfg, runtime, store.New())
+
+	if _, err := loadRootMetadataCached(context.Background(), deps, col, cacheManager.Policy{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	paths := seenPaths()
+	if len(paths) == 0 {
+		t.Fatal("expected the server to have received at least one request")
+	}
+	if !strings.Contains(paths[0], "/api/v3/") {
+		t.Fatalf("expected the first request to hit the galaxy.ansible.com-shaped /api/v3 candidate, got %q (all: %v)",
+			paths[0], paths)
+	}
+}
+
+// TestLoadRootMetadataCachedGalaxyShapeResolvesOnFirstCandidateNoRegression
+// is the no-regression guard for this unit's change: a galaxy.ansible.com-shaped
+// base (its v3 API mounted at "<base>/api/v3", the shape apiRootCandidates
+// has always tried first) must still resolve on the very first candidate,
+// with exactly the same request count as before the Galaxy NG / Automation
+// Hub fallback candidates existed. The common case must never pay for the
+// new candidates.
+func TestLoadRootMetadataCachedGalaxyShapeResolvesOnFirstCandidateNoRegression(t *testing.T) {
+	t.Parallel()
+	srv := fakegalaxy.New(t)
+	srv.AddVersion("acme", "widgets", "1.0.0", nil)
+
+	cfg := &config.Config{Server: srv.URL()}
+	col := collection{Namespace: "acme", Name: "widgets", Version: "1.0.0"}
+	runtime := infra.New(noopPrinter{}, srv.Client())
+	deps := newCollectionDeps(cfg, runtime, store.New())
+
+	root, err := loadRootMetadataCached(context.Background(), deps, col, cacheManager.Policy{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if root == nil {
+		t.Fatal("expected a non-nil root, got nil")
+	}
+	if got := srv.Count(fakegalaxy.EndpointRootMetadata); got != 1 {
+		t.Fatalf("expected exactly 1 root metadata request for the galaxy.ansible.com shape, got %d", got)
+	}
+}
+
+// TestLoadRootMetadataCachedFallsThroughOn404 asserts that a 404 on the v3
+// root-metadata candidate is treated as "try the next candidate" rather than
+// a hard failure: the loader must advance to the v2 candidate and return its
+// root metadata. This holds regardless of whether the collection carries an
+// explicit source.
 func TestLoadRootMetadataCachedFallsThroughOn404(t *testing.T) {
 	t.Parallel()
 	srv, seenPaths := newRootMetadataFallThroughServer(t)
@@ -195,33 +333,40 @@ func TestLoadRootMetadataCachedMemoizesWinningAPIRootAcrossCollections(t *testin
 	}
 }
 
-// TestLoadRootMetadataCachedExplicitSourceFastFailsOnFirstError asserts that
-// the hasExplicitSource fast-fail path is unchanged by memoization: a
-// collection with an explicit source returns on the very first candidate's
-// error, whatever its status, instead of falling through to the remaining
-// candidates.
-func TestLoadRootMetadataCachedExplicitSourceFastFailsOnFirstError(t *testing.T) {
+// TestLoadRootMetadataCachedNonNotFoundErrorAbortsImmediately asserts the
+// other half of the candidate-walk rule: a non-404 error is not something a
+// different apiRoot could route around, so it aborts the whole walk on the
+// very first candidate instead of falling through to the remaining
+// v3/v2/bare-API candidates. This holds regardless of whether the collection
+// carries an explicit source - unlike the now-removed hasExplicitSource
+// short-circuit, both cases share this one rule. The response uses 400
+// rather than a transient status such as 500, since helpers.
+// IsRetryableHTTPStatus would otherwise make fetchJSONWithCachePolicy retry
+// the same candidate URL up to FetchRetryMaxAttempts times, which would
+// inflate the request count this test asserts on without probing any
+// further candidate.
+func TestLoadRootMetadataCachedNonNotFoundErrorAbortsImmediately(t *testing.T) {
 	t.Parallel()
 	var requests atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requests.Add(1)
-		w.WriteHeader(http.StatusNotFound)
+		w.WriteHeader(http.StatusBadRequest)
 	}))
 	t.Cleanup(srv.Close)
 
-	cfg := &config.Config{}
-	col := collection{Namespace: "acme", Name: "widgets", Version: "1.0.0", Source: srv.URL}
+	cfg := &config.Config{Server: srv.URL}
+	col := collection{Namespace: "acme", Name: "widgets", Version: "1.0.0"}
 	runtime := infra.New(noopPrinter{}, srv.Client())
 	deps := newCollectionDeps(cfg, runtime, store.New())
 
 	root, err := loadRootMetadataCached(context.Background(), deps, col, cacheManager.Policy{})
 	if err == nil {
-		t.Fatal("expected an error from the explicit-source fast-fail path, got nil")
+		t.Fatal("expected an error from the 400 response, got nil")
 	}
 	if root != nil {
 		t.Fatalf("expected a nil root on failure, got %+v", root)
 	}
 	if got := requests.Load(); got != 1 {
-		t.Fatalf("expected exactly 1 request (no fallback to other candidates) for an explicit source, got %d", got)
+		t.Fatalf("expected exactly 1 request (no probing further candidates after a non-404 error), got %d", got)
 	}
 }

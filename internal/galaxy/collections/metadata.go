@@ -65,7 +65,6 @@ func loadRootMetadataCached(
 	st := deps.st
 
 	var lastErr error
-	hasExplicitSource := strings.TrimSpace(col.Source) != ""
 	candidates := rootMetadataURLCandidates(cfg, col, deps.apiRoots)
 	runtime.Output.Debugf("root metadata candidates for %s: %s", col.key(), joinCandidateURLs(candidates))
 
@@ -73,10 +72,12 @@ func loadRootMetadataCached(
 		runtime.Output.Debugf("root metadata GET %s", cand.url)
 		var root types.GalaxyCollection
 		if err := fetchJSONWithCachePolicy(ctx, runtime.HTTP, cand.url, st, &root, policy); err != nil {
+			// A 404 means only that this candidate's apiRoot is wrong (or, on
+			// the winning apiRoot, that the collection itself is absent) -
+			// try the next candidate. Any other error (network failure, a
+			// non-404 status, an offline-mode miss) is not something another
+			// candidate could route around, so it aborts immediately.
 			var statusErr *cacheManager.HTTPStatusError
-			if hasExplicitSource {
-				return nil, err
-			}
 			if errors.As(err, &statusErr) && statusErr.Code == http.StatusNotFound {
 				runtime.Output.Debugf("root metadata 404 %s", cand.url)
 				lastErr = err
