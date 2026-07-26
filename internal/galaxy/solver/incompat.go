@@ -125,7 +125,36 @@ func normalizeTerms(terms []term, uni func(string) *packageUniverse) []term {
 	if len(merged) > 1 {
 		merged = dropPositiveRoot(merged)
 	}
+	if len(merged) > 1 {
+		merged = dropTautological(merged, uni)
+	}
 	return merged
+}
+
+// dropTautological removes any term whose permitted set spans the whole
+// boundary-extended universe. Such a term is always satisfiable, so within an
+// incompatibility (a conjunction that must not hold in full) it contributes
+// nothing and is redundant: "{A, always-true}" is equivalent to "{A}". A
+// tautological negative term arises when a dependency names a version range no
+// published version satisfies (its positive reading is empty, so its negation
+// is the whole universe); left in a merged root cause it would leave that
+// package permanently unsatisfied and the learned clause non-unit after a
+// backjump, which conflict resolution would then reject as inconclusive. Only
+// applied when more than one term remains, so a genuinely tautological
+// single-term incompatibility is never emptied here.
+func dropTautological(terms []term, uni func(string) *packageUniverse) []term {
+	out := terms[:0:0]
+	for _, t := range terms {
+		u := uni(t.Package)
+		if popcount(permittedExtBits(t, u)) == u.extendedLen() {
+			continue
+		}
+		out = append(out, t)
+	}
+	if len(out) == 0 {
+		return terms
+	}
+	return out
 }
 
 // mergeTermGroup collapses one package's group of terms into a single term:
