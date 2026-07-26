@@ -185,3 +185,26 @@ func TestConditionalityDropFamily(t *testing.T) {
 		})
 	}
 }
+
+// TestTransitiveUnsatisfiableBacktrack is the regression for the transitive
+// false-rejection: a higher root version whose transitive dependency is
+// unsatisfiable must be learned as "not foo@2.0.0" and the solver must
+// backtrack to foo@1.2.0, not falsely declare the solvable graph unsolvable.
+func TestTransitiveUnsatisfiableBacktrack(t *testing.T) {
+	t.Parallel()
+	const survivor = "1.2.0"
+	p := newFakeProvider().
+		withVersions("acme.foo", survivor, "2.0.0").
+		withVersions("acme.mid", "1.5.0").
+		withVersions("acme.leaf", survivor).
+		withDeps("acme.foo", "2.0.0", map[string]string{"acme.mid": "1.x"}).
+		withDeps("acme.foo", survivor, map[string]string{"acme.leaf": "<2.0.0"}).
+		withDeps("acme.mid", "1.5.0", map[string]string{"acme.leaf": "^0.0.3"})
+	res, err := Solve([]Requirement{{Package: "acme.foo", Constraint: "*"}}, p)
+	if err != nil {
+		t.Fatalf("unexpected error (was a false ConflictError before stage 1): %v", err)
+	}
+	if res.Versions["acme.foo"] != survivor || res.Versions["acme.leaf"] != survivor {
+		t.Fatalf("Versions = %v, want foo=1.2.0 leaf=1.2.0", res.Versions)
+	}
+}

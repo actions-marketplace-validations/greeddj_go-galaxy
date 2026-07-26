@@ -184,6 +184,23 @@ func (s *solveState) propagatePackage(p string, changed map[string]bool) (bool, 
 // terminate (the boundary-extended universe fix is what prevents the
 // specific infinite re-derivation cycle this guard was originally added to
 // paper over; see conflict.go and term.go's extended-universe comments).
+// withoutTautologicalTerms returns inc with any always-satisfiable
+// (full-permitted) term removed, so conflict resolution's returned root cause
+// relates as the unit clause it logically is: an always-true term is redundant
+// inside an incompatibility ({A, always-true} is equivalent to {A}), and
+// leaving it in would read inconclusive and break the learned-clause unit
+// invariant after a backjump. A single-term or all-tautological incompatibility
+// clause is returned unchanged, and dropTautological never returns the empty
+// slice, so a genuine tautological leaf (the unknown-package "in any"
+// incompatibility) is preserved rather than emptied here.
+func (s *solveState) withoutTautologicalTerms(inc *incompatibility) *incompatibility {
+	kept := dropTautological(inc.Terms, s.uniFor)
+	if len(kept) == len(inc.Terms) {
+		return inc
+	}
+	return &incompatibility{Terms: kept, Cause: inc.Cause}
+}
+
 func (s *solveState) deriveOnce(term term, causeIdx int, changed map[string]bool) {
 	if s.ps.hasEquivalentAssignment(term) {
 		return
@@ -217,7 +234,7 @@ func (s *solveState) resolveAndDerive(idx int, changed map[string]bool) error {
 		if err != nil {
 			return err
 		}
-		rel, t := relate(rootCause, s.ps, s.uniFor)
+		rel, t := relate(s.withoutTautologicalTerms(rootCause), s.ps, s.uniFor)
 		switch rel {
 		case incAlmostSatisfied:
 			clear(changed)
