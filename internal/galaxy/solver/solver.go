@@ -146,24 +146,46 @@ func (s *solveState) materializePkg(pkg string) error {
 // dependency. Failing loudly here, rather than handing the caller a Result
 // that violates its own contract, is strictly safer than staying silent.
 func (s *solveState) extractResult() (*Result, error) {
-	versions := make(Resolution, len(s.ps.packages))
-	graph := make(map[string][]string, len(s.ps.packages))
-
+	decidedVer := make(map[string]Version, len(s.ps.packages))
+	decidedDeps := make(map[string][]string, len(s.ps.packages))
 	for pkg, p := range s.ps.packages {
-		if pkg == rootPkg || p.decisionIdx == -1 {
+		if p.decisionIdx == -1 {
 			continue
 		}
-		v := p.decisionVersion
-		versions[pkg] = v.Original()
-		graph[pkg] = s.decidedDependencyNames(pkg, v)
+		decidedVer[pkg] = p.decisionVersion
+		decidedDeps[pkg] = s.decidedDependencyNames(pkg, p.decisionVersion)
 	}
 
-	for pkg, deps := range graph {
-		for _, dep := range deps {
-			if _, ok := versions[dep]; !ok {
-				return nil, fmt.Errorf("resolution graph references an undecided package %q (via %s): %w", dep, pkg, errSolverBug)
-			}
+	// The result is the closure reachable from the root through the decided
+	// dependency edges, not every decided package. A version decided inside a
+	// branch the solver later backtracked away from can linger as a decision
+	// with no path from any requirement; including it would install a package
+	// nothing depends on. Walking the reachable closure keeps the result
+	// minimal.
+	reachable := make(map[string]bool, len(decidedVer))
+	stack := []string{rootPkg}
+	for len(stack) > 0 {
+		pkg := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if reachable[pkg] {
+			continue
 		}
+		reachable[pkg] = true
+		stack = append(stack, decidedDeps[pkg]...)
+	}
+
+	versions := make(Resolution, len(reachable))
+	graph := make(map[string][]string, len(reachable))
+	for pkg := range reachable {
+		if pkg == rootPkg {
+			continue
+		}
+		v, ok := decidedVer[pkg]
+		if !ok {
+			return nil, fmt.Errorf("resolution reaches an undecided package %q: %w", pkg, errSolverBug)
+		}
+		versions[pkg] = v.Original()
+		graph[pkg] = decidedDeps[pkg]
 	}
 
 	return &Result{Versions: versions, Graph: graph}, nil

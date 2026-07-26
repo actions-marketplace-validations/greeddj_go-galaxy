@@ -126,7 +126,15 @@ func TestExtractResultGuardFiresOnIncompleteResolution(t *testing.T) {
 func TestExtractResultGuardFiresOnConstructedIncompleteResolution(t *testing.T) {
 	t.Parallel()
 	s := newTestState(newFakeProvider())
+	s.ps.decide(rootPkg, rootVersion)
 	fooV := mustNewVersion(testVersion100)
+	s.store.add(&incompatibility{
+		Terms: []term{
+			{Package: rootPkg, Set: singletonSet(rootVersion), Positive: true},
+			{Package: "acme.foo", Set: anySet, Positive: false},
+		},
+		Cause: causeDependency{Parent: rootPkg, ParentVersion: rootVersion, Dep: "acme.foo", Constraint: "*"},
+	})
 	s.ps.decide("acme.foo", fooV)
 	s.store.add(&incompatibility{
 		Terms: []term{

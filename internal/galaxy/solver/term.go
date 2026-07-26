@@ -212,6 +212,10 @@ func setBit(b []uint64, i int) {
 	b[i/wordBits] |= 1 << (i % wordBits)
 }
 
+func clearBit(b []uint64, i int) {
+	b[i/wordBits] &^= 1 << (i % wordBits)
+}
+
 func testBit(b []uint64, i int) bool {
 	w := i / wordBits
 	if w >= len(b) {
@@ -514,6 +518,20 @@ func embedPublishedIntoExtended(published []uint64, extLen int) []uint64 {
 // A published bitset embeds via embedPublishedIntoExtended; an
 // already-extended bitset (produced by conflict resolution's own merge or
 // difference arithmetic) is returned as-is.
+func (u *packageUniverse) classifyIntoExtended(set versionSet, bits []uint64, n int) {
+	if set.Contains(u.extBelow) {
+		setBit(bits, 0)
+	}
+	for i, v := range u.versions {
+		if set.Contains(v) {
+			setBit(bits, i+1)
+		}
+	}
+	if set.Contains(u.extAbove) {
+		setBit(bits, n-1)
+	}
+}
+
 func (u *packageUniverse) materializeExtendedSet(set versionSet) []uint64 {
 	if set.kind == setExtBitset {
 		return set.bits
@@ -532,17 +550,20 @@ func (u *packageUniverse) materializeExtendedSet(set versionSet) []uint64 {
 			setBit(bits, i)
 		}
 	} else {
-		if set.Contains(u.extBelow) {
-			setBit(bits, 0)
-		}
-		for i, v := range u.versions {
-			if set.Contains(v) {
-				setBit(bits, i+1)
-			}
-		}
-		if set.Contains(u.extAbove) {
-			setBit(bits, n-1)
-		}
+		u.classifyIntoExtended(set, bits, n)
+	}
+	// A constraint that matches every published version and both boundary
+	// probes classifies to the full extended universe, which makes it
+	// invisible in a package's running intersection (full is the identity of
+	// intersection). Its requiring dependency's attribution is then lost when
+	// the package is later emptied by an exclusion, and a transitively
+	// unsatisfiable graph is falsely rejected. Retract the two boundary cells
+	// for such a vacuously-true constraint (an unconstrained "*", or a "!=X"
+	// whose X is unpublished) so it constrains the running to its published
+	// point cells and stays a resolvable contributor.
+	if popcount(bits) == n {
+		clearBit(bits, 0)
+		clearBit(bits, n-1)
 	}
 	u.extClassCache[set.key] = bits
 	return bits

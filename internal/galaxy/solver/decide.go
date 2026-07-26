@@ -309,7 +309,7 @@ func (s *solveState) decideFromAllowed(pkg string) (string, bool, error) {
 	if isEmptyBits(allowed) {
 		if len(u.versions) == 0 {
 			s.store.add(&incompatibility{
-				Terms: []term{{Package: pkg, Set: anySet, Positive: true}},
+				Terms: []term{{Package: pkg, Set: u.asExtBitsetSet(fullExtBits(u), "any"), Positive: true}},
 				Cause: causeUnknownPackage{Package: pkg},
 			})
 			return pkg, false, nil
