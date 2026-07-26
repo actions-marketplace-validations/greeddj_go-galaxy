@@ -31,7 +31,7 @@ type MetadataProvider struct {
 	ctx  context.Context
 	deps collectionDeps
 	// sources maps a root fqdn to its explicit install source, mirroring
-	// greedy resolution's own reference behavior (see sourceOf): a nil or
+	// the reference behavior (see sourceOf): a nil or
 	// empty map means every fqdn - root or transitive dependency alike -
 	// resolves against deps.cfg.Server, the prior (pre-source-aware) behavior.
 	sources map[string]string
@@ -39,7 +39,7 @@ type MetadataProvider struct {
 
 // NewMetadataProvider builds a MetadataProvider sharing cfg/runtime/st with
 // the rest of the install pipeline, so its cache reads and writes land in
-// the exact same Store buckets resolveOne and loadCollectionMetadata use -
+// the same Store buckets loadCollectionMetadata uses -
 // a warm entry written by either path satisfies the other. sources maps a
 // root fqdn to its explicit install source (see sourceOf); passing nil (or
 // an empty map) means every fqdn resolves against cfg.Server.
@@ -107,7 +107,7 @@ func (p *MetadataProvider) Universe(fqdn string) ([]solver.Version, error) {
 
 // Dependencies returns the validated dependency map of fqdn@v: dependency
 // fqdn mapped to its canonical Constraint. A warm deps-cache entry (written
-// under the same "ns.name@version" key resolveOne uses) is served without
+// under the "ns.name@version" key it computes) is served without
 // any network access; a miss fetches the version's metadata, validates and
 // caches its dependency map, and returns it. A malformed dependency key
 // aborts with helpers.ErrInvalidDependencyKey; an unparseable constraint
@@ -144,8 +144,7 @@ func (p *MetadataProvider) Dependencies(fqdn string, v solver.Version) (map[stri
 
 // sourceOf returns fqdn's install source: its own entry in sources when one
 // was recorded (a root with an explicit source), or deps.cfg.Server
-// otherwise. This is the reference behavior greedy resolution's
-// resolverState.applyResult implements: a transitive dependency is never
+// otherwise. This is the reference behavior: a transitive dependency is never
 // recorded in sources, so it always falls through to cfg.Server regardless
 // of which parent(s) required it or what source those parents themselves
 // have - there is no source inheritance from a requiring parent to its

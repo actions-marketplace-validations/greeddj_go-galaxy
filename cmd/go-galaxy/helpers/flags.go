@@ -112,13 +112,6 @@ func collectionBehaviorFlags() []cli.Flag {
 			Usage:   "Disallow any network access; only cached state may be used",
 			Sources: cli.EnvVars("GO_GALAXY_OFFLINE"),
 		},
-		&cli.StringFlag{
-			Name: "resolution",
-			Usage: "Resolution mode: strict (default), lenient (max-satisfaction)," +
-				" or backtrack (drop the single offending constraint, then lenient)",
-			Value:   "strict",
-			Sources: cli.EnvVars("GO_GALAXY_RESOLUTION"),
-		},
 	}
 }
 

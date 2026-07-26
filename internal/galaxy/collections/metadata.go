@@ -44,21 +44,6 @@ func loadCollectionMetadata(
 		versionURL = versionsURL + version + "/"
 	}
 
-	if !exact && col.Version != "*" {
-		versions, err := loadVersionsListCached(ctx, deps, versionsURL, policy)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load versions list: %w", err)
-		}
-		fqdn := fmt.Sprintf("%s.%s", col.Namespace, col.Name)
-		sources := []constraintSource{{Constraint: col.Version, Source: "root"}}
-		mode := selectionMode{Lenient: cfg.IsLenient(), Backtrack: cfg.IsBacktrack()}
-		selected, err := selectVersion(runtime, fqdn, versions, sources, mode)
-		if err != nil {
-			return nil, err
-		}
-		versionURL = versionsURL + selected + "/"
-	}
-
 	versionURL = normalizeVersionsURL(col.Source, versionURL)
 	var versionMetadataInfo types.GalaxyCollectionVersionInfo
 	if err := fetchJSONWithCachePolicy(ctx, runtime.HTTP, versionURL, st, &versionMetadataInfo, policy); err != nil {

@@ -9,11 +9,10 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/solver"
 )
 
-// solveCollections resolves roots via the PubGrub-style version solver
-// instead of the greedy resolver, returning the same (resolved, graph) shape
-// resolveCollectionsInternal's cold path does: resolved keyed by ns.name@version
+// solveCollections resolves roots via the PubGrub-style version solver,
+// returning (resolved, graph): resolved keyed by ns.name@version
 // (collection.key()), graph mapping a parent key to its dependency keys. It
-// is not wired into any production path yet - callers opt in explicitly.
+// is the production cold-resolve path.
 func solveCollections(ctx context.Context, deps collectionDeps, roots []collection) (map[string]collection, map[string][]string, error) {
 	sources := rootSourceMap(roots, deps.cfg)
 	var provider solver.Provider = NewMetadataProvider(ctx, deps.cfg, deps.runtime, deps.st, sources)
@@ -34,16 +33,14 @@ func solveCollections(ctx context.Context, deps collectionDeps, roots []collecti
 }
 
 // rootSourceMap builds a root fqdn -> source map from roots: a root's own
-// explicit Source when non-empty, else cfg.Server. This is the reference
-// source mapping (mirroring resolverState.enqueueRoots' own sourceByFQDN
-// seeding): passed straight through to NewMetadataProvider so the version
-// solver fetches every root from the exact server the greedy resolver
-// would, and reused by solverResultToResolvedGraph (via sourceFor) so the
-// resolved collection's own recorded Source always agrees with whichever
-// server actually served it. A transitive dependency is deliberately never
-// a key in the returned map - see sourceFor and MetadataProvider.sourceOf,
-// both of which fall back to cfg.Server for anything absent here, matching
-// greedy's own no-inheritance-from-parent behavior.
+// explicit Source when non-empty, else cfg.Server. It is passed straight
+// through to NewMetadataProvider so the version solver fetches every root
+// from its own configured server, and reused by solverResultToResolvedGraph
+// (via sourceFor) so the resolved collection's own recorded Source always
+// agrees with whichever server actually served it. A transitive dependency
+// is deliberately never a key in the returned map - see sourceFor and
+// MetadataProvider.sourceOf, both of which fall back to cfg.Server for
+// anything absent here: there is no source inheritance from a parent.
 func rootSourceMap(roots []collection, cfg *config.Config) map[string]string {
 	sources := make(map[string]string, len(roots))
 	for _, root := range roots {
@@ -58,16 +55,13 @@ func rootSourceMap(roots []collection, cfg *config.Config) map[string]string {
 }
 
 // buildSolverRequirements builds one solver.Requirement per unique root
-// fqdn from roots, mirroring resolverState.enqueueRoots/addRootConstraint's
-// exact per-fqdn dedup: a root's effective constraint is its own Constraint,
-// falling back to its Version when Constraint is empty; a constraint that
-// normalizes to the empty string ("*", or already empty) never touches the
-// stored value at all (mirroring addRootConstraint's own no-op on an empty
-// constraint), so two roots naming the same fqdn - one bare, one
-// constrained - never conflict; two roots naming the same fqdn with
-// different NON-EMPTY normalized constraints do conflict, reported through
-// the same helpers.ErrConflictingRootConstraints sentinel addRootConstraint
-// uses.
+// fqdn from roots, deduplicating per fqdn: a root's effective constraint is
+// its own Constraint, falling back to its Version when Constraint is empty; a
+// constraint that normalizes to the empty string ("*", or already empty)
+// never touches the stored value, so two roots naming the same fqdn - one
+// bare, one constrained - never conflict; two roots naming the same fqdn with
+// different NON-EMPTY normalized constraints do conflict, reported through the
+// helpers.ErrConflictingRootConstraints sentinel.
 func buildSolverRequirements(roots []collection) ([]solver.Requirement, error) {
 	order := make([]string, 0, len(roots))
 	seen := make(map[string]bool, len(roots))
@@ -101,10 +95,9 @@ func buildSolverRequirements(roots []collection) ([]solver.Requirement, error) {
 	return reqs, nil
 }
 
-// solverResultToResolvedGraph maps a solver.Result onto the same
-// (resolved, graph) shape the greedy resolver's buildGraph produces: resolved
-// keyed by fqdn (mirroring resolverState.resolved), graph keyed by
-// collection.key() (mirroring buildGraphFromDeps' own output).
+// solverResultToResolvedGraph maps a solver.Result onto the (resolved, graph)
+// shape the install pipeline consumes: resolved keyed by fqdn, graph keyed by
+// collection.key() (buildGraphFromDeps' output).
 func solverResultToResolvedGraph(
 	result *solver.Result,
 	roots []collection,

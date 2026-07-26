@@ -127,7 +127,6 @@ func TestCollectionCommandConfigSurface(t *testing.T) {
 		"--lock-file=req.lock.yml",
 		"--timeout=45s",
 		"--workers=3",
-		"--resolution=lenient",
 		"--offline",
 		"--cache-dir=" + cacheDir,
 	}
@@ -145,7 +144,6 @@ func TestCollectionCommandConfigSurface(t *testing.T) {
 	assertConfigField(t, "LockFile", cfg.LockFile, "req.lock.yml")
 	assertConfigField(t, "Timeout", cfg.Timeout, 45*time.Second)
 	assertConfigField(t, "Workers", cfg.Workers, 3)
-	assertConfigField(t, "Resolution", cfg.Resolution, "lenient")
 	assertConfigField(t, "Offline", cfg.Offline, true)
 	assertConfigField(t, "CacheDir", cfg.CacheDir, cacheDir)
 }

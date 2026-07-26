@@ -23,7 +23,6 @@ type Config struct {
 	CacheDir          string
 	DownloadPath      string
 	Server            string
-	Resolution        string
 	// Warnings collects non-fatal configuration warnings (e.g. a
 	// colon-separated collections_path with entries this tool ignores).
 	// BuildCollectionConfig runs before the output printer exists, so
@@ -69,24 +68,6 @@ func (c *Config) IsOffline() bool {
 		return false
 	}
 	return c.Offline
-}
-
-// IsLenient reports whether the resolver should fall back to best-effort
-// version selection when strict constraint satisfaction is impossible.
-func (c *Config) IsLenient() bool {
-	if c == nil {
-		return false
-	}
-	return c.Resolution == "lenient" || c.Resolution == "backtrack"
-}
-
-// IsBacktrack reports whether the resolver should attempt single-constraint
-// backtracking before falling back to max-satisfaction.
-func (c *Config) IsBacktrack() bool {
-	if c == nil {
-		return false
-	}
-	return c.Resolution == "backtrack"
 }
 
 // CollectionOptions captures collection install options before normalization.
@@ -162,7 +143,6 @@ func newConfigFromCLI(c *cli.Command) *Config {
 		DryRun:           c.Bool("dry-run"),
 		Offline:          c.Bool("offline"),
 		Frozen:           c.Bool("frozen"),
-		Resolution:       c.String("resolution"),
 		DownloadPath:     c.String("download-path"),
 	}
 
