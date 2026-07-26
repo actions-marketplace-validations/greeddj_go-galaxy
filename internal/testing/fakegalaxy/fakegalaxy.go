@@ -4,8 +4,11 @@
 // artifact download) without a real network dependency. It answers the
 // same routes and JSON shapes the real Galaxy API does, generates
 // deterministic tar.gz artifacts with a matching sha256, and supports
-// scripted fault injection (status codes, indefinite failures, hangs) and
-// per-endpoint request counting.
+// scripted fault injection (status codes, indefinite failures, hangs),
+// per-endpoint request counting, optional Authorization enforcement with
+// per-endpoint capture of the header actually received, and routing under
+// a base path prefix so a Galaxy NG / Automation Hub shaped deployment can
+// be simulated.
 //
 // The server can only be constructed from a test: New requires a
 // testing.TB, an interface implementable exclusively by the stdlib testing
@@ -82,15 +85,29 @@ var (
 )
 
 // Server is an in-memory Ansible Galaxy v3 API test double. It must only be
-// constructed via New.
+// constructed via New or NewAtBasePath.
 type Server struct {
-	srv         *httptest.Server
-	collections map[string]*fakeCollection
-	artifacts   map[string]fakeArtifact
-	baseURL     string
-	faults      []faultRule
-	mu          sync.Mutex
-	counts      [endpointCount]int
+	srv            *httptest.Server
+	collections    map[string]*fakeCollection
+	artifacts      map[string]fakeArtifact
+	baseURL        string
+	basePathPrefix string
+	requiredAuth   string
+	basePath       []string
+	faults         []faultRule
+	authSeen       [endpointCount]capturedAuth
+	mu             sync.Mutex
+	counts         [endpointCount]int
+	authFailStatus int
+}
+
+// capturedAuth is the Authorization header state one endpoint's most
+// recent request carried: present distinguishes a request that carried no
+// Authorization header at all from one that carried an empty value (value
+// "", present true).
+type capturedAuth struct {
+	value   string
+	present bool
 }
 
 // fakeCollection is the registry entry for one namespace/name pair: every
@@ -184,16 +201,45 @@ type Fault struct {
 // implementable exclusively by the stdlib testing package, so this
 // constructor, and therefore the server itself, can never be reached from
 // production code.
+//
+// New is equivalent to NewAtBasePath(tb, ""): every route is served at its
+// plain path, with no prefix.
 func New(tb testing.TB) *Server {
 	tb.Helper()
+	return NewAtBasePath(tb, "")
+}
+
+// NewAtBasePath starts an in-memory fake Galaxy v3 API server whose every
+// route is served under basePath, e.g. "/api/automation-hub", so a Galaxy
+// NG / Automation Hub shaped deployment - which mounts the same v3 API
+// under a non-root prefix - can be simulated. basePath is normalized by
+// trimming leading and trailing slashes; an empty basePath (or one that is
+// all slashes) serves every route at its plain path, identically to New.
+// Every URL this server generates for itself (root/version hrefs,
+// versions_url, download_url) carries the same prefix, so a client
+// following one lands back on this server. See New for why the
+// constructor takes testing.TB.
+func NewAtBasePath(tb testing.TB, basePath string) *Server {
+	tb.Helper()
+
+	trimmed := strings.Trim(basePath, "/")
+	var segments []string
+	var prefix string
+	if trimmed != "" {
+		segments = strings.Split(trimmed, "/")
+		prefix = "/" + trimmed
+	}
 
 	s := &Server{
-		collections: make(map[string]*fakeCollection),
-		artifacts:   make(map[string]fakeArtifact),
+		collections:    make(map[string]*fakeCollection),
+		artifacts:      make(map[string]fakeArtifact),
+		basePath:       segments,
+		basePathPrefix: prefix,
 	}
 	// The server is started before baseURL is known so ServeHTTP can be
-	// registered as its handler; no request can arrive before New returns
-	// s to the caller, so assigning s.srv/s.baseURL afterward is safe.
+	// registered as its handler; no request can arrive before this
+	// constructor returns s to the caller, so assigning s.srv/s.baseURL
+	// afterward is safe.
 	srv := httptest.NewServer(s)
 	tb.Cleanup(srv.Close)
 	s.srv = srv
@@ -226,8 +272,12 @@ func (s *Server) Client() *http.Client {
 func (s *Server) AddVersion(namespace, name, version string, deps map[string]string) Version {
 	data, sum := buildArtifact(namespace, name, version, deps)
 	filename := fmt.Sprintf("%s-%s-%s.tar.gz", namespace, name, version)
-	href := fmt.Sprintf("%s/api/v3/collections/%s/%s/versions/%s/", s.baseURL, namespace, name, version)
-	downloadURL := fmt.Sprintf("%s/download/%s", s.baseURL, filename)
+	// urlBase carries the base path prefix (empty unless NewAtBasePath was
+	// used), so every URL this fake hands back to a client resolves back to
+	// this server through the same prefix.
+	urlBase := s.baseURL + s.basePathPrefix
+	href := fmt.Sprintf("%s/api/v3/collections/%s/%s/versions/%s/", urlBase, namespace, name, version)
+	downloadURL := fmt.Sprintf("%s/download/%s", urlBase, filename)
 	detailBody := buildVersionDetailBody(namespace, name, version, href, downloadURL, filename, sum, len(data), deps)
 
 	s.mu.Lock()
@@ -245,7 +295,7 @@ func (s *Server) AddVersion(namespace, name, version string, deps map[string]str
 	}
 	col.versions[version] = &fakeVersionEntry{version: version, href: href, sha256: sum, detailBody: detailBody}
 	col.sortedVersions = sortedVersionKeys(col.versions)
-	recomputeRootBody(col, s.baseURL)
+	recomputeRootBody(col, urlBase)
 
 	s.artifacts[filename] = fakeArtifact{namespace: namespace, name: name, data: data}
 
@@ -261,6 +311,46 @@ func (s *Server) Fail(ep Endpoint, namespace, name string, f Fault) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.faults = append(s.faults, faultRule{namespace: namespace, name: name, ep: ep, fault: f})
+}
+
+// RequireAuth configures the server to demand an exact Authorization
+// header value, expected, on every request across every endpoint. The
+// empty string - the zero value, and the default before RequireAuth is
+// ever called - means anonymous: no Authorization header is required or
+// checked, this fake's original behavior. A non-empty expected value makes
+// a request whose Authorization header is missing or does not match byte
+// for byte fail with http.StatusUnauthorized (or whatever status
+// AuthFailStatus set) and an empty body, before that request reaches any
+// route handler or armed Fail rule - see the ordering documented on
+// ServeHTTP.
+func (s *Server) RequireAuth(expected string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.requiredAuth = expected
+}
+
+// AuthFailStatus overrides the HTTP status code an auth failure answers
+// with to status, e.g. http.StatusForbidden, in place of the default
+// http.StatusUnauthorized. It has no effect unless RequireAuth has also
+// been called with a non-empty expected value; the two may be called in
+// either order.
+func (s *Server) AuthFailStatus(status int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.authFailStatus = status
+}
+
+// SeenAuth reports the Authorization header value ep's most recent request
+// carried, and whether that request carried an Authorization header at
+// all. The second return is false when the header was altogether absent,
+// distinguishing that case from a request that carried an empty header
+// value (value "", second return true). It reports ("", false) for an
+// endpoint that has not yet received any request.
+func (s *Server) SeenAuth(ep Endpoint) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seen := s.authSeen[ep]
+	return seen.value, seen.present
 }
 
 // Count reports how many requests ep has received since the server started
@@ -294,28 +384,136 @@ func (s *Server) ResetCounts() {
 // plus the two Galaxy v2/bare-API probe routes real clients use to detect
 // server flavor - which must 404 rather than serve v3 metadata, since a
 // client would otherwise mistake this fake for a different API version.
+//
+// Each matched route is handed off to a dispatchXxx method, which - in
+// this load-bearing order - increments the endpoint's counter first (so it
+// reflects every request regardless of outcome), then runs the
+// Authorization check (so a request rejected for auth is still counted),
+// and only then falls through to fault handling and the endpoint's normal
+// response: an armed Fault can never mask a missing or wrong Authorization
+// header.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	segments := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	segments, ok := stripBasePath(segments, s.basePath)
+	if !ok {
+		// The request does not carry this server's configured base path
+		// prefix at all - not even a known route under a wrong prefix - so
+		// there is no endpoint to count against.
+		http.NotFound(w, r)
+		return
+	}
 
 	switch {
 	case isDownloadPath(segments):
-		s.incr(EndpointArtifact)
-		s.handleArtifact(w, r, segments[1])
+		s.dispatchArtifact(w, r, segments[1])
 	case isRootMetadataPath(segments):
-		s.incr(EndpointRootMetadata)
-		s.handleRootMetadata(w, r, segments[3], segments[4])
+		s.dispatchRootMetadata(w, r, segments[3], segments[4])
 	case isVersionsListPath(segments):
-		s.incr(EndpointVersionsList)
-		s.handleVersionsList(w, r, segments[3], segments[4])
+		s.dispatchVersionsList(w, r, segments[3], segments[4])
 	case isVersionDetailPath(segments):
-		s.incr(EndpointVersionDetail)
-		s.handleVersionDetail(w, r, segments[3], segments[4], segments[6])
+		s.dispatchVersionDetail(w, r, segments[3], segments[4], segments[6])
 	default:
 		// Covers the v2 ("api/v2/collections/ns/name") and bare-API
 		// ("api/collections/ns/name") probe routes, and anything else: none
 		// of them are served by this fake.
 		http.NotFound(w, r)
 	}
+}
+
+// dispatchArtifact counts, then auth-gates, a request to the download
+// route before handing it to handleArtifact. See ServeHTTP for why this
+// ordering is load-bearing.
+func (s *Server) dispatchArtifact(w http.ResponseWriter, r *http.Request, filename string) {
+	s.incr(EndpointArtifact)
+	if s.checkAuth(w, r, EndpointArtifact) {
+		return
+	}
+	s.handleArtifact(w, r, filename)
+}
+
+// dispatchRootMetadata counts, then auth-gates, a request to the root
+// metadata route before handing it to handleRootMetadata. See ServeHTTP
+// for why this ordering is load-bearing.
+func (s *Server) dispatchRootMetadata(w http.ResponseWriter, r *http.Request, namespace, name string) {
+	s.incr(EndpointRootMetadata)
+	if s.checkAuth(w, r, EndpointRootMetadata) {
+		return
+	}
+	s.handleRootMetadata(w, r, namespace, name)
+}
+
+// dispatchVersionsList counts, then auth-gates, a request to the versions
+// list route before handing it to handleVersionsList. See ServeHTTP for
+// why this ordering is load-bearing.
+func (s *Server) dispatchVersionsList(w http.ResponseWriter, r *http.Request, namespace, name string) {
+	s.incr(EndpointVersionsList)
+	if s.checkAuth(w, r, EndpointVersionsList) {
+		return
+	}
+	s.handleVersionsList(w, r, namespace, name)
+}
+
+// dispatchVersionDetail counts, then auth-gates, a request to the version
+// detail route before handing it to handleVersionDetail. See ServeHTTP for
+// why this ordering is load-bearing.
+func (s *Server) dispatchVersionDetail(w http.ResponseWriter, r *http.Request, namespace, name, version string) {
+	s.incr(EndpointVersionDetail)
+	if s.checkAuth(w, r, EndpointVersionDetail) {
+		return
+	}
+	s.handleVersionDetail(w, r, namespace, name, version)
+}
+
+// stripBasePath removes basePath's segments from the front of segments,
+// reporting false if segments does not start with them - the caller must
+// then 404 without dispatching to any known route. An empty basePath (set
+// by New, or NewAtBasePath with an empty or all-slash prefix) always
+// matches trivially, leaving segments unchanged, so behavior without a
+// base path is byte-identical to matching directly on segments.
+func stripBasePath(segments, basePath []string) ([]string, bool) {
+	if len(segments) < len(basePath) {
+		return nil, false
+	}
+	for i, want := range basePath {
+		if segments[i] != want {
+			return nil, false
+		}
+	}
+	return segments[len(basePath):], true
+}
+
+// checkAuth captures the Authorization header r carried for ep - readable
+// afterward via SeenAuth - and, if RequireAuth has been configured with a
+// non-empty expected value, enforces it: a request whose header is missing
+// or does not match byte for byte gets the configured failure status (401
+// Unauthorized unless AuthFailStatus overrode it) with an empty body, and
+// checkAuth reports true, telling the caller to stop. It reports false,
+// writing nothing, when RequireAuth was never armed or the header matches.
+// See ServeHTTP for why this must run after incr and before any fault
+// handling.
+func (s *Server) checkAuth(w http.ResponseWriter, r *http.Request, ep Endpoint) bool {
+	value, present := "", false
+	if values, ok := r.Header["Authorization"]; ok {
+		present = true
+		if len(values) > 0 {
+			value = values[0]
+		}
+	}
+
+	s.mu.Lock()
+	s.authSeen[ep] = capturedAuth{value: value, present: present}
+	required := s.requiredAuth
+	failStatus := s.authFailStatus
+	s.mu.Unlock()
+
+	if required == "" || (present && value == required) {
+		return false
+	}
+	if failStatus == 0 {
+		failStatus = http.StatusUnauthorized
+	}
+	w.WriteHeader(failStatus)
+	return true
 }
 
 // isDownloadPath reports whether segments is "download/{file}".
@@ -692,15 +890,18 @@ func parseDigits(s string) (int, bool) {
 // recomputeRootBody rebuilds col's premarshaled root metadata body after a
 // version has been added, since highest_version tracks whichever version
 // now sorts highest. It must be called with s.mu held, and requires
-// col.sortedVersions to already reflect the newly added version.
-func recomputeRootBody(col *fakeCollection, baseURL string) {
+// col.sortedVersions to already reflect the newly added version. urlBase is
+// the server's base URL with its base path prefix already appended (empty
+// unless NewAtBasePath was used), so the URLs embedded here resolve back to
+// this server through the same prefix.
+func recomputeRootBody(col *fakeCollection, urlBase string) {
 	highest := col.sortedVersions[len(col.sortedVersions)-1]
 
 	var root types.GalaxyCollection
-	root.Href = fmt.Sprintf("%s/api/v3/collections/%s/%s/", baseURL, col.namespace, col.name)
+	root.Href = fmt.Sprintf("%s/api/v3/collections/%s/%s/", urlBase, col.namespace, col.name)
 	root.Namespace = col.namespace
 	root.Name = col.name
-	root.VersionsURL = fmt.Sprintf("%s/api/v3/collections/%s/%s/versions/", baseURL, col.namespace, col.name)
+	root.VersionsURL = fmt.Sprintf("%s/api/v3/collections/%s/%s/versions/", urlBase, col.namespace, col.name)
 	root.HighestVersion.Href = col.versions[highest].href
 	root.HighestVersion.Version = highest
 

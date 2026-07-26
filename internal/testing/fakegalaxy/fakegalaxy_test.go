@@ -38,6 +38,26 @@ func doGet(t *testing.T, client *http.Client, url string) *http.Response {
 	return resp
 }
 
+// doGetWithAuth issues a GET against url, setting an Authorization header
+// to auth first unless auth is the empty string, failing the test on any
+// transport error. The caller owns the returned response and must close
+// its body.
+func doGetWithAuth(t *testing.T, client *http.Client, url, auth string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("build request for %s: %v", url, err)
+	}
+	if auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	return resp
+}
+
 // getJSON performs a GET against url and decodes the JSON response body
 // into target (skipped when target is nil or the status is not 200),
 // returning the response's status code. The body is always drained and
@@ -607,6 +627,324 @@ func TestPaginateClamps(t *testing.T) {
 				t.Errorf("paginate(versions, %d, %d) = %v, want %v", tc.offset, tc.limit, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestAuthAnonymousByDefault asserts a server that never called RequireAuth
+// serves requests exactly as before: no Authorization header is required,
+// and one supplied anyway is still captured but does not affect the
+// response.
+func TestAuthAnonymousByDefault(t *testing.T) {
+	t.Parallel()
+	s := New(t)
+	s.AddVersion("ns", "name", "1.0.0", nil)
+
+	url := s.URL() + "/api/v3/collections/ns/name"
+	if status := getJSON(t, s.Client(), url, nil); status != http.StatusOK {
+		t.Errorf("no Authorization header: status = %d, want %d", status, http.StatusOK)
+	}
+
+	resp := doGetWithAuth(t, s.Client(), url, "Token whatever")
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Authorization header present but unenforced: status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	value, ok := s.SeenAuth(EndpointRootMetadata)
+	if !ok || value != "Token whatever" {
+		t.Errorf("SeenAuth = (%q, %v), want (%q, true)", value, ok, "Token whatever")
+	}
+}
+
+// TestAuthMissingOrWrongHeaderRejected asserts RequireAuth rejects both a
+// request with no Authorization header at all and one carrying a header
+// that does not match byte for byte, in each case with the default 401
+// status.
+func TestAuthMissingOrWrongHeaderRejected(t *testing.T) {
+	t.Parallel()
+
+	t.Run("missing header", func(t *testing.T) {
+		t.Parallel()
+		s := New(t)
+		s.RequireAuth("Token s3cr3t")
+		s.AddVersion("ns", "name", "1.0.0", nil)
+
+		url := s.URL() + "/api/v3/collections/ns/name"
+		if status := getJSON(t, s.Client(), url, nil); status != http.StatusUnauthorized {
+			t.Errorf("status = %d, want %d", status, http.StatusUnauthorized)
+		}
+
+		value, ok := s.SeenAuth(EndpointRootMetadata)
+		if ok || value != "" {
+			t.Errorf("SeenAuth = (%q, %v), want (%q, false)", value, ok, "")
+		}
+	})
+
+	t.Run("wrong header", func(t *testing.T) {
+		t.Parallel()
+		s := New(t)
+		s.RequireAuth("Token s3cr3t")
+		s.AddVersion("ns", "name", "1.0.0", nil)
+
+		url := s.URL() + "/api/v3/collections/ns/name"
+		resp := doGetWithAuth(t, s.Client(), url, "Token wrong")
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+		}
+
+		value, ok := s.SeenAuth(EndpointRootMetadata)
+		if !ok || value != "Token wrong" {
+			t.Errorf("SeenAuth = (%q, %v), want (%q, true)", value, ok, "Token wrong")
+		}
+	})
+}
+
+// TestAuthCorrectHeaderSucceeds asserts a request carrying exactly the
+// expected Authorization header value is served normally.
+func TestAuthCorrectHeaderSucceeds(t *testing.T) {
+	t.Parallel()
+	s := New(t)
+	s.RequireAuth("Token s3cr3t")
+	s.AddVersion("ns", "name", "1.0.0", nil)
+
+	url := s.URL() + "/api/v3/collections/ns/name"
+	resp := doGetWithAuth(t, s.Client(), url, "Token s3cr3t")
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
+// TestAuthFailStatusOverridesTo403 asserts AuthFailStatus lets a caller
+// exercise the 403 Forbidden branch instead of the default 401.
+func TestAuthFailStatusOverridesTo403(t *testing.T) {
+	t.Parallel()
+	s := New(t)
+	s.RequireAuth("Token s3cr3t")
+	s.AuthFailStatus(http.StatusForbidden)
+	s.AddVersion("ns", "name", "1.0.0", nil)
+
+	url := s.URL() + "/api/v3/collections/ns/name"
+	if status := getJSON(t, s.Client(), url, nil); status != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", status, http.StatusForbidden)
+	}
+}
+
+// TestAuthEmptyHeaderDistinctFromAbsent asserts SeenAuth distinguishes a
+// request that carried an empty Authorization header from one that carried
+// none at all.
+func TestAuthEmptyHeaderDistinctFromAbsent(t *testing.T) {
+	t.Parallel()
+	s := New(t)
+	s.AddVersion("ns", "name", "1.0.0", nil)
+	url := s.URL() + "/api/v3/collections/ns/name"
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "")
+	resp, err := s.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	_ = resp.Body.Close()
+
+	value, ok := s.SeenAuth(EndpointRootMetadata)
+	if !ok || value != "" {
+		t.Errorf("empty header: SeenAuth = (%q, %v), want (%q, true)", value, ok, "")
+	}
+
+	// A brand new endpoint that has never received a request reports absent.
+	value, ok = s.SeenAuth(EndpointArtifact)
+	if ok || value != "" {
+		t.Errorf("never requested endpoint: SeenAuth = (%q, %v), want (%q, false)", value, ok, "")
+	}
+}
+
+// TestAuthRejectedRequestStillCounted asserts an endpoint's request counter
+// still counts a request that RequireAuth rejected.
+func TestAuthRejectedRequestStillCounted(t *testing.T) {
+	t.Parallel()
+	s := New(t)
+	s.RequireAuth("Token s3cr3t")
+	s.AddVersion("ns", "name", "1.0.0", nil)
+
+	url := s.URL() + "/api/v3/collections/ns/name"
+	if status := getJSON(t, s.Client(), url, nil); status != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", status, http.StatusUnauthorized)
+	}
+	if got := s.Count(EndpointRootMetadata); got != 1 {
+		t.Errorf("Count(EndpointRootMetadata) = %d, want 1", got)
+	}
+}
+
+// TestAuthWinsOverArmedFault asserts an armed Fault never masks an auth
+// failure: the auth check runs first, so a request missing its
+// Authorization header is rejected with the auth failure status rather
+// than the fault's, even though a fault is armed and would otherwise match.
+func TestAuthWinsOverArmedFault(t *testing.T) {
+	t.Parallel()
+	s := New(t)
+	s.RequireAuth("Token s3cr3t")
+	s.AddVersion("ns", "name", "1.0.0", nil)
+	s.Fail(EndpointRootMetadata, "ns", "name", Fault{Status: http.StatusTooManyRequests, Count: -1})
+
+	url := s.URL() + "/api/v3/collections/ns/name"
+	if status := getJSON(t, s.Client(), url, nil); status != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d (auth must win over the armed fault)", status, http.StatusUnauthorized)
+	}
+}
+
+// TestAuthServersAreIndependent asserts two fake servers with different
+// required tokens do not interfere: each enforces only its own token, and
+// each one's counters and captured Authorization values reflect only
+// requests it itself received.
+func TestAuthServersAreIndependent(t *testing.T) {
+	t.Parallel()
+	s1 := New(t)
+	s1.RequireAuth("Token one")
+	s1.AddVersion("ns", "name", "1.0.0", nil)
+
+	s2 := New(t)
+	s2.RequireAuth("Token two")
+	s2.AddVersion("ns", "name", "1.0.0", nil)
+
+	url1 := s1.URL() + "/api/v3/collections/ns/name"
+	url2 := s2.URL() + "/api/v3/collections/ns/name"
+
+	resp := doGetWithAuth(t, s1.Client(), url1, "Token one")
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("s1 with its own token: status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	// s2's own token, presented to s1, must be rejected: each server only
+	// accepts the token it was configured with.
+	resp = doGetWithAuth(t, s1.Client(), url1, "Token two")
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("s1 with s2's token: status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+
+	assertServersIndependentAfterS1Traffic(t, s1, s2)
+
+	// s2 still enforces its own auth requirement on an anonymous request,
+	// independently of everything done against s1 above.
+	status := getJSON(t, s2.Client(), url2, nil)
+	if status != http.StatusUnauthorized {
+		t.Errorf("s2 anonymous GET status = %d, want %d", status, http.StatusUnauthorized)
+	}
+}
+
+// assertServersIndependentAfterS1Traffic asserts that the two requests
+// TestAuthServersAreIndependent issued against s1 left s2's counter and
+// captured Authorization value untouched, while s1's own counter reflects
+// both of them.
+func assertServersIndependentAfterS1Traffic(t *testing.T, s1, s2 *Server) {
+	t.Helper()
+	if got := s1.Count(EndpointRootMetadata); got != 2 {
+		t.Errorf("s1 Count(EndpointRootMetadata) = %d, want 2", got)
+	}
+	if got := s2.Count(EndpointRootMetadata); got != 0 {
+		t.Errorf("s2 Count(EndpointRootMetadata) = %d, want 0", got)
+	}
+	if value, ok := s2.SeenAuth(EndpointRootMetadata); ok || value != "" {
+		t.Errorf("s2 SeenAuth = (%q, %v), want (%q, false)", value, ok, "")
+	}
+}
+
+// TestBasePathRouting asserts NewAtBasePath serves every endpoint under the
+// configured prefix, embeds that prefix in every self-generated URL, and
+// 404s a request to the unprefixed path.
+func TestBasePathRouting(t *testing.T) {
+	t.Parallel()
+	s := NewAtBasePath(t, "/api/automation-hub")
+	v := s.AddVersion("ns", "name", "1.0.0", map[string]string{"ns2.dep": "*"})
+	prefix := s.URL() + "/api/automation-hub"
+
+	assertBasePathRootMetadata(t, s, prefix)
+	assertBasePathVersionsList(t, s, prefix)
+	assertBasePathVersionDetail(t, s, prefix, v)
+	assertBasePathArtifact(t, s, prefix, v)
+
+	// The unprefixed path must 404: this server only answers under its
+	// configured base path.
+	status := getJSON(t, s.Client(), s.URL()+"/api/v3/collections/ns/name", nil)
+	if status != http.StatusNotFound {
+		t.Errorf("unprefixed path status = %d, want %d", status, http.StatusNotFound)
+	}
+}
+
+// assertBasePathRootMetadata asserts the root metadata route resolves
+// under prefix and its embedded versions_url/highest_version.href URLs
+// carry the same prefix.
+func assertBasePathRootMetadata(t *testing.T, s *Server, prefix string) {
+	t.Helper()
+	var root types.GalaxyCollection
+	status := getJSON(t, s.Client(), prefix+"/api/v3/collections/ns/name", &root)
+	if status != http.StatusOK {
+		t.Fatalf("root metadata status = %d, want %d", status, http.StatusOK)
+	}
+	if want := prefix + "/api/v3/collections/ns/name/versions/"; root.VersionsURL != want {
+		t.Errorf("versions_url = %q, want %q", root.VersionsURL, want)
+	}
+	if want := prefix + "/api/v3/collections/ns/name/versions/1.0.0/"; root.HighestVersion.Href != want {
+		t.Errorf("highest_version.href = %q, want %q", root.HighestVersion.Href, want)
+	}
+}
+
+// assertBasePathVersionsList asserts the versions-list route resolves
+// under prefix and its one entry's href carries the same prefix.
+func assertBasePathVersionsList(t *testing.T, s *Server, prefix string) {
+	t.Helper()
+	var versions types.GalaxyCollectionVersions
+	status := getJSON(t, s.Client(), prefix+"/api/v3/collections/ns/name/versions", &versions)
+	if status != http.StatusOK {
+		t.Fatalf("versions list status = %d, want %d", status, http.StatusOK)
+	}
+	if len(versions.Data) != 1 {
+		t.Fatalf("len(versions.Data) = %d, want 1", len(versions.Data))
+	}
+	if want := prefix + "/api/v3/collections/ns/name/versions/1.0.0/"; versions.Data[0].Href != want {
+		t.Errorf("versions.Data[0].href = %q, want %q", versions.Data[0].Href, want)
+	}
+}
+
+// assertBasePathVersionDetail asserts the version-detail route resolves
+// under prefix and its download_url carries the same prefix.
+func assertBasePathVersionDetail(t *testing.T, s *Server, prefix string, v Version) {
+	t.Helper()
+	var info types.GalaxyCollectionVersionInfo
+	status := getJSON(t, s.Client(), prefix+"/api/v3/collections/ns/name/versions/1.0.0/", &info)
+	if status != http.StatusOK {
+		t.Fatalf("version detail status = %d, want %d", status, http.StatusOK)
+	}
+	if want := prefix + "/download/ns-name-1.0.0.tar.gz"; info.DownloadURL != want {
+		t.Errorf("download_url = %q, want %q", info.DownloadURL, want)
+	}
+	if info.Artifact.Sha256 != v.SHA256 {
+		t.Errorf("artifact.sha256 = %q, want %q", info.Artifact.Sha256, v.SHA256)
+	}
+}
+
+// assertBasePathArtifact asserts the download route resolves under prefix
+// and serves bytes hashing to v's recorded sha256.
+func assertBasePathArtifact(t *testing.T, s *Server, prefix string, v Version) {
+	t.Helper()
+	resp := doGet(t, s.Client(), prefix+"/download/ns-name-1.0.0.tar.gz")
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read artifact body: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("artifact status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	sum := sha256.Sum256(body)
+	if got := hex.EncodeToString(sum[:]); got != v.SHA256 {
+		t.Errorf("artifact sha256 = %q, want %q", got, v.SHA256)
 	}
 }
 
