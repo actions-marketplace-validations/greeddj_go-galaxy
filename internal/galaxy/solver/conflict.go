@@ -50,6 +50,15 @@ func (s *solveState) resolveConflict(startIdx int) (int, *incompatibility, error
 
 		satisfier, term := s.earliestSatisfier(inc)
 		if satisfier == nil {
+			// The incompatibility is satisfied only vacuously: every term is
+			// tautological (its permitted set spans the whole extended
+			// universe), so there is no real assignment to resolve against. A
+			// tautologically-satisfied incompatibility is a genuine dead end -
+			// the forbidden combination always holds - so it is reported as a
+			// clean conflict, not an internal-invariant error.
+			if s.allTautological(inc) {
+				return 0, nil, s.buildConflictError(inc)
+			}
 			// The reference algorithm assumes a satisfier always exists for
 			// a genuinely satisfied incompatibility; under the
 			// boundary-extended universe this holds for every package
@@ -81,7 +90,7 @@ func (s *solveState) resolveConflict(startIdx int) (int, *incompatibility, error
 		inc = next
 		incChanged = true
 	}
-	return 0, nil, fmt.Errorf("resolveConflict did not converge: %w", errSolverBug)
+	return 0, nil, s.buildConflictError(inc)
 }
 
 // shouldBackjump decides resolveConflict's terminate-vs-resolve step. The
@@ -195,6 +204,18 @@ func mergeTermsExcluding(a, b *incompatibility, exclude string) []term {
 // termSatisfies reports whether a's permitted set is a subset of b's over
 // the boundary-extended universe - i.e. whether a on its own, without
 // anything else, already satisfies b. a and b must name the same package.
+// allTautological reports whether every term in inc is always-satisfiable -
+// its permitted set spans every cell of that package's extended universe.
+func (s *solveState) allTautological(inc *incompatibility) bool {
+	for _, t := range inc.Terms {
+		u := s.uniFor(t.Package)
+		if popcount(permittedExtBits(t, u)) != u.extendedLen() {
+			return false
+		}
+	}
+	return true
+}
+
 func termSatisfies(a, b term, uni *packageUniverse) bool {
 	return subset(permittedExtBits(a, uni), permittedExtBits(b, uni))
 }

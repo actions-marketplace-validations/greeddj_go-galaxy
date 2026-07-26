@@ -1,7 +1,6 @@
 package solver
 
 import (
-	"fmt"
 	"slices"
 )
 
@@ -246,10 +245,10 @@ func (s *solveState) resolveAndDerive(idx int, changed map[string]bool) error {
 		case incSatisfied:
 			idx = rootIdx
 		case incInconclusive:
-			return fmt.Errorf("conflict resolution returned an inconclusive incompatibility: %w", errSolverBug)
+			return s.buildConflictError(rootCause)
 		}
 	}
-	return fmt.Errorf("resolveAndDerive did not converge: %w", errSolverBug)
+	return s.buildConflictError(s.store.all[idx])
 }
 
 // popSmallest removes and returns the lexicographically smallest key from
