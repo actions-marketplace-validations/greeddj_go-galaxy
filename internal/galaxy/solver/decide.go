@@ -171,6 +171,41 @@ func (s *solveState) pickByFewestCandidates(names []string) (string, bool) {
 	return best, best != ""
 }
 
+// pickRequiredDependencyTarget is decision making's fallback for when the
+// positive-derivation candidate pool is empty: it returns the lowest-named
+// undecided package that a currently-decided parent depends on. Such a
+// package is required by that decided parent, yet can carry only a negative
+// assignment - a residual left by an earlier, backtracked parent version
+// whose own dependency on it had no matching version makes its later
+// dependency term read as already satisfied (running subset of the required
+// range) rather than deriving a fresh positive requirement. Deciding it here
+// honors the same dependency edges the completeness guard enforces, and the
+// store scan stays off the decision hot path since it runs only once the
+// ordinary candidate pool is exhausted.
+func (s *solveState) pickRequiredDependencyTarget() (string, bool) {
+	best := ""
+	for _, inc := range s.store.all {
+		dep, ok := inc.Cause.(causeDependency)
+		if !ok {
+			continue
+		}
+		if best != "" && dep.Dep >= best {
+			continue
+		}
+		parent := s.ps.packages[dep.Parent]
+		if parent == nil || parent.decisionIdx == -1 ||
+			parent.decisionVersion.Original() != dep.ParentVersion.Original() {
+			continue
+		}
+		child := s.ps.packages[dep.Dep]
+		if child != nil && child.decisionIdx != -1 {
+			continue
+		}
+		best = dep.Dep
+	}
+	return best, best != ""
+}
+
 // decisionOutcome carries makeDecision's early-exit result: a fast-path
 // helper returns a non-nil outcome when the caller should return it as-is,
 // or nil when the caller should fall through to decideFromAllowed instead.
@@ -188,7 +223,10 @@ type decisionOutcome struct {
 func (s *solveState) makeDecision() (string, bool, error) {
 	pkg, ok := s.pickPackage()
 	if !ok {
-		return "", true, nil
+		pkg, ok = s.pickRequiredDependencyTarget()
+		if !ok {
+			return "", true, nil
+		}
 	}
 	if out := s.tryFastDecide(pkg); out != nil {
 		return out.pkg, out.done, out.err

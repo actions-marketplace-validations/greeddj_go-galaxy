@@ -68,6 +68,16 @@ func relateMaterialized(term term, p *packageAssignments, uniFor func(string) *p
 	if subsetOfPermittedExt(p.running, term, uni) {
 		return termSatisfied
 	}
+	if isEmptyBits(permittedExtBits(term, uni)) {
+		// A structurally-false term (its permitted set spans no cell of the
+		// extended universe) cannot be satisfied by any assignment. Inside a
+		// dependency incompatibility {parent, not P in C} - where C matches
+		// every published version of P, so "not P in C" is empty-permitted -
+		// reading it as contradicted would discard the dependency and drop P.
+		// Treat it as the single open term instead, so the satisfied parent
+		// derives its negation ("P required") and P is still decided.
+		return termInconclusive
+	}
 	if disjointFromPermittedExt(p.running, term, uni) {
 		return termContradicted
 	}

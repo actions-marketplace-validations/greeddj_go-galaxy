@@ -111,14 +111,77 @@ func TestExtractResultGuardFiresOnIncompleteResolution(t *testing.T) {
 		withDeps("acme.foo", "2.0.0", map[string]string{"acme.bar": ">=5.0.0"}).
 		withDeps("acme.foo", "1.0.0", map[string]string{"acme.bar": "*"})
 
-	_, err := Solve([]Requirement{{Package: "acme.foo", Constraint: ">=1.0.0"}}, p)
-	if err == nil {
-		t.Fatalf("Solve succeeded; want the completeness guard to fire on this known-incomplete input")
+	res, err := Solve([]Requirement{{Package: "acme.foo", Constraint: ">=1.0.0"}}, p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if !errors.Is(err, errSolverBug) {
-		t.Fatalf("error = %v, want errors.Is(err, errSolverBug) (the completeness guard's own sentinel)", err)
+	if res.Versions["acme.foo"] != testVersion100 || res.Versions["acme.bar"] != testVersion100 {
+		t.Fatalf("Versions = %v, want foo=1.0.0 bar=1.0.0 (the * dependency must resolve after the unsatisfiable-2.0.0 backtrack)", res.Versions)
 	}
-	if !strings.Contains(err.Error(), "acme.bar") {
-		t.Fatalf("error = %q, want it to name the undecided package acme.bar", err.Error())
+}
+
+// TestExtractResultGuardFiresOnConstructedIncompleteResolution exercises the
+// completeness guard directly: a decided package with a dependency edge to a
+// package that was never decided must surface a loud internal-bug error.
+func TestExtractResultGuardFiresOnConstructedIncompleteResolution(t *testing.T) {
+	t.Parallel()
+	s := newTestState(newFakeProvider())
+	fooV := mustNewVersion(testVersion100)
+	s.ps.decide("acme.foo", fooV)
+	s.store.add(&incompatibility{
+		Terms: []term{
+			{Package: "acme.foo", Set: singletonSet(fooV), Positive: true},
+			{Package: "acme.bar", Set: anySet, Positive: false},
+		},
+		Cause: causeDependency{Parent: "acme.foo", ParentVersion: fooV, Dep: "acme.bar", Constraint: "*"},
+	})
+	if _, err := s.extractResult(); err == nil || !errors.Is(err, errSolverBug) ||
+		!strings.Contains(err.Error(), "acme.bar") {
+		t.Fatalf("guard did not fire on a constructed incomplete resolution: err=%v", err)
+	}
+}
+
+// conditionalityDropCase is one conditionality-drop-family regression: foo's
+// highest version 2.0.0 depends on bar via the unsatisfiable constraintHi
+// (leaving a residual on bar after backtrack), and its surviving version
+// 1.0.0 depends on bar via constraintLo - bar must still resolve to wantBar.
+type conditionalityDropCase struct {
+	name         string
+	constraintHi string
+	constraintLo string
+	wantBar      string
+	barVersions  []string
+}
+
+func conditionalityDropCases() []conditionalityDropCase {
+	return []conditionalityDropCase{
+		{"star-after-empty-collapse", ">=5.0.0", "*", testVersion100, []string{testVersion100}},
+		{"star-after-boundary-collapse", "1.x", "*", "0.2.0", []string{"0.2.0"}},
+		{"vacuous-neq-survivor", ">=5.0.0", "!=1.5.0", "1.2.5", []string{"0.2.3", "1.2.5"}},
+		{"point-pinned-residual-survivor", "!=1.5.0", ">=1.0.0-0", "1.5.0", []string{"1.5.0"}},
+	}
+}
+
+// TestConditionalityDropFamily covers the resolutions that a residual left by
+// a backtracked, unsatisfiable parent version used to silently drop.
+func TestConditionalityDropFamily(t *testing.T) {
+	t.Parallel()
+	root := []Requirement{{Package: "acme.foo", Constraint: ">=1.0.0"}}
+	for _, tc := range conditionalityDropCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := newFakeProvider().
+				withVersions("acme.foo", testVersion100, "2.0.0").
+				withVersions("acme.bar", tc.barVersions...).
+				withDeps("acme.foo", "2.0.0", map[string]string{"acme.bar": tc.constraintHi}).
+				withDeps("acme.foo", testVersion100, map[string]string{"acme.bar": tc.constraintLo})
+			res, err := Solve(root, p)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if res.Versions["acme.foo"] != testVersion100 || res.Versions["acme.bar"] != tc.wantBar {
+				t.Fatalf("Versions = %v, want foo=1.0.0 bar=%s", res.Versions, tc.wantBar)
+			}
+		})
 	}
 }
