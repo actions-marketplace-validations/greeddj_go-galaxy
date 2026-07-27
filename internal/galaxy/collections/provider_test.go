@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
 
+	cacheManager "github.com/greeddj/go-galaxy/internal/galaxy/cache"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/fetch"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
@@ -321,6 +323,49 @@ func newEmptyHighestVersionServer(t *testing.T) *httptest.Server {
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// TestIsUnknownPackageErrorClassification pins isUnknownPackageError's
+// contract against the two new classified sentinels: a 401/403 wrapped in
+// helpers.ErrGalaxyAuthFailed and a retryable status wrapped in
+// helpers.ErrGalaxyServerUnavailable must both fail this check (so they
+// abort the run rather than silently becoming "unknown package"), while a
+// bare 404 and helpers.ErrLoadMetadataFailed - the two forms
+// loadRootMetadataCached's own advance-or-abort walk can still produce -
+// keep passing it. A future edit that let a 404 slip into the
+// unavailable/auth branch would invert this test.
+func TestIsUnknownPackageErrorClassification(t *testing.T) {
+	t.Parallel()
+	notFound := &cacheManager.HTTPStatusError{Code: http.StatusNotFound}
+	unauthorized := &cacheManager.HTTPStatusError{Code: http.StatusUnauthorized}
+	unavailable := &cacheManager.HTTPStatusError{Code: http.StatusServiceUnavailable}
+
+	cases := []struct {
+		err  error
+		name string
+		want bool
+	}{
+		{name: "bare 404", err: notFound, want: true},
+		{name: "ErrLoadMetadataFailed", err: helpers.ErrLoadMetadataFailed, want: true},
+		{
+			name: "401 wrapped in ErrGalaxyAuthFailed",
+			err:  fmt.Errorf("%w: server a: %w", helpers.ErrGalaxyAuthFailed, unauthorized),
+			want: false,
+		},
+		{
+			name: "503 wrapped in ErrGalaxyServerUnavailable",
+			err:  fmt.Errorf("%w: server a: %w", helpers.ErrGalaxyServerUnavailable, unavailable),
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isUnknownPackageError(tc.err); got != tc.want {
+				t.Fatalf("isUnknownPackageError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
 }
 
 // newTestMetadataProvider builds a MetadataProvider pointed at srv.

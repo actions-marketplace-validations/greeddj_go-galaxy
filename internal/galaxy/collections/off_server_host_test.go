@@ -24,8 +24,8 @@ const offHostWarnSubstring = "differs from the configured server host"
 // offServerHostGuardCase is one table entry for
 // TestWarnIfOffServerDownloadHostGuards.
 type offServerHostGuardCase struct {
-	cfg         *config.Config
 	name        string
+	base        string
 	downloadURL string
 	wantWarn    bool
 }
@@ -34,20 +34,20 @@ type offServerHostGuardCase struct {
 // warnIfOffServerDownloadHost, factored out of the test function itself so
 // the test body stays short: a genuine host mismatch, a same-host match
 // under varying scheme/port/case, and every input this function
-// deliberately declines to warn about (nil config, blank server, an
-// unparseable server or download URL, and a download URL with no host at
-// all) so a false alarm never reaches CI output.
+// deliberately declines to warn about (a blank base, an unparseable base or
+// download URL, and a download URL with no host at all) so a false alarm
+// never reaches CI output.
 func offServerHostGuardCases() []offServerHostGuardCase {
 	return []offServerHostGuardCase{
 		{
 			name:        "differing host warns",
-			cfg:         &config.Config{Server: "https://galaxy.example.com"},
+			base:        "https://galaxy.example.com",
 			downloadURL: "https://cdn.other.example/artifact.tar.gz",
 			wantWarn:    true,
 		},
 		{
 			name:        "same host no warn",
-			cfg:         &config.Config{Server: "https://galaxy.example.com"},
+			base:        "https://galaxy.example.com",
 			downloadURL: "https://galaxy.example.com/artifact.tar.gz",
 			wantWarn:    false,
 		},
@@ -56,38 +56,32 @@ func offServerHostGuardCases() []offServerHostGuardCase {
 			// identical (and differently schemed) host is not a mismatch -
 			// this is the intended semantics: only the host is compared.
 			name:        "same host different scheme and port no warn",
-			cfg:         &config.Config{Server: "https://galaxy.example.com:443"},
+			base:        "https://galaxy.example.com:443",
 			downloadURL: "http://galaxy.example.com:8080/artifact.tar.gz",
 			wantWarn:    false,
 		},
 		{
 			name:        "host comparison is case-insensitive",
-			cfg:         &config.Config{Server: "https://Galaxy.Example.COM"},
+			base:        "https://Galaxy.Example.COM",
 			downloadURL: "https://galaxy.example.com/artifact.tar.gz",
 			wantWarn:    false,
 		},
 		{
-			name:        "nil config no warn",
-			cfg:         nil,
-			downloadURL: "https://cdn.other.example/artifact.tar.gz",
-			wantWarn:    false,
-		},
-		{
-			name:        "blank server no warn",
-			cfg:         &config.Config{Server: "   "},
+			name:        "blank base no warn",
+			base:        "   ",
 			downloadURL: "https://cdn.other.example/artifact.tar.gz",
 			wantWarn:    false,
 		},
 		{
 			// A raw control character makes url.Parse fail outright.
-			name:        "unparseable server no warn",
-			cfg:         &config.Config{Server: "http://exa\x7fmple.com"},
+			name:        "unparseable base no warn",
+			base:        "http://exa\x7fmple.com",
 			downloadURL: "https://cdn.other.example/artifact.tar.gz",
 			wantWarn:    false,
 		},
 		{
 			name:        "unparseable download URL no warn",
-			cfg:         &config.Config{Server: "https://galaxy.example.com"},
+			base:        "https://galaxy.example.com",
 			downloadURL: "http://exa\x7fmple.com",
 			wantWarn:    false,
 		},
@@ -96,7 +90,7 @@ func offServerHostGuardCases() []offServerHostGuardCase {
 			// an empty Hostname(), which is guarded against explicitly rather
 			// than treated as a mismatch.
 			name:        "download URL without a host no warn",
-			cfg:         &config.Config{Server: "https://galaxy.example.com"},
+			base:        "https://galaxy.example.com",
 			downloadURL: "/local/artifact.tar.gz",
 			wantWarn:    false,
 		},
@@ -114,13 +108,13 @@ func TestWarnIfOffServerDownloadHostGuards(t *testing.T) {
 			printer := &capturingPrinter{}
 			runtime := infra.New(printer, http.DefaultClient)
 
-			warnIfOffServerDownloadHost(runtime, tt.cfg, tt.downloadURL)
+			warnIfOffServerDownloadHost(runtime, tt.base, tt.downloadURL)
 
 			// The warning goes out through Warnf, not Printf, so it survives
 			// --quiet; assert against that channel specifically.
 			if got := printer.hasWarnContaining(offHostWarnSubstring); got != tt.wantWarn {
-				t.Fatalf("downloadURL %q against server %v: warned=%v, want %v (warns=%v)",
-					tt.downloadURL, tt.cfg, got, tt.wantWarn, printer.warns)
+				t.Fatalf("downloadURL %q against base %q: warned=%v, want %v (warns=%v)",
+					tt.downloadURL, tt.base, got, tt.wantWarn, printer.warns)
 			}
 		})
 	}
@@ -152,7 +146,11 @@ func runOffHostInstall(t *testing.T, cfgServer string, server *httptest.Server, 
 		t.Fatalf("mkdir cacheDir: %v", err)
 	}
 
-	col := collection{Namespace: "acme", Name: "offhost", Version: "1.0.0"}
+	// Source is set explicitly to cfgServer here, mirroring what
+	// solverResultToResolvedGraph always stamps onto a real resolved
+	// collection: warnIfOffServerDownloadHost now compares against the
+	// collection's own bound server, not a package-wide cfg.Server.
+	col := collection{Namespace: "acme", Name: "offhost", Version: "1.0.0", Source: cfgServer}
 	meta := &types.GalaxyCollectionVersionInfo{DownloadURL: server.URL}
 	meta.Artifact.Sha256 = sha
 

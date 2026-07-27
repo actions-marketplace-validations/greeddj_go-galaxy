@@ -5,7 +5,6 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 )
 
@@ -89,7 +88,6 @@ func assertLevel(t *testing.T, got []string, want []string) {
 // RequirementsHash check.
 func TestRequirementsSignatureModePartition(t *testing.T) {
 	t.Parallel()
-	cfg := &config.Config{Server: "https://galaxy.example.com"}
 	rootsForward := []collection{
 		{Namespace: "acme", Name: "app", Constraint: ">=1.0.0"},
 		{Namespace: "acme", Name: "lib", Constraint: ">=2.0.0"},
@@ -99,8 +97,8 @@ func TestRequirementsSignatureModePartition(t *testing.T) {
 		{Namespace: "acme", Name: "app", Constraint: ">=1.0.0"},
 	}
 
-	specForward := buildRequirementsSpec(cfg, rootsForward)
-	specReversed := buildRequirementsSpec(cfg, rootsReversed)
+	specForward := buildRequirementsSpec(rootsForward)
+	specReversed := buildRequirementsSpec(rootsReversed)
 
 	depsSigForward := requirementsSignatureFromSpec(specForward, false)
 	depsSigReversed := requirementsSignatureFromSpec(specReversed, false)

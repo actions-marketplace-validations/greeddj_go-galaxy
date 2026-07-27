@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 )
 
@@ -14,8 +13,11 @@ type rootPreparation struct {
 	GalaxyRoots []collection
 }
 
-// prepareRoots normalizes and validates root requirements.
-func prepareRoots(cfg *config.Config, roots []collection) (*rootPreparation, error) {
+// prepareRoots normalizes and validates root requirements. A root's empty
+// Source is left as-is: unpinned is now a distinct, stable value that lets
+// the root walk the configured server list, rather than being nailed to a
+// single default server here.
+func prepareRoots(roots []collection) (*rootPreparation, error) {
 	prep := &rootPreparation{}
 	seen := make(map[string]collection)
 	addRoot := func(col collection) error {
@@ -42,9 +44,6 @@ func prepareRoots(cfg *config.Config, roots []collection) (*rootPreparation, err
 			}
 			root.Namespace = namespace
 			root.Name = name
-		}
-		if root.Source == "" {
-			root.Source = cfg.Server
 		}
 		if err := addRoot(root); err != nil {
 			return nil, err

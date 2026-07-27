@@ -60,6 +60,16 @@ var fromErrorCases = []exitCase{
 		wantCode: ExitNetwork,
 	},
 	{
+		name:     "galaxy server auth failed",
+		err:      fmt.Errorf("%w: server a: ctx", helpers.ErrGalaxyAuthFailed),
+		wantCode: ExitNetwork,
+	},
+	{
+		name:     "galaxy server unavailable",
+		err:      fmt.Errorf("%w: server a: ctx", helpers.ErrGalaxyServerUnavailable),
+		wantCode: ExitNetwork,
+	},
+	{
 		name:     "dependency graph has a cycle",
 		err:      fmt.Errorf("%w: ctx", helpers.ErrDependencyGraphHasACycle),
 		wantCode: ExitResolution,

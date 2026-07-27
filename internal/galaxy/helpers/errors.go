@@ -258,4 +258,20 @@ var (
 	// origin, one transport" a structural invariant instead of a silent
 	// pick between two credentials for the same endpoint.
 	ErrConflictingServerToken = errors.New("conflicting token for the same galaxy server origin")
+
+	// ErrGalaxyAuthFailed indicates a configured Galaxy server answered a
+	// root-metadata request with 401 or 403. This is fail-closed: unlike a
+	// 404 (which only means this server does not have the collection and
+	// advances the server-list walk to the next candidate), a credential
+	// failure aborts the whole run rather than silently falling through to
+	// another server that might answer anonymously.
+	ErrGalaxyAuthFailed = errors.New("galaxy server authentication failed")
+	// ErrGalaxyServerUnavailable indicates a configured Galaxy server kept
+	// answering a root-metadata request with a retryable status (429, 500,
+	// 502, 503, or 504) until the retry budget was spent. Like
+	// ErrGalaxyAuthFailed, this aborts the run instead of advancing to the
+	// next server in the list: a transient outage on one server is not
+	// evidence the collection is absent there, so silently falling through
+	// would risk installing from the wrong server once the outage clears.
+	ErrGalaxyServerUnavailable = errors.New("galaxy server unavailable")
 )

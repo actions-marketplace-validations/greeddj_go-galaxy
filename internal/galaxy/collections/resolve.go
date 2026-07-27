@@ -28,7 +28,7 @@ func resolveCollectionsInternal(
 	cfg := deps.cfg
 	st := deps.st
 
-	reqSpec := buildRequirementsSpec(cfg, roots)
+	reqSpec := buildRequirementsSpec(roots)
 	reqHash := requirementsSignatureFromSpec(reqSpec, cfg.NoDeps)
 
 	snapshotAllowed := allowSnapshot && st != nil
@@ -145,24 +145,46 @@ func cachedDeps(st *store.Store, policy cacheManager.Policy, cacheKey string) (m
 	return deps, ok
 }
 
+// resolvedRoot bundles loadRootMetadataCached's result with the fallback
+// versions URL resolveRootMetadata derives from it. It is a struct rather
+// than a fourth return value: three of resolveRootMetadata's four callers
+// only need two or three of these fields, and a five-value return signature
+// fights this repo's lll/revive budget.
+type resolvedRoot struct {
+	meta        *types.GalaxyCollection
+	versionsURL string
+	// base is the server that actually answered col's root-metadata fetch -
+	// loadRootMetadataCached's own winningBase - never col.Source, which may
+	// be empty (an unpinned collection) or stale (a snapshot/legacy-lockfile
+	// Source that disagrees with whichever server actually served it).
+	base string
+}
+
+// resolveRootMetadata loads col's root metadata and derives the versions
+// URL callers use to page through its published versions. It fetches first,
+// then falls back to collectionVersionsURL built from the winning base
+// (never col.Source), and finally overrides that fallback with the root
+// metadata's own versions_url, normalized against the same winning base,
+// when the metadata provides one - the fallback only matters for a root
+// metadata document that omits versions_url.
 func resolveRootMetadata(
 	ctx context.Context,
 	deps collectionDeps,
 	col collection,
 	policy cacheManager.Policy,
 	label string,
-) (*types.GalaxyCollection, string, error) {
+) (resolvedRoot, error) {
 	runtime := deps.runtime
-	versionsURL := collectionVersionsURL(col)
-	rootMeta, err := loadRootMetadataCached(ctx, deps, col, policy)
+	rootMeta, base, err := loadRootMetadataCached(ctx, deps, col, policy)
 	if err != nil {
-		return nil, "", err
+		return resolvedRoot{}, err
 	}
+	versionsURL := collectionVersionsURL(collection{Namespace: col.Namespace, Name: col.Name, Source: base})
 	if rootMeta != nil && rootMeta.VersionsURL != "" {
-		versionsURL = normalizeVersionsURL(col.Source, rootMeta.VersionsURL)
+		versionsURL = normalizeVersionsURL(base, rootMeta.VersionsURL)
 		runtime.Output.Debugf("versions URL for %s: %s", label, versionsURL)
 	}
-	return rootMeta, versionsURL, nil
+	return resolvedRoot{meta: rootMeta, versionsURL: versionsURL, base: base}, nil
 }
 
 func extractDependencies(info *types.GalaxyCollectionVersionInfo) map[string]string {
@@ -706,15 +728,16 @@ func validateMergedGraph(mergedResolved map[string]collection, mergedGraph map[s
 	return true
 }
 
-// buildRequirementsSpec builds a normalized requirement spec map.
-func buildRequirementsSpec(cfg *config.Config, roots []collection) map[string]requirementSpec {
+// buildRequirementsSpec builds a normalized requirement spec map. An
+// unpinned root's Source stays "" here rather than defaulting to cfg.Server:
+// unpinned is now a distinct, stable spec value (the root walks the
+// configured server list instead of being nailed to one), and folding it
+// into cfg.Server would make two roots that mean different things ("no
+// preference" vs "pinned to the default server") hash identically.
+func buildRequirementsSpec(roots []collection) map[string]requirementSpec {
 	spec := make(map[string]requirementSpec, len(roots))
 	for _, root := range roots {
 		fqdn := fmt.Sprintf("%s.%s", root.Namespace, root.Name)
-		source := root.Source
-		if source == "" {
-			source = cfg.Server
-		}
 		constraint := root.Constraint
 		if constraint == "" {
 			constraint = root.Version
@@ -722,7 +745,7 @@ func buildRequirementsSpec(cfg *config.Config, roots []collection) map[string]re
 		constraint = normalizeRequirementConstraint(constraint)
 		spec[fqdn] = requirementSpec{
 			Constraint: constraint,
-			Source:     source,
+			Source:     root.Source,
 			Type:       root.Type,
 			Signatures: normalizeSignatures(root.Signatures),
 		}

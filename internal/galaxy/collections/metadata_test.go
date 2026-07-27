@@ -104,7 +104,7 @@ func TestLoadRootMetadataCachedResolvesHubShapedBase(t *testing.T) {
 	runtime := infra.New(noopPrinter{}, srv.Client())
 	deps := newCollectionDeps(cfg, runtime, store.New())
 
-	root, err := loadRootMetadataCached(context.Background(), deps, col, cacheManager.Policy{})
+	root, _, err := loadRootMetadataCached(context.Background(), deps, col, cacheManager.Policy{})
 	if err != nil {
 		t.Fatalf("expected the hub-shaped base to resolve via the bare /v3 candidate, got error: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestLoadRootMetadataCachedGalaxyShapeResolvesOnFirstCandidateNoRegression(t
 	runtime := infra.New(noopPrinter{}, srv.Client())
 	deps := newCollectionDeps(cfg, runtime, store.New())
 
-	root, err := loadRootMetadataCached(context.Background(), deps, col, cacheManager.Policy{})
+	root, _, err := loadRootMetadataCached(context.Background(), deps, col, cacheManager.Policy{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestLoadRootMetadataCachedFallsThroughOn404(t *testing.T) {
 	runtime := infra.New(noopPrinter{}, srv.Client())
 	deps := newCollectionDeps(cfg, runtime, store.New())
 
-	root, err := loadRootMetadataCached(context.Background(), deps, col, cacheManager.Policy{})
+	root, _, err := loadRootMetadataCached(context.Background(), deps, col, cacheManager.Policy{})
 	if err != nil {
 		t.Fatalf("expected the 404 on v3 to fall through to v2, got error: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestLoadRootMetadataCachedAllCandidates404ReturnsLastError(t *testing.T) {
 	runtime := infra.New(noopPrinter{}, srv.Client())
 	deps := newCollectionDeps(cfg, runtime, store.New())
 
-	root, err := loadRootMetadataCached(context.Background(), deps, col, cacheManager.Policy{})
+	root, _, err := loadRootMetadataCached(context.Background(), deps, col, cacheManager.Policy{})
 	if err == nil {
 		t.Fatal("expected an error when every candidate 404s, got nil")
 	}
@@ -266,7 +266,7 @@ func TestLoadRootMetadataCachedMemoizesWinningAPIRootAcrossCollections(t *testin
 	deps := newCollectionDeps(cfg, runtime, store.New())
 
 	first := collection{Namespace: "acme", Name: "widgets", Version: "1.0.0"}
-	if _, err := loadRootMetadataCached(context.Background(), deps, first, cacheManager.Policy{}); err != nil {
+	if _, _, err := loadRootMetadataCached(context.Background(), deps, first, cacheManager.Policy{}); err != nil {
 		t.Fatalf("first collection: unexpected error: %v", err)
 	}
 	afterFirst := v3Requests.Load()
@@ -275,7 +275,7 @@ func TestLoadRootMetadataCachedMemoizesWinningAPIRootAcrossCollections(t *testin
 	}
 
 	second := collection{Namespace: "acme", Name: "gadgets", Version: "1.0.0"}
-	if _, err := loadRootMetadataCached(context.Background(), deps, second, cacheManager.Policy{}); err != nil {
+	if _, _, err := loadRootMetadataCached(context.Background(), deps, second, cacheManager.Policy{}); err != nil {
 		t.Fatalf("second collection: unexpected error: %v", err)
 	}
 	if afterSecond := v3Requests.Load(); afterSecond != afterFirst {
@@ -313,7 +313,7 @@ func TestLoadRootMetadataCachedNonNotFoundErrorAbortsImmediately(t *testing.T) {
 	runtime := infra.New(noopPrinter{}, srv.Client())
 	deps := newCollectionDeps(cfg, runtime, store.New())
 
-	root, err := loadRootMetadataCached(context.Background(), deps, col, cacheManager.Policy{})
+	root, _, err := loadRootMetadataCached(context.Background(), deps, col, cacheManager.Policy{})
 	if err == nil {
 		t.Fatal("expected an error from the 400 response, got nil")
 	}

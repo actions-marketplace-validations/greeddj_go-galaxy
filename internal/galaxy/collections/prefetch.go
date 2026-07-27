@@ -203,7 +203,7 @@ func prefetchOne(
 	// cache for every other consumer (a different project, a later run), on
 	// top of handing its temp off to this run's own install worker.
 	downloadDeps := newInstallDeps(deps.cfg, deps.runtime, deps.st, deps.artifacts, nil)
-	result, err := downloadCollectionToCache(ctx, downloadDeps, artifactKey(col), meta, true)
+	result, err := downloadCollectionToCache(ctx, downloadDeps, artifactKey(col), col.Source, meta, true)
 	if err != nil {
 		return meta, downloadResult{}, err
 	}

@@ -432,7 +432,7 @@ func fetchArtifact(
 			return artifactData{}, fmt.Errorf("%w: artifact %s not in cache", helpers.ErrOfflineMode, col.key())
 		}
 		downloadStart := time.Now()
-		result, err := downloadCollectionToCache(ctx, deps, artifactKey(col), meta, useCache)
+		result, err := downloadCollectionToCache(ctx, deps, artifactKey(col), col.Source, meta, useCache)
 		if err != nil {
 			return artifactData{}, err
 		}
@@ -576,6 +576,7 @@ func downloadCollectionToCache(
 	ctx context.Context,
 	deps installDeps,
 	key string,
+	base string,
 	meta *types.GalaxyCollectionVersionInfo,
 	useCache bool,
 ) (downloadResult, error) {
@@ -585,7 +586,7 @@ func downloadCollectionToCache(
 
 	var result downloadResult
 	err := helpers.Retry(ctx, helpers.FetchRetryPolicy(), func() error {
-		attempted, attemptErr := attemptDownloadToCache(ctx, deps, key, meta, useCache)
+		attempted, attemptErr := attemptDownloadToCache(ctx, deps, key, base, meta, useCache)
 		if attemptErr != nil {
 			return attemptErr
 		}
@@ -599,22 +600,25 @@ func downloadCollectionToCache(
 }
 
 // warnIfOffServerDownloadHost emits a warning when an artifact's download URL
-// points at a host other than the configured Galaxy server. The metadata that
-// supplies the URL can come from a cached snapshot, which a bucket writer
-// could poison to redirect a download off-server; surfacing the mismatch
-// gives a visible signal in CI logs without blocking, since a legitimate
-// deployment (an enterprise content host or an object-storage URL) may serve
-// downloads from a different host than its API server. A missing server or
-// an unparseable URL is not warned about, to avoid false alarms. The warning
-// goes out through Warnf rather than Printf: this is a security/integrity
-// detection signal, so it must survive --quiet (Warnf always emits, to
-// stderr, unlike the transient Printf tier) rather than risk being silenced
-// in the very CI mode where it matters most.
-func warnIfOffServerDownloadHost(runtime *infra.Infra, cfg *config.Config, downloadURL string) {
-	if cfg == nil || strings.TrimSpace(cfg.Server) == "" {
+// points at a host other than base, the server that actually resolved this
+// collection (col.Source, non-empty by construction at install time - every
+// resolved collection is stamped with its winning server by
+// solverResultToResolvedGraph). The metadata that supplies the download URL
+// can come from a cached snapshot, which a bucket writer could poison to
+// redirect a download off-server; surfacing the mismatch gives a visible
+// signal in CI logs without blocking, since a legitimate deployment (an
+// enterprise content host or an object-storage URL) may serve downloads from
+// a different host than its API server. A blank base or an unparseable URL
+// is not warned about, to avoid false alarms. The warning goes out through
+// Warnf rather than Printf: this is a security/integrity detection signal,
+// so it must survive --quiet (Warnf always emits, to stderr, unlike the
+// transient Printf tier) rather than risk being silenced in the very CI mode
+// where it matters most.
+func warnIfOffServerDownloadHost(runtime *infra.Infra, base, downloadURL string) {
+	if strings.TrimSpace(base) == "" {
 		return
 	}
-	server, err := url.Parse(cfg.Server)
+	server, err := url.Parse(base)
 	if err != nil {
 		return
 	}
@@ -652,10 +656,11 @@ func attemptDownloadToCache(
 	ctx context.Context,
 	deps installDeps,
 	key string,
+	base string,
 	meta *types.GalaxyCollectionVersionInfo,
 	useCache bool,
 ) (downloadResult, error) {
-	warnIfOffServerDownloadHost(deps.runtime, deps.cfg, meta.DownloadURL)
+	warnIfOffServerDownloadHost(deps.runtime, base, meta.DownloadURL)
 	resp, err := downloadCollection(ctx, deps.runtime, meta.DownloadURL)
 	if err != nil {
 		return downloadResult{}, err

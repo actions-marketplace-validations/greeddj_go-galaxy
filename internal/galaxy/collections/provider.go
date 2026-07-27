@@ -30,11 +30,21 @@ type MetadataProvider struct {
 	//nolint:containedctx // required: solver.Provider has no ctx parameter of its own to thread through instead.
 	ctx  context.Context
 	deps collectionDeps
-	// sources maps a root fqdn to its explicit install source, mirroring
-	// the reference behavior (see sourceOf): a nil or
-	// empty map means every fqdn - root or transitive dependency alike -
-	// resolves against deps.cfg.Server, the prior (pre-source-aware) behavior.
+	// sources maps a root fqdn to its explicit install source (see
+	// sourceOf): a root without one, and every transitive dependency, is
+	// simply absent from this map, so sourceOf falls through to "" -
+	// unpinned - letting serverCandidates walk the whole configured server
+	// list for it.
 	sources map[string]string
+	// bindings maps every fqdn this provider has successfully fetched root
+	// metadata for to the server base that answered it (see recordBinding).
+	// It is a plain map with no mutex, deliberately: a single Solve call
+	// drives every MetadataProvider method from one goroutine only (see the
+	// ctx field's own doc comment), unlike the install and prefetch worker
+	// pools, which is why apiRootMemo (shared across those pools) needs one
+	// and this does not. solveCollections reads it once Solve returns, to
+	// stamp the same winning server onto each resolved collection's Source.
+	bindings map[string]string
 }
 
 // NewMetadataProvider builds a MetadataProvider sharing cfg/runtime/st with
@@ -50,7 +60,7 @@ func NewMetadataProvider(
 	st *store.Store,
 	sources map[string]string,
 ) *MetadataProvider {
-	return &MetadataProvider{ctx: ctx, deps: newCollectionDeps(cfg, runtime, st), sources: sources}
+	return &MetadataProvider{ctx: ctx, deps: newCollectionDeps(cfg, runtime, st), sources: sources, bindings: make(map[string]string)}
 }
 
 // Highest returns fqdn's registry-reported highest_version, with no
@@ -126,11 +136,12 @@ func (p *MetadataProvider) Dependencies(fqdn string, v solver.Version) (map[stri
 	}
 
 	col := collection{Namespace: ns, Name: name, Source: p.sourceOf(fqdn)}
-	_, versionsURL, err := resolveRootMetadata(p.ctx, p.deps, col, policy, fqdn)
+	root, err := resolveRootMetadata(p.ctx, p.deps, col, policy, fqdn)
 	if err != nil {
 		return nil, err
 	}
-	info, err := fetchVersionMetadataCached(p.ctx, p.deps, col.Source, versionsURL, v.Original(), policy)
+	p.recordBinding(fqdn, root.base)
+	info, err := fetchVersionMetadataCached(p.ctx, p.deps, root.base, root.versionsURL, v.Original(), policy)
 	if err != nil {
 		return nil, err
 	}
@@ -143,38 +154,54 @@ func (p *MetadataProvider) Dependencies(fqdn string, v solver.Version) (map[stri
 }
 
 // sourceOf returns fqdn's install source: its own entry in sources when one
-// was recorded (a root with an explicit source), or deps.cfg.Server
-// otherwise. This is the reference behavior: a transitive dependency is never
-// recorded in sources, so it always falls through to cfg.Server regardless
-// of which parent(s) required it or what source those parents themselves
-// have - there is no source inheritance from a requiring parent to its
-// dependencies.
+// was recorded (a root with an explicit source), or "" otherwise - a
+// transitive dependency is never recorded in sources, and a root without an
+// explicit source is recorded with "" too, so both cases fall through to
+// unpinned here. An unpinned fqdn's serverCandidates then walks the whole
+// configured server list rather than being nailed to a single one; there is
+// no source inheritance from a requiring parent to its dependencies.
 func (p *MetadataProvider) sourceOf(fqdn string) string {
-	if s, ok := p.sources[fqdn]; ok {
-		return s
+	return p.sources[fqdn]
+}
+
+// recordBinding remembers base as the server whose root-metadata fetch for
+// fqdn just succeeded, so solveCollections can later stamp that same server
+// onto fqdn's resolved collection (see sourceFor). It is called on every
+// fetch success, never conditioned on what the caller does with the result
+// afterward: Highest reports known=false when the fetch succeeded but
+// HighestVersion.Version is empty, and a package later decided via Universe
+// must not be left unbound just because that earlier Highest call rejected
+// it for an unrelated reason. base == "" (never expected once a fetch has
+// actually succeeded) is a no-op rather than poisoning the map with an
+// empty winner.
+func (p *MetadataProvider) recordBinding(fqdn, base string) {
+	if base == "" {
+		return
 	}
-	return p.deps.cfg.Server
+	p.bindings[fqdn] = base
 }
 
 // resolveRoot loads fqdn's root metadata (built from ns/name, with fqdn's
 // own source per sourceOf), translating a 404 or an exhausted-candidate-list
 // failure into known=false rather than an error, so Highest/Universe can
 // both report "unknown package" instead of aborting the solve. Any other
-// failure (a genuine network/offline error, or a non-404 HTTP status)
-// propagates unchanged.
+// failure (a genuine network/offline error, a non-404 HTTP status, or a
+// classified auth/availability abort) propagates unchanged. A successful
+// fetch is recorded via recordBinding before it is ever inspected further.
 func (p *MetadataProvider) resolveRoot(
 	fqdn, ns, name string,
 	policy cacheManager.Policy,
 ) (*types.GalaxyCollection, string, bool, error) {
 	col := collection{Namespace: ns, Name: name, Source: p.sourceOf(fqdn)}
-	rootMeta, versionsURL, err := resolveRootMetadata(p.ctx, p.deps, col, policy, fqdn)
+	root, err := resolveRootMetadata(p.ctx, p.deps, col, policy, fqdn)
 	if err != nil {
 		if isUnknownPackageError(err) {
 			return nil, "", false, nil
 		}
 		return nil, "", false, err
 	}
-	return rootMeta, versionsURL, true, nil
+	p.recordBinding(fqdn, root.base)
+	return root.meta, root.versionsURL, true, nil
 }
 
 // isUnknownPackageError reports whether err represents "this package does

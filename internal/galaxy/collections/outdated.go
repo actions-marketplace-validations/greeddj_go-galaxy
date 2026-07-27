@@ -81,11 +81,11 @@ func lookupOutdated(ctx context.Context, deps collectionDeps, e lockfile.Entry) 
 	}
 	col := collection{Namespace: ns, Name: name, Source: source}
 	policy := cachePolicyForConstraint(deps.cfg, false)
-	root, _, err := resolveRootMetadata(ctx, deps, col, policy, e.Name)
+	root, err := resolveRootMetadata(ctx, deps, col, policy, e.Name)
 	if err != nil {
 		return outdatedEntry{Name: e.Name, Locked: e.Version, Failed: true, Message: err.Error()}
 	}
-	latest := strings.TrimSpace(root.HighestVersion.Version)
+	latest := strings.TrimSpace(root.meta.HighestVersion.Version)
 	if latest == "" {
 		return outdatedEntry{Name: e.Name, Locked: e.Version, Failed: true, Message: "no highest_version in metadata"}
 	}

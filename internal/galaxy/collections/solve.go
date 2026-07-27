@@ -14,8 +14,9 @@ import (
 // (collection.key()), graph mapping a parent key to its dependency keys. It
 // is the production cold-resolve path.
 func solveCollections(ctx context.Context, deps collectionDeps, roots []collection) (map[string]collection, map[string][]string, error) {
-	sources := rootSourceMap(roots, deps.cfg)
-	var provider solver.Provider = NewMetadataProvider(ctx, deps.cfg, deps.runtime, deps.st, sources)
+	sources := rootSourceMap(roots)
+	mp := NewMetadataProvider(ctx, deps.cfg, deps.runtime, deps.st, sources)
+	var provider solver.Provider = mp
 	if deps.cfg.NoDeps {
 		provider = NewNoDepsProvider(provider)
 	}
@@ -29,27 +30,25 @@ func solveCollections(ctx context.Context, deps collectionDeps, roots []collecti
 	if err != nil {
 		return nil, nil, err
 	}
-	return solverResultToResolvedGraph(result, roots, deps.cfg)
+	// mp.bindings is read only now that Solve has returned: the solver core
+	// drives every MetadataProvider method from this one goroutine, so there
+	// is no concurrent writer left to race with this read.
+	return solverResultToResolvedGraph(result, deps.cfg, mp.bindings)
 }
 
-// rootSourceMap builds a root fqdn -> source map from roots: a root's own
-// explicit Source when non-empty, else cfg.Server. It is passed straight
-// through to NewMetadataProvider so the version solver fetches every root
-// from its own configured server, and reused by solverResultToResolvedGraph
-// (via sourceFor) so the resolved collection's own recorded Source always
-// agrees with whichever server actually served it. A transitive dependency
-// is deliberately never a key in the returned map - see sourceFor and
-// MetadataProvider.sourceOf, both of which fall back to cfg.Server for
-// anything absent here: there is no source inheritance from a parent.
-func rootSourceMap(roots []collection, cfg *config.Config) map[string]string {
+// rootSourceMap builds a root fqdn -> explicit-source map from roots: a
+// root's own Source, which may be "" (unpinned - the root walks the
+// configured server list instead of being nailed to one). It is passed
+// straight through to NewMetadataProvider so MetadataProvider.sourceOf can
+// tell a pinned root from an unpinned one. A transitive dependency is
+// deliberately never a key in the returned map - see sourceOf, which falls
+// back to "" for anything absent here: there is no source inheritance from
+// a parent to its dependencies.
+func rootSourceMap(roots []collection) map[string]string {
 	sources := make(map[string]string, len(roots))
 	for _, root := range roots {
 		fqdn := fmt.Sprintf("%s.%s", root.Namespace, root.Name)
-		source := root.Source
-		if source == "" {
-			source = cfg.Server
-		}
-		sources[fqdn] = source
+		sources[fqdn] = root.Source
 	}
 	return sources
 }
@@ -97,13 +96,17 @@ func buildSolverRequirements(roots []collection) ([]solver.Requirement, error) {
 
 // solverResultToResolvedGraph maps a solver.Result onto the (resolved, graph)
 // shape the install pipeline consumes: resolved keyed by fqdn, graph keyed by
-// collection.key() (buildGraphFromDeps' output).
+// collection.key() (buildGraphFromDeps' output). bindings is
+// MetadataProvider's own fqdn -> winning-server-base map, built during the
+// solve (see MetadataProvider.recordBinding); it - not a root's own,
+// possibly-unpinned Source field - is what stamps every resolved entry's
+// Source, so a root or a transitive dependency alike always records
+// whichever server actually served it.
 func solverResultToResolvedGraph(
 	result *solver.Result,
-	roots []collection,
 	cfg *config.Config,
+	bindings map[string]string,
 ) (map[string]collection, map[string][]string, error) {
-	sources := rootSourceMap(roots, cfg)
 	resolved := make(map[string]collection, len(result.Versions))
 	for fqdn, version := range result.Versions {
 		ns, name, ok := helpers.SplitFQDN(fqdn)
@@ -114,7 +117,7 @@ func solverResultToResolvedGraph(
 			Namespace: ns,
 			Name:      name,
 			Version:   version,
-			Source:    sourceFor(fqdn, sources, cfg),
+			Source:    sourceFor(fqdn, bindings, cfg),
 		}
 	}
 
@@ -141,16 +144,33 @@ func solverResultToResolvedGraph(
 	return resolved, graph, nil
 }
 
-// sourceFor returns fqdn's install source given the precomputed root source
-// map (rootSourceMap): that map's own entry when fqdn is a root, or
-// cfg.Server otherwise - the same reference mapping MetadataProvider's
-// sourceOf uses, so the server that actually served fqdn and the Source
-// recorded on its resolved collection always agree. A transitive dependency
-// (any fqdn absent from sources) always resolves to cfg.Server; there is no
-// source inheritance from whichever parent(s) require it.
-func sourceFor(fqdn string, sources map[string]string, cfg *config.Config) string {
-	if source, ok := sources[fqdn]; ok {
+// sourceFor returns fqdn's install source: the server base that actually
+// answered its root-metadata fetch during the solve (bindings, recorded by
+// MetadataProvider.recordBinding on every fetch success - root or
+// transitive dependency alike), so the resolved collection's Source always
+// agrees with whichever server served it under this run's first-match
+// ownership rule. The firstServerURL fallback is defensive only: every
+// package solver.Solve actually decides is bound before Solve returns (via
+// Highest/Universe's shared resolveRoot, or via Dependencies), so bindings
+// is never actually missing an entry for a decided fqdn in practice.
+func sourceFor(fqdn string, bindings map[string]string, cfg *config.Config) string {
+	if source, ok := bindings[fqdn]; ok {
 		return source
+	}
+	return firstServerURL(cfg)
+}
+
+// firstServerURL returns cfg's first configured server: Servers[0].URL when
+// Servers is populated, else cfg.Server - the shape every hand-built
+// *config.Config in this package's test suite (no Servers slice) still has,
+// and the shape resolveServers guarantees for a real one (cfg.Server always
+// equals Servers[0].URL once it has run).
+func firstServerURL(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	if len(cfg.Servers) > 0 {
+		return cfg.Servers[0].URL
 	}
 	return cfg.Server
 }

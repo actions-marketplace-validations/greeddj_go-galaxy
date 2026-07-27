@@ -116,7 +116,8 @@ func isSymlinkError(err error) bool {
 }
 
 // isNetworkError reports whether err is a network or Galaxy API sentinel,
-// including request timeouts and offline-mode violations.
+// including request timeouts, offline-mode violations, and a server-list
+// walk aborting on a credential failure or an exhausted retry budget.
 func isNetworkError(err error) bool {
 	return errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, helpers.ErrOfflineMode) ||
@@ -125,7 +126,9 @@ func isNetworkError(err error) bool {
 		errors.Is(err, helpers.ErrMetadataIsNil) ||
 		errors.Is(err, helpers.ErrMissingDownloadURL) ||
 		errors.Is(err, helpers.ErrVersionsPayloadEmpty) ||
-		errors.Is(err, helpers.ErrVersionsPayloadUnsupported)
+		errors.Is(err, helpers.ErrVersionsPayloadUnsupported) ||
+		errors.Is(err, helpers.ErrGalaxyAuthFailed) ||
+		errors.Is(err, helpers.ErrGalaxyServerUnavailable)
 }
 
 // isResolutionError reports whether err is a dependency-resolution sentinel

@@ -130,22 +130,22 @@ func TestSolveCollectionsSharedTransitiveDepUsesDefaultServer(t *testing.T) {
 }
 
 // TestRootSourceMap pins rootSourceMap's per-root rule directly: a root
-// with an explicit Source maps to that source, a root without one maps to
-// cfg.Server, and a transitive dependency's fqdn is simply never a key.
+// with an explicit Source maps to that source, an unpinned root maps to ""
+// (a distinct, stable value - not cfg.Server), and a transitive
+// dependency's fqdn is simply never a key.
 func TestRootSourceMap(t *testing.T) {
 	t.Parallel()
-	cfg := &config.Config{Server: "https://default.example"}
 	roots := []collection{
 		{Namespace: "acme", Name: "a", Source: "https://explicit.example"},
 		{Namespace: "acme", Name: "b"},
 	}
 
-	sources := rootSourceMap(roots, cfg)
+	sources := rootSourceMap(roots)
 	if sources["acme.a"] != "https://explicit.example" {
 		t.Fatalf("sources[acme.a] = %q, want the explicit source", sources["acme.a"])
 	}
-	if sources["acme.b"] != "https://default.example" {
-		t.Fatalf("sources[acme.b] = %q, want cfg.Server", sources["acme.b"])
+	if v, ok := sources["acme.b"]; !ok || v != "" {
+		t.Fatalf("sources[acme.b] = (%q, %v), want (\"\", true) - unpinned", v, ok)
 	}
 	if _, ok := sources["acme.dep"]; ok {
 		t.Fatalf("sources unexpectedly has an entry for a non-root fqdn: %v", sources)
@@ -154,8 +154,10 @@ func TestRootSourceMap(t *testing.T) {
 
 // TestMetadataProviderSourceOf pins MetadataProvider.sourceOf's own
 // fallback directly: a fqdn recorded in sources returns that source, and
-// any other fqdn (a transitive dependency, never recorded) falls back to
-// cfg.Server - there is no inheritance from whichever parent required it.
+// any other fqdn (a transitive dependency, or a root recorded with an empty
+// source, never distinguished here) falls back to "" - unpinned - so
+// serverCandidates walks the whole configured server list for it; there is
+// no inheritance from whichever parent required it.
 func TestMetadataProviderSourceOf(t *testing.T) {
 	t.Parallel()
 	cfg := &config.Config{Server: "https://default.example"}
@@ -165,7 +167,7 @@ func TestMetadataProviderSourceOf(t *testing.T) {
 	if got := p.sourceOf("acme.a"); got != "https://explicit.example" {
 		t.Fatalf("sourceOf(acme.a) = %q, want the explicit source", got)
 	}
-	if got := p.sourceOf("acme.dep"); got != "https://default.example" {
-		t.Fatalf("sourceOf(acme.dep) = %q, want cfg.Server", got)
+	if got := p.sourceOf("acme.dep"); got != "" {
+		t.Fatalf("sourceOf(acme.dep) = %q, want \"\" (unpinned)", got)
 	}
 }

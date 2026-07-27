@@ -457,9 +457,14 @@ func resolveOrLoadLockfile(
 	return resolved, graph, nil
 }
 
+// loadRoots parses requirements.yml and normalizes its entries into roots.
+// A collection with no explicit source: field is passed through with an
+// empty Source ("" for defaultSource below), deliberately not defaulted to
+// cfg.Server here: an unpinned root walks the whole configured server list
+// at resolve time (see serverCandidates) instead of being nailed to one.
 func loadRoots(cfg *config.Config, runtime *infra.Infra) (*rootPreparation, error) {
 	runtime.Output.Printf("🗂️ load collections from requirements file")
-	collectionsDirect, rolesFound, err := loadRequirements(cfg.RequirementsFile, cfg.Server)
+	collectionsDirect, rolesFound, err := loadRequirements(cfg.RequirementsFile, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to load requirements file: %w", err)
 	}
@@ -467,7 +472,7 @@ func loadRoots(cfg *config.Config, runtime *infra.Infra) (*rootPreparation, erro
 		runtime.Output.Printf("⚠️ requirements.yml contains roles, but roles are not supported.")
 	}
 	runtime.Output.Printf("🧩 prepare roots")
-	prep, err := prepareRoots(cfg, collectionsDirect)
+	prep, err := prepareRoots(collectionsDirect)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare requirements: %w", err)
 	}

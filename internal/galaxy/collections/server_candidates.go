@@ -2,37 +2,142 @@ package collections
 
 import (
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
+	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 )
 
-// serverBaseCandidates returns candidate base URLs for metadata lookup.
-func serverBaseCandidates(cfg *config.Config, col collection) []string {
-	seen := make(map[string]bool)
-	var out []string
+// serverCandidate is one server a collection's root-metadata fetch may try,
+// in the order serverCandidates returns. base is the normalized (no
+// trailing slash) URL to fetch against; id is the matching entry's
+// server_list id when one was found, or "" for the implicit single server,
+// an anonymous ad-hoc base, or a source: value that matched no configured
+// server. id exists purely for operator-facing error attribution (label);
+// the credential and TLS policy always follow base's actual origin via
+// internal/galaxy/fetch's own origin-keyed dispatch, regardless of whether
+// id is set.
+type serverCandidate struct {
+	base string
+	id   string
+}
 
-	add := func(value string) {
-		trimmed := strings.TrimSpace(strings.Trim(value, "\""))
-		trimmed = strings.TrimRight(trimmed, "/")
-		if trimmed == "" || seen[trimmed] {
-			return
+// label names the server for an operator-facing error: its configured
+// server_list id when it has one, else its base URL - so a run aborting on
+// an auth failure or an exhausted retry budget always names something an
+// operator can recognize, even for the implicit single server (id "") or an
+// anonymous source: pin.
+func (s serverCandidate) label() string {
+	if s.id != "" {
+		return s.id
+	}
+	return s.base
+}
+
+// serverCandidates returns the ordered list of servers col's root-metadata
+// fetch may try.
+//
+// A pinned collection (col.Source non-empty) always yields exactly one
+// candidate - a source: value pins its fqdn to one server for the whole
+// run, and the list is never consulted for it - resolved by
+// pinnedServerCandidate.
+//
+// An unpinned collection (col.Source empty) yields every cfg.Servers entry
+// in list order, deduplicated by normalized base: the "walk the configured
+// list, first match wins" behavior this unit exists to deliver.
+//
+// cfg == nil never happens in production (BuildCollectionConfig always
+// returns a non-nil *Config) but is handled defensively, yielding nil.
+func serverCandidates(cfg *config.Config, col collection) []serverCandidate {
+	if cfg == nil {
+		return nil
+	}
+	if col.Source != "" {
+		return []serverCandidate{pinnedServerCandidate(cfg, col.Source)}
+	}
+	return unpinnedServerCandidates(cfg)
+}
+
+// pinnedServerCandidate resolves col.Source (already known non-empty) to a
+// single serverCandidate:
+//
+//  1. An exact, case-sensitive match against a configured server's
+//     server_list id wins outright, using that server's own URL as the base.
+//  2. Otherwise the value is normalized and compared by network origin
+//     (helpers.Origin) against every configured server's URL. A match
+//     KEEPS the given (normalized) URL as the base - a source: may
+//     legitimately name a repo-scoped path under the same origin, e.g.
+//     "<server>/content/published/" - but adopts that server's id for error
+//     attribution. The credential and TLS policy still follow automatically,
+//     since internal/galaxy/fetch dispatches by origin, not by the exact
+//     configured URL: this is the origin-keying design paying off here.
+//  3. A source matching neither is an anonymous, unmatched base (id "").
+func pinnedServerCandidate(cfg *config.Config, source string) serverCandidate {
+	for _, srv := range cfg.Servers {
+		if srv.ID != "" && srv.ID == source {
+			return serverCandidate{base: srv.URL, id: srv.ID}
 		}
-		seen[trimmed] = true
-		out = append(out, trimmed)
 	}
 
-	add(col.Source)
-	if cfg != nil {
-		add(cfg.Server)
+	normalized := normalizeServerBase(source)
+	if origin, ok := parsedOrigin(normalized); ok {
+		for _, srv := range cfg.Servers {
+			if srvOrigin, ok := parsedOrigin(normalizeServerBase(srv.URL)); ok && srvOrigin == origin {
+				return serverCandidate{base: normalized, id: srv.ID}
+			}
+		}
+	}
+	return serverCandidate{base: normalized}
+}
+
+// unpinnedServerCandidates returns every cfg.Servers entry as a candidate,
+// in list order, deduplicated by normalized base. When cfg.Servers is empty
+// - the shape every hand-built *config.Config in this package's tests still
+// uses, and the shape any caller that predates multi-server support still
+// has - it falls back to the single candidate {base: cfg.Server}, exactly
+// the effective server every such caller already had.
+func unpinnedServerCandidates(cfg *config.Config) []serverCandidate {
+	if len(cfg.Servers) == 0 {
+		return []serverCandidate{{base: normalizeServerBase(cfg.Server)}}
 	}
 
+	seen := make(map[string]bool, len(cfg.Servers))
+	out := make([]serverCandidate, 0, len(cfg.Servers))
+	for _, srv := range cfg.Servers {
+		base := normalizeServerBase(srv.URL)
+		if base == "" || seen[base] {
+			continue
+		}
+		seen[base] = true
+		out = append(out, serverCandidate{base: base, id: srv.ID})
+	}
 	return out
 }
 
+// normalizeServerBase trims whitespace, strips one surrounding quote pair
+// (an ansible.cfg value quirk), and removes a trailing slash - the same
+// normalization apiRootCandidates applies before deriving API root variants.
+func normalizeServerBase(value string) string {
+	trimmed := strings.TrimSpace(strings.Trim(value, "\""))
+	return strings.TrimRight(trimmed, "/")
+}
+
+// parsedOrigin parses value as an absolute URL and returns its
+// helpers.Origin. It reports ("", false) for anything that fails to parse
+// or lacks a scheme/host, which pinnedServerCandidate then never treats as
+// matching anything.
+func parsedOrigin(value string) (string, bool) {
+	u, err := url.Parse(value)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", false
+	}
+	return helpers.Origin(u), true
+}
+
 // rootMetaCandidate is a single root-metadata URL candidate together with
-// the server base and API root it was derived from. loadRootMetadataCached
+// the server base and API root it was derived from. tryServerRootMetadata
 // uses the (base, apiRoot) pair to record the winning apiRoot in the memo
 // once a candidate's fetch succeeds.
 type rootMetaCandidate struct {
@@ -41,42 +146,41 @@ type rootMetaCandidate struct {
 	apiRoot string
 }
 
-// rootMetadataURLCandidates builds candidate root metadata URLs.
+// rootMetadataURLCandidates builds candidate root metadata URLs for one
+// server base.
 //
-// If memo already knows the winning apiRoot for a server base (a prior
-// collection resolved it in this same phase), only that apiRoot's two
-// trailing-slash variants are emitted for that base, skipping the losing
+// If memo already knows the winning apiRoot for base (a prior collection
+// resolved it against this same server in this same phase), only that
+// apiRoot's two trailing-slash variants are emitted, skipping the losing
 // variants entirely. Otherwise every apiRoot variant apiRootCandidates
-// derives for that base is emitted, in apiRootCandidates' own priority
-// order - so an empty memo always probes /api/v3 first, matching the common
-// case's shape, and only reaches the Galaxy NG / Automation Hub shaped /v3
-// and /v2 fallbacks (and the legacy bare /api) if that first probe 404s.
-func rootMetadataURLCandidates(cfg *config.Config, col collection, memo *apiRootMemo) []rootMetaCandidate {
+// derives for base is emitted, in apiRootCandidates' own priority order - so
+// an empty memo always probes /api/v3 first, matching the common case's
+// shape, and only reaches the Galaxy NG / Automation Hub shaped /v3 and /v2
+// fallbacks (and the legacy bare /api) if that first probe 404s.
+func rootMetadataURLCandidates(base string, col collection, memo *apiRootMemo) []rootMetaCandidate {
 	seen := make(map[string]bool)
 	var out []rootMetaCandidate
 
-	add := func(url, base, apiRoot string) {
-		if url == "" || seen[url] {
+	add := func(u, apiRoot string) {
+		if u == "" || seen[u] {
 			return
 		}
-		seen[url] = true
-		out = append(out, rootMetaCandidate{url: url, base: base, apiRoot: apiRoot})
+		seen[u] = true
+		out = append(out, rootMetaCandidate{url: u, base: base, apiRoot: apiRoot})
 	}
 
-	addWithVariants := func(base, apiRoot string) {
-		url := fmt.Sprintf("%s/collections/%s/%s/", apiRoot, col.Namespace, col.Name)
-		add(url, base, apiRoot)
-		add(strings.TrimRight(url, "/"), base, apiRoot)
+	addWithVariants := func(apiRoot string) {
+		u := fmt.Sprintf("%s/collections/%s/%s/", apiRoot, col.Namespace, col.Name)
+		add(u, apiRoot)
+		add(strings.TrimRight(u, "/"), apiRoot)
 	}
 
-	for _, base := range serverBaseCandidates(cfg, col) {
-		if winningRoot, ok := memo.winner(base); ok {
-			addWithVariants(base, winningRoot)
-			continue
-		}
-		for _, apiRoot := range apiRootCandidates(base) {
-			addWithVariants(base, apiRoot)
-		}
+	if winningRoot, ok := memo.winner(base); ok {
+		addWithVariants(winningRoot)
+		return out
+	}
+	for _, apiRoot := range apiRootCandidates(base) {
+		addWithVariants(apiRoot)
 	}
 
 	return out
@@ -105,8 +209,7 @@ func joinCandidateURLs(candidates []rootMetaCandidate) string {
 // overwhelmingly common case: the fallback candidates only cost anything
 // when the first probe 404s.
 func apiRootCandidates(base string) []string {
-	trimmed := strings.TrimSpace(strings.Trim(base, "\""))
-	trimmed = strings.TrimRight(trimmed, "/")
+	trimmed := normalizeServerBase(base)
 	if trimmed == "" {
 		return nil
 	}
