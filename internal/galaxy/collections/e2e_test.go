@@ -218,9 +218,25 @@ func TestWarmInstallServesFromCache(t *testing.T) {
 // explicit rather than racing the two subtests against each other.
 func TestFrozenInstallHonorsLockfilePins(t *testing.T) {
 	f := newE2EFixture(t)
-	// Registered after the fixture's own acme.app@1.0.0, so an unpinned
-	// resolution would prefer this one - proving the lockfile pin, not
-	// "highest available", drives a frozen install.
+	lockPath, lf := newFrozenPinFixture(t, f)
+
+	t.Run("pin overrides the highest available version", func(t *testing.T) {
+		assertFrozenPinOverridesHighestVersion(t, f)
+	})
+	t.Run("a corrupted pin fails the run without installing", func(t *testing.T) {
+		assertFrozenCorruptedPinFailsClosed(t, f, lockPath, lf)
+	})
+}
+
+// newFrozenPinFixture registers acme.app@2.0.0 on f.server (after the
+// fixture's own acme.app@1.0.0, so an unpinned resolution would prefer this
+// one - proving a lockfile pin, not "highest available", drives a frozen
+// run), writes a lockfile pinning acme.app@1.0.0 and acme.lib@1.0.0 to their
+// real sha256 sums, and sets f.cfg.Frozen. Shared by the install- and
+// warm-side frozen-pin e2e tests, which otherwise differ only in which
+// collections.* entry point they drive.
+func newFrozenPinFixture(t *testing.T, f *e2eFixture) (string, *lockfile.File) {
+	t.Helper()
 	f.server.AddVersion("acme", "app", "2.0.0", map[string]string{"acme.lib": ">=1.0.0"})
 
 	lockPath := lockfile.ResolveDefaultPath(f.cfg.RequirementsFile, f.cfg.LockFile)
@@ -236,13 +252,17 @@ func TestFrozenInstallHonorsLockfilePins(t *testing.T) {
 		t.Fatalf("save lockfile: %v", err)
 	}
 	f.cfg.Frozen = true
+	return lockPath, lf
+}
 
-	t.Run("pin overrides the highest available version", func(t *testing.T) {
-		assertFrozenPinOverridesHighestVersion(t, f)
-	})
-	t.Run("a corrupted pin fails the run without installing", func(t *testing.T) {
-		assertFrozenCorruptedPinFailsClosed(t, f, lockPath, lf)
-	})
+// setAppPin sets acme.app's SHA256 pin in-place within lf.Collections.
+// Shared by the install- and warm-side corrupted-pin e2e tests.
+func setAppPin(lf *lockfile.File, sha string) {
+	for i := range lf.Collections {
+		if lf.Collections[i].Name == "acme.app" {
+			lf.Collections[i].SHA256 = sha
+		}
+	}
 }
 
 // assertFrozenPinOverridesHighestVersion runs a frozen install and asserts it
@@ -270,11 +290,7 @@ func assertFrozenCorruptedPinFailsClosed(t *testing.T, f *e2eFixture, lockPath s
 	if err := os.RemoveAll(f.downloadPath); err != nil {
 		t.Fatalf("remove downloadPath before the corrupted-pin run: %v", err)
 	}
-	for i := range lf.Collections {
-		if lf.Collections[i].Name == "acme.app" {
-			lf.Collections[i].SHA256 = corruptedAppSHA256
-		}
-	}
+	setAppPin(lf, corruptedAppSHA256)
 	if err := lockfile.Save(lockPath, lf); err != nil {
 		t.Fatalf("save corrupted lockfile: %v", err)
 	}

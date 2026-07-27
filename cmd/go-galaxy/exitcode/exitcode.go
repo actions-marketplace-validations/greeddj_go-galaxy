@@ -164,7 +164,8 @@ func isConfigUsageError(err error) bool {
 		errors.Is(err, helpers.ErrUnsupportedRequirementsFormat) ||
 		errors.Is(err, helpers.ErrCacheDirEmpty) ||
 		errors.Is(err, helpers.ErrInvalidTimeout) ||
-		errors.Is(err, helpers.ErrAnsibleConfigNotFound)
+		errors.Is(err, helpers.ErrAnsibleConfigNotFound) ||
+		errors.Is(err, helpers.ErrWarmCacheDisabled)
 }
 
 // isGalaxyServerConfigError reports whether err is a Galaxy server

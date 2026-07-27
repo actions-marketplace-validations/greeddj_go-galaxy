@@ -95,6 +95,11 @@ var fromErrorCases = []exitCase{
 		wantCode: ExitUsage,
 	},
 	{
+		name:     "warm cache disabled",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrWarmCacheDisabled),
+		wantCode: ExitUsage,
+	},
+	{
 		name:     "unclassified error falls back to ExitError",
 		err:      errTestGeneric,
 		wantCode: ExitError,

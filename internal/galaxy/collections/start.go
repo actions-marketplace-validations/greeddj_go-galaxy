@@ -53,7 +53,20 @@ func Warm(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
 	return err
 }
 
+// runWarm owns the backend lifecycle for the warm command: it rejects
+// --no-cache before anything is opened, then opens the backend, takes its
+// exclusive lock, and registers the release/close defers that must run on
+// every exit path - including one from warmWithState, which owns the actual
+// work once state is initialized. This is the same lifecycle/work boundary
+// runInstall already draws around prepareInstallPlan.
 func runWarm(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
+	// warm's entire output IS cache state: with --no-cache, initInstall would
+	// build a nil extract store and every download would be thrown away
+	// uncommitted (see helpers.ErrWarmCacheDisabled), so this is rejected
+	// before the backend is opened or its lock taken - no lock, no network.
+	if cfg.NoCache {
+		return helpers.ErrWarmCacheDisabled
+	}
 	runtime.Output.Printf("🔥 Warming caches")
 	start := time.Now()
 	state, err := initInstall(ctx, cfg, runtime)
@@ -71,6 +84,17 @@ func runWarm(ctx context.Context, cfg *config.Config, runtime *infra.Infra) erro
 		_ = state.backend.Close(ctx)
 	}()
 
+	return warmWithState(ctx, cfg, runtime, state, start)
+}
+
+// warmWithState performs warm's actual work against an already-initialized
+// state: resolving requirements, warming every resolved collection into the
+// cache, saving the resulting snapshot, and writing the run metrics report -
+// in that order, since the report always runs regardless of whether the save
+// succeeded. It assumes the backend is already open and locked - runWarm
+// holds that lifecycle - so it never touches state.release or
+// state.backend.Close itself.
+func warmWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra, state *installState, start time.Time) error {
 	prep, err := loadRoots(cfg, runtime)
 	if err != nil {
 		return err
@@ -85,10 +109,13 @@ func runWarm(ctx context.Context, cfg *config.Config, runtime *infra.Infra) erro
 	}
 
 	failures := warmCollections(ctx, cfg, runtime, state, collections)
-	if err := state.backend.SaveStore(ctx, state.store); err != nil {
-		return err
-	}
+	// Mirror runInstall's precedence: writeRunMetrics always runs, even when
+	// SaveStore fails, and a save error wins over a nonzero failure count.
+	saveErr := state.backend.SaveStore(ctx, state.store)
 	writeRunMetrics(cfg, runtime, "warm", start, len(collections), int(failures))
+	if saveErr != nil {
+		return saveErr
+	}
 	if failures > 0 {
 		return fmt.Errorf("%w: warm failed for %d collections", helpers.ErrInstallationFailed, failures)
 	}
@@ -106,7 +133,11 @@ func warmCollections(
 	var failures atomic.Int32
 	depsCtx := newInstallDeps(cfg, runtime, state.store, state.backend.Artifacts(), state.extractStore)
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, cfg.Workers)
+	// max(cfg.Workers, 1): a zero Workers would make sem unbuffered, and the
+	// first send would block forever since no worker has started to drain it
+	// yet. Matches the same guard the prefetcher already applies (see
+	// buildPrefetchTasks / startPrefetchWorkers).
+	sem := make(chan struct{}, max(cfg.Workers, 1))
 	for _, col := range collections {
 		sem <- struct{}{}
 		wg.Go(func() {
@@ -119,6 +150,12 @@ func warmCollections(
 			}
 		})
 	}
+	// wg.Wait is inline, not deferred: this function returns failures.Load(),
+	// and a deferred wait would evaluate that return value before the workers
+	// finish, silently under-reporting failures. runInstallLevel can defer its
+	// wait only because it returns an error and reports failures through a
+	// caller-owned *int32 instead of a return value - do not "fix" this to
+	// match that shape.
 	wg.Wait()
 	return failures.Load()
 }
@@ -565,7 +602,9 @@ func runInstallLevel(
 	failures *int32,
 ) error {
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, depsCtx.cfg.Workers)
+	// max(depsCtx.cfg.Workers, 1): see warmCollections's identical guard - a
+	// zero Workers would make sem unbuffered and deadlock the first send.
+	sem := make(chan struct{}, max(depsCtx.cfg.Workers, 1))
 	defer wg.Wait()
 
 	for _, key := range level {

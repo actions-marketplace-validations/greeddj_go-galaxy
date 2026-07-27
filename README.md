@@ -139,7 +139,7 @@ Clean unreachable collections:
 
 - `install` (`i`) - install collections from `requirements.yml`.
 - `lock` (`l`) - resolve and write `requirements.lock.yml` for reproducible CI.
-- `warm` (`w`) - populate the artifact + extracted caches without installing (for CI image bake).
+- `warm` (`w`) - populate the artifact + extracted caches without installing (for CI image bake). Requires a cache: `--no-cache` is rejected as a usage error rather than downloading everything and discarding it.
 - `hash` (`h`) - print a deterministic cache key (`sha256:…`) for use as a CI cache key.
 - `cleanup` (`c`) - remove unused cached collections across projects.
 

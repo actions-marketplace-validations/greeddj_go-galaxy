@@ -140,6 +140,14 @@ var (
 	ErrLoadMetadataFailed = errors.New("failed to load collection metadata")
 	// ErrDuplicateCollectionKey indicates a duplicate collection entry.
 	ErrDuplicateCollectionKey = errors.New("duplicate collection entry")
+	// ErrWarmCacheDisabled indicates the warm command was run with --no-cache.
+	// Unlike install, whose --no-cache still yields a correct install, warm's
+	// entire output IS cache state: with caching disabled, every artifact
+	// would be downloaded and then discarded without ever being committed to
+	// the cache or the extracted store, so the run would report success while
+	// warming nothing. This is rejected before any backend lock is taken or
+	// any network request is made.
+	ErrWarmCacheDisabled = errors.New("warm requires a cache: --no-cache leaves nothing to warm")
 
 	// ErrDbNil indicates a nil Bolt DB was provided.
 	ErrDbNil = errors.New("bolt DB is nil")
