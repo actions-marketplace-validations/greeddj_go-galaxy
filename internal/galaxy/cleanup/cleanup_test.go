@@ -1350,16 +1350,38 @@ func TestRemoveUnusedAbortsOnRemoveAllError(t *testing.T) {
 // removal actually deletes it, rather than the WithinDir guard change
 // leaving it as a silent no-op. The .info directory name mirrors exactly
 // what removeInstalled itself constructs: fmt.Sprintf("%s.%s-%s.info", ns,
-// name, version) joined under <collectionsDir>/ansible_collections.
+// name, version) joined under <collectionsDir>/ansible_collections. Both
+// fixture trees also carry a read-only (0444) file, mirroring what a
+// hardened extraction now produces, proving removeInstallPath and
+// removeInfoDir still clear them: removal only needs write permission on
+// the containing directory, never on the target file's own mode.
 func TestRemoveInstalledRemovesInfoDir(t *testing.T) {
 	t.Parallel()
 	cacheDir := t.TempDir()
 	downloadPath := t.TempDir()
-	seedInstallTree(t, downloadPath) // ns.name@1.0.0, unreferenced below
+	installDir := seedInstallTree(t, downloadPath) // ns.name@1.0.0, unreferenced below
+
+	// The install's MANIFEST.json is exactly the kind of file a hardened
+	// extraction now produces read-only: removeInstallPath must still be
+	// able to remove the directory it lives in even though the file itself
+	// carries no write bit, since removal only needs write permission on the
+	// containing directory, never on the target file's own mode.
+	manifestPath := filepath.Join(installDir, "MANIFEST.json")
+	//nolint:gosec // read-only (not writable) is exactly the fixture this test needs, not a leak risk.
+	if err := os.Chmod(manifestPath, 0o444); err != nil {
+		t.Fatalf("failed to chmod MANIFEST.json read-only: %v", err)
+	}
 
 	infoDir := filepath.Join(downloadPath, "ansible_collections", "ns.name-1.0.0.info")
 	if err := os.MkdirAll(filepath.Join(infoDir, "marker"), helpers.DirMod); err != nil {
 		t.Fatalf("failed to create .info dir: %v", err)
+	}
+	// .info sidecar content is never CAS-backed, but removeInfoDir must be
+	// equally indifferent to a read-only file underneath it.
+	infoFile := filepath.Join(infoDir, "marker", "GALAXY.yml")
+	//nolint:gosec // read-only (not writable) is exactly the fixture this test needs, not a leak risk.
+	if err := os.WriteFile(infoFile, []byte("collection_info: {}\n"), 0o444); err != nil {
+		t.Fatalf("failed to write read-only .info file: %v", err)
 	}
 
 	registerCleanupProject(t, cacheDir, downloadPath)
@@ -1372,6 +1394,9 @@ func TestRemoveInstalledRemovesInfoDir(t *testing.T) {
 	}
 	if _, statErr := os.Stat(infoDir); !os.IsNotExist(statErr) {
 		t.Fatalf("expected the .info directory to be removed, stat error: %v", statErr)
+	}
+	if _, statErr := os.Stat(installDir); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the install directory (with its read-only MANIFEST.json) to be removed, stat error: %v", statErr)
 	}
 }
 

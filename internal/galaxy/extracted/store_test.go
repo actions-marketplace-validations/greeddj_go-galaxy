@@ -5,21 +5,29 @@ import (
 	"bytes"
 	"compress/gzip"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/archive"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 )
 
+// helloFileContent is the shared "foo.txt" fixture body used across most
+// tests in this file, factored into one constant so its many uses (as a
+// writeTarball map value, an expected read-back body, and a legacy-file
+// seed) do not read as coincidentally identical literals.
+const helloFileContent = "hello"
+
 func TestStoreEnsureExtractsOnce(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	tarPath := filepath.Join(dir, "src.tar.gz")
 	writeTarball(t, tarPath, map[string]string{
-		"foo.txt":     "hello",
+		"foo.txt":     helloFileContent,
 		"sub/bar.txt": "world",
 	})
 
@@ -39,7 +47,7 @@ func TestStoreEnsureExtractsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read foo.txt: %v", err)
 	}
-	if string(body) != "hello" {
+	if string(body) != helloFileContent {
 		t.Fatalf("foo.txt = %q", body)
 	}
 	if _, err := os.Stat(filepath.Join(got, ReadyMarker)); err != nil {
@@ -90,7 +98,7 @@ func TestMaterializeUsesHardlinks(t *testing.T) {
 	dir := t.TempDir()
 	tarPath := filepath.Join(dir, "src.tar.gz")
 	writeTarball(t, tarPath, map[string]string{
-		"foo.txt":     "hello",
+		"foo.txt":     helloFileContent,
 		"sub/bar.txt": "world",
 	})
 	store := NewStore(filepath.Join(dir, "cache"))
@@ -135,7 +143,7 @@ func TestEnsureRejectsTarballNotMatchingSHA(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	tarPath := filepath.Join(dir, "src.tar.gz")
-	writeTarball(t, tarPath, map[string]string{"foo.txt": "hello"})
+	writeTarball(t, tarPath, map[string]string{"foo.txt": helloFileContent})
 	store := NewStore(filepath.Join(dir, "cache"))
 
 	// A well-formed but wrong sha256: valid-length (64) hex that is not
@@ -160,7 +168,7 @@ func TestEnsureAcceptsMatchingSHA(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	tarPath := filepath.Join(dir, "src.tar.gz")
-	writeTarball(t, tarPath, map[string]string{"foo.txt": "hello"})
+	writeTarball(t, tarPath, map[string]string{"foo.txt": helloFileContent})
 	store := NewStore(filepath.Join(dir, "cache"))
 
 	sha := mustHash(t, tarPath)
@@ -324,7 +332,7 @@ func seedFinalizedEntry(t *testing.T, store *Store, name string) string {
 	if err := os.MkdirAll(dir, helpers.DirMod); err != nil {
 		t.Fatalf("mkdir %s: %v", dir, err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, ReadyMarker), []byte("ok"), helpers.FileMod); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ReadyMarker), []byte(ReadyMarkerPayload), helpers.FileMod); err != nil {
 		t.Fatalf("write ready marker in %s: %v", dir, err)
 	}
 	return dir
@@ -447,5 +455,500 @@ func writeTarball(t *testing.T, path string, files map[string]string) {
 	}
 	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
 		t.Fatalf("write tar: %v", err)
+	}
+}
+
+// seedCASTree extracts a small tarball into a fresh store via Ensure and
+// returns (store, casTree). It is the common fixture for every read-only /
+// removal test below, none of which care about the tarball's own content
+// beyond it being a real, hashable file.
+func seedCASTree(t *testing.T) (*Store, string) {
+	t.Helper()
+	dir := t.TempDir()
+	tarPath := filepath.Join(dir, "src.tar.gz")
+	writeTarball(t, tarPath, map[string]string{
+		"foo.txt":     helloFileContent,
+		"sub/bar.txt": "world",
+	})
+	store := NewStore(filepath.Join(dir, "cache"))
+	got, err := store.Ensure(mustHash(t, tarPath), tarPath)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	return store, got
+}
+
+// casEntryInfo resolves path's fs.FileInfo and its root-relative name,
+// factored out of checkCASEntryMode purely to keep each function's
+// cyclomatic complexity under the linter's budget.
+func casEntryInfo(root, path string, d fs.DirEntry) (string, fs.FileInfo, error) {
+	info, err := d.Info()
+	if err != nil {
+		return "", nil, err
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return "", nil, err
+	}
+	return rel, info, nil
+}
+
+// assertCASEntryMode applies the three-way permission contract from the
+// table in this commit's own documentation: the .ready marker is
+// helpers.FileMod, a directory is helpers.DirMod, and anything else (a
+// regular file, the only other kind a collection tarball produces) must
+// carry no write bit.
+func assertCASEntryMode(t *testing.T, rel string, info fs.FileInfo, isDir bool) {
+	t.Helper()
+	switch {
+	case rel == ReadyMarker:
+		if info.Mode().Perm() != helpers.FileMod {
+			t.Errorf(".ready mode = %o, want %o", info.Mode().Perm(), helpers.FileMod)
+		}
+	case isDir:
+		if info.Mode().Perm() != helpers.DirMod {
+			t.Errorf("directory %s mode = %o, want %o", rel, info.Mode().Perm(), helpers.DirMod)
+		}
+	default:
+		if info.Mode().Perm()&0o222 != 0 {
+			t.Errorf("file %s carries a write bit: mode %o", rel, info.Mode().Perm())
+		}
+	}
+}
+
+// checkCASEntryMode is TestCASTreeIsReadOnly's per-entry WalkDir callback,
+// split out as its own function so the test itself stays a simple two-line
+// call: golangci-lint's cyclomatic-complexity budget counts a WalkDir
+// closure's branches against its enclosing test function, and this entry's
+// three-way mode check is exactly the branching that budget exists to flag.
+func checkCASEntryMode(t *testing.T, root, path string, d fs.DirEntry, walkErr error) error {
+	t.Helper()
+	if walkErr != nil {
+		return walkErr
+	}
+	if path == root {
+		return nil
+	}
+	rel, info, err := casEntryInfo(root, path, d)
+	if err != nil {
+		return err
+	}
+	assertCASEntryMode(t, rel, info, d.IsDir())
+	return nil
+}
+
+// TestCASTreeIsReadOnly proves Ensure's extraction result satisfies the
+// permission contract everywhere at once: every regular file has no write
+// bit, every directory (including the root) keeps helpers.DirMod, and the
+// .ready marker itself is at helpers.FileMod (it is go-galaxy's own sidecar,
+// not artifact content, so it is deliberately not hardened).
+func TestCASTreeIsReadOnly(t *testing.T) {
+	t.Parallel()
+	_, got := seedCASTree(t)
+
+	err := filepath.WalkDir(got, func(path string, d fs.DirEntry, walkErr error) error {
+		return checkCASEntryMode(t, got, path, d, walkErr)
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+}
+
+// TestInstalledFilesAreReadOnly proves Materialize preserves the CAS tree's
+// read-only regular-file mode exactly (not merely "still read-only", but
+// bit-for-bit identical to the source), that every linked file really is
+// the same inode as its CAS source, and that install directories stay
+// writable even though their file contents do not.
+func TestInstalledFilesAreReadOnly(t *testing.T) {
+	t.Parallel()
+	_, src := seedCASTree(t)
+	dst := filepath.Join(t.TempDir(), "install")
+	if err := Materialize(src, dst); err != nil {
+		t.Fatalf("Materialize: %v", err)
+	}
+
+	for _, rel := range []string{"foo.txt", filepath.Join("sub", "bar.txt")} {
+		srcInfo, err := os.Stat(filepath.Join(src, rel))
+		if err != nil {
+			t.Fatalf("stat src %s: %v", rel, err)
+		}
+		dstInfo, err := os.Stat(filepath.Join(dst, rel))
+		if err != nil {
+			t.Fatalf("stat dst %s: %v", rel, err)
+		}
+		if dstInfo.Mode().Perm()&0o222 != 0 {
+			t.Fatalf("installed %s carries a write bit: mode %o", rel, dstInfo.Mode().Perm())
+		}
+		if dstInfo.Mode().Perm() != srcInfo.Mode().Perm() {
+			t.Fatalf("%s: installed mode %o != CAS mode %o", rel, dstInfo.Mode().Perm(), srcInfo.Mode().Perm())
+		}
+		if !os.SameFile(srcInfo, dstInfo) {
+			t.Fatalf("expected %s to be hard-linked to its CAS source (same inode)", rel)
+		}
+	}
+
+	subInfo, err := os.Stat(filepath.Join(dst, "sub"))
+	if err != nil {
+		t.Fatalf("stat installed sub dir: %v", err)
+	}
+	if subInfo.Mode().Perm() != helpers.DirMod {
+		t.Fatalf("installed directory mode = %o, want %o", subInfo.Mode().Perm(), helpers.DirMod)
+	}
+}
+
+// TestInPlaceEditIsBlocked is the load-bearing regression test for this
+// commit: opening an installed, hard-linked file for writing must fail with
+// a permission error, and the CAS content it aliases must be unaffected by
+// the attempt. Skipped under root, which bypasses every permission bit this
+// test relies on to force the write to fail - detection (the tree-tally
+// check from the previous commit) is what still holds in that case, not
+// these mode bits.
+func TestInPlaceEditIsBlocked(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; permission bits do not block writes")
+	}
+	t.Parallel()
+
+	_, src := seedCASTree(t)
+	dst := filepath.Join(t.TempDir(), "install")
+	if err := Materialize(src, dst); err != nil {
+		t.Fatalf("Materialize: %v", err)
+	}
+	installed := filepath.Join(dst, "foo.txt")
+
+	//nolint:gosec // installed is derived from a t.TempDir() fixture, not external input; this is the exact write attempt under test.
+	f, err := os.OpenFile(installed, os.O_WRONLY, 0)
+	if err == nil {
+		_ = f.Close()
+		t.Fatalf("expected opening the installed file for writing to fail")
+	}
+	if !os.IsPermission(err) {
+		t.Fatalf("expected a permission error, got %v", err)
+	}
+
+	//nolint:gosec // path under t.TempDir().
+	body, err := os.ReadFile(filepath.Join(src, "foo.txt"))
+	if err != nil {
+		t.Fatalf("read CAS file: %v", err)
+	}
+	if string(body) != helloFileContent {
+		t.Fatalf("CAS file bytes changed by the blocked write attempt: %q", body)
+	}
+}
+
+// TestReplaceByRenameDoesNotCorruptCAS pins the intentional scope of this
+// commit's protection: it blocks a write *through* the shared inode, not a
+// project replacing its own installed file wholesale. Renaming a new file
+// over the installed path only needs write permission on the containing
+// directory (which stays writable by design), so it succeeds and simply
+// detaches the install from the CAS inode - the CAS content itself, still
+// referenced under its own sha, is untouched.
+func TestReplaceByRenameDoesNotCorruptCAS(t *testing.T) {
+	t.Parallel()
+
+	_, src := seedCASTree(t)
+	dst := filepath.Join(t.TempDir(), "install")
+	if err := Materialize(src, dst); err != nil {
+		t.Fatalf("Materialize: %v", err)
+	}
+	installed := filepath.Join(dst, "foo.txt")
+
+	replacement := filepath.Join(t.TempDir(), "replacement.txt")
+	if err := os.WriteFile(replacement, []byte("evil"), helpers.FileMod); err != nil {
+		t.Fatalf("write replacement: %v", err)
+	}
+	if err := os.Rename(replacement, installed); err != nil {
+		t.Fatalf("rename over installed file: %v", err)
+	}
+
+	//nolint:gosec // path under t.TempDir().
+	body, err := os.ReadFile(filepath.Join(src, "foo.txt"))
+	if err != nil {
+		t.Fatalf("read CAS file: %v", err)
+	}
+	if string(body) != helloFileContent {
+		t.Fatalf("CAS file corrupted by a rename over the installed copy: got %q", body)
+	}
+}
+
+// assertCopyFileCreatesIndependentCopy asserts copyFile(src, dst, perm)
+// succeeds, dst's content matches want, dst's mode is exactly perm (not
+// merely read-only), and dst is a distinct inode from src rather than a
+// hard link.
+func assertCopyFileCreatesIndependentCopy(t *testing.T, dst, src, want string, perm os.FileMode) {
+	t.Helper()
+	if err := copyFile(src, dst, perm); err != nil {
+		t.Fatalf("copyFile: %v", err)
+	}
+	//nolint:gosec // path under t.TempDir().
+	body, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read dst: %v", err)
+	}
+	if string(body) != want {
+		t.Fatalf("dst content = %q, want %q", body, want)
+	}
+	dstInfo, err := os.Stat(dst)
+	if err != nil {
+		t.Fatalf("stat dst: %v", err)
+	}
+	if dstInfo.Mode().Perm() != perm {
+		t.Fatalf("dst mode = %o, want %o", dstInfo.Mode().Perm(), perm)
+	}
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		t.Fatalf("stat src: %v", err)
+	}
+	if os.SameFile(srcInfo, dstInfo) {
+		t.Fatalf("expected copyFile to create a distinct inode, not a hard link")
+	}
+}
+
+// assertMaterializeFileSurfacesRemoveError drives materializeFile's
+// checked-remove error path by pre-creating dst as a non-empty directory:
+// os.Remove fails on a non-empty directory (unlike an empty one, which it
+// would happily remove), so this deterministically forces the checked
+// remove to surface a real error instead of silently falling through to a
+// confusing EEXIST/EISDIR failure further down.
+func assertMaterializeFileSurfacesRemoveError(t *testing.T, dir, src string, perm os.FileMode) {
+	t.Helper()
+	occupiedDst := filepath.Join(dir, "occupied-dst")
+	if err := os.MkdirAll(filepath.Join(occupiedDst, "occupant"), helpers.DirMod); err != nil {
+		t.Fatalf("mkdir non-empty occupied dst: %v", err)
+	}
+	err := materializeFile(src, occupiedDst, perm)
+	if err == nil {
+		t.Fatalf("expected materializeFile to fail against a non-empty directory at dst")
+	}
+	if !errors.Is(err, syscall.ENOTEMPTY) {
+		t.Fatalf("expected the checked remove's own ENOTEMPTY error, got: %v", err)
+	}
+}
+
+// TestMaterializeCopyFallback exercises copyFile's cross-device fallback
+// branch directly, without needing a second filesystem, then drives
+// materializeFile's checked-remove error path. See
+// assertCopyFileCreatesIndependentCopy and
+// assertMaterializeFileSurfacesRemoveError for what each half proves.
+func TestMaterializeCopyFallback(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	const casPerm = os.FileMode(0o444)
+	const payload = "payload"
+	src := filepath.Join(dir, "src.txt")
+	//nolint:gosec // test fixture; the permissive create mode is immediately narrowed by the Chmod below.
+	if err := os.WriteFile(src, []byte(payload), 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	if err := os.Chmod(src, casPerm); err != nil {
+		t.Fatalf("chmod src to CAS mode: %v", err)
+	}
+
+	assertCopyFileCreatesIndependentCopy(t, filepath.Join(dir, "dst.txt"), src, payload, casPerm)
+	assertMaterializeFileSurfacesRemoveError(t, dir, src, casPerm)
+}
+
+// TestLegacyReadyMarkerForcesRebuild proves a CAS tree left over from a
+// pre-hardening binary - carrying the legacy "ok" marker payload and a
+// writable regular file - is never trusted: Ensure must reject its stale
+// marker, rebuild the tree via extractInto's RemoveAll-then-rebuild path,
+// and the rebuilt tree must be hardened (and carry the current marker
+// payload) exactly like a first-time extraction would.
+func TestLegacyReadyMarkerForcesRebuild(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	tarPath := filepath.Join(dir, "src.tar.gz")
+	writeTarball(t, tarPath, map[string]string{"foo.txt": helloFileContent})
+	sha := mustHash(t, tarPath)
+
+	store := NewStore(filepath.Join(dir, "cache"))
+	final := filepath.Join(store.Root(), sha)
+	if err := os.MkdirAll(final, helpers.DirMod); err != nil {
+		t.Fatalf("mkdir legacy final: %v", err)
+	}
+	//nolint:gosec // test fixture: the legacy tree's writable file is the exact condition under test, not a leak risk.
+	if err := os.WriteFile(filepath.Join(final, "foo.txt"), []byte(helloFileContent), 0o644); err != nil {
+		t.Fatalf("write legacy file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(final, ReadyMarker), []byte("ok"), helpers.FileMod); err != nil {
+		t.Fatalf("write legacy marker: %v", err)
+	}
+
+	got, err := store.Ensure(sha, tarPath)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	info, err := os.Stat(filepath.Join(got, "foo.txt"))
+	if err != nil {
+		t.Fatalf("stat rebuilt file: %v", err)
+	}
+	if info.Mode().Perm() != 0o444 {
+		t.Fatalf("rebuilt file mode = %o, want 0444 (the legacy tree must be rebuilt hardened)", info.Mode().Perm())
+	}
+	//nolint:gosec // path under t.TempDir().
+	marker, err := os.ReadFile(filepath.Join(got, ReadyMarker))
+	if err != nil {
+		t.Fatalf("read ready marker: %v", err)
+	}
+	if string(marker) != ReadyMarkerPayload {
+		t.Fatalf("ready marker = %q, want %q", marker, ReadyMarkerPayload)
+	}
+}
+
+// TestTarballShippingReadyMarkerPromotes is the regression test for the bug
+// hardening introduces: a tarball that ships its own root-level ".ready"
+// entry now extracts it read-only along with everything else, so a naive
+// os.WriteFile of the real marker would fail EACCES trying to truncate it
+// in place. Promote's remove-then-write must tolerate this and finish with
+// the current payload, not the tarball's own content.
+func TestTarballShippingReadyMarkerPromotes(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	tarPath := filepath.Join(dir, "src.tar.gz")
+	writeTarball(t, tarPath, map[string]string{
+		"foo.txt":   helloFileContent,
+		ReadyMarker: "not-ready-yet",
+	})
+	store := NewStore(filepath.Join(dir, "cache"))
+
+	//nolint:gosec // path under t.TempDir().
+	f, err := os.Open(tarPath)
+	if err != nil {
+		t.Fatalf("open tarball: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	tmp, err := store.IngestReader(f)
+	if err != nil {
+		t.Fatalf("IngestReader: %v", err)
+	}
+	sha := mustHash(t, tarPath)
+	final, err := store.Promote(tmp, sha)
+	if err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+
+	//nolint:gosec // path under t.TempDir().
+	content, err := os.ReadFile(filepath.Join(final, ReadyMarker))
+	if err != nil {
+		t.Fatalf("read ready marker: %v", err)
+	}
+	if string(content) != ReadyMarkerPayload {
+		t.Fatalf("ready marker = %q, want %q (the tarball's own .ready entry must be overwritten)", content, ReadyMarkerPayload)
+	}
+	//nolint:gosec // path under t.TempDir().
+	body, err := os.ReadFile(filepath.Join(final, "foo.txt"))
+	if err != nil {
+		t.Fatalf("read foo.txt: %v", err)
+	}
+	if string(body) != helloFileContent {
+		t.Fatalf("foo.txt = %q", body)
+	}
+}
+
+// TestRemovalPathsWithReadOnlyFiles proves every removal path this
+// package's callers rely on still succeeds against a tree of read-only
+// regular files: Store.Remove, Sweep, and SweepTemp for CAS trees, plus a
+// bare os.RemoveAll over a Materialize'd install tree - the exact pattern
+// collections.extractCollection uses to wipe an install path before a fresh
+// extraction. None of these need the target file's own write bit, only the
+// containing directory's, so hardening the files must not affect any of
+// them.
+func TestRemovalPathsWithReadOnlyFiles(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		// remove performs the removal against target (a finalized CAS tree
+		// for the Store-level cases, or a Materialize'd install tree for the
+		// last one) and returns the path that must be gone afterward.
+		remove func(t *testing.T, store *Store, target string) (removed string, err error)
+		name   string
+	}{
+		{
+			name: "Store.Remove",
+			remove: func(t *testing.T, store *Store, target string) (string, error) {
+				t.Helper()
+				return target, store.Remove(filepath.Base(target))
+			},
+		},
+		{
+			name: "Sweep",
+			remove: func(t *testing.T, store *Store, target string) (string, error) {
+				t.Helper()
+				return target, store.Sweep(map[string]bool{})
+			},
+		},
+		{
+			name: "SweepTemp",
+			remove: func(t *testing.T, store *Store, target string) (string, error) {
+				t.Helper()
+				// SweepTemp deliberately never touches a finalized entry, so
+				// reshape it into the "<sha>.tmp" form its matcher targets.
+				tempTarget := target + tmpSuffix
+				if err := os.Rename(target, tempTarget); err != nil {
+					t.Fatalf("rename to temp shape: %v", err)
+				}
+				return tempTarget, store.SweepTemp()
+			},
+		},
+		{
+			name: "os.RemoveAll over a Materialize'd install tree",
+			remove: func(t *testing.T, _ *Store, target string) (string, error) {
+				t.Helper()
+				installDir := filepath.Join(filepath.Dir(target), "install")
+				if err := Materialize(target, installDir); err != nil {
+					t.Fatalf("Materialize: %v", err)
+				}
+				return installDir, os.RemoveAll(installDir)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			store, target := seedCASTree(t)
+
+			removed, err := tt.remove(t, store, target)
+			if err != nil {
+				t.Fatalf("removal failed against a hardened tree: %v", err)
+			}
+			if _, statErr := os.Stat(removed); !os.IsNotExist(statErr) {
+				t.Fatalf("expected %s to be removed, stat error: %v", removed, statErr)
+			}
+		})
+	}
+}
+
+// TestNewFilesCanStillBeCreatedInInstallTree encodes the __pycache__
+// guarantee: hardening regular files must never extend to blocking new file
+// or directory creation inside an install tree, since directories are never
+// hardened and their write bit is exactly what os.Mkdir and os.WriteFile
+// need. A future change that hardened directories too would break this
+// test.
+func TestNewFilesCanStillBeCreatedInInstallTree(t *testing.T) {
+	t.Parallel()
+	_, src := seedCASTree(t)
+	dst := filepath.Join(t.TempDir(), "install")
+	if err := Materialize(src, dst); err != nil {
+		t.Fatalf("Materialize: %v", err)
+	}
+
+	newDir := filepath.Join(dst, "__pycache__")
+	if err := os.Mkdir(newDir, helpers.DirMod); err != nil {
+		t.Fatalf("mkdir __pycache__ in hardened install tree: %v", err)
+	}
+	newFile := filepath.Join(newDir, "module.cpython-312.pyc")
+	//nolint:gosec // test fixture; an ordinary writable mode is exactly what a real __pycache__ write would use.
+	if err := os.WriteFile(newFile, []byte("compiled"), 0o644); err != nil {
+		t.Fatalf("write new file in hardened install tree: %v", err)
+	}
+	//nolint:gosec // path under t.TempDir().
+	body, err := os.ReadFile(newFile)
+	if err != nil {
+		t.Fatalf("read new file: %v", err)
+	}
+	if string(body) != "compiled" {
+		t.Fatalf("new file content = %q", body)
 	}
 }

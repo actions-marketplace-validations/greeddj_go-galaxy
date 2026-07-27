@@ -28,6 +28,26 @@ const (
 	// ingestPrefix names the temp directories IngestReader creates under the
 	// store root before a stream is finalized via Promote.
 	ingestPrefix = "ingest-"
+
+	// ReadyMarkerPayload is the exact content a current binary writes into
+	// ReadyMarker, and the only content isReady accepts. This is a version
+	// tag, not decoration: Ensure's isReady check runs before the per-sha
+	// lock is taken, so a CAS tree extracted by an older binary - one that
+	// wrote the legacy "ok" sentinel and left its regular files writable -
+	// would otherwise be trusted verbatim and hard-linked into every install
+	// that references it, silently defeating the write-bit hardening this
+	// commit adds. Bumping this payload is what forces every pre-existing
+	// tree to fail isReady exactly once and rebuild hardened; a tree that
+	// already carries this payload was, by construction, extracted by a
+	// binary new enough to have applied the mask.
+	ReadyMarkerPayload = "ro1"
+	// readyMarkerMaxReadSize bounds the read of a ready marker file. A
+	// well-formed marker is a few bytes, so anything longer is either
+	// corrupt or hostile and is rejected outright without the caller ever
+	// needing to learn the file's real length - mirroring
+	// collections.extractMarkerMaxReadSize's same reasoning for the
+	// extract-done marker.
+	readyMarkerMaxReadSize = 64
 )
 
 var (
@@ -171,7 +191,7 @@ func (s *Store) Promote(tmpRoot, sha string) (string, error) {
 		_ = os.RemoveAll(tmpRoot)
 		return final, nil
 	}
-	if err := os.WriteFile(filepath.Join(tmpRoot, ReadyMarker), []byte("ok"), helpers.FileMod); err != nil {
+	if err := writeReadyMarker(tmpRoot); err != nil {
 		_ = os.RemoveAll(tmpRoot)
 		return "", err
 	}
@@ -286,7 +306,7 @@ func (s *Store) extractInto(final, tarPath string) (string, error) {
 		_ = os.RemoveAll(tmp)
 		return "", err
 	}
-	if err := os.WriteFile(filepath.Join(tmp, ReadyMarker), []byte("ok"), helpers.FileMod); err != nil {
+	if err := writeReadyMarker(tmp); err != nil {
 		_ = os.RemoveAll(tmp)
 		return "", err
 	}
@@ -309,9 +329,59 @@ func (s *Store) lockFor(sha string) *sync.Mutex {
 	return lock
 }
 
+// writeReadyMarker writes ReadyMarkerPayload into dir's ready marker,
+// removing any existing file at that path first (ignoring fs.ErrNotExist).
+// The remove-then-write is not decorative: a tarball can ship its own
+// root-level ".ready" entry, which archive.extractRegularFile now extracts
+// read-only along with every other regular file, so a plain os.WriteFile
+// here would fail EACCES trying to truncate it in place. Removing first
+// always starts from a clean, writable slate regardless of what extraction
+// left behind at that path.
+func writeReadyMarker(dir string) error {
+	path := filepath.Join(dir, ReadyMarker)
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return os.WriteFile(path, []byte(ReadyMarkerPayload), helpers.FileMod)
+}
+
+// readReadyMarker reads path with a hard cap of readyMarkerMaxReadSize+1
+// bytes, reporting ok=false for a missing/unreadable file and for a file at
+// least one byte over the cap - mirroring
+// collections.readExtractMarker's same bounded-read shape.
+func readReadyMarker(path string) (string, bool) {
+	f, err := os.Open(path) //nolint:gosec // path is this store's own marker path, not attacker-controlled input.
+	if err != nil {
+		return "", false
+	}
+	defer func() {
+		_ = f.Close()
+	}()
+
+	buf := make([]byte, readyMarkerMaxReadSize+1)
+	n, err := io.ReadFull(f, buf)
+	switch {
+	case err == nil:
+		return "", false
+	case errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, io.EOF):
+		return string(buf[:n]), true
+	default:
+		return "", false
+	}
+}
+
+// isReady reports whether dir holds a finalized CAS tree written by a
+// binary new enough to apply the write-bit hardening. It checks the marker's
+// exact content, not merely its presence: a tree extracted by an older
+// binary carries the legacy "ok" sentinel (or, on a much older binary,
+// nothing at all in this format) and its regular files are still writable,
+// so isReady must reject it here rather than let Ensure/Materialize trust it
+// verbatim and hand out unhardened hard links. Rejecting forces
+// extractInto/Promote's own RemoveAll-then-rebuild path, which re-extracts
+// the tree through the current, hardened archive package.
 func isReady(dir string) bool {
-	_, err := os.Stat(filepath.Join(dir, ReadyMarker))
-	return err == nil
+	content, ok := readReadyMarker(filepath.Join(dir, ReadyMarker))
+	return ok && content == ReadyMarkerPayload
 }
 
 // Materialize mirrors srcRoot into dstRoot using hardlinks, falling back
@@ -370,17 +440,39 @@ func materializeSymlink(src, dst string) error {
 	return os.Symlink(target, dst)
 }
 
+// materializeFile links src into dst, falling back to a byte copy when the
+// link fails (e.g. src and dst are on different devices). The remove before
+// linking is checked rather than best-effort: extractCollection always wipes
+// installPath with os.RemoveAll before a real install, so in the ordinary
+// path dst is simply absent here and os.Remove returns fs.ErrNotExist, which
+// is ignored; any other remove failure would otherwise fall through to an
+// EEXIST link error and then an EACCES/EISDIR open inside copyFile, hiding
+// the real cause behind a confusing downstream failure.
 func materializeFile(src, dst string, perm os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(dst), helpers.DirMod); err != nil {
 		return err
 	}
-	_ = os.Remove(dst)
+	if err := os.Remove(dst); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
 	if err := os.Link(src, dst); err == nil {
 		return nil
 	}
 	return copyFile(src, dst, perm)
 }
 
+// copyFile is materializeFile's cross-device fallback: a plain byte copy
+// into a freshly created dst at the CAS entry's own mode. The create mode
+// passed to OpenFile is masked by the process umask (unlike a hard link,
+// which carries the source inode's mode verbatim and is never subject to
+// umask), so under a restrictive umask the created file could otherwise end
+// up with fewer permission bits than a linked install of the same CAS entry
+// - breaking the "installed mode == CAS mode" invariant Materialize
+// otherwise guarantees. The explicit Chmod after the copy - an fchmod on an
+// already-open, still-writable descriptor - re-asserts perm exactly,
+// independent of umask, and succeeds even though perm has no write bit: an
+// open O_WRONLY descriptor keeps writing after its own mode is dropped to
+// read-only, since fchmod affects future opens, not the fd already held.
 func copyFile(src, dst string, perm os.FileMode) error {
 	//nolint:gosec // src comes from the trusted extracted store.
 	in, err := os.Open(src)
@@ -394,6 +486,10 @@ func copyFile(src, dst string, perm os.FileMode) error {
 		return err
 	}
 	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	if err := out.Chmod(perm); err != nil {
 		_ = out.Close()
 		return err
 	}

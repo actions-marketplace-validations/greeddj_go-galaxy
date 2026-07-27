@@ -1,6 +1,7 @@
 package helpers
 
 import (
+	"io/fs"
 	"net/http"
 	"time"
 )
@@ -10,6 +11,16 @@ const (
 	DirMod = 0o755
 	// FileMod is the default permission for created files.
 	FileMod = 0o644
+	// WritePermBits is the write-permission mask (owner, group, other)
+	// ReadOnlyPerm clears. It exists as a named constant rather than an
+	// inline literal because the mask is applied at exactly one call site
+	// (archive.extractRegularFile) and must never be reintroduced ad hoc
+	// elsewhere: content extracted into the shared extracted-store CAS tree
+	// is later hard-linked into every install that references it, so its
+	// mode is genuinely shared inode metadata, and clearing the write bits
+	// anywhere but at the moment the bytes are first created would itself be
+	// an aliasing write into the CAS tree the mask exists to protect.
+	WritePermBits = 0o222
 
 	// ExtractMarkerPrefix names the marker file extractCollection writes into
 	// an install path once extraction (or CAS materialization) completes,
@@ -221,6 +232,18 @@ const (
 // retry loop.
 func FetchRetryPolicy() RetryPolicy {
 	return RetryPolicy{Base: FetchRetryBackoffBase, Cap: FetchRetryBackoffCap, MaxAttempts: FetchRetryMaxAttempts}
+}
+
+// ReadOnlyPerm strips every write bit (owner, group, other) from perm,
+// leaving its read and execute bits untouched. It is meant for regular files
+// only: a directory must never be passed through this, since a read-only
+// directory blocks entry creation and deletion (os.RemoveAll itself would
+// start failing), and a symlink's mode is meaningless on every platform this
+// project targets and must never be chmod'ed - os.Chmod follows a symlink
+// and would silently mutate whatever it points at instead of the link
+// itself.
+func ReadOnlyPerm(perm fs.FileMode) fs.FileMode {
+	return perm &^ fs.FileMode(WritePermBits)
 }
 
 // IsRetryableHTTPStatus reports whether status is one of the small set of

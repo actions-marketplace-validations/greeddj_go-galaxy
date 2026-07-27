@@ -53,12 +53,15 @@ func TestSanitizeArchivePath(t *testing.T) {
 	}
 }
 
-// testArchiveEntry describes one tar entry for buildTestArchive.
+// testArchiveEntry describes one tar entry for buildTestArchive. mode is the
+// tar header's permission bits; zero means "use the package's own default
+// of 0o644", preserving every existing caller that never set it.
 type testArchiveEntry struct {
 	name     string
 	linkname string
 	content  []byte
 	typeflag byte
+	mode     int64
 }
 
 // buildTestArchive renders entries, in order, into an in-memory tar.gz,
@@ -75,12 +78,16 @@ func buildTestArchive(t *testing.T, entries []testArchiveEntry) []byte {
 	tw := tar.NewWriter(gz)
 
 	for _, e := range entries {
+		mode := e.mode
+		if mode == 0 {
+			mode = 0o644
+		}
 		header := &tar.Header{
 			Typeflag: e.typeflag,
 			Name:     e.name,
 			Linkname: e.linkname,
 			Size:     int64(len(e.content)),
-			Mode:     0o644,
+			Mode:     mode,
 			ModTime:  testEntryModTime,
 		}
 		if err := tw.WriteHeader(header); err != nil {
@@ -487,5 +494,140 @@ func TestExtractOverlongPathComponentFailsClosed(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "failed to stat path") {
 		t.Fatalf("expected a wrapped stat error, got: %v", err)
+	}
+}
+
+// assertExtractedFileModes asserts that each dst-relative path in want has
+// exactly the given permission bits, via os.Lstat (never following a
+// symlink, though none of these paths are expected to be one).
+func assertExtractedFileModes(t *testing.T, dst string, want map[string]os.FileMode) {
+	t.Helper()
+	for name, wantMode := range want {
+		info, err := os.Lstat(filepath.Join(dst, filepath.FromSlash(name)))
+		if err != nil {
+			t.Fatalf("lstat %s: %v", name, err)
+		}
+		if got := info.Mode().Perm(); got != wantMode {
+			t.Fatalf("%s: mode = %o, want %o", name, got, wantMode)
+		}
+	}
+}
+
+// TestExtractStripsWriteBits proves extraction masks every write bit off a
+// regular file at open time regardless of the tar header's own mode, leaves
+// directories at helpers.DirMod, and never touches a symlink's own mode
+// (which os.Chmod would resolve through to the symlink's target instead of
+// the link itself).
+func TestExtractStripsWriteBits(t *testing.T) {
+	t.Parallel()
+
+	entries := []testArchiveEntry{
+		{typeflag: tar.TypeReg, name: "rw.txt", content: []byte("a"), mode: 0o644},
+		{typeflag: tar.TypeReg, name: "rwx.txt", content: []byte("b"), mode: 0o755},
+		{typeflag: tar.TypeReg, name: "owner-rw.txt", content: []byte("c"), mode: 0o600},
+		{typeflag: tar.TypeReg, name: "already-ro.txt", content: []byte("d"), mode: 0o400},
+		{typeflag: tar.TypeDir, name: "sub/", mode: 0o755},
+		{typeflag: tar.TypeReg, name: "sub/target.txt", content: []byte("e"), mode: 0o644},
+		{typeflag: tar.TypeSymlink, name: "link.txt", linkname: "sub/target.txt"},
+	}
+	archiveBytes := buildTestArchive(t, entries)
+
+	dst := t.TempDir()
+	if err := ExtractTarGzStream(bytes.NewReader(archiveBytes), dst); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertExtractedFileModes(t, dst, map[string]os.FileMode{
+		"rw.txt":         0o444,
+		"rwx.txt":        0o555,
+		"owner-rw.txt":   0o400,
+		"already-ro.txt": 0o400,
+		"sub/target.txt": 0o444,
+	})
+
+	dirInfo, err := os.Lstat(filepath.Join(dst, "sub"))
+	if err != nil {
+		t.Fatalf("lstat sub: %v", err)
+	}
+	if got := dirInfo.Mode().Perm(); got != helpers.DirMod {
+		t.Fatalf("directory mode = %o, want %o (directories must never be hardened)", got, helpers.DirMod)
+	}
+
+	// The symlink entry itself must never be chmod'ed: os.Chmod follows a
+	// symlink and would silently mutate whatever it points at.
+	linkInfo, err := os.Lstat(filepath.Join(dst, "link.txt"))
+	if err != nil {
+		t.Fatalf("lstat link.txt: %v", err)
+	}
+	if linkInfo.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("expected link.txt to be a symlink")
+	}
+	targetInfo, err := os.Lstat(filepath.Join(dst, "sub", "target.txt"))
+	if err != nil {
+		t.Fatalf("lstat symlink target: %v", err)
+	}
+	if got := targetInfo.Mode().Perm(); got != 0o444 {
+		t.Fatalf("symlink target mode changed to %o, want unaffected 0444", got)
+	}
+}
+
+// TestExtractRejectsDuplicateEntries proves a tarball with two regular-file
+// entries at the same path fails with helpers.ErrArchiveDuplicateEntry
+// naming the offending path, rather than the bare, undebuggable permission
+// error the second entry's OpenFile now hits against the first entry's
+// already-read-only file.
+func TestExtractRejectsDuplicateEntries(t *testing.T) {
+	t.Parallel()
+
+	entries := []testArchiveEntry{
+		{typeflag: tar.TypeReg, name: "dup.txt", content: []byte("first")},
+		{typeflag: tar.TypeReg, name: "dup.txt", content: []byte("second")},
+	}
+	archiveBytes := buildTestArchive(t, entries)
+
+	dst := t.TempDir()
+	err := ExtractTarGzStream(bytes.NewReader(archiveBytes), dst)
+	if !errors.Is(err, helpers.ErrArchiveDuplicateEntry) {
+		t.Fatalf("expected ErrArchiveDuplicateEntry, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "dup.txt") {
+		t.Fatalf("expected the error to name the offending path, got: %v", err)
+	}
+}
+
+// TestExtractAcceptsDotSlashPrefixedNames guards against the write-bit and
+// duplicate-entry changes above false-positiving on a perfectly ordinary
+// tarball whose entries are named with a "./" prefix (a common tar output
+// convention): sanitizeArchivePath already normalizes it away, and this
+// pins that normal single-entry extraction still succeeds.
+func TestExtractAcceptsDotSlashPrefixedNames(t *testing.T) {
+	t.Parallel()
+
+	entries := []testArchiveEntry{
+		{typeflag: tar.TypeReg, name: "./MANIFEST.json", content: []byte("{}")},
+		{typeflag: tar.TypeReg, name: "./sub/file.txt", content: []byte("data")},
+	}
+	archiveBytes := buildTestArchive(t, entries)
+
+	dst := t.TempDir()
+	if err := ExtractTarGzStream(bytes.NewReader(archiveBytes), dst); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	//nolint:gosec // dst is a t.TempDir() and the joined path is a literal, not external input.
+	got, err := os.ReadFile(filepath.Join(dst, "MANIFEST.json"))
+	if err != nil {
+		t.Fatalf("read MANIFEST.json: %v", err)
+	}
+	if string(got) != "{}" {
+		t.Fatalf("MANIFEST.json = %q", got)
+	}
+	//nolint:gosec // dst is a t.TempDir() and the joined path is a literal, not external input.
+	got, err = os.ReadFile(filepath.Join(dst, "sub", "file.txt"))
+	if err != nil {
+		t.Fatalf("read sub/file.txt: %v", err)
+	}
+	if string(got) != "data" {
+		t.Fatalf("sub/file.txt = %q", got)
 	}
 }

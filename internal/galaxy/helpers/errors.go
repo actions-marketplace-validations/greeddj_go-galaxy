@@ -33,6 +33,21 @@ var (
 	// ErrArchiveTooManyEntries indicates an archive contains more entries
 	// than ArchiveMaxEntryCount allows.
 	ErrArchiveTooManyEntries = errors.New("archive contains too many entries")
+	// ErrArchiveDuplicateEntry indicates a tar archive contains a regular-file
+	// entry whose on-disk path is already occupied by something the same
+	// archive extracted earlier - most often a second regular-file entry at
+	// that path, but equally a directory entry the file now collides with.
+	// Extracted regular files are opened read-only (see
+	// archive.extractRegularFile), so such an entry fails os.OpenFile with a
+	// bare permission error against what is already there, which is
+	// undebuggable on its own; this sentinel reclassifies that failure into
+	// something that names the offending archive path. The classification is
+	// existence-based rather than errno-based, so it deliberately covers both
+	// collision shapes under one name - "two entries want the same path" is
+	// the actionable fact either way. Previously a duplicate regular-file
+	// entry silently won; that is a deliberate behavior change, not a
+	// regression.
+	ErrArchiveDuplicateEntry = errors.New("archive contains a duplicate entry")
 
 	// ErrHardlinkTargetIsEmpty indicates a hardlink target is empty.
 	ErrHardlinkTargetIsEmpty = errors.New("hardlink target is empty")

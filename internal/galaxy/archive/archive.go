@@ -131,11 +131,18 @@ func extractRegularFile(tarReader *tar.Reader, header *tar.Header, targetPath st
 	if err := os.MkdirAll(filepath.Dir(targetPath), helpers.DirMod); err != nil {
 		return fmt.Errorf("failed to create directories for %s: %w", targetPath, err)
 	}
-	mode := header.FileInfo().Mode().Perm()
+	// Strip every write bit at the moment the file is created. This is the
+	// single point in the whole pipeline where content extracted from an
+	// artifact becomes read-only, and it is forced rather than chosen: the
+	// extracted bytes are later hard-linked into every install that
+	// references them, so their mode is shared inode metadata, and masking
+	// it anywhere downstream (e.g. in extracted.Materialize) would itself be
+	// a write aliased into every other hard link of the same content.
+	mode := helpers.ReadOnlyPerm(header.FileInfo().Mode().Perm())
 	//nolint:gosec // targetPath is sanitized archive entry under dstDir.
 	file, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 	if err != nil {
-		return fmt.Errorf("failed to create file %s: %w", targetPath, err)
+		return classifyOpenRegularFileError(targetPath, header.Name, err)
 	}
 	written, err := io.CopyN(file, tarReader, header.Size)
 	if err != nil {
@@ -147,6 +154,31 @@ func extractRegularFile(tarReader *tar.Reader, header *tar.Header, targetPath st
 		return fmt.Errorf("failed to close file %s: %w", targetPath, err)
 	}
 	return nil
+}
+
+// classifyOpenRegularFileError runs only after os.OpenFile in
+// extractRegularFile has already failed - the happy path pays nothing for
+// this. Regular files now extract read-only (see extractRegularFile above),
+// so a tarball with two entries competing for one path fails this OpenFile
+// with a bare permission error against whatever the earlier entry already
+// put there, which is undebuggable on its own: previously, with writable
+// extracted files, the second entry's O_TRUNC open silently succeeded and
+// the last entry won. An os.Stat of the target distinguishes "this path is
+// already occupied by something our own extraction just created" from a
+// genuine open failure against an absent path (an unwritable destination, a
+// vanished parent directory, and so on), and reports the former as
+// helpers.ErrArchiveDuplicateEntry naming the offending archive path;
+// anything else is returned as the original wrapped error, unchanged.
+//
+// The check is existence-based rather than errno-based on purpose: a
+// regular-file entry landing on an earlier directory entry's path is the
+// same actionable fact - two entries want one path - and reporting it under
+// one name beats surfacing a raw EISDIR the operator would have to decode.
+func classifyOpenRegularFileError(targetPath, entryName string, openErr error) error {
+	if _, statErr := os.Stat(targetPath); statErr == nil {
+		return fmt.Errorf("%w: %s", helpers.ErrArchiveDuplicateEntry, entryName)
+	}
+	return fmt.Errorf("failed to create file %s: %w", targetPath, openErr)
 }
 
 func extractSymlink(relPath, targetPath string, header *tar.Header) error {
