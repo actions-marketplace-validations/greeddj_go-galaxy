@@ -538,6 +538,10 @@ suitable for CI dashboards:
 }
 ```
 
+The report is written atomically (temp file plus rename), so a consumer never
+reads a partial JSON, and a symlink at the operator-specified path is replaced
+rather than followed.
+
 `cache_hits`, `cache_misses`, and `bytes_downloaded` are artifact-level counters,
 not collection-level: a hit is one artifact served from the artifact cache and a
 miss is one artifact fetched from the origin, so `cache_hits + cache_misses`

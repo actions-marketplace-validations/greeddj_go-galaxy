@@ -4,8 +4,6 @@ package metrics
 
 import (
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
@@ -51,17 +49,17 @@ type Report struct {
 }
 
 // Write marshals the report and writes it to path. If path is empty this
-// is a no-op so callers can pass cfg.MetricsFile unconditionally.
+// is a no-op so callers can pass cfg.MetricsFile unconditionally. The write
+// is atomic (see helpers.WriteFileAtomic): a CI consumer never observes a
+// truncated report, and a symlink planted at the operator-specified path is
+// replaced rather than followed.
 func Write(path string, r Report) error {
 	if path == "" {
 		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(path), helpers.DirMod); err != nil {
-		return err
 	}
 	data, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, helpers.FileMod)
+	return helpers.WriteFileAtomic(path, data)
 }

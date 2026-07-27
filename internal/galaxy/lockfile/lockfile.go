@@ -89,50 +89,7 @@ func Save(path string, f *File) error {
 	if err != nil {
 		return err
 	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, helpers.DirMod); err != nil {
-		return err
-	}
-	return writeFileAtomic(dir, path, data)
-}
-
-// writeFileAtomic writes data to a temporary file in dir and renames it onto
-// path. Rename within a single directory is atomic, so a reader sees either
-// the previous file or the fully written new one, never a truncated one. The
-// temp file is removed on any error so a failed write leaves nothing behind. A
-// directory fsync is intentionally omitted: rename atomicity plus the content
-// Sync deliver the no-truncated-file guarantee, and a dir-open would add a
-// portability wrinkle for no benefit here.
-//
-//nolint:nonamedreturns // the named err return lets the deferred cleanup see the final error and remove the temp file only on failure.
-func writeFileAtomic(dir, path string, data []byte) (err error) {
-	tmp, err := os.CreateTemp(dir, DefaultName+".*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer func() {
-		if err != nil {
-			_ = os.Remove(tmpName)
-		}
-	}()
-	if _, err = tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err = tmp.Chmod(helpers.FileMod); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err = tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err = tmp.Close(); err != nil {
-		return err
-	}
-	err = os.Rename(tmpName, path)
-	return err
+	return helpers.WriteFileAtomic(path, data)
 }
 
 // Hash returns a stable SHA256 hex of the canonical lockfile bytes.
