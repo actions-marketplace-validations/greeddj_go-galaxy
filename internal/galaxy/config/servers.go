@@ -186,10 +186,56 @@ func resolveServers(cfg *Config, c *cli.Command, ansCfg ansibleConfig) error {
 	if err != nil {
 		return err
 	}
+	if err := applyTokenFlag(c, servers); err != nil {
+		return err
+	}
 
 	cfg.Servers = servers
 	cfg.Server = servers[0].URL
 	cfg.Warnings = append(cfg.Warnings, tlsWarnings(servers)...)
+	return nil
+}
+
+// applyTokenFlag folds an explicitly set --token (or GO_GALAXY_TOKEN) into
+// the resolved server list, in place.
+//
+// It is go-galaxy's own convenience for the common single-server case -
+// point the tool at one private hub and hand it a credential - without
+// making the operator write an ansible.cfg section for it. It is deliberately
+// the only go-galaxy-spelled name in this whole surface: everything else is
+// ANSIBLE_-prefixed, because everything else exists for drop-in fidelity.
+//
+// It is allowed only when exactly one server is effective (the built-in
+// default, [galaxy] server, --server as a URL, or --server naming a
+// server_list id). With a multi-entry server_list in effect there is no
+// answer to "which server is this credential for", and silently picking one
+// could send a private hub's token to the public Galaxy, so it is a hard
+// error instead.
+//
+// Being explicitly set to the empty string clears the token, so a pipeline
+// can force an anonymous run by exporting GO_GALAXY_TOKEN= without editing
+// any config. An unset flag - including a command that never registers it -
+// leaves the list untouched.
+func applyTokenFlag(c *cli.Command, servers []Server) error {
+	if !c.IsSet("token") {
+		return nil
+	}
+	if len(servers) > 1 {
+		return fmt.Errorf("%w: %d servers configured", helpers.ErrAmbiguousGalaxyToken, len(servers))
+	}
+	if len(servers) == 0 {
+		return nil
+	}
+
+	token := NewSecret(strings.TrimSpace(c.String("token")))
+	_, parsed, err := normalizeServerURL(servers[0].URL)
+	if err != nil {
+		return fmt.Errorf("%w: server %q", helpers.ErrInvalidGalaxyServerURL, servers[0].ID)
+	}
+	if err := checkTokenTransport(servers[0].ID, token, parsed); err != nil {
+		return err
+	}
+	servers[0].Token = token
 	return nil
 }
 
@@ -343,8 +389,8 @@ func buildServer(id string, kv map[string]string) (Server, []string, error) {
 		return Server{}, warnings, err
 	}
 
-	if token.IsSet() && strings.EqualFold(parsed.Scheme, "http") && !isLoopbackHost(parsed.Hostname()) {
-		return Server{}, warnings, fmt.Errorf("%w: server %q (%s)", helpers.ErrInsecureTokenTransport, id, helpers.Origin(parsed))
+	if err := checkTokenTransport(id, token, parsed); err != nil {
+		return Server{}, warnings, err
 	}
 
 	return Server{ID: id, URL: normalized, Token: token, InsecureSkipTLSVerify: insecure}, warnings, nil
@@ -481,6 +527,24 @@ func normalizeServerURL(raw string) (string, *url.URL, error) {
 		return "", nil, helpers.ErrInvalidGalaxyServerURL
 	}
 	return v, parsed, nil
+}
+
+// checkTokenTransport rejects a token configured for a plaintext,
+// non-loopback origin. Sending a credential over http:// hands it to any
+// passive observer on the path - a proxy, a capture, a log - which no
+// ansible-compatibility argument justifies, since validate_certs never
+// turns http:// into https:// either. Loopback is exempt: nothing leaves
+// the machine. id names the server in the error; it is "" for the implicit
+// single server and for a --token applied to it, which still reads
+// sensibly.
+func checkTokenTransport(id string, token Secret, parsed *url.URL) error {
+	if !token.IsSet() || parsed == nil {
+		return nil
+	}
+	if !strings.EqualFold(parsed.Scheme, "http") || isLoopbackHost(parsed.Hostname()) {
+		return nil
+	}
+	return fmt.Errorf("%w: server %q (%s)", helpers.ErrInsecureTokenTransport, id, helpers.Origin(parsed))
 }
 
 // isLoopbackHost reports whether host - already bracket-stripped via

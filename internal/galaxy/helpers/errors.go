@@ -258,6 +258,13 @@ var (
 	// origin, one transport" a structural invariant instead of a silent
 	// pick between two credentials for the same endpoint.
 	ErrConflictingServerToken = errors.New("conflicting token for the same galaxy server origin")
+	// ErrAmbiguousGalaxyToken indicates --token (or GO_GALAXY_TOKEN) was set
+	// while a multi-entry server_list is in effect. The flag names no server,
+	// so there is no answer to which one the credential belongs to, and
+	// guessing could send a private hub's token to the public Galaxy.
+	// Configure the token in that server's own [galaxy_server.<id>] section
+	// or its ANSIBLE_GALAXY_SERVER_<ID>_TOKEN variable instead.
+	ErrAmbiguousGalaxyToken = errors.New("--token is ambiguous with a multi-entry server_list")
 
 	// ErrGalaxyAuthFailed indicates a configured Galaxy server answered a
 	// root-metadata request with 401 or 403. This is fail-closed: unlike a

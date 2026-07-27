@@ -201,7 +201,8 @@ func isGalaxyServerPolicyError(err error) bool {
 	return errors.Is(err, helpers.ErrGalaxyServerURLUserinfo) ||
 		errors.Is(err, helpers.ErrInsecureTokenTransport) ||
 		errors.Is(err, helpers.ErrConflictingServerTLSPolicy) ||
-		errors.Is(err, helpers.ErrConflictingServerToken)
+		errors.Is(err, helpers.ErrConflictingServerToken) ||
+		errors.Is(err, helpers.ErrAmbiguousGalaxyToken)
 }
 
 // isCollectionNameUsageError reports whether err is an invalid-collection-name/format sentinel.

@@ -20,11 +20,12 @@ import (
 // be distinguishable from the values under test.
 const testServerFlagDefault = "https://default.example"
 
-// newServerCmd builds a *cli.Command exposing the "server" flag exactly as
-// cmd/go-galaxy/helpers/flags.go defines it - default value
-// testServerFlagDefault, sourced from GO_GALAXY_SERVER and
-// ANSIBLE_GALAXY_SERVER - so c.IsSet("server") and c.String("server")
-// behave the same way they do for a real command.
+// newServerCmd builds a *cli.Command exposing the "server" and "token"
+// flags exactly as cmd/go-galaxy/helpers/flags.go defines them - server
+// defaulting to testServerFlagDefault and sourced from GO_GALAXY_SERVER and
+// ANSIBLE_GALAXY_SERVER, token with no default and sourced from
+// GO_GALAXY_TOKEN - so c.IsSet and c.String behave the same way they do for
+// a real command.
 func newServerCmd(t *testing.T, args []string) *cli.Command {
 	t.Helper()
 
@@ -36,6 +37,10 @@ func newServerCmd(t *testing.T, args []string) *cli.Command {
 				Name:    "server",
 				Value:   testServerFlagDefault,
 				Sources: cli.EnvVars("GO_GALAXY_SERVER", "ANSIBLE_GALAXY_SERVER"),
+			},
+			&cli.StringFlag{
+				Name:    "token",
+				Sources: cli.EnvVars("GO_GALAXY_TOKEN"),
 			},
 		},
 		Action: func(_ context.Context, c *cli.Command) error {
@@ -828,4 +833,120 @@ func TestSecretRedactionMarshalNestedInConfig(t *testing.T) {
 			t.Errorf("yaml.Marshal() = %s, must not contain the plaintext", b)
 		}
 	})
+}
+
+// TestTokenFlagAppliesToSingleServer checks the case --token exists for:
+// one effective server, credential handed to it on the command line rather
+// than through an ansible.cfg section.
+func TestTokenFlagAppliesToSingleServer(t *testing.T) {
+	t.Parallel()
+
+	c := newServerCmd(t, []string{"--server=https://hub.example.com", "--token=s3cr3t"})
+	cfg, err := runResolveServers(t, c, ansibleConfig{})
+	if err != nil {
+		t.Fatalf("resolveServers() error = %v, want nil", err)
+	}
+	if len(cfg.Servers) != 1 {
+		t.Fatalf("len(Servers) = %d, want 1", len(cfg.Servers))
+	}
+	if got := cfg.Servers[0].Token.Reveal(); got != "s3cr3t" {
+		t.Errorf("Servers[0].Token = %q, want %q", got, "s3cr3t")
+	}
+}
+
+// TestTokenFlagOverridesConfiguredToken checks precedence: an explicit
+// command-line or environment token wins over one configured in
+// ansible.cfg, the same direction every other explicitly-set value takes.
+func TestTokenFlagOverridesConfiguredToken(t *testing.T) {
+	t.Parallel()
+
+	ansCfg := ansibleConfig{
+		Galaxy:        ansibleGalaxyConfig{ServerList: "hub"},
+		GalaxyServers: map[string]map[string]string{"hub": {"url": "https://hub.example.com", "token": "from-ini"}},
+	}
+	c := newServerCmd(t, []string{"--token=from-flag"})
+	cfg, err := runResolveServers(t, c, ansCfg)
+	if err != nil {
+		t.Fatalf("resolveServers() error = %v, want nil", err)
+	}
+	if got := cfg.Servers[0].Token.Reveal(); got != "from-flag" {
+		t.Errorf("Servers[0].Token = %q, want the flag value %q", got, "from-flag")
+	}
+}
+
+// TestTokenFlagClearsWhenExplicitlyEmpty checks that exporting
+// GO_GALAXY_TOKEN= forces an anonymous run without editing any config,
+// which is the point of treating an explicitly empty value as "no token"
+// rather than as "unset".
+func TestTokenFlagClearsWhenExplicitlyEmpty(t *testing.T) {
+	t.Parallel()
+
+	ansCfg := ansibleConfig{
+		Galaxy:        ansibleGalaxyConfig{ServerList: "hub"},
+		GalaxyServers: map[string]map[string]string{"hub": {"url": "https://hub.example.com", "token": "from-ini"}},
+	}
+	c := newServerCmd(t, []string{"--token="})
+	cfg, err := runResolveServers(t, c, ansCfg)
+	if err != nil {
+		t.Fatalf("resolveServers() error = %v, want nil", err)
+	}
+	if cfg.Servers[0].Token.IsSet() {
+		t.Errorf("Servers[0].Token is set, want it cleared by an explicitly empty --token")
+	}
+}
+
+// TestTokenFlagRejectedWithMultipleServers checks the ambiguity refusal:
+// with two servers in effect the flag names neither, and guessing could
+// send a private hub's credential to the public Galaxy.
+func TestTokenFlagRejectedWithMultipleServers(t *testing.T) {
+	t.Parallel()
+
+	ansCfg := ansibleConfig{
+		Galaxy: ansibleGalaxyConfig{ServerList: "hub,public"},
+		GalaxyServers: map[string]map[string]string{
+			"hub":    {"url": "https://hub.example.com"},
+			"public": {"url": "https://galaxy.ansible.com"},
+		},
+	}
+	c := newServerCmd(t, []string{"--token=s3cr3t"})
+	if _, err := runResolveServers(t, c, ansCfg); !errors.Is(err, helpers.ErrAmbiguousGalaxyToken) {
+		t.Fatalf("resolveServers() error = %v, want ErrAmbiguousGalaxyToken", err)
+	}
+}
+
+// TestTokenFlagRejectedOverPlaintext checks that --token is held to the
+// same transport rule as a configured token: a credential must not be sent
+// in the clear to anything but loopback.
+func TestTokenFlagRejectedOverPlaintext(t *testing.T) {
+	t.Parallel()
+
+	c := newServerCmd(t, []string{"--server=http://hub.example.com", "--token=s3cr3t"})
+	if _, err := runResolveServers(t, c, ansibleConfig{}); !errors.Is(err, helpers.ErrInsecureTokenTransport) {
+		t.Fatalf("resolveServers() error = %v, want ErrInsecureTokenTransport", err)
+	}
+
+	loopback := newServerCmd(t, []string{"--server=http://127.0.0.1:8080", "--token=s3cr3t"})
+	if _, err := runResolveServers(t, loopback, ansibleConfig{}); err != nil {
+		t.Fatalf("resolveServers() over loopback error = %v, want nil", err)
+	}
+}
+
+// TestTokenFlagUnsetLeavesServersUntouched checks that a command which
+// never sets the flag - including one that does not register it - changes
+// nothing, so the flag cannot silently strip a configured credential.
+func TestTokenFlagUnsetLeavesServersUntouched(t *testing.T) {
+	t.Parallel()
+
+	ansCfg := ansibleConfig{
+		Galaxy:        ansibleGalaxyConfig{ServerList: "hub"},
+		GalaxyServers: map[string]map[string]string{"hub": {"url": "https://hub.example.com", "token": "from-ini"}},
+	}
+	c := newServerCmd(t, nil)
+	cfg, err := runResolveServers(t, c, ansCfg)
+	if err != nil {
+		t.Fatalf("resolveServers() error = %v, want nil", err)
+	}
+	if got := cfg.Servers[0].Token.Reveal(); got != "from-ini" {
+		t.Errorf("Servers[0].Token = %q, want the configured %q", got, "from-ini")
+	}
 }

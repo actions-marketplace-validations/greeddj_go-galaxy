@@ -51,6 +51,12 @@ func collectionPathFlags() []cli.Flag {
 			Sources: cli.EnvVars("GO_GALAXY_SERVER", "ANSIBLE_GALAXY_SERVER"),
 		},
 		&cli.StringFlag{
+			Name: "token",
+			Usage: "Galaxy API token for the configured server; only valid when a single server is in effect " +
+				"(configure per-server tokens in [galaxy_server.<id>] when using server_list)",
+			Sources: cli.EnvVars("GO_GALAXY_TOKEN"),
+		},
+		&cli.StringFlag{
 			Name:    "timeout",
 			Usage:   "Timeout as seconds (e.g. 60) or Go duration (e.g. 90s, 1m30s)",
 			Value:   defaultTimeout.String(),

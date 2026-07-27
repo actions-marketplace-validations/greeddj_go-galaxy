@@ -135,6 +135,7 @@ var galaxyServerConfigSentinels = []struct {
 	{name: "token over insecure transport", err: helpers.ErrInsecureTokenTransport},
 	{name: "conflicting tls policy", err: helpers.ErrConflictingServerTLSPolicy},
 	{name: "conflicting token", err: helpers.ErrConflictingServerToken},
+	{name: "ambiguous --token", err: helpers.ErrAmbiguousGalaxyToken},
 }
 
 // TestGalaxyServerConfigErrorsMapToUsage pins every Galaxy server
