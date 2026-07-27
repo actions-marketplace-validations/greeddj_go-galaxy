@@ -835,6 +835,57 @@ func TestSecretRedactionMarshalNestedInConfig(t *testing.T) {
 	})
 }
 
+// TestSecretRedactionDumpNestedInPointerConfig goes one level deeper still
+// than TestSecretRedactionMarshalNestedInConfig: a *config.Config (the shape
+// every real call site actually holds and could plausibly hand to a debug
+// print or a panic value, never a bare Config) carrying a token nested two
+// levels down (Config -> Servers -> Server -> Secret), rendered through
+// every verb/marshaler a careless "%v of the whole config" debug line or
+// crash dump could reach for. Every one of them must redact.
+func TestSecretRedactionDumpNestedInPointerConfig(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{Servers: []Server{{ID: "prod", URL: "https://hub.example", Token: NewSecret(secretRedactionPlaintext)}}}
+
+	fmtChecks := []struct {
+		verb string
+		got  string
+	}{
+		{"%v", fmt.Sprintf("%v", cfg)},
+		{"%+v", fmt.Sprintf("%+v", cfg)},
+		{"%#v", fmt.Sprintf("%#v", cfg)},
+	}
+	for _, c := range fmtChecks {
+		t.Run(c.verb, func(t *testing.T) {
+			t.Parallel()
+			if strings.Contains(c.got, secretRedactionPlaintext) {
+				t.Errorf("%s of *Config rendered the plaintext: %q", c.verb, c.got)
+			}
+		})
+	}
+
+	t.Run("json.Marshal", func(t *testing.T) {
+		t.Parallel()
+		b, err := json.Marshal(cfg) //nolint:musttag // see TestSecretRedactionMarshalNestedInConfig
+		if err != nil {
+			t.Fatalf("json.Marshal() error = %v, want nil", err)
+		}
+		if strings.Contains(string(b), secretRedactionPlaintext) {
+			t.Errorf("json.Marshal() = %s, must not contain the plaintext", b)
+		}
+	})
+
+	t.Run("yaml.Marshal", func(t *testing.T) {
+		t.Parallel()
+		b, err := yaml.Marshal(cfg) //nolint:musttag // see TestSecretRedactionMarshalNestedInConfig
+		if err != nil {
+			t.Fatalf("yaml.Marshal() error = %v, want nil", err)
+		}
+		if strings.Contains(string(b), secretRedactionPlaintext) {
+			t.Errorf("yaml.Marshal() = %s, must not contain the plaintext", b)
+		}
+	})
+}
+
 // TestTokenFlagAppliesToSingleServer checks the case --token exists for:
 // one effective server, credential handed to it on the command line rather
 // than through an ansible.cfg section.

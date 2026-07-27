@@ -2,6 +2,7 @@ package requirements
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 
@@ -199,6 +200,16 @@ func finalizeCollectionRequirement(req CollectionRequirement, defaultSource stri
 }
 
 func validateRequirement(req CollectionRequirement, raw any) error {
+	// Checked first, ahead of every other branch below (including the
+	// req.Name == "" one immediately following): that branch echoes the
+	// entire raw item back in its error message for diagnostic purposes, and
+	// raw may itself carry the very userinfo-bearing source: this check
+	// exists to catch. Validating source before ever touching raw means an
+	// invalid entry ("name" missing or empty) can never smuggle a credential
+	// out through its own error message.
+	if err := checkSourceUserinfo(req); err != nil {
+		return err
+	}
 	if req.Name == "" {
 		return fmt.Errorf("%w: %v", helpers.ErrInvalidCollectionEntry, raw)
 	}
@@ -210,6 +221,35 @@ func validateRequirement(req CollectionRequirement, raw any) error {
 	}
 	if req.Type == "" && looksLikeSourceName(req.Name) {
 		return fmt.Errorf("%w %q (only Galaxy API sources are supported)", helpers.ErrUnsupportedCollectionSource, req.Name)
+	}
+	return nil
+}
+
+// checkSourceUserinfo rejects an explicit "source:" that embeds userinfo
+// (e.g. "https://user:pass@hub/"), the same shape config.Server's own URL
+// already refuses (see helpers.ErrGalaxyServerURLUserinfo). Unlike a
+// configured server, a per-collection source: comes straight from
+// requirements.yml - repository content, not an operator-controlled
+// config file - and an unmatched source: flows unchanged into root-metadata
+// request URLs, debug log lines, HTTP error strings, the resolved snapshot,
+// the lockfile, and GALAXY.yml (see serverCandidates/pinnedServerCandidate
+// in package collections). url.URL.String() renders a userinfo password
+// back out in plain text, so without this check any of those repository-
+// content-controlled sinks could leak a credential embedded in the source.
+//
+// A source: naming a bare server_list id (e.g. "internal", never URL-shaped)
+// is left alone: url.Parse succeeds on it but yields no scheme/host, so it
+// never reaches the User-set branch below.
+func checkSourceUserinfo(req CollectionRequirement) error {
+	if req.Source == "" {
+		return nil
+	}
+	parsed, err := url.Parse(req.Source)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return nil
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("%w: collection %q", helpers.ErrGalaxyServerURLUserinfo, req.Name)
 	}
 	return nil
 }

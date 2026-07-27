@@ -232,13 +232,13 @@ var (
 	// unparseable value must never silently resolve to "false" (certs
 	// unverified).
 	ErrInvalidValidateCerts = errors.New("invalid validate_certs value")
-	// ErrGalaxyServerURLUserinfo indicates a configured Galaxy server URL
-	// embeds userinfo (e.g. "https://user:pass@hub/"). url.URL.String()
-	// renders the password back out in plain text, so such a URL would
-	// otherwise leak into debug output, the lockfile, GALAXY.yml, and the
-	// persisted snapshot; rejecting it at config load closes that off
-	// structurally instead of relying on every downstream consumer to
-	// remember to redact it.
+	// ErrGalaxyServerURLUserinfo indicates a configured Galaxy server URL, or
+	// a requirements.yml collection's "source:", embeds userinfo (e.g.
+	// "https://user:pass@hub/"). url.URL.String() renders the password back
+	// out in plain text, so such a URL would otherwise leak into debug
+	// output, the lockfile, GALAXY.yml, and the persisted snapshot; rejecting
+	// it at config/requirements load closes that off structurally instead of
+	// relying on every downstream consumer to remember to redact it.
 	ErrGalaxyServerURLUserinfo = errors.New("galaxy server url must not contain userinfo")
 	// ErrInsecureTokenTransport indicates a token is configured for a
 	// plaintext (http) origin that is not loopback (localhost,

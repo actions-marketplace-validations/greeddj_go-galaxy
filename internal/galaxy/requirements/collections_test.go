@@ -2,6 +2,7 @@ package requirements
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
@@ -236,5 +237,83 @@ func TestParseCollectionsNamespaceWithThreePartNameUnaffected(t *testing.T) {
 	}
 	if collections[0].Namespace != "foo" || collections[0].Name != "a.b.c" {
 		t.Fatalf("unexpected collection[0]: %#v", collections[0])
+	}
+}
+
+// TestParseCollectionsSourceUserinfoRejected pins the closed hole: a
+// requirements.yml "source:" carrying embedded userinfo (a credential in
+// the URL itself) must be rejected at parse time with
+// ErrGalaxyServerURLUserinfo, the same sentinel config.Server's own URL
+// validation uses. Without this check the userinfo-bearing URL flows
+// unchanged into root-metadata request URLs, debug logs, HTTP error
+// strings, the lockfile, and GALAXY.yml, all of which would then render
+// the embedded password in plain text via url.URL.String().
+func TestParseCollectionsSourceUserinfoRejected(t *testing.T) {
+	t.Parallel()
+	// #nosec G101 -- test fixture literal, not a real credential
+	input := "- name: ns.name\n  source: https://user:tok3n-must-not-leak@hub.example/api/\n"
+	_, _, err := ParseCollections([]byte(input), "")
+	if err == nil {
+		t.Fatalf("expected an error")
+	}
+	if !errors.Is(err, helpers.ErrGalaxyServerURLUserinfo) {
+		t.Fatalf("expected ErrGalaxyServerURLUserinfo, got %v", err)
+	}
+	if strings.Contains(err.Error(), "tok3n-must-not-leak") {
+		t.Fatalf("error must not echo the rejected source's credential, got %v", err)
+	}
+}
+
+// TestParseCollectionsSourceBareIDAllowed checks that a source: naming a
+// bare server_list id (never URL-shaped: no "://") is left alone by the
+// userinfo check - url.Parse succeeds on it but yields no scheme/host, so
+// it never reaches the userinfo branch.
+func TestParseCollectionsSourceBareIDAllowed(t *testing.T) {
+	t.Parallel()
+	input := "- name: ns.name\n  source: internal\n"
+	collections, _, err := ParseCollections([]byte(input), "")
+	if err != nil {
+		t.Fatalf("ParseCollections error: %v", err)
+	}
+	if len(collections) != 1 || collections[0].Source != "internal" {
+		t.Fatalf("unexpected collections: %#v", collections)
+	}
+}
+
+// TestParseCollectionsInvalidEntryDoesNotLeakSourceCredential is a
+// regression guard for an ordering bug: an entry missing "name" fails with
+// ErrInvalidCollectionEntry, whose message echoes the raw item back for
+// diagnostics - and that raw item can itself carry the very
+// credential-bearing source: this package's userinfo check exists to catch.
+// The userinfo check must run before that raw dump, not after, or an
+// invalid entry becomes a way to smuggle the credential out through its own
+// error message.
+func TestParseCollectionsInvalidEntryDoesNotLeakSourceCredential(t *testing.T) {
+	t.Parallel()
+	// #nosec G101 -- test fixture literal, not a real credential
+	input := "- source: https://user:tok3n-must-not-leak@hub.example/api/\n  version: \"*\"\n"
+	_, _, err := ParseCollections([]byte(input), "")
+	if err == nil {
+		t.Fatalf("expected an error")
+	}
+	if !errors.Is(err, helpers.ErrGalaxyServerURLUserinfo) {
+		t.Fatalf("expected ErrGalaxyServerURLUserinfo, got %v", err)
+	}
+	if strings.Contains(err.Error(), "tok3n-must-not-leak") {
+		t.Fatalf("error must not echo the rejected source's credential, got %v", err)
+	}
+}
+
+// TestParseCollectionsSourcePlainURLAllowed is a regression guard: a
+// userinfo-free source: URL must keep working exactly as before.
+func TestParseCollectionsSourcePlainURLAllowed(t *testing.T) {
+	t.Parallel()
+	input := "- name: ns.name\n  source: https://hub.example/api/\n"
+	collections, _, err := ParseCollections([]byte(input), "")
+	if err != nil {
+		t.Fatalf("ParseCollections error: %v", err)
+	}
+	if len(collections) != 1 || collections[0].Source != "https://hub.example/api/" {
+		t.Fatalf("unexpected collections: %#v", collections)
 	}
 }

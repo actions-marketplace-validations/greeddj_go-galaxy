@@ -27,20 +27,26 @@ func New(out output.Printer, httpClient *http.Client) *Infra {
 	}
 }
 
-// DebugAnsibleConfig logs which settings were sourced from ansible.cfg.
+// DebugAnsibleConfig logs which settings were sourced from ansible.cfg, then
+// the fully resolved server list (see debugServerList) - independent of
+// whether ansible.cfg contributed anything at all, since the server list can
+// equally come from CLI flags or env vars alone.
 func (i *Infra) DebugAnsibleConfig(cfg *config.Config) {
-	if i == nil || i.Output == nil || cfg == nil || cfg.AnsibleConfigPath == "" {
+	if i == nil || i.Output == nil || cfg == nil {
 		return
 	}
-	if cfg.AnsibleCollectionsPathUsed {
-		i.Output.Debugf("ansible.cfg %s: defaults.collections_path=%s", cfg.AnsibleConfigPath, cfg.DownloadPath)
+	if cfg.AnsibleConfigPath != "" {
+		if cfg.AnsibleCollectionsPathUsed {
+			i.Output.Debugf("ansible.cfg %s: defaults.collections_path=%s", cfg.AnsibleConfigPath, cfg.DownloadPath)
+		}
+		if cfg.AnsibleCacheDirUsed {
+			i.Output.Debugf("ansible.cfg %s: galaxy.cache_dir=%s", cfg.AnsibleConfigPath, cfg.CacheDir)
+		}
+		if cfg.AnsibleServerUsed {
+			i.Output.Debugf("ansible.cfg %s: galaxy.server=%s", cfg.AnsibleConfigPath, cfg.Server)
+		}
 	}
-	if cfg.AnsibleCacheDirUsed {
-		i.Output.Debugf("ansible.cfg %s: galaxy.cache_dir=%s", cfg.AnsibleConfigPath, cfg.CacheDir)
-	}
-	if cfg.AnsibleServerUsed {
-		i.Output.Debugf("ansible.cfg %s: galaxy.server=%s", cfg.AnsibleConfigPath, cfg.Server)
-	}
+	i.debugServerList(cfg.Servers)
 }
 
 // WarnConfig surfaces non-fatal configuration warnings collected while
@@ -53,5 +59,19 @@ func (i *Infra) WarnConfig(cfg *config.Config) {
 	}
 	for _, w := range cfg.Warnings {
 		i.Output.Warnf("%s", w)
+	}
+}
+
+// debugServerList logs one line per resolved server this run will use: its
+// server_list id (empty for the implicit single server), its URL, whether
+// it carries a token, and whether TLS certificate verification is disabled
+// for it - exactly what an operator debugging "why is it hitting the wrong
+// server" needs. The token is rendered as a presence boolean only, never
+// through config.Secret.Reveal, so raising verbosity can never turn this
+// line into a credential leak.
+func (i *Infra) debugServerList(servers []config.Server) {
+	for _, s := range servers {
+		i.Output.Debugf("galaxy server %q: url=%s token=%t insecure_skip_tls_verify=%t",
+			s.ID, s.URL, s.Token.IsSet(), s.InsecureSkipTLSVerify)
 	}
 }
