@@ -13,8 +13,9 @@ const ansibleBOM = "\uFEFF"
 
 // ansibleGalaxyConfig maps the [galaxy] section from ansible.cfg (INI).
 type ansibleGalaxyConfig struct {
-	CacheDir string
-	Server   string
+	CacheDir   string
+	Server     string
+	ServerList string
 }
 
 // ansibleDefaultsConfig maps the [defaults] section from ansible.cfg (INI).
@@ -23,10 +24,11 @@ type ansibleDefaultsConfig struct {
 }
 
 // ansibleConfig represents the subset of ansible.cfg (INI) sections this
-// tool understands: [defaults] and [galaxy].
+// tool understands: [defaults], [galaxy], and any [galaxy_server.<id>].
 type ansibleConfig struct {
-	Defaults ansibleDefaultsConfig
-	Galaxy   ansibleGalaxyConfig
+	GalaxyServers map[string]map[string]string
+	Galaxy        ansibleGalaxyConfig
+	Defaults      ansibleDefaultsConfig
 }
 
 // parseAnsibleConfig reads an ansible.cfg (INI-style) file and extracts the
@@ -107,9 +109,18 @@ func splitKeyValue(t string) (string, string, bool) {
 	return key, value, key != ""
 }
 
+// galaxyServerSectionPrefix is the fixed prefix of a per-server
+// configuration section header, "[galaxy_server.<id>]"; everything after
+// it is the server's id.
+const galaxyServerSectionPrefix = "galaxy_server."
+
 // assignAnsibleValue stores value into cfg for the known (section, key)
 // pairs this tool consumes; anything else, including keys seen before any
-// section header, is ignored. Later occurrences win over earlier ones.
+// section header, is ignored. Later occurrences win over earlier ones. A
+// section matching "galaxy_server.<id>" is captured in full via
+// assignGalaxyServerValue rather than a fixed key whitelist, since the set
+// of keys to recognize (and which ones are errors vs. warnings) is a
+// concern of the config resolver, not this parser.
 func assignAnsibleValue(cfg *ansibleConfig, section, key, value string) {
 	switch section {
 	case "defaults":
@@ -122,6 +133,26 @@ func assignAnsibleValue(cfg *ansibleConfig, section, key, value string) {
 			cfg.Galaxy.CacheDir = value
 		case "server":
 			cfg.Galaxy.Server = value
+		case "server_list":
+			cfg.Galaxy.ServerList = value
+		}
+	default:
+		if id, ok := strings.CutPrefix(section, galaxyServerSectionPrefix); ok {
+			assignGalaxyServerValue(cfg, id, key, value)
 		}
 	}
+}
+
+// assignGalaxyServerValue stores key/value into the per-id map for a
+// "[galaxy_server.<id>]" section, allocating the outer and inner maps
+// lazily. Later occurrences of the same key within the same id win, same
+// as every other key this parser tracks.
+func assignGalaxyServerValue(cfg *ansibleConfig, id, key, value string) {
+	if cfg.GalaxyServers == nil {
+		cfg.GalaxyServers = make(map[string]map[string]string)
+	}
+	if cfg.GalaxyServers[id] == nil {
+		cfg.GalaxyServers[id] = make(map[string]string)
+	}
+	cfg.GalaxyServers[id][key] = value
 }

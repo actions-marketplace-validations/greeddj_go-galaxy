@@ -191,4 +191,71 @@ var (
 	// so retrying would only spend the retry budget re-downloading a
 	// hostile or broken response.
 	ErrArtifactTooLarge = errors.New("artifact download exceeds the maximum allowed size")
+
+	// ErrUnsupportedGalaxyServerKey indicates a [galaxy_server.<id>] section
+	// used a key this tool deliberately refuses to interpret: username,
+	// password, auth_url, or client_id imply Basic auth or a Keycloak/SSO
+	// token exchange, neither of which this tool implements. This fails
+	// config loading outright, before any request is made, rather than
+	// silently sending an unauthenticated request and getting a confusing
+	// 401 later.
+	ErrUnsupportedGalaxyServerKey = errors.New("unsupported galaxy_server key: configure a Galaxy API token instead")
+	// ErrUnsupportedGalaxyServerAPIVersion indicates a [galaxy_server.<id>]
+	// section set api_version to something other than the one value this
+	// tool understands ("v3").
+	ErrUnsupportedGalaxyServerAPIVersion = errors.New("unsupported galaxy_server api_version")
+	// ErrMissingGalaxyServerURL indicates a server named in server_list has
+	// no url configured, from either its [galaxy_server.<id>] section or
+	// the matching ANSIBLE_GALAXY_SERVER_<ID>_URL env var.
+	ErrMissingGalaxyServerURL = errors.New("galaxy server is missing its url")
+	// ErrInvalidGalaxyServerURL indicates a configured Galaxy server URL
+	// could not be parsed as an absolute URL with a scheme and host. The
+	// raw value is deliberately never included in this error's context: it
+	// may carry embedded userinfo, and echoing it back would defeat the
+	// point of ErrGalaxyServerURLUserinfo below.
+	ErrInvalidGalaxyServerURL = errors.New("invalid galaxy server url")
+	// ErrInvalidGalaxyServerID indicates a server_list id contains a
+	// character outside [A-Za-z0-9_-]. Ansible does not enforce this, but
+	// this tool does: a "." would make the "[galaxy_server.<id>]" section
+	// grammar ambiguous, and every other character is unsafe to fold into
+	// an ANSIBLE_GALAXY_SERVER_<ID>_* environment variable name.
+	ErrInvalidGalaxyServerID = errors.New("invalid galaxy server id")
+	// ErrDuplicateGalaxyServerID indicates server_list repeats an id, or
+	// lists two ids that differ only in case. The latter is rejected
+	// because both would resolve to the same ANSIBLE_GALAXY_SERVER_<ID>_*
+	// environment variable prefix, making per-server env overrides
+	// ambiguous.
+	ErrDuplicateGalaxyServerID = errors.New("duplicate galaxy server id")
+	// ErrInvalidValidateCerts indicates a validate_certs value is not one
+	// of ansible's recognized boolean spellings (true/false, yes/no,
+	// on/off, 1/0, case-insensitive). This is always a hard error: an
+	// unparseable value must never silently resolve to "false" (certs
+	// unverified).
+	ErrInvalidValidateCerts = errors.New("invalid validate_certs value")
+	// ErrGalaxyServerURLUserinfo indicates a configured Galaxy server URL
+	// embeds userinfo (e.g. "https://user:pass@hub/"). url.URL.String()
+	// renders the password back out in plain text, so such a URL would
+	// otherwise leak into debug output, the lockfile, GALAXY.yml, and the
+	// persisted snapshot; rejecting it at config load closes that off
+	// structurally instead of relying on every downstream consumer to
+	// remember to redact it.
+	ErrGalaxyServerURLUserinfo = errors.New("galaxy server url must not contain userinfo")
+	// ErrInsecureTokenTransport indicates a token is configured for a
+	// plaintext (http) origin that is not loopback (localhost,
+	// 127.0.0.0/8, or ::1). Sending a token over such a connection lets any
+	// on-path observer capture it, so this is rejected at config load
+	// rather than warned about at request time.
+	ErrInsecureTokenTransport = errors.New("galaxy server token configured for an insecure plaintext transport")
+	// ErrConflictingServerTLSPolicy indicates two configured servers share
+	// a normalized origin (scheme, host, and effective port) but disagree
+	// on validate_certs. One origin must map to exactly one transport, so
+	// this conflict is a config error rather than an arbitrary
+	// last-one-wins resolution.
+	ErrConflictingServerTLSPolicy = errors.New("conflicting validate_certs for the same galaxy server origin")
+	// ErrConflictingServerToken indicates two configured servers share a
+	// normalized origin but carry different tokens (including one set and
+	// one unset). Like ErrConflictingServerTLSPolicy, this keeps "one
+	// origin, one transport" a structural invariant instead of a silent
+	// pick between two credentials for the same endpoint.
+	ErrConflictingServerToken = errors.New("conflicting token for the same galaxy server origin")
 )

@@ -22,12 +22,27 @@ type Config struct {
 	MetricsFile       string
 	CacheDir          string
 	DownloadPath      string
-	Server            string
+	// Server is the derived "first effective server" URL, kept for the
+	// consumers that only ever deal with one Galaxy server: metrics,
+	// GALAXY.yml, the lockfile's Server field, and Meta.Server. It always
+	// equals Servers[0].URL once resolveServers has run. A consumer that
+	// needs to be multi-server-aware (credential/TLS dispatch per origin)
+	// must read Servers instead.
+	Server string
 	// Warnings collects non-fatal configuration warnings (e.g. a
-	// colon-separated collections_path with entries this tool ignores).
-	// BuildCollectionConfig runs before the output printer exists, so
-	// warnings are carried here and drained later through Infra.WarnConfig.
-	Warnings                   []string
+	// colon-separated collections_path with entries this tool ignores, or
+	// a disabled-TLS-verification server). BuildCollectionConfig runs
+	// before the output printer exists, so warnings are carried here and
+	// drained later through Infra.WarnConfig.
+	Warnings []string
+	// Servers is the resolved, non-empty list of configured Galaxy
+	// servers, in the precedence and list order documented on
+	// resolveServers. When no server_list is configured it holds exactly
+	// one entry with ID "" (the implicit single server), the URL resolved
+	// by the same precedence this tool always used for Server, and no
+	// token - the shape every release before multi-server support existed
+	// effectively had.
+	Servers                    []Server
 	S3Cache                    S3CacheConfig
 	Timeout                    time.Duration
 	Workers                    int
@@ -120,6 +135,10 @@ func BuildCollectionConfig(c *cli.Command) (*Config, error) {
 		return nil, err
 	}
 	applyAnsibleConfig(cfg, c, ansibleConfig, ansiblePath)
+
+	if err := resolveServers(cfg, c, ansibleConfig); err != nil {
+		return nil, err
+	}
 
 	s3Cfg, err := loadS3CacheConfig(c)
 	if err != nil {
@@ -341,6 +360,13 @@ missing $ANSIBLE_CONFIG target simply falls through to the next candidate):
 [galaxy]
 cache_dir // env:ANSIBLE_GALAXY_CACHE_DIR // default {{ ANSIBLE_HOME ~ "/galaxy_cache" }}
 server // env:ANSIBLE_GALAXY_SERVER // default https://galaxy.ansible.com
+server_list // env:ANSIBLE_GALAXY_SERVER_LIST // comma-separated ids, each resolved
+            // against its own [galaxy_server.<id>] section; see servers.go.
+
+[galaxy_server.<id>]
+url // env:ANSIBLE_GALAXY_SERVER_<ID>_URL
+token // env:ANSIBLE_GALAXY_SERVER_<ID>_TOKEN
+validate_certs // env:ANSIBLE_GALAXY_SERVER_<ID>_VALIDATE_CERTS
 */
 
 // loadAnsibleConfig loads and parses ansible.cfg if it exists.

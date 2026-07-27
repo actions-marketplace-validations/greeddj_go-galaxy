@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -11,9 +12,9 @@ import (
 // parseAnsibleConfigCase is one table-driven case shared by the
 // TestParseAnsibleConfig* functions below.
 type parseAnsibleConfigCase struct {
+	want  ansibleConfig
 	name  string
 	input string
-	want  ansibleConfig
 }
 
 // runParseAnsibleConfigCases feeds each case's input through
@@ -27,7 +28,10 @@ func runParseAnsibleConfigCases(t *testing.T, cases []parseAnsibleConfigCase) {
 			if err != nil {
 				t.Fatalf("parseAnsibleConfig() error = %v, want nil", err)
 			}
-			if got != tt.want {
+			// ansibleConfig now carries GalaxyServers, a map field, so it is
+			// no longer comparable with !=; reflect.DeepEqual is the
+			// equivalent structural check.
+			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("parseAnsibleConfig() = %+v, want %+v", got, tt.want)
 			}
 		})
@@ -187,6 +191,127 @@ func TestParseAnsibleConfigLexicalQuirks(t *testing.T) {
 	})
 }
 
+// TestParseAnsibleConfigServerList checks that [galaxy] server_list is
+// captured as a plain string, with the same BC2 fidelity (verbatim value,
+// last-occurrence-wins) as every other [galaxy] key.
+func TestParseAnsibleConfigServerList(t *testing.T) {
+	t.Parallel()
+	runParseAnsibleConfigCases(t, []parseAnsibleConfigCase{
+		{
+			name:  "server_list captured verbatim",
+			input: "[galaxy]\nserver_list = prod, staging",
+			want:  ansibleConfig{Galaxy: ansibleGalaxyConfig{ServerList: "prod, staging"}},
+		},
+		{
+			name:  "duplicate key last wins",
+			input: "[galaxy]\nserver_list = a\nserver_list = b\n",
+			want:  ansibleConfig{Galaxy: ansibleGalaxyConfig{ServerList: "b"}},
+		},
+	})
+}
+
+// TestParseAnsibleConfigGalaxyServerSections checks that every
+// [galaxy_server.<id>] section is captured in full into GalaxyServers,
+// keyed by the id exactly as written after the dot, with the outer map
+// staying nil when no such section is present (the overwhelmingly common
+// case must not pay for an allocation it never uses).
+func TestParseAnsibleConfigGalaxyServerSections(t *testing.T) {
+	t.Parallel()
+	runParseAnsibleConfigCases(t, []parseAnsibleConfigCase{
+		{
+			name:  "no galaxy_server section: outer map stays nil",
+			input: "[galaxy]\nserver = https://x\n",
+			want:  ansibleConfig{Galaxy: ansibleGalaxyConfig{Server: "https://x"}},
+		},
+		{
+			name:  "single section, single key",
+			input: "[galaxy_server.prod]\nurl = https://prod.example\n",
+			want: ansibleConfig{GalaxyServers: map[string]map[string]string{
+				"prod": {"url": "https://prod.example"},
+			}},
+		},
+		{
+			name: "single section, multiple keys",
+			input: "[galaxy_server.prod]\n" +
+				"url = https://prod.example\n" +
+				"token = abc123\n" +
+				"validate_certs = false\n",
+			want: ansibleConfig{GalaxyServers: map[string]map[string]string{
+				"prod": {"url": "https://prod.example", "token": "abc123", "validate_certs": "false"},
+			}},
+		},
+		{
+			name: "multiple sections coexist",
+			input: "[galaxy_server.prod]\n" +
+				"url = https://prod.example\n" +
+				"[galaxy_server.staging]\n" +
+				"url = https://staging.example\n",
+			want: ansibleConfig{GalaxyServers: map[string]map[string]string{
+				"prod":    {"url": "https://prod.example"},
+				"staging": {"url": "https://staging.example"},
+			}},
+		},
+		{
+			name: "duplicate key within a section: last wins",
+			input: "[galaxy_server.prod]\n" +
+				"url = https://one.example\n" +
+				"url = https://two.example\n",
+			want: ansibleConfig{GalaxyServers: map[string]map[string]string{
+				"prod": {"url": "https://two.example"},
+			}},
+		},
+		{
+			name:  "id containing a dot is captured verbatim",
+			input: "[galaxy_server.my.hub]\nurl = https://x\n",
+			want: ansibleConfig{GalaxyServers: map[string]map[string]string{
+				"my.hub": {"url": "https://x"},
+			}},
+		},
+		{
+			// "galaxy_server" without a trailing dot is not a per-server
+			// section at all - the fixed prefix requires the dot.
+			name:  "bare galaxy_server section without a dot is ignored",
+			input: "[galaxy_server]\nurl = https://x\n",
+			want:  ansibleConfig{},
+		},
+	})
+}
+
+// TestParseAnsibleConfigGalaxyServerSectionsFidelity checks that a
+// [galaxy_server.<id>] section gets the same BC2 fidelity (verbatim
+// values, case-sensitive section matching, lowercased keys) as every other
+// section this parser tracks.
+func TestParseAnsibleConfigGalaxyServerSectionsFidelity(t *testing.T) {
+	t.Parallel()
+	runParseAnsibleConfigCases(t, []parseAnsibleConfigCase{
+		{
+			name: "quoted value and inline comment preserved verbatim (BC2 fidelity)",
+			input: "[galaxy_server.prod]\n" +
+				`url = "https://prod.example"` + "\n" +
+				"token = abc123 # comment\n",
+			want: ansibleConfig{GalaxyServers: map[string]map[string]string{
+				"prod": {"url": `"https://prod.example"`, "token": "abc123 # comment"},
+			}},
+		},
+		{
+			// Section names (including the galaxy_server.<id> prefix match)
+			// are case-sensitive, same as every other section.
+			name:  "section name case is not normalized",
+			input: "[Galaxy_Server.prod]\nurl = https://x\n",
+			want:  ansibleConfig{},
+		},
+		{
+			// Keys within a galaxy_server section are lowercased, same as
+			// every other section.
+			name:  "keys within galaxy_server section are lowercased",
+			input: "[galaxy_server.prod]\nURL = https://x\n",
+			want: ansibleConfig{GalaxyServers: map[string]map[string]string{
+				"prod": {"url": "https://x"},
+			}},
+		},
+	})
+}
+
 // TestLoadAnsibleConfig checks that loadAnsibleConfig opens and parses a
 // real file from disk, and surfaces a wrapped os.ErrNotExist for a missing
 // path (the existing swallow-and-continue behavior in
@@ -210,7 +335,7 @@ func TestLoadAnsibleConfig(t *testing.T) {
 		Defaults: ansibleDefaultsConfig{CollectionsPath: "./collections"},
 		Galaxy:   ansibleGalaxyConfig{Server: "https://x", CacheDir: "/c"},
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("loadAnsibleConfig() = %+v, want %+v", got, want)
 	}
 
