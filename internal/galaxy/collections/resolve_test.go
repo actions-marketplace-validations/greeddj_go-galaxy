@@ -100,21 +100,21 @@ func TestRequirementsSignatureModePartition(t *testing.T) {
 	specForward := buildRequirementsSpec(rootsForward)
 	specReversed := buildRequirementsSpec(rootsReversed)
 
-	depsSigForward := requirementsSignatureFromSpec(specForward, false)
-	depsSigReversed := requirementsSignatureFromSpec(specReversed, false)
+	depsSigForward := requirementsSignatureFromSpec(specForward, false, "")
+	depsSigReversed := requirementsSignatureFromSpec(specReversed, false, "")
 	if depsSigForward != depsSigReversed {
 		t.Fatalf("deps-mode signature is order-dependent: %q != %q", depsSigForward, depsSigReversed)
 	}
-	if depsSigForward != requirementsSignatureFromSpec(specForward, false) {
+	if depsSigForward != requirementsSignatureFromSpec(specForward, false, "") {
 		t.Fatalf("deps-mode signature is not deterministic across repeated calls")
 	}
 
-	noDepsSigForward := requirementsSignatureFromSpec(specForward, true)
-	noDepsSigReversed := requirementsSignatureFromSpec(specReversed, true)
+	noDepsSigForward := requirementsSignatureFromSpec(specForward, true, "")
+	noDepsSigReversed := requirementsSignatureFromSpec(specReversed, true, "")
 	if noDepsSigForward != noDepsSigReversed {
 		t.Fatalf("no-deps-mode signature is order-dependent: %q != %q", noDepsSigForward, noDepsSigReversed)
 	}
-	if noDepsSigForward != requirementsSignatureFromSpec(specForward, true) {
+	if noDepsSigForward != requirementsSignatureFromSpec(specForward, true, "") {
 		t.Fatalf("no-deps-mode signature is not deterministic across repeated calls")
 	}
 

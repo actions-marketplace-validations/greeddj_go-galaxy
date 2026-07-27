@@ -29,7 +29,7 @@ func resolveCollectionsInternal(
 	st := deps.st
 
 	reqSpec := buildRequirementsSpec(roots)
-	reqHash := requirementsSignatureFromSpec(reqSpec, cfg.NoDeps)
+	reqHash := requirementsSignatureFromSpec(reqSpec, cfg.NoDeps, serversSignature(cfg))
 
 	snapshotAllowed := allowSnapshot && st != nil
 	if snapshotAllowed {
@@ -468,7 +468,7 @@ func tryIncrementalResolve(
 	// never matches a deps-following recompute, and vice versa: the mismatch
 	// falls through to a fresh resolve instead of silently preserving a graph
 	// shape from the other mode.
-	if requirementsSignatureFromSpec(prevSpec, deps.cfg.NoDeps) != deps.st.MetaSnapshot().RequirementsHash {
+	if requirementsSignatureFromSpec(prevSpec, deps.cfg.NoDeps, serversSignature(deps.cfg)) != deps.st.MetaSnapshot().RequirementsHash {
 		return nil, nil, false, nil
 	}
 
@@ -754,14 +754,23 @@ func buildRequirementsSpec(roots []collection) map[string]requirementSpec {
 }
 
 // requirementsSignatureFromSpec returns a stable signature of requirements.
-// noDeps folds the --no-deps resolution mode into the signature via a
-// fixed-position header line, so a snapshot resolved without following
-// dependencies (roots only, nil graph edges) can never match - and therefore
-// never be reused by - a later run that resolves the full dependency graph,
-// and vice versa. The header has zero "|" separators, unlike every per-root
-// line (which has four), so it cannot collide with one; it is prepended
-// rather than sorted into parts so the per-root ordering stays deterministic.
-func requirementsSignatureFromSpec(spec map[string]requirementSpec, noDeps bool) string {
+//
+// Two fixed-position header lines precede the sorted per-root lines. noDeps
+// folds the --no-deps resolution mode in, so a snapshot resolved without
+// following dependencies (roots only, nil graph edges) can never match - and
+// therefore never be reused by - a later run that resolves the full graph,
+// and vice versa. serversSig folds in the effective server list, because
+// under first-match ownership a root with no source: of its own resolves
+// against whichever configured server answers first: the same requirements
+// against a different list, or the same list in a different order, are a
+// different resolution problem and must not reuse each other's answer.
+//
+// Both headers have zero "|" separators, unlike every per-root line (which
+// has exactly four), so neither can collide with one; their distinct literal
+// prefixes keep them from colliding with each other. They are prepended
+// rather than sorted into parts, so the per-root ordering stays
+// deterministic.
+func requirementsSignatureFromSpec(spec map[string]requirementSpec, noDeps bool, serversSig string) string {
 	parts := make([]string, 0, len(spec))
 	for fqdn, entry := range spec {
 		constraint := entry.Constraint
@@ -772,8 +781,56 @@ func requirementsSignatureFromSpec(spec map[string]requirementSpec, noDeps bool)
 		parts = append(parts, fmt.Sprintf("%s|%s|%s|%s|%s", fqdn, constraint, entry.Source, entry.Type, signatureKey))
 	}
 	sort.Strings(parts)
-	header := fmt.Sprintf("no-deps=%t", noDeps)
+	header := fmt.Sprintf("no-deps=%t\nservers=%s", noDeps, serversSig)
 	sum := sha256.Sum256([]byte(header + "\n" + strings.Join(parts, "\n")))
+	return hex.EncodeToString(sum[:])
+}
+
+// serversSignature hashes cfg's effective server list for the "servers="
+// header of requirementsSignatureFromSpec.
+//
+// Order is preserved, never sorted: under first-match ownership the list
+// order decides which server owns a collection, so a reorder is a genuine
+// change of meaning. Fields are NUL-separated, a byte no URL or id can
+// contain, so no value can forge a field boundary; the result is hex, which
+// is what guarantees the header line it feeds can never contain a "|" and
+// therefore can never be mistaken for a per-root line.
+//
+// Only whether a server carries a credential is hashed, never the token and
+// never any value derived from it - the signature is persisted in the
+// snapshot, and no token-derived value may ever land there. A token rotated
+// to a different value therefore leaves the signature untouched, which is
+// correct: the same server still serves the same collections. Going from no
+// token to a token does flip the bit, and that is the case that matters,
+// since an authenticated read can reveal collections an anonymous one could
+// not see.
+//
+// A configured-but-unused server also changes the signature. That is
+// deliberately conservative: whether a server is "unused" is not knowable
+// without resolving, so the cost is one cold resolve and the benefit is that
+// nobody has to reason about which additions could matter.
+func serversSignature(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+
+	servers := cfg.Servers
+	if len(servers) == 0 {
+		// The shape a hand-built config (and every caller predating
+		// multi-server support) still has: one effective server, no
+		// credential, matching what unpinnedServerCandidates falls back to.
+		servers = []config.Server{{URL: cfg.Server}}
+	}
+
+	entries := make([]string, 0, len(servers))
+	for _, srv := range servers {
+		auth := "0"
+		if srv.Token.IsSet() {
+			auth = "1"
+		}
+		entries = append(entries, srv.ID+"\x00"+srv.URL+"\x00"+auth)
+	}
+	sum := sha256.Sum256([]byte(strings.Join(entries, ",")))
 	return hex.EncodeToString(sum[:])
 }
 

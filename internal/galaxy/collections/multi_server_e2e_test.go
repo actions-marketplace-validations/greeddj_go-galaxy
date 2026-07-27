@@ -629,3 +629,59 @@ func TestMultiServerResolutionDeterministicAcrossWorkerCounts(t *testing.T) {
 		t.Fatalf("SHA256 map differs between workers=1 and workers=8:\n1: %v\n8: %v", shas1, shas8)
 	}
 }
+
+// msReusedConfig clones cfg with the same cache, install and requirements
+// paths but a different server list, so a second run reuses the first run's
+// persisted snapshot if and only if the signature says it may.
+func msReusedConfig(cfg *config.Config, servers []config.Server) *config.Config {
+	clone := *cfg
+	clone.Servers = servers
+	if len(servers) > 0 {
+		clone.Server = servers[0].URL
+	}
+	return &clone
+}
+
+// TestMultiServerSnapshotReuseIsPartitionedByServerList asserts the
+// resolved-snapshot reuse signature accounts for the effective server list:
+// re-running against the identical list reuses the persisted resolution and
+// touches no server, while re-running against the same two servers in the
+// other order re-resolves, because under first-match ownership that order
+// decides which server owns each collection.
+func TestMultiServerSnapshotReuseIsPartitionedByServerList(t *testing.T) {
+	t.Parallel()
+	srvA := fakegalaxy.New(t)
+	srvB := fakegalaxy.New(t)
+	srvA.AddVersion("ns", "shared", "1.0.0", nil)
+	srvB.AddVersion("ns", "shared", "1.0.0", nil)
+
+	forward := []config.Server{{ID: "a", URL: srvA.URL()}, {ID: "b", URL: srvB.URL()}}
+	cfg := newMultiServerConfig(t, forward, buildMultiServerRequirements([]msReqSpec{{name: "ns.shared"}}))
+	runtime := multiServerRuntime(cfg)
+
+	if err := collections.Start(context.Background(), cfg, runtime); err != nil {
+		t.Fatalf("first install: %v", err)
+	}
+
+	srvA.ResetCounts()
+	srvB.ResetCounts()
+	if err := collections.Start(context.Background(), cfg, runtime); err != nil {
+		t.Fatalf("second install with an identical server list: %v", err)
+	}
+	if got := srvA.Count(fakegalaxy.EndpointRootMetadata); got != 0 {
+		t.Fatalf("srvA root metadata requests on reuse = %d, want 0 (the snapshot should have been reused)", got)
+	}
+
+	reversed := []config.Server{{ID: "b", URL: srvB.URL()}, {ID: "a", URL: srvA.URL()}}
+	reorderedCfg := msReusedConfig(cfg, reversed)
+	reorderedRuntime := multiServerRuntime(reorderedCfg)
+
+	srvA.ResetCounts()
+	srvB.ResetCounts()
+	if err := collections.Start(context.Background(), reorderedCfg, reorderedRuntime); err != nil {
+		t.Fatalf("third install with a reordered server list: %v", err)
+	}
+	if srvA.Count(fakegalaxy.EndpointRootMetadata)+srvB.Count(fakegalaxy.EndpointRootMetadata) == 0 {
+		t.Fatal("expected a reordered server list to re-resolve, but no server was contacted")
+	}
+}
