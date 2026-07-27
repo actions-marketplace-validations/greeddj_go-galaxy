@@ -324,7 +324,10 @@ func TestLoadRejectsCorruptResolvedEntry(t *testing.T) {
 
 // TestSnapshotV4RoundTripLocal proves the schema-4 wire shape - APICache,
 // DepsCache, and Versions each carrying a FetchedAt stamp - round-trips
-// through Save/Load intact.
+// through Save/Load intact. The wire shape has carried forward unchanged
+// through later schema bumps (a bump gates key-format changes, not this
+// struct shape), so the assertion compares against the live
+// helpers.StoreSnapshotSchemaVersion rather than a stale literal.
 func TestSnapshotV4RoundTripLocal(t *testing.T) {
 	t.Parallel()
 	dbs := openTestDBs(t)
@@ -341,8 +344,8 @@ func TestSnapshotV4RoundTripLocal(t *testing.T) {
 	mustSave(t, dbs, st)
 
 	loaded := mustLoad(t, dbs)
-	if loaded.Meta.SchemaVersion != 4 {
-		t.Fatalf("expected schema version 4, got %d", loaded.Meta.SchemaVersion)
+	if loaded.Meta.SchemaVersion != helpers.StoreSnapshotSchemaVersion {
+		t.Fatalf("expected schema version %d, got %d", helpers.StoreSnapshotSchemaVersion, loaded.Meta.SchemaVersion)
 	}
 	assertV4APICacheEntry(t, loaded, recent)
 	assertV4DepsCacheEntry(t, loaded)
@@ -382,7 +385,10 @@ func assertV4VersionsEntry(t *testing.T, loaded *Store) {
 // TestSnapshotV4RoundTripJSON proves MarshalSnapshot's schema-4 wire shape
 // round-trips through a plain json.Unmarshal, and that the raw JSON encodes
 // versions_cache and deps_cache values as objects (fetched_at plus the
-// payload), not the bare arrays/maps of the pre-v4 shape.
+// payload), not the bare arrays/maps of the pre-v4 shape. As with
+// TestSnapshotV4RoundTripLocal, this shape is unchanged by later schema
+// bumps, so the version assertion compares against the live
+// helpers.StoreSnapshotSchemaVersion.
 func TestSnapshotV4RoundTripJSON(t *testing.T) {
 	t.Parallel()
 	st := New()
@@ -399,8 +405,8 @@ func TestSnapshotV4RoundTripJSON(t *testing.T) {
 	if err := json.Unmarshal(payload, &loaded); err != nil {
 		t.Fatalf("json.Unmarshal error: %v", err)
 	}
-	if loaded.Meta.SchemaVersion != 4 {
-		t.Fatalf("expected schema version 4, got %d", loaded.Meta.SchemaVersion)
+	if loaded.Meta.SchemaVersion != helpers.StoreSnapshotSchemaVersion {
+		t.Fatalf("expected schema version %d, got %d", helpers.StoreSnapshotSchemaVersion, loaded.Meta.SchemaVersion)
 	}
 	depsEntry, ok := loaded.DepsCache["deps"]
 	if !ok || depsEntry.Deps["a.b"] != testDepsConstraint || depsEntry.FetchedAt.IsZero() {

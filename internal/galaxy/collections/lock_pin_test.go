@@ -368,6 +368,55 @@ func TestCanSkipInstallPinGate(t *testing.T) {
 	}
 }
 
+// TestCanSkipInstallSourceGate proves installEntryMatches' server-source
+// check: an install recorded from one server must not be silently kept when
+// the same namespace.name@version now resolves from a different server, even
+// though InstallPath and ArtifactSHA256 both still match and no lockfile pin
+// is in play to catch the mismatch another way.
+func TestCanSkipInstallSourceGate(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	downloadPath := filepath.Join(root, "install")
+
+	col := collection{Namespace: "acme", Name: "widgets", Version: "1.0.0", Source: "https://a.example.com"}
+	installPath := filepath.Join(downloadPath, "ansible_collections", col.Namespace, col.Name)
+	const installedSHA = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
+	if err := os.MkdirAll(installPath, helpers.DirMod); err != nil {
+		t.Fatalf("mkdir installPath: %v", err)
+	}
+	marker := filepath.Join(installPath, ".extract-done."+installedSHA)
+	if err := os.WriteFile(marker, []byte("ok"), helpers.FileMod); err != nil {
+		t.Fatalf("write extract marker: %v", err)
+	}
+	infoDir := filepath.Join(downloadPath, "ansible_collections", col.Namespace+"."+col.Name+"-"+col.Version+".info")
+	if err := os.MkdirAll(infoDir, helpers.DirMod); err != nil {
+		t.Fatalf("mkdir infoDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(infoDir, "GALAXY.yml"), []byte("format_version: 1.0.0\n"), helpers.FileMod); err != nil {
+		t.Fatalf("write GALAXY.yml: %v", err)
+	}
+
+	cfg := &config.Config{DownloadPath: downloadPath}
+	st := store.New()
+	st.SetInstalled(col.key(), store.InstalledEntry{
+		InstallPath:    installPath,
+		Source:         col.Source,
+		ArtifactSHA256: installedSHA,
+		InstalledAt:    time.Now().UTC(),
+	})
+
+	if !canSkipInstall(cfg, col, installPath, st) {
+		t.Fatalf("expected canSkipInstall to return true when the source is unchanged")
+	}
+
+	switched := col
+	switched.Source = "https://b.example.com"
+	if canSkipInstall(cfg, switched, installPath, st) {
+		t.Fatalf("expected canSkipInstall to return false when the collection now resolves from a different server")
+	}
+}
+
 func sha256Hex(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])

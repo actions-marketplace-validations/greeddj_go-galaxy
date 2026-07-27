@@ -486,21 +486,38 @@ func resolveArtifactSHA(
 	return archive.FileHashSHA256(path)
 }
 
-// artifactKey builds the cache key for a collection tarball.
+// artifactKey builds the cache key for a collection tarball, scoped to the
+// server col actually resolved from (col.Source, stamped by
+// solverResultToResolvedGraph/sourceFor with the server that answered during
+// solve - never a stale pin, never a bare cfg.Server). See helpers.ArtifactKey
+// for the collision this scoping closes: two servers publishing the same
+// <ns>-<name>-<version>.tar.gz used to collide on one flat cache slot with no
+// way for isCacheHit to detect it.
 func artifactKey(col collection) string {
 	filename := fmt.Sprintf("%s-%s-%s.tar.gz", col.Namespace, col.Name, col.Version)
-	return url.QueryEscape(filename)
+	return helpers.ArtifactKey(col.Source, filename)
 }
 
 // installEntryMatches reports whether a recorded install entry still points
 // at installPath with a known artifact hash consistent with any lockfile pin
-// on col. An empty pin allows any recorded hash, so non-frozen installs keep
-// their prior skip behavior unchanged.
+// on col, and was installed from the same server col now resolves from. An
+// empty pin allows any recorded hash, so non-frozen installs keep their prior
+// skip behavior unchanged. The source check exists because a resolved
+// collection's Source can change between runs with no version change at all
+// - the same namespace.name@version now resolves from a different
+// configured server (a source: edit, a server reordering, or a different
+// server winning first-match ownership) - and without it, a stale install
+// from the old server would be silently kept: canSkipInstall never re-checks
+// origin, and an unpinned collection carries no SHA256 to catch the mismatch
+// the way a frozen lockfile pin would.
 func installEntryMatches(col collection, entry store.InstalledEntry, installPath string) bool {
 	if entry.InstallPath == "" || entry.InstallPath != installPath {
 		return false
 	}
 	if entry.ArtifactSHA256 == "" {
+		return false
+	}
+	if entry.Source != col.Source {
 		return false
 	}
 	if col.SHA256 != "" && strings.TrimSpace(entry.ArtifactSHA256) != strings.TrimSpace(col.SHA256) {

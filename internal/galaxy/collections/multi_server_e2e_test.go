@@ -116,15 +116,16 @@ func msAssertInstalled(t *testing.T, downloadPath, name string) {
 }
 
 // msArtifactSHA256 hashes the cached tarball for ns.name@version under
-// cacheDir, the same on-disk location assertArtifactFilePresent checks
-// (the local artifact backend keys a cached tarball by its filename
-// directly under cacheDir).
-func msArtifactSHA256(t *testing.T, cacheDir, ns, name, version string) string {
+// cacheDir, scoped to source (the server that actually resolved it - see
+// helpers.ArtifactKey), the same on-disk location the local artifact backend
+// commits a cached tarball to.
+func msArtifactSHA256(t *testing.T, cacheDir, source, ns, name, version string) string {
 	t.Helper()
 	filename := fmt.Sprintf("%s-%s-%s.tar.gz", ns, name, version)
-	data, err := os.ReadFile(filepath.Join(cacheDir, filename)) //nolint:gosec // path built from this test's own temp dir and fixture names.
+	key := helpers.ArtifactKey(source, filename)
+	data, err := os.ReadFile(filepath.Join(cacheDir, key)) //nolint:gosec // path built from this test's own temp dir and fixture names.
 	if err != nil {
-		t.Fatalf("read cached artifact %s: %v", filename, err)
+		t.Fatalf("read cached artifact %s (key %s): %v", filename, key, err)
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
@@ -179,7 +180,7 @@ func TestMultiServerFirstMatchOwnership(t *testing.T) {
 	msAssertInstalled(t, cfg.DownloadPath, "b")
 	msAssertInstalled(t, cfg.DownloadPath, "both")
 
-	if got := msArtifactSHA256(t, cfg.CacheDir, "ns", "both", "1.0.0"); got != bothA.SHA256 {
+	if got := msArtifactSHA256(t, cfg.CacheDir, srvA.URL(), "ns", "both", "1.0.0"); got != bothA.SHA256 {
 		t.Fatalf("installed ns.both sha = %s, want A's own sha %s (first-match ownership)", got, bothA.SHA256)
 	}
 
@@ -683,5 +684,132 @@ func TestMultiServerSnapshotReuseIsPartitionedByServerList(t *testing.T) {
 	}
 	if srvA.Count(fakegalaxy.EndpointRootMetadata)+srvB.Count(fakegalaxy.EndpointRootMetadata) == 0 {
 		t.Fatal("expected a reordered server list to re-resolve, but no server was contacted")
+	}
+}
+
+// TestMultiServerArtifactCacheKeyIsScopedPerServer is the regression guard
+// for the artifact-cache collision this commit closes: two independent
+// projects, sharing one cache dir, each pin ns.shared@1.0.0 to a different
+// server carrying different artifact bytes for that same name and version.
+// Before the fix, both projects' downloads shared one flat cache key
+// (percent-encoded filename only, no server component), so the second
+// project's install would silently reuse the first project's cached tarball
+// - the wrong bytes, with no metadata round trip able to catch it. With the
+// fix, each server's bytes land under its own key, so both projects install
+// their own server's bytes and both cache entries coexist on disk.
+func TestMultiServerArtifactCacheKeyIsScopedPerServer(t *testing.T) {
+	t.Parallel()
+	srvA := fakegalaxy.New(t)
+	srvB := fakegalaxy.New(t)
+	verA := srvA.AddVersion("ns", "shared", "1.0.0", nil)
+	// A non-nil-but-empty deps map renders differently in the generated
+	// MANIFEST.json than a nil one, giving B's copy different artifact bytes
+	// (and therefore a different sha256) than A's, without changing either
+	// copy's dependency set.
+	verB := srvB.AddVersion("ns", "shared", "1.0.0", map[string]string{})
+	if verA.SHA256 == verB.SHA256 {
+		t.Fatalf("fixture bug: A and B must have distinct artifact bytes to prove no collision, both hash to %s", verA.SHA256)
+	}
+
+	servers := []config.Server{{ID: "a", URL: srvA.URL()}, {ID: "b", URL: srvB.URL()}}
+	cfgA := newMultiServerConfig(t, servers, buildMultiServerRequirements([]msReqSpec{{name: "ns.shared", source: "a"}}))
+	cfgB := newMultiServerConfig(t, servers, buildMultiServerRequirements([]msReqSpec{{name: "ns.shared", source: "b"}}))
+	cfgB.CacheDir = cfgA.CacheDir // force both projects onto one shared cache dir
+
+	runtimeA := multiServerRuntime(cfgA)
+	runtimeB := multiServerRuntime(cfgB)
+
+	if err := collections.Start(context.Background(), cfgA, runtimeA); err != nil {
+		t.Fatalf("install pinned to A: %v", err)
+	}
+	if err := collections.Start(context.Background(), cfgB, runtimeB); err != nil {
+		t.Fatalf("install pinned to B: %v", err)
+	}
+	msAssertInstalled(t, cfgA.DownloadPath, "shared")
+	msAssertInstalled(t, cfgB.DownloadPath, "shared")
+
+	if got := msArtifactSHA256(t, cfgA.CacheDir, srvA.URL(), "ns", "shared", "1.0.0"); got != verA.SHA256 {
+		t.Fatalf("A's cached artifact sha = %s, want A's own sha %s", got, verA.SHA256)
+	}
+	if got := msArtifactSHA256(t, cfgB.CacheDir, srvB.URL(), "ns", "shared", "1.0.0"); got != verB.SHA256 {
+		t.Fatalf("B's cached artifact sha = %s, want B's own sha %s", got, verB.SHA256)
+	}
+}
+
+// TestMultiServerDepsCacheKeyIsScopedPerServer is the deps-cache sibling of
+// TestMultiServerArtifactCacheKeyIsScopedPerServer: two projects sharing one
+// cache dir each pin ns.shared@1.0.0 to a different server, and each
+// server's copy of ns.shared declares a different dependency. Before the
+// fix, both projects' resolves shared one deps-cache entry keyed only by
+// "ns.shared@1.0.0" with no server component, so the second project's
+// resolve would silently reuse the first project's cached dependency map
+// instead of ever asking its own server. With the fix, each server's
+// dependency map lands under its own scoped key, so both projects end up
+// with their own server's transitive dependency installed.
+func TestMultiServerDepsCacheKeyIsScopedPerServer(t *testing.T) {
+	t.Parallel()
+	srvA := fakegalaxy.New(t)
+	srvB := fakegalaxy.New(t)
+	srvA.AddVersion("ns", "shared", "1.0.0", map[string]string{"ns.depa": "*"})
+	srvA.AddVersion("ns", "depa", "1.0.0", nil)
+	srvB.AddVersion("ns", "shared", "1.0.0", map[string]string{"ns.depb": "*"})
+	srvB.AddVersion("ns", "depb", "1.0.0", nil)
+
+	servers := []config.Server{{ID: "a", URL: srvA.URL()}, {ID: "b", URL: srvB.URL()}}
+	cfgA := newMultiServerConfig(t, servers, buildMultiServerRequirements([]msReqSpec{{name: "ns.shared", source: "a"}}))
+	cfgB := newMultiServerConfig(t, servers, buildMultiServerRequirements([]msReqSpec{{name: "ns.shared", source: "b"}}))
+	cfgB.CacheDir = cfgA.CacheDir // force both projects onto one shared cache dir (and deps cache)
+
+	runtimeA := multiServerRuntime(cfgA)
+	runtimeB := multiServerRuntime(cfgB)
+
+	if err := collections.Start(context.Background(), cfgA, runtimeA); err != nil {
+		t.Fatalf("install pinned to A: %v", err)
+	}
+	if err := collections.Start(context.Background(), cfgB, runtimeB); err != nil {
+		t.Fatalf("install pinned to B: %v", err)
+	}
+
+	msAssertInstalled(t, cfgA.DownloadPath, "shared")
+	msAssertInstalled(t, cfgA.DownloadPath, "depa")
+	msAssertInstalled(t, cfgB.DownloadPath, "shared")
+	msAssertInstalled(t, cfgB.DownloadPath, "depb")
+}
+
+// TestMultiServerSourceSwitchForcesReinstall proves installEntryMatches'
+// server-source check end to end: a collection first installed pinned to A
+// is re-run against the same cache dir and download path but pinned to B
+// instead. Before the fix, canSkipInstall never compared the recorded
+// install's server against the newly resolved one, so the second run would
+// silently keep A's install untouched; B would never even be contacted.
+func TestMultiServerSourceSwitchForcesReinstall(t *testing.T) {
+	t.Parallel()
+	srvA := fakegalaxy.New(t)
+	srvB := fakegalaxy.New(t)
+	srvA.AddVersion("ns", "x", "1.0.0", nil)
+	srvB.AddVersion("ns", "x", "1.0.0", nil)
+
+	servers := []config.Server{{ID: "a", URL: srvA.URL()}, {ID: "b", URL: srvB.URL()}}
+	cfg := newMultiServerConfig(t, servers, buildMultiServerRequirements([]msReqSpec{{name: "ns.x", source: "a"}}))
+	runtime := multiServerRuntime(cfg)
+
+	if err := collections.Start(context.Background(), cfg, runtime); err != nil {
+		t.Fatalf("first install (pinned to A): %v", err)
+	}
+	msAssertInstalled(t, cfg.DownloadPath, "x")
+	if got := srvB.Total(); got != 0 {
+		t.Fatalf("srvB.Total() = %d, want 0 before switching source", got)
+	}
+
+	switchedCfg := newMultiServerConfig(t, servers, buildMultiServerRequirements([]msReqSpec{{name: "ns.x", source: "b"}}))
+	switchedCfg.CacheDir = cfg.CacheDir         // reuse the snapshot recording A's install
+	switchedCfg.DownloadPath = cfg.DownloadPath // reuse the on-disk install tree
+	switchedRuntime := multiServerRuntime(switchedCfg)
+
+	if err := collections.Start(context.Background(), switchedCfg, switchedRuntime); err != nil {
+		t.Fatalf("second install (pinned to B): %v", err)
+	}
+	if got := srvB.Total(); got == 0 {
+		t.Fatal("srvB.Total() = 0, want > 0 (a source switch must force a real reinstall from B, not a silent skip)")
 	}
 }

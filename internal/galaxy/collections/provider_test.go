@@ -81,14 +81,17 @@ func TestProviderLazinessAvoidsVersionsList(t *testing.T) {
 }
 
 // TestProviderDependenciesWarmPinIsZeroNetwork warms the deps cache under
-// the exact key resolveOne itself would use, then asserts Dependencies
-// serves it without ever touching the (otherwise-empty, would-404) fake
-// server.
+// the exact scoped key Dependencies itself would use - scoped to the single
+// configured server, which boundBaseFor resolves with no network access
+// since serverCandidates already returns exactly one candidate for it - then
+// asserts Dependencies serves it without ever touching the (otherwise-empty,
+// would-404) fake server.
 func TestProviderDependenciesWarmPinIsZeroNetwork(t *testing.T) {
 	t.Parallel()
 	srv := fakegalaxy.New(t)
 	st := store.New()
-	st.SetDepsCache("acme.widgets@1.0.0", map[string]string{"acme.other": "^2.0.0"})
+	cacheKey := helpers.ScopedDepsCacheKey(normalizeServerBase(srv.URL()), "acme.widgets@1.0.0")
+	st.SetDepsCache(cacheKey, map[string]string{"acme.other": "^2.0.0"})
 
 	p := NewMetadataProvider(context.Background(), testConfig(srv), testRuntime(srv), st, nil)
 	deps, err := p.Dependencies("acme.widgets", mustSolverVersion(t))

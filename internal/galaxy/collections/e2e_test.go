@@ -383,7 +383,7 @@ func TestNoDepsUnpinnedInstallsResolvedVersion(t *testing.T) {
 	}
 
 	assertNoWildcardArtifactFilenames(t, cacheDir)
-	assertArtifactFilePresent(t, cacheDir, "acme-solo-2.0.0.tar.gz")
+	assertArtifactFilePresent(t, cacheDir, s.URL(), "acme-solo-2.0.0.tar.gz")
 
 	if err := collections.Lock(context.Background(), cfg, runtime); err != nil {
 		t.Fatalf("Lock: %v", err)
@@ -424,12 +424,12 @@ func assertNoWildcardArtifactFilenames(t *testing.T, cacheDir string) {
 	}
 }
 
-// assertArtifactFilePresent fails the test unless a file named filename
-// exists directly under cacheDir, where the local artifact backend keys a
-// cached tarball by its (query-escaped) filename.
-func assertArtifactFilePresent(t *testing.T, cacheDir, filename string) {
+// assertArtifactFilePresent fails the test unless a cache entry for filename,
+// scoped to source (the server the collection resolved from - see
+// helpers.ArtifactKey), exists directly under cacheDir.
+func assertArtifactFilePresent(t *testing.T, cacheDir, source, filename string) {
 	t.Helper()
-	path := filepath.Join(cacheDir, filename)
+	path := filepath.Join(cacheDir, helpers.ArtifactKey(source, filename))
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("expected cached artifact %s to exist, stat error: %v", path, err)
 	}

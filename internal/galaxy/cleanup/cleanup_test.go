@@ -402,7 +402,7 @@ func TestRemoveInstalledContainmentGuard(t *testing.T) {
 		CollectionsDir: collectionsDir,
 	}
 
-	err := removeInstalled(t.Context(), inst, nil)
+	err := removeInstalled(t.Context(), inst, nil, "")
 	if !errors.Is(err, helpers.ErrUnsafeRemovalPath) {
 		t.Fatalf("expected ErrUnsafeRemovalPath, got %v", err)
 	}
@@ -431,7 +431,7 @@ func TestRemoveInstalledRejectsInstallPathEscape(t *testing.T) {
 		CollectionsDir: collectionsDir,
 	}
 
-	err := removeInstalled(t.Context(), inst, nil)
+	err := removeInstalled(t.Context(), inst, nil, "")
 	if !errors.Is(err, helpers.ErrUnsafeRemovalPath) {
 		t.Fatalf("expected ErrUnsafeRemovalPath, got %v", err)
 	}
@@ -568,6 +568,104 @@ func TestStartDeletesUnreferencedWithValidRequirements(t *testing.T) {
 	manifestPath := filepath.Join(installDir, "MANIFEST.json")
 	if _, statErr := os.Stat(manifestPath); !os.IsNotExist(statErr) {
 		t.Fatalf("expected the unreferenced collection to be deleted, stat error: %v", statErr)
+	}
+}
+
+// TestStartRemovesLegacyAndScopedArtifactKeys is the regression guard for
+// the one-time artifact-cache migration this commit's key-format change
+// requires: a cached tarball can exist under the pre-multi-server flat key
+// (legacyArtifactKey) and/or the current, server-scoped key
+// (helpers.ArtifactKey), and a single Start run against an unreferenced
+// collection must remove both - the scoped key via removeUnused's own purge
+// (driven by the persisted InstalledEntry.Source), the legacy key via
+// sweepLegacyArtifacts, which runs unconditionally rather than only for
+// collections being removed.
+func TestStartRemovesLegacyAndScopedArtifactKeys(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+	seedInstallTree(t, downloadPath)
+	registerCleanupProject(t, cacheDir, downloadPath)
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	const source = "https://galaxy.example.com/api"
+	seedSnapshotInstalled(t, cfg, runtime, map[string]store.InstalledEntry{
+		"ns.name@1.0.0": {Source: source, ArtifactSHA256: "deadbeef"},
+	})
+
+	const filename = "ns-name-1.0.0.tar.gz"
+	legacyPath := filepath.Join(cacheDir, legacyArtifactKey("ns", "name", "1.0.0"))
+	scopedPath := filepath.Join(cacheDir, helpers.ArtifactKey(source, filename))
+	if err := os.WriteFile(legacyPath, []byte("legacy-bytes"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to seed legacy artifact: %v", err)
+	}
+	if err := os.WriteFile(scopedPath, []byte("scoped-bytes"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to seed scoped artifact: %v", err)
+	}
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Fatalf("expected the legacy-keyed artifact to be removed, stat error: %v", err)
+	}
+	if _, err := os.Stat(scopedPath); !os.IsNotExist(err) {
+		t.Fatalf("expected the scoped artifact to be removed, stat error: %v", err)
+	}
+}
+
+// TestStartSweepsLegacyArtifactForReachableCollection proves
+// sweepLegacyArtifacts runs independent of reachability: a collection that
+// remains referenced by a project's requirements keeps its workspace and its
+// current, server-scoped artifact cache entry, but its legacy-keyed tarball -
+// which nothing will ever look up again regardless of reachability - is
+// still reclaimed.
+func TestStartSweepsLegacyArtifactForReachableCollection(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+	seedInstallTree(t, downloadPath)
+
+	reqPath := filepath.Join(t.TempDir(), "requirements.yml")
+	if err := os.WriteFile(reqPath, []byte("collections:\n  - name: ns.name\n"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write requirements file: %v", err)
+	}
+	registerCleanupProjectAt(t, cacheDir, downloadPath, reqPath)
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	const source = "https://galaxy.example.com/api"
+	seedSnapshotInstalled(t, cfg, runtime, map[string]store.InstalledEntry{
+		"ns.name@1.0.0": {Source: source, ArtifactSHA256: "deadbeef"},
+	})
+
+	const filename = "ns-name-1.0.0.tar.gz"
+	legacyPath := filepath.Join(cacheDir, legacyArtifactKey("ns", "name", "1.0.0"))
+	scopedPath := filepath.Join(cacheDir, helpers.ArtifactKey(source, filename))
+	if err := os.WriteFile(legacyPath, []byte("legacy-bytes"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to seed legacy artifact: %v", err)
+	}
+	if err := os.WriteFile(scopedPath, []byte("scoped-bytes"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to seed scoped artifact: %v", err)
+	}
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+
+	manifestPath := filepath.Join(downloadPath, "ansible_collections", "ns", "name", "MANIFEST.json")
+	if _, err := os.Stat(manifestPath); err != nil {
+		t.Fatalf("expected the still-referenced collection's workspace to survive, stat error: %v", err)
+	}
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Fatalf("expected the legacy-keyed artifact to be swept even though the collection is reachable, stat error: %v", err)
+	}
+	if _, err := os.Stat(scopedPath); err != nil {
+		t.Fatalf("expected the scoped artifact of a reachable collection to survive, stat error: %v", err)
 	}
 }
 
@@ -1078,6 +1176,44 @@ func TestDryRunReportsExtractedSweep(t *testing.T) {
 	}
 }
 
+// TestDryRunReportsLegacyArtifactSweep proves sweepLegacyArtifacts' dry-run
+// path: it reports only a legacy-keyed entry that actually exists on disk,
+// deletes nothing, and does not report a collection that never had a
+// legacy-keyed artifact in the first place.
+func TestDryRunReportsLegacyArtifactSweep(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+	seedManifestAt(t, downloadPath, "ns", "name", "1.0.0")
+	seedManifestAt(t, downloadPath, "ns", "other", "1.0.0")
+
+	reqPath := filepath.Join(t.TempDir(), "requirements.yml")
+	if err := os.WriteFile(reqPath, []byte("collections:\n  - ns.name\n  - ns.other\n"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write requirements file: %v", err)
+	}
+	registerCleanupProjectAt(t, cacheDir, downloadPath, reqPath)
+
+	legacyPath := filepath.Join(cacheDir, legacyArtifactKey("ns", "name", "1.0.0"))
+	if err := os.WriteFile(legacyPath, []byte("legacy-bytes"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to seed legacy artifact: %v", err)
+	}
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: true}
+	printer := &recordingPrinter{}
+	runtime := infra.New(printer, http.DefaultClient)
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected dry-run Start to succeed, got %v", err)
+	}
+
+	if _, err := os.Stat(legacyPath); err != nil {
+		t.Fatalf("expected dry-run to delete nothing, but the legacy artifact is gone: %v", err)
+	}
+	if !printer.hasPrintContaining("legacy artifact") {
+		t.Fatalf("expected a would-sweep report mentioning the legacy artifact, got prints: %v", printer.prints)
+	}
+}
+
 // assertSelectedKeys fails the test unless the Key of every item in got is
 // exactly the set of want, ignoring order.
 func assertSelectedKeys(t *testing.T, got []installedCollection, want ...string) {
@@ -1277,7 +1413,7 @@ func TestRemoveInstalledRefusesNamespaceSymlinkSwap(t *testing.T) {
 		CollectionsDir: collectionsDir,
 	}
 
-	if err := removeInstalled(t.Context(), inst, nil); err == nil {
+	if err := removeInstalled(t.Context(), inst, nil, ""); err == nil {
 		t.Fatalf("expected removeInstalled to refuse to follow the swapped ns symlink, got nil error")
 	}
 	if _, statErr := os.Stat(sentinelFile); statErr != nil {
@@ -1315,7 +1451,7 @@ func TestRemoveInstalledRefusesAnsibleCollectionsSymlinkSwap(t *testing.T) {
 		CollectionsDir: collectionsDir,
 	}
 
-	if err := removeInstalled(t.Context(), inst, nil); err == nil {
+	if err := removeInstalled(t.Context(), inst, nil, ""); err == nil {
 		t.Fatalf("expected removeInstalled to refuse to follow the swapped ansible_collections symlink, got nil error")
 	}
 	if _, statErr := os.Stat(sentinelFile); statErr != nil {
@@ -1365,12 +1501,13 @@ func (a *recordingArtifactStore) Delete(_ context.Context, key string) error {
 // purge is not gated on the on-disk workspace's presence: when
 // inst.CollectionsDir does not exist at all - e.g. its project's workspace
 // was already removed, or never existed this run - removeInstalled must
-// still call artifacts.Delete with the collection's artifact key rather than
-// returning early before ever reaching the purge. This is the regression a
-// naive "os.IsNotExist -> return nil" placed directly in removeInstalled
-// (instead of in the workspace-only helper) would reintroduce: pre-os.Root,
-// os.RemoveAll on an absent path was itself a silent no-op, so the artifact
-// purge always ran regardless of workspace presence.
+// still call artifacts.Delete with the collection's current, server-scoped
+// artifact key rather than returning early before ever reaching the purge.
+// This is the regression a naive "os.IsNotExist -> return nil" placed
+// directly in removeInstalled (instead of in the workspace-only helper)
+// would reintroduce: pre-os.Root, os.RemoveAll on an absent path was itself a
+// silent no-op, so the artifact purge always ran regardless of workspace
+// presence.
 func TestRemoveInstalledDeletesArtifactWhenWorkspaceAbsent(t *testing.T) {
 	t.Parallel()
 	collectionsDir := filepath.Join(t.TempDir(), "does-not-exist")
@@ -1382,14 +1519,41 @@ func TestRemoveInstalledDeletesArtifactWhenWorkspaceAbsent(t *testing.T) {
 		CollectionsDir: collectionsDir,
 	}
 	artifacts := &recordingArtifactStore{}
+	const source = "https://galaxy.example.com/api"
 
-	if err := removeInstalled(t.Context(), inst, artifacts); err != nil {
+	if err := removeInstalled(t.Context(), inst, artifacts, source); err != nil {
 		t.Fatalf("expected nil error for an absent workspace, got %v", err)
 	}
 
-	wantKey := artifactKey("ns", "name", "1.0.0")
+	wantKey := helpers.ArtifactKey(source, "ns-name-1.0.0.tar.gz")
 	if len(artifacts.deleted) != 1 || artifacts.deleted[0] != wantKey {
 		t.Fatalf("expected Delete to be called once with key %q, got %v", wantKey, artifacts.deleted)
+	}
+}
+
+// TestRemoveInstalledSkipsArtifactPurgeWhenSourceUnknown proves removeInstalled
+// never guesses an artifact key when source is unknown (""): purging the
+// legacy flat key is sweepLegacyArtifacts' job now, not removeInstalled's, so
+// an empty source - e.g. an InstalledEntry that predates the multi-server
+// work, or was never recorded - means no Delete call at all, rather than one
+// built from an empty, meaningless server fingerprint.
+func TestRemoveInstalledSkipsArtifactPurgeWhenSourceUnknown(t *testing.T) {
+	t.Parallel()
+	collectionsDir := filepath.Join(t.TempDir(), "does-not-exist")
+	inst := installedCollection{
+		Key:            "ns.name@1.0.0",
+		FQDN:           "ns.name",
+		Version:        "1.0.0",
+		InstallPath:    filepath.Join(collectionsDir, "ansible_collections", "ns", "name"),
+		CollectionsDir: collectionsDir,
+	}
+	artifacts := &recordingArtifactStore{}
+
+	if err := removeInstalled(t.Context(), inst, artifacts, ""); err != nil {
+		t.Fatalf("expected nil error for an absent workspace, got %v", err)
+	}
+	if len(artifacts.deleted) != 0 {
+		t.Fatalf("expected no Delete call when source is unknown, got %v", artifacts.deleted)
 	}
 }
 

@@ -85,6 +85,7 @@ func Start(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error 
 	if err != nil {
 		return err
 	}
+	sweepLegacyArtifacts(ctx, cfg, runtime, state.backend, installedByKey)
 	sweepExtractedStore(cfg, runtime, state.store, reachable, installedByKey)
 	return finalizeCleanup(ctx, cfg, runtime, state.backend, state.store, removed)
 }
@@ -189,12 +190,18 @@ func removeUnused(
 			runtime.Output.Printf("🧹 would remove %s", key)
 			continue
 		}
+		// The persisted InstalledEntry's own Source - not any field on the
+		// on-disk installedCollection scan, which never recorded a server at
+		// all - is the only place the server this collection actually
+		// resolved from is available, and it is what the current, scoped
+		// artifact key (helpers.ArtifactKey) must be built from.
+		source := installedSource(st, key)
 		// The same key can be installed under more than one project's
 		// collections path; every on-disk copy is removed in this single
 		// run, and the snapshot is pruned exactly once afterward rather
 		// than once per copy.
 		for _, inst := range insts {
-			if err := removeInstalled(ctx, inst, backend.Artifacts()); err != nil {
+			if err := removeInstalled(ctx, inst, backend.Artifacts(), source); err != nil {
 				return removed, err
 			}
 		}
@@ -202,10 +209,38 @@ func removeUnused(
 		if st != nil {
 			st.DeleteInstalled(key)
 			st.DeleteGraph(key)
-			st.DeleteDepsCache(key)
+			// The deps-cache entry for this key, if any, lives under the
+			// server-scoped key (helpers.ScopedDepsCacheKey) the resolve path
+			// wrote it under, not under key itself - a bare "ns.name@version"
+			// delete would never match anything once every live entry carries
+			// the server-base prefix. Without source (e.g. this collection's
+			// InstalledEntry predates the multi-server work, or was never
+			// recorded), there is no way to know which scoped key to target,
+			// so the stale entry is simply left for CacheEntryMaxAge to evict.
+			if source != "" {
+				st.DeleteDepsCache(helpers.ScopedDepsCacheKey(source, key))
+			}
 		}
 	}
 	return removed, nil
+}
+
+// installedSource returns the server the collection recorded under key
+// actually resolved from - the persisted InstalledEntry's own Source, the
+// only place that survives from resolve time, since the on-disk manifest
+// scan (installedCollection) never records a server at all. It returns ""
+// when st is nil or has no entry for key, in which case the caller cannot
+// build a correctly scoped artifact or deps-cache key and must skip that
+// part of the purge rather than guess.
+func installedSource(st *store.Store, key string) string {
+	if st == nil {
+		return ""
+	}
+	entry, ok := st.GetInstalled(key)
+	if !ok {
+		return ""
+	}
+	return entry.Source
 }
 
 func finalizeCleanup(
@@ -530,7 +565,16 @@ func markReachable(
 // on-disk collections tree, so an absent (or already-swept) workspace must
 // not gate it - otherwise a cached tarball for an unreachable collection
 // would leak whenever its project's workspace happens to be gone this run.
-func removeInstalled(ctx context.Context, inst installedCollection, artifacts cacheManager.ArtifactStore) error {
+//
+// source is the server this collection actually resolved from (the
+// persisted InstalledEntry's own Source, via installedSource) - possibly ""
+// when unknown - and is used to purge its current, server-scoped artifact
+// cache entry (helpers.ArtifactKey). It does not purge the pre-multi-server
+// flat-keyed entry (legacyArtifactKey): that purge runs unconditionally for
+// every scanned collection, reachable or not, via sweepLegacyArtifacts,
+// since a legacy-keyed entry can never be reached by a fresh install again
+// regardless of whether its collection is being removed.
+func removeInstalled(ctx context.Context, inst installedCollection, artifacts cacheManager.ArtifactStore, source string) error {
 	parts := strings.Split(inst.FQDN, ".")
 	if len(parts) != helpers.CollectionNameParts {
 		return nil
@@ -545,9 +589,9 @@ func removeInstalled(ctx context.Context, inst installedCollection, artifacts ca
 		return err
 	}
 
-	if artifacts != nil {
-		key := artifactKey(namespace, name, inst.Version)
-		_ = artifacts.Delete(ctx, key)
+	if artifacts != nil && strings.TrimSpace(source) != "" {
+		filename := fmt.Sprintf("%s-%s-%s.tar.gz", namespace, name, inst.Version)
+		_ = artifacts.Delete(ctx, helpers.ArtifactKey(source, filename))
 	}
 	return nil
 }
@@ -617,10 +661,77 @@ func removeInfoDir(root *os.Root, inst installedCollection, namespace, name stri
 	return nil
 }
 
-// artifactKey builds the cache key for an artifact.
-func artifactKey(namespace, name, version string) string {
+// legacyArtifactKey builds the pre-multi-server-scoped artifact cache key:
+// the flat, percent-encoded-filename-only shape every artifactKey in this
+// codebase used to build before it gained a server-fingerprint prefix (see
+// helpers.ArtifactKey). No code path ever builds this shape for a fresh
+// install anymore - collections.artifactKey and this package's own current
+// key both go through helpers.ArtifactKey now - so a cache entry still
+// living under this key can never again be reached by a cache-hit lookup,
+// regardless of whether its collection is still reachable. sweepLegacyArtifacts
+// is the only remaining caller, purging it unconditionally as a one-time
+// migration cleanup rather than leaving it as permanent orphaned disk usage.
+func legacyArtifactKey(namespace, name, version string) string {
 	filename := fmt.Sprintf("%s-%s-%s.tar.gz", namespace, name, version)
 	return url.QueryEscape(filename)
+}
+
+// sweepLegacyArtifacts removes every discovered installed collection's
+// artifact cached under the pre-multi-server flat key shape
+// (legacyArtifactKey), independent of reachability: a still-reachable
+// collection keeps its workspace and its current, server-scoped artifact
+// cache entry (helpers.ArtifactKey) untouched, but any copy still cached
+// under the retired flat key is unconditionally dead weight, since nothing
+// will ever look it up again. removeUnused's own artifact purge only ever
+// runs for a collection it is also removing, so without this separate pass a
+// still-reachable collection's legacy-keyed tarball would never be reclaimed
+// by any code path. In a dry run this only reports candidates that actually
+// exist on disk, matching sweepExtractedStore's own dry-run reporting
+// convention.
+func sweepLegacyArtifacts(
+	ctx context.Context,
+	cfg *config.Config,
+	runtime *infra.Infra,
+	backend cacheManager.Backend,
+	installedByKey map[string][]installedCollection,
+) {
+	artifacts := backend.Artifacts()
+	if artifacts == nil {
+		return
+	}
+	for _, insts := range installedByKey {
+		if len(insts) == 0 {
+			continue
+		}
+		// Every on-disk copy of the same key shares the same namespace/name/
+		// version, and therefore the same legacy key, regardless of which
+		// project installed it - so only the first copy needs inspecting.
+		inst := insts[0]
+		namespace, name, ok := helpers.SplitFQDN(inst.FQDN)
+		if !ok {
+			continue
+		}
+		key := legacyArtifactKey(namespace, name, inst.Version)
+		if cfg.DryRun {
+			reportLegacyArtifactSweepCandidate(ctx, runtime, artifacts, key)
+			continue
+		}
+		_ = artifacts.Delete(ctx, key)
+	}
+}
+
+// reportLegacyArtifactSweepCandidate prints a dry-run sweep line for key only
+// when it actually exists, so a dry-run report is not flooded with a line for
+// every installed collection regardless of whether it ever had a
+// legacy-keyed cache entry in the first place. A Has error is treated as "not
+// present" - conservative for a report that must never claim more than it
+// can verify.
+func reportLegacyArtifactSweepCandidate(ctx context.Context, runtime *infra.Infra, artifacts cacheManager.ArtifactStore, key string) {
+	has, err := artifacts.Has(ctx, key)
+	if err != nil || !has {
+		return
+	}
+	runtime.Output.Printf("🧹 would sweep legacy artifact %s", key)
 }
 
 // sweepExtractedStore drops content-addressable extracted entries whose SHA

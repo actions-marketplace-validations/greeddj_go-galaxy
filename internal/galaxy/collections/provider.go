@@ -117,25 +117,31 @@ func (p *MetadataProvider) Universe(fqdn string) ([]solver.Version, error) {
 
 // Dependencies returns the validated dependency map of fqdn@v: dependency
 // fqdn mapped to its canonical Constraint. A warm deps-cache entry (written
-// under the "ns.name@version" key it computes) is served without
-// any network access; a miss fetches the version's metadata, validates and
-// caches its dependency map, and returns it. A malformed dependency key
-// aborts with helpers.ErrInvalidDependencyKey; an unparseable constraint
-// aborts wrapped, both as a provider contract violation the core never
-// tries to guess around.
+// under the helpers.ScopedDepsCacheKey it computes, scoped to whichever
+// server fqdn is bound to - see boundBaseFor) is served without any network
+// access when that server is known with no ambiguity; a miss fetches the
+// version's metadata, validates and caches its dependency map, and returns
+// it. A malformed dependency key aborts with helpers.ErrInvalidDependencyKey;
+// an unparseable constraint aborts wrapped, both as a provider contract
+// violation the core never tries to guess around.
 func (p *MetadataProvider) Dependencies(fqdn string, v solver.Version) (map[string]solver.Constraint, error) {
 	ns, name, err := splitFQDN(fqdn)
 	if err != nil {
 		return nil, err
 	}
 	policy := cachePolicyForConstraint(p.deps.cfg, true)
-	cacheKey := fmt.Sprintf("%s.%s@%s", ns, name, v.Original())
+	col := collection{Namespace: ns, Name: name, Source: p.sourceOf(fqdn)}
+
+	base, err := p.boundBaseFor(col, fqdn, policy)
+	if err != nil {
+		return nil, err
+	}
+	cacheKey := helpers.ScopedDepsCacheKey(base, fmt.Sprintf("%s.%s@%s", ns, name, v.Original()))
 
 	if raw, ok := cachedDeps(p.deps.st, policy, cacheKey); ok {
 		return canonicalizeDependencies(fqdn, raw)
 	}
 
-	col := collection{Namespace: ns, Name: name, Source: p.sourceOf(fqdn)}
 	root, err := resolveRootMetadata(p.ctx, p.deps, col, policy, fqdn)
 	if err != nil {
 		return nil, err
@@ -151,6 +157,40 @@ func (p *MetadataProvider) Dependencies(fqdn string, v solver.Version) (map[stri
 	}
 	cacheDeps(p.deps.st, policy, cacheKey, raw)
 	return canonicalizeDependencies(fqdn, raw)
+}
+
+// boundBaseFor returns the server base fqdn's deps-cache key must be scoped
+// to (see ScopedDepsCacheKey), resolving it over the network only when
+// genuinely ambiguous. When col has only one possible server candidate - a
+// pinned col.Source, or a single configured server, both cases
+// serverCandidates already resolves with no network access - that candidate
+// IS the server fqdn will end up bound to, so it is returned directly. This
+// is also what keeps a warm single-server deps-cache hit zero-network: the
+// overwhelming majority of deployments configure exactly one server, so this
+// branch covers them without ever touching resolveRootMetadata.
+//
+// Otherwise (more than one configured server, so which one actually serves
+// fqdn is genuinely undetermined without asking) it prefers whatever server
+// has already answered a prior Highest/Universe/Dependencies call for fqdn
+// this Solve (p.bindings). Failing that - reached only when the solver
+// decides fqdn's version via its exact-pin fast path before ever probing it
+// with Highest or Universe (see the solver's packageIsExactPin), which
+// requirements pinning an exact version trigger routinely - it resolves root
+// metadata now to settle which server actually serves it, recording the
+// binding via recordBinding so every later call for fqdn reuses it.
+func (p *MetadataProvider) boundBaseFor(col collection, fqdn string, policy cacheManager.Policy) (string, error) {
+	if candidates := serverCandidates(p.deps.cfg, col); len(candidates) == 1 {
+		return candidates[0].base, nil
+	}
+	if base, ok := p.bindings[fqdn]; ok {
+		return base, nil
+	}
+	root, err := resolveRootMetadata(p.ctx, p.deps, col, policy, fqdn)
+	if err != nil {
+		return "", err
+	}
+	p.recordBinding(fqdn, root.base)
+	return root.base, nil
 }
 
 // sourceOf returns fqdn's install source: its own entry in sources when one

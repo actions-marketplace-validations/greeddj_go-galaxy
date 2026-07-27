@@ -122,7 +122,18 @@ const (
 	FetchRetryBackoffCap = 5 * time.Second
 
 	// StoreSnapshotSchemaVersion is the current snapshot schema version.
-	StoreSnapshotSchemaVersion = 4
+	//
+	// Bumped to 5 when the deps-cache key gained a server-base scope (see
+	// helpers.ScopedDepsCacheKey) and the artifact cache key gained a
+	// server-fingerprint prefix (see helpers.ArtifactKey): both changes are
+	// pure additions to what a key looks like, not a change to any persisted
+	// struct's shape, so there is no field-level migration to write. The
+	// existing drop-and-rebuild policy already handles it - store.Load and
+	// the S3 schema probe discard a snapshot older than this version and
+	// rebuild cold - which is also what retires every old-format deps-cache
+	// key still on record: it never survives into a schema-5 snapshot to
+	// collide with anything.
+	StoreSnapshotSchemaVersion = 5
 
 	// CacheEntryMaxAge is the retention window for persisted cache entries
 	// (API responses, resolved versions lists, and dependency constraints).
