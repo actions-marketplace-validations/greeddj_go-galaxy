@@ -191,6 +191,67 @@ func TestInstallCollectionCacheHitExtractFailureRefetchOnceThenFails(t *testing.
 	}
 }
 
+// TestInstallCollectionCacheHitExtractFailureCountsOneHitAndOneMiss pins the
+// artifact-metrics semantic that a bounded evict-and-refetch recovery makes
+// one collection contribute exactly one cache hit AND one cache miss: the
+// run really did serve a cache hit (the corrupt cached tarball) which then
+// turned out bad, and the run really did download a replacement from the
+// origin. Without this test, a future change to prepareWithRecovery could
+// silently drift this accounting (e.g. by double-counting the hit, or by
+// never counting the miss) with nothing catching it.
+func TestInstallCollectionCacheHitExtractFailureCountsOneHitAndOneMiss(t *testing.T) {
+	t.Parallel()
+	validTarGz := buildMinimalTarGz(t)
+	correctSHA := sha256Hex(validTarGz)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(validTarGz)
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	cacheDir := filepath.Join(root, "cache")
+	downloadPath := filepath.Join(root, "install")
+	if err := os.MkdirAll(cacheDir, helpers.DirMod); err != nil {
+		t.Fatalf("mkdir cacheDir: %v", err)
+	}
+
+	col := collection{Namespace: "acme", Name: "gizmos", Version: "1.0.0"}
+	artifactPath := filepath.Join(cacheDir, artifactKey(col))
+	// Not a valid gzip stream, despite what the sidecar claims: this is what
+	// makes the cache-hit extraction fail and triggers the evict-and-refetch
+	// recovery path.
+	corruptBytes := []byte("not a gzip stream, despite what the sidecar claims")
+	mustWriteFile(t, artifactPath, corruptBytes)
+	sidecarPath := artifactPath + helpers.ArtifactSHASidecarSuffix
+	mustWriteFile(t, sidecarPath, []byte(correctSHA))
+
+	meta := &types.GalaxyCollectionVersionInfo{DownloadURL: server.URL}
+	meta.Artifact.Sha256 = correctSHA
+
+	cfg := &config.Config{
+		CacheDir:     cacheDir,
+		DownloadPath: downloadPath,
+		Workers:      1,
+		NoDeps:       true,
+		Offline:      false,
+		NoCache:      false,
+	}
+	deps := newTestInstallDepsWithExtractStore(t, cfg)
+
+	if err := installCollection(context.Background(), col, deps, nil, meta, downloadResult{}); err != nil {
+		t.Fatalf("expected the corrupt cache hit to recover via a single refetch, got %v", err)
+	}
+
+	totals := deps.runtime.Metrics.Totals()
+	if totals.CacheHits != 1 {
+		t.Errorf("CacheHits = %d, want 1 (the corrupt cache-resident artifact was served once before eviction)", totals.CacheHits)
+	}
+	if totals.CacheMisses != 1 {
+		t.Errorf("CacheMisses = %d, want 1 (the forced refetch after eviction)", totals.CacheMisses)
+	}
+}
+
 // TestInstallCollectionCacheHitPinMismatchRefetchesOnce covers the pinned
 // (frozen lockfile) variant of corruption recovery: a cached tarball that has
 // drifted away from its lockfile-pinned sha is evicted and refetched exactly

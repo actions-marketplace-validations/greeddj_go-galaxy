@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
+	"github.com/greeddj/go-galaxy/internal/galaxy/metrics"
 	"github.com/greeddj/go-galaxy/internal/galaxy/output"
 )
 
@@ -15,6 +16,11 @@ type Infra struct {
 	HTTP    *http.Client
 	Now     func() time.Time
 	TempDir func() string
+	// Metrics accumulates this run's artifact cache-hit/miss and
+	// bytes-downloaded tallies. It belongs to this Infra, and therefore to
+	// this run: New always allocates a fresh Counters, so totals never carry
+	// over from a prior run sharing the same process.
+	Metrics *metrics.Counters
 }
 
 // New builds Infra with default helpers for time and temp paths.
@@ -24,6 +30,7 @@ func New(out output.Printer, httpClient *http.Client) *Infra {
 		HTTP:    httpClient,
 		Now:     time.Now,
 		TempDir: os.TempDir,
+		Metrics: &metrics.Counters{},
 	}
 }
 

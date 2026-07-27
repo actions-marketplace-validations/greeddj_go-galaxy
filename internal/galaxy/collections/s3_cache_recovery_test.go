@@ -122,4 +122,21 @@ func TestInstallCollectionS3CacheFetchMismatchEvictsAndRefetches(t *testing.T) {
 	installPathDir := filepath.Join(downloadPath, "ansible_collections", col.Namespace, col.Name)
 	assertFileContent(t, filepath.Join(installPathDir, "README.md"), "# acme.widgets\n")
 	assertFileSHA256(t, artifactPath, version.SHA256)
+
+	// This pins "a hit only when Fetch returns nil": the stubbed Fetch above
+	// fails on its very first call, before any bytes are ever served, so this
+	// acquisition must count zero hits and exactly the one miss from the
+	// forced refetch. This is the deliberate accounting asymmetry against
+	// TestInstallCollectionCacheHitExtractFailureCountsOneHitAndOneMiss: there,
+	// the cache-resident tarball is actually served (Fetch succeeds) and only
+	// fails later, at extraction, so that scenario counts 1 hit + 1 miss. Here,
+	// the read-time integrity failure means no bytes were ever served at all,
+	// so it counts 0 hits + 1 miss instead.
+	totals := runtime.Metrics.Totals()
+	if totals.CacheHits != 0 {
+		t.Errorf("CacheHits = %d, want 0 (Fetch failed before serving any bytes, so it can never register a hit)", totals.CacheHits)
+	}
+	if totals.CacheMisses != 1 {
+		t.Errorf("CacheMisses = %d, want 1 (the forced refetch after the read-time integrity failure)", totals.CacheMisses)
+	}
 }

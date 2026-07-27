@@ -43,7 +43,7 @@ func Start(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error 
 
 // Warm resolves dependencies and ensures every artifact is downloaded into
 // the cache and extracted into the content-addressable extracted store.
-// It does not write anything to the install path — useful for baking CI
+// It does not write anything to the install path - useful for baking CI
 // images so subsequent installs hardlink instantly.
 func Warm(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
 	err := runWarm(ctx, cfg, runtime)
@@ -381,23 +381,42 @@ func sweepDeadRunTemps(ctx context.Context, runtime *infra.Infra, backend cacheM
 
 // writeRunMetrics persists a JSON metrics report when cfg.MetricsFile is set.
 // Best-effort: failures are logged but never fail the run.
+//
+// For the "lock" command, CacheHits/CacheMisses/BytesDownloaded always report
+// 0/0/0: runLock resolves and writes a lockfile without ever touching an
+// ArtifactStore, so runtime.Metrics genuinely accumulates nothing during that
+// path - a truthful zero, not a gap in this report.
+//
+// The totals read here are best-effort on a failed run. runInstall registers
+// `defer plan.prefetch.Close()`, so on a successful run every prefetch task
+// has already been joined through Wait before this function runs, and the
+// totals are complete. On a failed run, though, installLevels breaks out of
+// its level loop before scheduling any later level, while the prefetcher may
+// already have background workers in flight for that unscheduled level; such
+// a worker can still land its own miss and bytes after Totals() is read here
+// (Close only cancels and joins it afterward, once runInstall unwinds), so a
+// failed run's counters in this report are a lower bound, not an exact count.
 func writeRunMetrics(cfg *config.Config, runtime *infra.Infra, command string, start time.Time, collections, failures int) {
 	if cfg == nil || cfg.MetricsFile == "" {
 		return
 	}
 	now := time.Now()
+	totals := runtime.Metrics.Totals()
 	report := metrics.Report{
-		Command:      command,
-		StartedAt:    start.UTC(),
-		FinishedAt:   now.UTC(),
-		Duration:     now.Sub(start),
-		Collections:  collections,
-		Failures:     failures,
-		Server:       cfg.Server,
-		Frozen:       cfg.Frozen,
-		Offline:      cfg.Offline,
-		LockfilePath: lockfile.ResolveDefaultPath(cfg.RequirementsFile, cfg.LockFile),
-		LockfileHash: tryLockfileHash(cfg),
+		Command:         command,
+		StartedAt:       start.UTC(),
+		FinishedAt:      now.UTC(),
+		Duration:        now.Sub(start),
+		CacheHits:       totals.CacheHits,
+		CacheMisses:     totals.CacheMisses,
+		BytesDownloaded: totals.BytesDownloaded,
+		Collections:     collections,
+		Failures:        failures,
+		Server:          cfg.Server,
+		Frozen:          cfg.Frozen,
+		Offline:         cfg.Offline,
+		LockfilePath:    lockfile.ResolveDefaultPath(cfg.RequirementsFile, cfg.LockFile),
+		LockfileHash:    tryLockfileHash(cfg),
 	}
 	if err := metrics.Write(cfg.MetricsFile, report); err != nil {
 		runtime.Output.Printf("⚠️ Failed to write metrics %s: %v", cfg.MetricsFile, err)

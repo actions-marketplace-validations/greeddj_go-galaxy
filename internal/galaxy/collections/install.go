@@ -447,6 +447,7 @@ func fetchArtifact(
 	if err != nil {
 		return artifactData{}, err
 	}
+	runtime.Metrics.AddCacheHit()
 	return artifactData{Path: cached.Path, Cleanup: cached.Cleanup, Meta: cached.Meta}, nil
 }
 
@@ -641,6 +642,11 @@ func downloadCollectionToCache(
 	if err != nil {
 		return downloadResult{}, err
 	}
+	// Counted once per successful, retry-bounded acquisition - not inside
+	// attemptDownloadToCache - so a retried 5xx counts one miss, not one per
+	// attempt. This is the single funnel for both the main install path
+	// (fetchArtifact) and the prefetcher, which calls this function directly.
+	deps.runtime.Metrics.AddCacheMiss()
 	return result, nil
 }
 
@@ -718,7 +724,7 @@ func attemptDownloadToCache(
 		return streamDownloadAndExtract(ctx, deps, key, meta, resp.Body, useCache)
 	}
 
-	tmpPath, cleanup, sha, err := writeDownloadToTemp(ctx, deps.artifacts, resp.Body)
+	tmpPath, cleanup, sha, err := writeDownloadToTemp(ctx, deps, resp.Body)
 	if err != nil {
 		cleanupIfNeeded(cleanup)
 		return downloadResult{}, err
@@ -763,7 +769,8 @@ func streamDownloadAndExtract(
 
 	hasher := sha256.New()
 	limited := helpers.NewSizeLimitedReader(body, helpers.ArtifactMaxDownloadSize)
-	_, copyErr := io.Copy(io.MultiWriter(tmpFile, hasher, pw), limited)
+	n, copyErr := io.Copy(io.MultiWriter(tmpFile, hasher, pw), limited)
+	deps.runtime.Metrics.AddBytesDownloaded(n)
 	if copyErr != nil {
 		_ = pw.CloseWithError(copyErr)
 	} else {
@@ -821,15 +828,17 @@ func validateDownloadInputs(cfg *config.Config, artifacts cacheManager.ArtifactS
 	return nil
 }
 
-func writeDownloadToTemp(ctx context.Context, artifacts cacheManager.ArtifactStore, body io.Reader) (string, func(), string, error) {
-	tmpFile, cleanup, err := artifacts.TempFile(ctx, helpers.ArtifactDownloadTempPrefix)
+func writeDownloadToTemp(ctx context.Context, deps installDeps, body io.Reader) (string, func(), string, error) {
+	tmpFile, cleanup, err := deps.artifacts.TempFile(ctx, helpers.ArtifactDownloadTempPrefix)
 	if err != nil {
 		return "", cleanup, "", err
 	}
 	hasher := sha256.New()
 	writer := io.MultiWriter(tmpFile, hasher)
 	limited := helpers.NewSizeLimitedReader(body, helpers.ArtifactMaxDownloadSize)
-	if _, err := io.Copy(writer, limited); err != nil {
+	n, err := io.Copy(writer, limited)
+	deps.runtime.Metrics.AddBytesDownloaded(n)
+	if err != nil {
 		_ = tmpFile.Close()
 		return "", cleanup, "", err
 	}

@@ -518,15 +518,32 @@ suitable for CI dashboards:
 
 ```json
 {
-  "started_at":   "2026-04-28T10:00:00Z",
-  "finished_at":  "2026-04-28T10:00:08Z",
-  "command":      "install",
-  "server":       "https://galaxy.ansible.com",
-  "lockfile":     "requirements.lock.yml",
-  "lockfile_hash":"<sha256-hex>",
-  "duration_ns":  8123456789,
-  "collections":  17,
-  "failures":     0,
-  "frozen":       true
+  "started_at":       "2026-04-28T10:00:00Z",
+  "finished_at":      "2026-04-28T10:00:08Z",
+  "command":          "install",
+  "server":           "https://galaxy.ansible.com",
+  "lockfile":         "requirements.lock.yml",
+  "lockfile_hash":    "<sha256-hex>",
+  "duration_ns":      8123456789,
+  "cache_hits":       12,
+  "cache_misses":     5,
+  "bytes_downloaded": 4831201,
+  "collections":      17,
+  "failures":         0,
+  "frozen":           true
 }
 ```
+
+`cache_hits`, `cache_misses`, and `bytes_downloaded` are artifact-level counters,
+not collection-level: a hit is one artifact served from the artifact cache and a
+miss is one artifact fetched from the origin, so `cache_hits + cache_misses`
+counts artifact acquisitions rather than collections. That sum can exceed
+`collections` - the bounded evict-and-refetch recovery path makes one collection
+contribute both a hit (the cache-resident artifact that turned out corrupt) and
+a miss (the refetch that replaced it) - and it can also fall below `collections`,
+since a collection whose install is skipped touches no artifact at all. A cache
+hit always contributes zero bytes to `bytes_downloaded`, including an S3 cache
+hit: that object transfer is a real network round trip to the cache backend,
+but it is not artifact-download traffic, so it is deliberately excluded. The
+`lock` command never fetches an artifact, so its report always has
+`cache_hits`, `cache_misses`, and `bytes_downloaded` at `0`.

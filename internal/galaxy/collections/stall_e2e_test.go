@@ -112,3 +112,39 @@ func TestArtifactPersistentStallFailsBounded(t *testing.T) {
 		t.Errorf("EndpointArtifact count = %d, want helpers.FetchRetryMaxAttempts=%d", got, helpers.FetchRetryMaxAttempts)
 	}
 }
+
+// TestArtifactStallBytesCountedPerAttemptWithNoMissOnFailure pins two
+// metrics invariants together against the same persistent-stall scenario as
+// TestArtifactPersistentStallFailsBounded: first, that AddBytesDownloaded is
+// recorded once per download attempt - including a failed attempt's partial
+// read - so a persistent stall's total is the per-attempt stalled prefix
+// times the number of attempts, not the bytes of just one attempt and not
+// zero; second, that a download acquisition which never completes
+// successfully records no cache miss at all, since AddCacheMiss lives
+// outside the retry loop in downloadCollectionToCache and only fires once its
+// helpers.Retry call returns with no error - which it never does here.
+func TestArtifactStallBytesCountedPerAttemptWithNoMissOnFailure(t *testing.T) {
+	t.Parallel()
+	const stallAfterBytes = 8 // same K as TestArtifactStallRecoversOnRetry above
+	cfg, runtime, s := newStallFixture(t)
+	s.Fail(fakegalaxy.EndpointArtifact, "acme", "solo", fakegalaxy.Fault{StallAfterBytes: stallAfterBytes, Count: -1})
+
+	err := collections.Start(context.Background(), cfg, runtime)
+	if err == nil {
+		t.Fatal("expected an error from a persistently stalled artifact download, got nil")
+	}
+	if !errors.Is(err, helpers.ErrInstallationFailed) {
+		t.Fatalf("expected errors.Is ErrInstallationFailed, got %v", err)
+	}
+
+	totals := runtime.Metrics.Totals()
+	wantBytes := int64(stallAfterBytes) * int64(helpers.FetchRetryMaxAttempts)
+	if totals.BytesDownloaded != wantBytes {
+		t.Errorf("BytesDownloaded = %d, want %d (%d attempts, each stalling after exactly %d real bytes)",
+			totals.BytesDownloaded, wantBytes, helpers.FetchRetryMaxAttempts, stallAfterBytes)
+	}
+	if totals.CacheMisses != 0 {
+		t.Errorf("CacheMisses = %d, want 0 (the acquisition never completed successfully, so it never reaches AddCacheMiss)",
+			totals.CacheMisses)
+	}
+}

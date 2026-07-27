@@ -90,6 +90,38 @@ func TestArtifactDownloadRetriesTransientFailureThenSucceeds(t *testing.T) {
 	}
 }
 
+// TestArtifactDownloadRetrySuccessCountsOneMissNotOnePerAttempt pins "one
+// miss per acquisition, not per attempt": downloadCollectionToCache retries
+// the whole establish+stream+verify attempt inside attemptDownloadToCache up
+// to helpers.FetchRetryMaxAttempts times, but AddCacheMiss is called exactly
+// once, outside that retry loop, only after the whole retry-bounded
+// acquisition finally succeeds. The EndpointArtifact-count-of-3-vs-
+// CacheMisses-of-1 relationship asserted below is the whole point of this
+// test: it proves the increment lives in downloadCollectionToCache, not in
+// attemptDownloadToCache - if AddCacheMiss were moved into
+// attemptDownloadToCache (incrementing once per HTTP attempt instead of once
+// per successful acquisition), this run would report CacheMisses == 3, not 1.
+func TestArtifactDownloadRetrySuccessCountsOneMissNotOnePerAttempt(t *testing.T) {
+	t.Parallel()
+	cfg, runtime, s := newRetryFixture(t, "artretry", true)
+	s.Fail(fakegalaxy.EndpointArtifact, "acme", "artretry", fakegalaxy.Fault{Status: http.StatusServiceUnavailable, Count: 2})
+
+	if err := collections.Start(context.Background(), cfg, runtime); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	assertManifestInstalled(t, cfg.DownloadPath, "artretry")
+	if got := s.Count(fakegalaxy.EndpointArtifact); got != 3 {
+		t.Errorf("EndpointArtifact count = %d, want 3 (2 failures + 1 success)", got)
+	}
+	totals := runtime.Metrics.Totals()
+	if totals.CacheMisses != 1 {
+		t.Errorf("CacheMisses = %d, want 1 (one per retry-bounded acquisition, not one per the 3 HTTP attempts above)", totals.CacheMisses)
+	}
+	if totals.CacheHits != 0 {
+		t.Errorf("CacheHits = %d, want 0 (a fresh origin download is never a cache hit)", totals.CacheHits)
+	}
+}
+
 // TestMetadataFetchExhaustsRetriesAndFails asserts that an indefinitely
 // failing Galaxy API GET is attempted exactly helpers.FetchRetryMaxAttempts
 // times before the run fails closed. The fault is armed with a negative

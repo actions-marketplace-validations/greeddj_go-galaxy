@@ -497,6 +497,212 @@ func TestNoDepsSnapshotNotReusedByDepsRun(t *testing.T) {
 	assertManifestInstalled(t, f.downloadPath, "lib")
 }
 
+// TestArtifactMetricsColdInstallCountsMisses asserts a cold-cache install
+// against a fake Galaxy server counts one cache miss per artifact actually
+// downloaded from the origin, no hits at all, and a positive number of bytes
+// downloaded.
+func TestArtifactMetricsColdInstallCountsMisses(t *testing.T) {
+	t.Parallel()
+	f := newE2EFixture(t)
+
+	if err := collections.Start(context.Background(), f.cfg, f.runtime); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	totals := f.runtime.Metrics.Totals()
+	if totals.CacheMisses != 2 {
+		t.Errorf("CacheMisses = %d, want 2 (acme.app and acme.lib, both fetched from the origin)", totals.CacheMisses)
+	}
+	if totals.CacheHits != 0 {
+		t.Errorf("CacheHits = %d, want 0 (a cold cache serves no hits)", totals.CacheHits)
+	}
+	if totals.BytesDownloaded <= 0 {
+		t.Errorf("BytesDownloaded = %d, want > 0 (both artifacts were actually read off the network)", totals.BytesDownloaded)
+	}
+}
+
+// TestArtifactMetricsWrittenToMetricsFile asserts that the counters a cold
+// install accumulates in-process actually reach cfg.MetricsFile on disk with
+// the wire-contract key names a CI dashboard reads, not just the in-memory
+// runtime.Metrics.Totals() other tests in this file check. A cold install is
+// the required scenario, not a warm one: it is the only one where CacheHits
+// (0) and CacheMisses (2) are distinguishable from each other, so a swapped
+// field mapping in writeRunMetrics's Report literal - CacheHits written where
+// CacheMisses belongs, or vice versa - actually flips the file's values
+// instead of leaving them coincidentally equal. A warm run, where both
+// figures could plausibly collide, would not catch that class of bug and
+// would make this test vacuous.
+func TestArtifactMetricsWrittenToMetricsFile(t *testing.T) {
+	t.Parallel()
+	f := newE2EFixture(t)
+	// Set on f.cfg for this test only, never on the shared fixture: every
+	// other counter test in this file reuses newE2EFixture without reading a
+	// metrics file, and giving every one of them a MetricsFile would make
+	// them all start writing files nothing ever reads.
+	f.cfg.MetricsFile = filepath.Join(t.TempDir(), "metrics.json")
+
+	if err := collections.Start(context.Background(), f.cfg, f.runtime); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	data, err := os.ReadFile(f.cfg.MetricsFile)
+	if err != nil {
+		t.Fatalf("read metrics file %s: %v", f.cfg.MetricsFile, err)
+	}
+	// Unmarshal into a map, not metrics.Report: decoding into the struct
+	// would resolve field names through the very same json tags the marshal
+	// side used, so a renamed or swapped tag would round-trip invisibly.
+	// Reading the literal wire keys pins the on-disk contract a consuming CI
+	// dashboard actually parses, independent of the Go struct's field names.
+	var written map[string]any
+	if err := json.Unmarshal(data, &written); err != nil {
+		t.Fatalf("unmarshal metrics file %s: %v", f.cfg.MetricsFile, err)
+	}
+
+	totals := f.runtime.Metrics.Totals()
+	// Each assertMetricCounter call does both halves required to catch a
+	// swapped field mapping: file-vs-Totals (catches a stale read or the
+	// wrong runtime) and file-vs-absolute-value (catches the mapping swap
+	// itself, which the file-vs-Totals half alone cannot - both sides of
+	// that comparison would swap together and still agree).
+	assertMetricCounter(t, written, "cache_hits", totals.CacheHits, 0)
+	assertMetricCounter(t, written, "cache_misses", totals.CacheMisses, 2)
+
+	gotBytes := metricFloat(t, written, "bytes_downloaded")
+	if int64(gotBytes) != totals.BytesDownloaded {
+		t.Errorf("metrics file bytes_downloaded = %v, want %d (runtime.Metrics.Totals().BytesDownloaded)", gotBytes, totals.BytesDownloaded)
+	}
+	if gotBytes <= 0 {
+		t.Errorf("metrics file bytes_downloaded = %v, want > 0 (both artifacts were actually read off the network)", gotBytes)
+	}
+}
+
+// metricFloat extracts the JSON number stored at key in written, failing the
+// test if the key is missing or not a number. encoding/json decodes every
+// JSON number into a map[string]any as float64; a cache-hit/miss count of 2
+// and a download size of a few KB are both far inside float64's exact-integer
+// range (2^53), so converting the result to int64 for comparison is exact,
+// not approximate.
+func metricFloat(t *testing.T, written map[string]any, key string) float64 {
+	t.Helper()
+	v, ok := written[key].(float64)
+	if !ok {
+		t.Fatalf("metrics file %s = %v (%T), want a JSON number", key, written[key], written[key])
+	}
+	return v
+}
+
+// assertMetricCounter cross-checks the JSON metrics file's value at key
+// against both the in-process totals value (a stale-read/wrong-runtime
+// check) and its expected absolute value (a swapped-field-mapping check).
+func assertMetricCounter(t *testing.T, written map[string]any, key string, wantTotals, wantAbsolute int64) {
+	t.Helper()
+	got := int64(metricFloat(t, written, key))
+	if got != wantTotals {
+		t.Errorf("metrics file %s = %d, want %d (runtime.Metrics.Totals())", key, got, wantTotals)
+	}
+	if got != wantAbsolute {
+		t.Errorf("metrics file %s = %d, want %d", key, got, wantAbsolute)
+	}
+}
+
+// TestArtifactMetricsWarmInstallCountsHits asserts a warm-cache reinstall
+// into a wiped download path counts one cache hit per artifact served from
+// the artifact cache, no misses, and zero bytes downloaded, since a cache hit
+// reads no bytes from a Galaxy origin's artifact response body.
+func TestArtifactMetricsWarmInstallCountsHits(t *testing.T) {
+	t.Parallel()
+	f := newE2EFixture(t)
+
+	if err := collections.Start(context.Background(), f.cfg, f.runtime); err != nil {
+		t.Fatalf("first Start (populate the cache): %v", err)
+	}
+
+	f.server.ResetCounts()
+	if err := os.RemoveAll(f.downloadPath); err != nil {
+		t.Fatalf("remove downloadPath to force a reinstall from cache: %v", err)
+	}
+	// Rebuild the runtime so its Metrics starts fresh for the warm reinstall:
+	// there is no Reset method, and reusing f.runtime across two Start calls
+	// would let the cold run's misses bleed into this run's totals.
+	f.runtime = infra.New(noopPrinter{}, f.server.Client())
+
+	if err := collections.Start(context.Background(), f.cfg, f.runtime); err != nil {
+		t.Fatalf("second Start (warm cache): %v", err)
+	}
+
+	totals := f.runtime.Metrics.Totals()
+	if totals.CacheHits != 2 {
+		t.Errorf("CacheHits = %d, want 2 (acme.app and acme.lib, both served from the artifact cache)", totals.CacheHits)
+	}
+	if totals.CacheMisses != 0 {
+		t.Errorf("CacheMisses = %d, want 0 (a warm reinstall never reaches the origin)", totals.CacheMisses)
+	}
+	if totals.BytesDownloaded != 0 {
+		t.Errorf("BytesDownloaded = %d, want 0 (a cache hit reads no bytes from a Galaxy origin's artifact response body)",
+			totals.BytesDownloaded)
+	}
+}
+
+// TestArtifactMetricsPrefetchHandoffCountedOnce asserts that a cold install's
+// prefetch handoff (payloadFromPrefetched) contributes no separate miss of
+// its own: CacheMisses must equal exactly the number of EndpointArtifact
+// requests the fake server actually served, proving the miss is counted once,
+// at the prefetcher's own download, not again when installCollection consumes
+// the handed-off artifact. The CacheHits == 0 assertion is what makes this
+// test self-supporting rather than vacuous: payloadFromPrefetched reports
+// servedFromCache as false and never touches ArtifactStore.Fetch, so an
+// install worker that actually consumed the handoff records no hit at all.
+// If prefetching were silently disabled (or an install worker ignored the
+// handoff and re-fetched from the cache the prefetcher had just populated),
+// that worker would find the artifact the prefetcher already committed and
+// serve a HIT instead - so a zero hit count is the proof the handed-off bytes
+// were the ones actually installed, not that prefetching ran at all in name
+// only.
+func TestArtifactMetricsPrefetchHandoffCountedOnce(t *testing.T) {
+	t.Parallel()
+	f := newE2EFixture(t)
+
+	if err := collections.Start(context.Background(), f.cfg, f.runtime); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	wantMisses := int64(f.server.Count(fakegalaxy.EndpointArtifact))
+	totals := f.runtime.Metrics.Totals()
+	if totals.CacheMisses != wantMisses {
+		t.Errorf("CacheMisses = %d, want %d (one per EndpointArtifact request; the prefetch handoff must not add a second one)",
+			totals.CacheMisses, wantMisses)
+	}
+	if totals.CacheHits != 0 {
+		t.Errorf("CacheHits = %d, want 0 (a consumed prefetch handoff never calls ArtifactStore.Fetch, so it can never register a hit)",
+			totals.CacheHits)
+	}
+}
+
+// TestArtifactMetricsLockCountsNothing asserts collections.Lock reports all
+// three artifact counters as zero: runLock resolves and writes a lockfile
+// without ever touching an ArtifactStore, so this is a truthful zero, not a
+// gap in coverage.
+func TestArtifactMetricsLockCountsNothing(t *testing.T) {
+	t.Parallel()
+	f := newE2EFixture(t)
+
+	if err := collections.Lock(context.Background(), f.cfg, f.runtime); err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+
+	totals := f.runtime.Metrics.Totals()
+	if totals.CacheHits != 0 {
+		t.Errorf("CacheHits = %d, want 0 (Lock never touches an ArtifactStore)", totals.CacheHits)
+	}
+	if totals.CacheMisses != 0 {
+		t.Errorf("CacheMisses = %d, want 0 (Lock never touches an ArtifactStore)", totals.CacheMisses)
+	}
+	if totals.BytesDownloaded != 0 {
+		t.Errorf("BytesDownloaded = %d, want 0 (Lock never touches an ArtifactStore)", totals.BytesDownloaded)
+	}
+}
+
 // TestNoDepsSnapshotNotReusedIncrementally proves the incremental snapshot-
 // reuse path (tryIncrementalResolve) cannot preserve a --no-deps root's
 // nil-deps graph entry across a mode change either. Adding acme.tool as a
