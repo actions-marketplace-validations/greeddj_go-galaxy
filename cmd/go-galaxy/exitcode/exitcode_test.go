@@ -17,68 +17,127 @@ import (
 // ExitError fallback in TestFromError.
 var errTestGeneric = errors.New("some unclassified error")
 
-// TestFromError checks one representative wrapped error per exit class, plus
-// the nil/context/fs.ErrNotExist/unclassified edge cases. Wrapping with
+// exitCase is one FromError classification expectation.
+type exitCase struct {
+	err      error
+	name     string
+	wantCode int
+}
+
+// fromErrorCases is TestFromError's table, hoisted to package level so the
+// test function itself stays within the complexity budget as classes are
+// added. It checks one representative wrapped error per exit class, plus
+// the nil/context/fs.ErrNotExist/unclassified edge cases; wrapping with
 // fmt.Errorf("%w: ctx", sentinel) verifies FromError matches through
 // errors.Is rather than requiring exact identity.
-func TestFromError(t *testing.T) {
-	tests := []struct {
-		err      error
-		name     string
-		wantCode int
-	}{
-		{name: "nil error", err: nil, wantCode: ExitOK},
-		{
-			name:     "context canceled",
-			err:      fmt.Errorf("%w: ctx", context.Canceled),
-			wantCode: ExitInterrupt,
-		},
-		{
-			name:     "lockfile mismatch",
-			err:      fmt.Errorf("%w: ctx", helpers.ErrLockfileMismatch),
-			wantCode: ExitLock,
-		},
-		{
-			name:     "installation failed",
-			err:      fmt.Errorf("%w: ctx", helpers.ErrInstallationFailed),
-			wantCode: ExitInstall,
-		},
-		{
-			name:     "context deadline exceeded",
-			err:      fmt.Errorf("%w: ctx", context.DeadlineExceeded),
-			wantCode: ExitNetwork,
-		},
-		{
-			name:     "download failed",
-			err:      fmt.Errorf("%w: ctx", helpers.ErrDownloadFailed),
-			wantCode: ExitNetwork,
-		},
-		{
-			name:     "dependency graph has a cycle",
-			err:      fmt.Errorf("%w: ctx", helpers.ErrDependencyGraphHasACycle),
-			wantCode: ExitResolution,
-		},
-		{
-			name:     "fs.ErrNotExist",
-			err:      fmt.Errorf("%w: ctx", fs.ErrNotExist),
-			wantCode: ExitUsage,
-		},
-		{
-			name:     "invalid collection key",
-			err:      fmt.Errorf("%w: ctx", helpers.ErrInvalidCollectionKey),
-			wantCode: ExitUsage,
-		},
-		{
-			name:     "unclassified error falls back to ExitError",
-			err:      errTestGeneric,
-			wantCode: ExitError,
-		},
-	}
+//
+//nolint:gochecknoglobals // a fixed table consumed by one test, not mutable shared state
+var fromErrorCases = []exitCase{
+	{name: "nil error", err: nil, wantCode: ExitOK},
+	{
+		name:     "context canceled",
+		err:      fmt.Errorf("%w: ctx", context.Canceled),
+		wantCode: ExitInterrupt,
+	},
+	{
+		name:     "lockfile mismatch",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrLockfileMismatch),
+		wantCode: ExitLock,
+	},
+	{
+		name:     "installation failed",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrInstallationFailed),
+		wantCode: ExitInstall,
+	},
+	{
+		name:     "context deadline exceeded",
+		err:      fmt.Errorf("%w: ctx", context.DeadlineExceeded),
+		wantCode: ExitNetwork,
+	},
+	{
+		name:     "download failed",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrDownloadFailed),
+		wantCode: ExitNetwork,
+	},
+	{
+		name:     "dependency graph has a cycle",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrDependencyGraphHasACycle),
+		wantCode: ExitResolution,
+	},
+	{
+		name:     "fs.ErrNotExist",
+		err:      fmt.Errorf("%w: ctx", fs.ErrNotExist),
+		wantCode: ExitUsage,
+	},
+	{
+		name:     "invalid collection key",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrInvalidCollectionKey),
+		wantCode: ExitUsage,
+	},
+	{
+		name:     "invalid timeout",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrInvalidTimeout),
+		wantCode: ExitUsage,
+	},
+	{
+		name:     "ansible config not found",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrAnsibleConfigNotFound),
+		wantCode: ExitUsage,
+	},
+	{
+		name:     "unclassified error falls back to ExitError",
+		err:      errTestGeneric,
+		wantCode: ExitError,
+	},
+}
 
-	for _, tt := range tests {
+// TestFromError walks fromErrorCases, checking one representative error per
+// exit class.
+func TestFromError(t *testing.T) {
+	for _, tt := range fromErrorCases {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := FromError(tt.err); got != tt.wantCode {
 				t.Errorf("FromError(%v) = %d, want %d", tt.err, got, tt.wantCode)
+			}
+		})
+	}
+}
+
+// galaxyServerConfigSentinels is every Galaxy server configuration sentinel
+// this package must classify as ExitUsage. It is listed exhaustively rather
+// than sampled: each one is raised only while building the config, and a
+// missed entry would silently exit 1 - indistinguishable to a CI pipeline
+// from a genuine runtime failure it should retry.
+//
+//nolint:gochecknoglobals // a fixed table consumed by one test, not mutable shared state
+var galaxyServerConfigSentinels = []struct {
+	err  error
+	name string
+}{
+	{name: "unsupported galaxy_server key", err: helpers.ErrUnsupportedGalaxyServerKey},
+	{name: "unsupported api_version", err: helpers.ErrUnsupportedGalaxyServerAPIVersion},
+	{name: "missing server url", err: helpers.ErrMissingGalaxyServerURL},
+	{name: "invalid server url", err: helpers.ErrInvalidGalaxyServerURL},
+	{name: "invalid server id", err: helpers.ErrInvalidGalaxyServerID},
+	{name: "duplicate server id", err: helpers.ErrDuplicateGalaxyServerID},
+	{name: "invalid validate_certs", err: helpers.ErrInvalidValidateCerts},
+	{name: "server url with userinfo", err: helpers.ErrGalaxyServerURLUserinfo},
+	{name: "token over insecure transport", err: helpers.ErrInsecureTokenTransport},
+	{name: "conflicting tls policy", err: helpers.ErrConflictingServerTLSPolicy},
+	{name: "conflicting token", err: helpers.ErrConflictingServerToken},
+}
+
+// TestGalaxyServerConfigErrorsMapToUsage pins every Galaxy server
+// configuration sentinel to ExitUsage. These are raised before any request
+// is made, so a pipeline that branches on the exit code must be able to
+// tell "your ansible.cfg is wrong, editing it is the only fix" apart from
+// a transient failure worth retrying.
+func TestGalaxyServerConfigErrorsMapToUsage(t *testing.T) {
+	for _, tt := range galaxyServerConfigSentinels {
+		t.Run(tt.name, func(t *testing.T) {
+			wrapped := fmt.Errorf("%w: ctx", tt.err)
+			if got := FromError(wrapped); got != ExitUsage {
+				t.Errorf("FromError(%v) = %d, want %d", wrapped, got, ExitUsage)
 			}
 		})
 	}

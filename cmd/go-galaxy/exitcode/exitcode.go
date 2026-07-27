@@ -144,10 +144,13 @@ func isResolutionError(err error) bool {
 
 // isUsageError reports whether err is a configuration or CLI-input sentinel
 // (invalid flags, malformed requirements, or a missing path). Split into
-// three sub-checks purely to stay under the cyclomatic-complexity budget;
-// the three together still cover the exact same sentinel set.
+// four sub-checks purely to stay under the cyclomatic-complexity budget;
+// the four together still cover the exact same sentinel set.
 func isUsageError(err error) bool {
-	return isConfigUsageError(err) || isCollectionNameUsageError(err) || isCollectionListUsageError(err)
+	return isConfigUsageError(err) ||
+		isGalaxyServerConfigError(err) ||
+		isCollectionNameUsageError(err) ||
+		isCollectionListUsageError(err)
 }
 
 // isConfigUsageError reports whether err is a config/environment-level usage sentinel.
@@ -156,7 +159,46 @@ func isConfigUsageError(err error) bool {
 		errors.Is(err, helpers.ErrConfigIsNil) ||
 		errors.Is(err, helpers.ErrS3EmptyCreds) ||
 		errors.Is(err, helpers.ErrUnsupportedRequirementsFormat) ||
-		errors.Is(err, helpers.ErrCacheDirEmpty)
+		errors.Is(err, helpers.ErrCacheDirEmpty) ||
+		errors.Is(err, helpers.ErrInvalidTimeout) ||
+		errors.Is(err, helpers.ErrAnsibleConfigNotFound)
+}
+
+// isGalaxyServerConfigError reports whether err is a Galaxy server
+// configuration sentinel: a bad [galaxy_server.<id>] section, a bad
+// server_list id, or a server whose URL/credential/TLS combination this
+// tool refuses. Every one of these is raised while building the config,
+// before a single request is made, which is what makes them usage errors
+// rather than network ones - the operator has to edit ansible.cfg or an
+// environment variable, not retry. Split into two sub-checks purely to
+// stay under the cyclomatic-complexity budget; the two together still
+// cover the exact same sentinel set.
+func isGalaxyServerConfigError(err error) bool {
+	return isGalaxyServerSectionError(err) || isGalaxyServerPolicyError(err)
+}
+
+// isGalaxyServerSectionError reports whether err says the configuration
+// itself is malformed: an unsupported or unparseable key, a missing or
+// syntactically invalid url, or an id that cannot be represented.
+func isGalaxyServerSectionError(err error) bool {
+	return errors.Is(err, helpers.ErrUnsupportedGalaxyServerKey) ||
+		errors.Is(err, helpers.ErrUnsupportedGalaxyServerAPIVersion) ||
+		errors.Is(err, helpers.ErrMissingGalaxyServerURL) ||
+		errors.Is(err, helpers.ErrInvalidGalaxyServerURL) ||
+		errors.Is(err, helpers.ErrInvalidGalaxyServerID) ||
+		errors.Is(err, helpers.ErrDuplicateGalaxyServerID) ||
+		errors.Is(err, helpers.ErrInvalidValidateCerts)
+}
+
+// isGalaxyServerPolicyError reports whether err says the configuration
+// parses but describes something this tool refuses to do: leak a
+// credential through a URL or a plaintext transport, or give one origin
+// two different credential/TLS policies.
+func isGalaxyServerPolicyError(err error) bool {
+	return errors.Is(err, helpers.ErrGalaxyServerURLUserinfo) ||
+		errors.Is(err, helpers.ErrInsecureTokenTransport) ||
+		errors.Is(err, helpers.ErrConflictingServerTLSPolicy) ||
+		errors.Is(err, helpers.ErrConflictingServerToken)
 }
 
 // isCollectionNameUsageError reports whether err is an invalid-collection-name/format sentinel.
