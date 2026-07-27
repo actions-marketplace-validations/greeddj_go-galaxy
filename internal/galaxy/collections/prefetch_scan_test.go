@@ -167,13 +167,13 @@ func (a *presenceArtifacts) Delete(context.Context, string) error {
 	return errStubNotImplemented
 }
 
-// seedAlreadyInstalled makes canSkipInstall report col as already installed
-// under cfg.DownloadPath: it creates the install directory, the
-// .extract-done.<sha> marker, and the sibling <ns>.<name>-<version>.info/
-// GALAXY.yml file canSkipInstall requires, and records a matching entry in
-// st. This is what drives shouldSchedulePrefetch's canSkipInstall-is-true
-// branch, which the concurrent scan inherits unchanged from the pre-rewrite
-// sequential one.
+// seedAlreadyInstalled makes installRecordMatches report col as already
+// installed under cfg.DownloadPath: it creates the install directory, a
+// valid .extract-done.<sha> marker, and the sibling
+// <ns>.<name>-<version>.info/GALAXY.yml file installRecordMatches requires,
+// and records a matching entry in st. This is what drives
+// shouldSchedulePrefetch's installRecordMatches-is-true branch, which the
+// concurrent scan inherits unchanged from the pre-rewrite sequential one.
 func seedAlreadyInstalled(t *testing.T, cfg *config.Config, st *store.Store, col collection) {
 	t.Helper()
 	const installedSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -181,10 +181,7 @@ func seedAlreadyInstalled(t *testing.T, cfg *config.Config, st *store.Store, col
 	if err := os.MkdirAll(installPath, helpers.DirMod); err != nil {
 		t.Fatalf("mkdir installPath: %v", err)
 	}
-	marker := filepath.Join(installPath, ".extract-done."+installedSHA)
-	if err := os.WriteFile(marker, []byte("ok"), helpers.FileMod); err != nil {
-		t.Fatalf("write extract marker: %v", err)
-	}
+	seedValidExtractMarker(t, installPath, installedSHA)
 	infoDir := filepath.Join(cfg.DownloadPath, "ansible_collections", col.Namespace+"."+col.Name+"-"+col.Version+".info")
 	if err := os.MkdirAll(infoDir, helpers.DirMod); err != nil {
 		t.Fatalf("mkdir infoDir: %v", err)

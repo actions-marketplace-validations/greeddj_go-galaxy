@@ -137,12 +137,20 @@ func buildPrefetchTasks(
 // the artifact cache. A Has() error is treated as "schedule it" - the same
 // fail-open behavior the original sequential scan had, where a probe error fell
 // through to scheduling rather than silently skipping the collection.
+//
+// This deliberately calls installRecordMatches, not canSkipInstall: a wrong
+// "already installed" here only skips a background download ahead of time,
+// which installCollection's own strict canSkipInstall check corrects at
+// actual install time, at the cost of a lost prefetch head start - not
+// correctness. Spending a full tree-tally walk per candidate here, on top of
+// the one installCollection already pays for the same collection, would
+// double the cost this unit adds for no benefit.
 func shouldSchedulePrefetch(ctx context.Context, deps prefetchDeps, col collection) bool {
 	if !isGalaxyType(col.Type) {
 		return false
 	}
 	installPath := filepath.Join(deps.cfg.DownloadPath, "ansible_collections", col.Namespace, col.Name)
-	if canSkipInstall(deps.cfg, col, installPath, deps.st) {
+	if installRecordMatches(deps.cfg, col, installPath, deps.st) {
 		return false
 	}
 	ok, err := deps.artifacts.Has(ctx, artifactKey(col))

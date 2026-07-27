@@ -19,6 +19,7 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
+	"github.com/greeddj/go-galaxy/internal/galaxy/output"
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
 	"github.com/psvmcc/hub/pkg/types"
 )
@@ -53,7 +54,7 @@ func installCollection(
 	filename := fmt.Sprintf("%s-%s-%s.tar.gz", col.Namespace, col.Name, col.Version)
 	installPath := filepath.Join(cfg.DownloadPath, "ansible_collections", col.Namespace, col.Name)
 
-	if canSkipInstall(cfg, col, installPath, st) {
+	if canSkipInstall(cfg, col, installPath, st, runtime.Output) {
 		runtime.Output.Printf("⏭️ Skipping install, already installed: %s/%s/%s", col.Namespace, col.Name, col.Version)
 		// installCollection may be handed a prefetched temp on a path that skips the install; release it here rather than
 		// leave it unclaimed until Close. In today's dispatch this branch is not live: a schedulable prefetch task is never
@@ -526,8 +527,15 @@ func installEntryMatches(col collection, entry store.InstalledEntry, installPath
 	return true
 }
 
-// canSkipInstall reports whether a collection is already installed.
-func canSkipInstall(cfg *config.Config, col collection, installPath string, st *store.Store) bool {
+// installRecordMatches reports whether a collection's store entry, extract
+// marker, and GALAXY.yml sidecar are all present and consistent for
+// installPath, using only cheap os.Stat calls - no tree walk. This is the
+// check shouldSchedulePrefetch uses to decide whether to spend a background
+// download ahead of time: a wrong "skip" there only costs a lost prefetch
+// head start, since installCollection's canSkipInstall below always
+// re-checks strictly (including the tally) before actually skipping the
+// install itself, so correctness never depends on this cheap version.
+func installRecordMatches(cfg *config.Config, col collection, installPath string, st *store.Store) bool {
 	if cfg == nil || st == nil {
 		return false
 	}
@@ -536,7 +544,7 @@ func canSkipInstall(cfg *config.Config, col collection, installPath string, st *
 		return false
 	}
 
-	marker := filepath.Join(installPath, ".extract-done."+entry.ArtifactSHA256)
+	marker := filepath.Join(installPath, helpers.ExtractMarkerPrefix+entry.ArtifactSHA256)
 	if _, err := os.Stat(marker); err != nil {
 		return false
 	}
@@ -547,6 +555,26 @@ func canSkipInstall(cfg *config.Config, col collection, installPath string, st *
 	}
 
 	return true
+}
+
+// canSkipInstall reports whether a collection is already installed and its
+// extracted tree still matches the tally recorded at extraction time. It
+// layers verifyExtractMarker's filepath.WalkDir pass on top of
+// installRecordMatches's cheap checks, and is called only from
+// installCollection: this is the gate that actually decides whether real
+// work is skipped, so unlike the prefetch scan's use of installRecordMatches,
+// a false "skip" here would silently keep serving a corrupted shared
+// extracted-store cache to every future install. See verifyExtractMarker for
+// exactly what the tally catches and does not catch.
+func canSkipInstall(cfg *config.Config, col collection, installPath string, st *store.Store, out output.Printer) bool {
+	if !installRecordMatches(cfg, col, installPath, st) {
+		return false
+	}
+	entry, ok := st.GetInstalled(col.key())
+	if !ok {
+		return false
+	}
+	return verifyExtractMarker(out, installPath, entry.ArtifactSHA256)
 }
 
 // downloadCollection performs a single attempt at fetching an artifact and

@@ -513,10 +513,7 @@ func TestInstallCollectionSkipReleasesPrefetchedTempExactlyOnce(t *testing.T) {
 	if err := os.MkdirAll(installPath, helpers.DirMod); err != nil {
 		t.Fatalf("mkdir installPath: %v", err)
 	}
-	marker := filepath.Join(installPath, ".extract-done."+installedSHA)
-	if err := os.WriteFile(marker, []byte("ok"), helpers.FileMod); err != nil {
-		t.Fatalf("write extract marker: %v", err)
-	}
+	seedValidExtractMarker(t, installPath, installedSHA)
 	infoDir := filepath.Join(downloadPath, "ansible_collections", col.Namespace+"."+col.Name+"-"+col.Version+".info")
 	if err := os.MkdirAll(infoDir, helpers.DirMod); err != nil {
 		t.Fatalf("mkdir infoDir: %v", err)

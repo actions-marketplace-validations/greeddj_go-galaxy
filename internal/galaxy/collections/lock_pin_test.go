@@ -335,10 +335,7 @@ func TestCanSkipInstallPinGate(t *testing.T) {
 	if err := os.MkdirAll(installPath, helpers.DirMod); err != nil {
 		t.Fatalf("mkdir installPath: %v", err)
 	}
-	marker := filepath.Join(installPath, ".extract-done."+installedSHA)
-	if err := os.WriteFile(marker, []byte("ok"), helpers.FileMod); err != nil {
-		t.Fatalf("write extract marker: %v", err)
-	}
+	seedValidExtractMarker(t, installPath, installedSHA)
 	infoDir := filepath.Join(downloadPath, "ansible_collections", col.Namespace+"."+col.Name+"-"+col.Version+".info")
 	if err := os.MkdirAll(infoDir, helpers.DirMod); err != nil {
 		t.Fatalf("mkdir infoDir: %v", err)
@@ -357,13 +354,13 @@ func TestCanSkipInstallPinGate(t *testing.T) {
 
 	matching := col
 	matching.SHA256 = installedSHA
-	if !canSkipInstall(cfg, matching, installPath, st) {
+	if !canSkipInstall(cfg, matching, installPath, st, noopPrinter{}) {
 		t.Fatalf("expected canSkipInstall to return true when the pin matches the installed SHA")
 	}
 
 	mismatched := col
 	mismatched.SHA256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	if canSkipInstall(cfg, mismatched, installPath, st) {
+	if canSkipInstall(cfg, mismatched, installPath, st, noopPrinter{}) {
 		t.Fatalf("expected canSkipInstall to return false when the pin does not match the installed SHA")
 	}
 }
@@ -385,10 +382,7 @@ func TestCanSkipInstallSourceGate(t *testing.T) {
 	if err := os.MkdirAll(installPath, helpers.DirMod); err != nil {
 		t.Fatalf("mkdir installPath: %v", err)
 	}
-	marker := filepath.Join(installPath, ".extract-done."+installedSHA)
-	if err := os.WriteFile(marker, []byte("ok"), helpers.FileMod); err != nil {
-		t.Fatalf("write extract marker: %v", err)
-	}
+	seedValidExtractMarker(t, installPath, installedSHA)
 	infoDir := filepath.Join(downloadPath, "ansible_collections", col.Namespace+"."+col.Name+"-"+col.Version+".info")
 	if err := os.MkdirAll(infoDir, helpers.DirMod); err != nil {
 		t.Fatalf("mkdir infoDir: %v", err)
@@ -406,13 +400,13 @@ func TestCanSkipInstallSourceGate(t *testing.T) {
 		InstalledAt:    time.Now().UTC(),
 	})
 
-	if !canSkipInstall(cfg, col, installPath, st) {
+	if !canSkipInstall(cfg, col, installPath, st, noopPrinter{}) {
 		t.Fatalf("expected canSkipInstall to return true when the source is unchanged")
 	}
 
 	switched := col
 	switched.Source = "https://b.example.com"
-	if canSkipInstall(cfg, switched, installPath, st) {
+	if canSkipInstall(cfg, switched, installPath, st, noopPrinter{}) {
 		t.Fatalf("expected canSkipInstall to return false when the collection now resolves from a different server")
 	}
 }

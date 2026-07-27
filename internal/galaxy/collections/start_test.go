@@ -14,17 +14,19 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 )
 
-// capturingPrinter is an output.Printer stub that records Printf and Warnf
-// calls (into separate slices, mirroring the Printer interface's separate
-// transient and always-emitted tiers) so a test can assert a best-effort
-// failure, or a security-relevant warning, surfaced its line rather than
-// being silently swallowed. It embeds noopPrinter (defined in
-// lock_pin_test.go) for the other Printer methods.
+// capturingPrinter is an output.Printer stub that records Printf, Warnf, and
+// Debugf calls (into separate slices, mirroring the Printer interface's
+// separate transient, always-emitted, and debug-only tiers) so a test can
+// assert a best-effort failure, a security-relevant warning, or a
+// debug-tier-only signal surfaced on the expected channel rather than being
+// silently swallowed or emitted on the wrong tier. It embeds noopPrinter
+// (defined in lock_pin_test.go) for the other Printer methods.
 type capturingPrinter struct {
 	noopPrinter
 
 	prints []string
 	warns  []string
+	debugs []string
 	mu     sync.Mutex
 }
 
@@ -38,6 +40,12 @@ func (p *capturingPrinter) Warnf(format string, args ...any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.warns = append(p.warns, fmt.Sprintf(format, args...))
+}
+
+func (p *capturingPrinter) Debugf(format string, args ...any) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.debugs = append(p.debugs, fmt.Sprintf(format, args...))
 }
 
 // hasPrintContaining reports whether any recorded Printf line contains substr.
@@ -57,6 +65,18 @@ func (p *capturingPrinter) hasWarnContaining(substr string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, line := range p.warns {
+		if strings.Contains(line, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasDebugContaining reports whether any recorded Debugf line contains substr.
+func (p *capturingPrinter) hasDebugContaining(substr string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, line := range p.debugs {
 		if strings.Contains(line, substr) {
 			return true
 		}

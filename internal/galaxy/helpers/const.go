@@ -11,6 +11,14 @@ const (
 	// FileMod is the default permission for created files.
 	FileMod = 0o644
 
+	// ExtractMarkerPrefix names the marker file extractCollection writes into
+	// an install path once extraction (or CAS materialization) completes,
+	// suffixed with the artifact's sha256. Its presence is the fast first
+	// signal a later run uses to consider skipping re-extraction; the
+	// collections package's verifyExtractMarker layers a tree-tally check on
+	// top of that presence check before actually trusting it.
+	ExtractMarkerPrefix = ".extract-done."
+
 	// CollectionNameParts is the expected number of parts in a collection name like "namespace.collection".
 	CollectionNameParts = 2
 

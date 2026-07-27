@@ -2,7 +2,6 @@ package collections
 
 import (
 	"os"
-	"path/filepath"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/archive"
 	"github.com/greeddj/go-galaxy/internal/galaxy/extracted"
@@ -28,9 +27,7 @@ func extractCollection(
 		}
 		artifactSHA = hash
 	}
-	cacheTag := filepath.Join(installPath, ".extract-done."+artifactSHA)
-
-	if _, err := os.Stat(cacheTag); err == nil {
+	if verifyExtractMarker(runtime.Output, installPath, artifactSHA) {
 		runtime.Output.Printf("⏭️ Skipping extraction, already done: %s/%s", col.Namespace, col.Name)
 		return nil
 	}
@@ -44,7 +41,7 @@ func extractCollection(
 		return err
 	}
 
-	return os.WriteFile(cacheTag, []byte("ok"), helpers.FileMod)
+	return writeExtractMarker(installPath, artifactSHA)
 }
 
 func unpack(tarPath, installPath string, extractStore *extracted.Store, artifactSHA string) error {
