@@ -77,43 +77,29 @@ func newRootMetadataFallThroughServer(t *testing.T) (*httptest.Server, func() []
 	return newFallThroughServer(t, "/api/v2/", v2FallThroughBody)
 }
 
-// hubShapeVersionsURL is a marker only the hub-shaped bare-/v3 candidate's
-// response body carries, so a test can prove the returned root came from
-// that candidate and not from any other one that might otherwise satisfy
-// the request.
-const hubShapeVersionsURL = "http://hub-shape-candidate.example/versions/"
-
-// hubShapeBody is a minimal but valid types.GalaxyCollection root metadata
-// document, just enough for loadRootMetadataCached to unmarshal and return
-// without error.
-const hubShapeBody = `{"versions_url":"` + hubShapeVersionsURL +
-	`","highest_version":{"href":"http://hub-shape-candidate.example/versions/9.9.9/","version":"9.9.9"}}`
-
-// newHubShapedServer starts an httptest.Server simulating a Galaxy NG /
-// Automation Hub deployment whose v3 API is mounted directly under its own
-// base path - "<base>/v3/collections/...", not the galaxy.ansible.com shape
-// "<base>/api/v3/collections/..." - by 404ing any candidate under "/api/v3/"
-// and answering any candidate under "/v3/" (that is not also under
-// "/api/v3/") with hubShapeBody. This shape cannot be reproduced with
-// fakegalaxy.NewAtBasePath: that server's routing unconditionally requires
-// the literal segments "api", "v3", "collections" adjacent to each other
-// regardless of its configured base path, so it can only ever serve
-// "<prefix>/api/v3/collections/...", never the bare "<prefix>/v3/collections/..."
-// this apiRootCandidates fallback exists for.
-func newHubShapedServer(t *testing.T) (*httptest.Server, func() []string) {
-	t.Helper()
-	return newFallThroughServer(t, "/v3/", hubShapeBody)
-}
+// hubBasePath is the mount point of the simulated Galaxy NG / Automation
+// Hub, chosen to match the shape a real deployment takes: the v3 API lives
+// directly under it, at "<base>/v3/collections/...", never under a further
+// "/api/v3".
+const hubBasePath = "/api/automation-hub"
 
 // TestLoadRootMetadataCachedResolvesHubShapedBase asserts that a base whose
 // v3 API is mounted directly under its own path (no "/api" immediately
 // before "/v3", the Galaxy NG / Automation Hub shape) resolves via the bare
-// "/v3" fallback candidate rather than failing outright.
+// "/v3" fallback candidate rather than failing outright. The fake hub 404s
+// the galaxy.ansible.com-shaped candidate exactly as a real one does, so
+// reaching its root metadata is only possible by falling through to the
+// next candidate. That the fall-through is ordered - "/api/v3" tried first,
+// "/v3" second - is pinned by TestAPIRootCandidates and by
+// TestLoadRootMetadataCachedFallsThroughOn404, which asserts the first
+// request on the wire.
 func TestLoadRootMetadataCachedResolvesHubShapedBase(t *testing.T) {
 	t.Parallel()
-	srv, seenPaths := newHubShapedServer(t)
+	srv := fakegalaxy.NewAtBasePath(t, hubBasePath)
+	srv.AddVersion("acme", "widgets", "1.0.0", nil)
+	base := srv.URL() + hubBasePath
 
-	cfg := &config.Config{Server: srv.URL}
+	cfg := &config.Config{Server: base}
 	col := collection{Namespace: "acme", Name: "widgets", Version: "1.0.0"}
 	runtime := infra.New(noopPrinter{}, srv.Client())
 	deps := newCollectionDeps(cfg, runtime, store.New())
@@ -125,48 +111,16 @@ func TestLoadRootMetadataCachedResolvesHubShapedBase(t *testing.T) {
 	if root == nil {
 		t.Fatal("expected a non-nil root, got nil")
 	}
-	if root.VersionsURL != hubShapeVersionsURL {
+	if want := base + "/v3/collections/acme/widgets/versions/"; root.VersionsURL != want {
 		t.Fatalf("expected the root served by the bare /v3 candidate (versions_url=%q), got versions_url=%q",
-			hubShapeVersionsURL, root.VersionsURL)
+			want, root.VersionsURL)
 	}
-
-	var winningPath string
-	for _, p := range seenPaths() {
-		if strings.Contains(p, "/v3/") && !strings.Contains(p, "/api/v3/") {
-			winningPath = p
-			break
-		}
-	}
-	if winningPath == "" {
-		t.Fatalf("expected a request to hit the bare /v3 candidate, got requests: %v", seenPaths())
-	}
-}
-
-// TestLoadRootMetadataCachedFallsThroughOn404ToHubShape asserts the fallback
-// mechanics behind TestLoadRootMetadataCachedResolvesHubShapedBase: the
-// candidate walk tries the galaxy.ansible.com-shaped "/api/v3" candidate
-// first (and 404s), then falls through to the bare "/v3" candidate that
-// succeeds, rather than skipping straight to it or failing on the first 404.
-func TestLoadRootMetadataCachedFallsThroughOn404ToHubShape(t *testing.T) {
-	t.Parallel()
-	srv, seenPaths := newHubShapedServer(t)
-
-	cfg := &config.Config{Server: srv.URL}
-	col := collection{Namespace: "acme", Name: "widgets", Version: "1.0.0"}
-	runtime := infra.New(noopPrinter{}, srv.Client())
-	deps := newCollectionDeps(cfg, runtime, store.New())
-
-	if _, err := loadRootMetadataCached(context.Background(), deps, col, cacheManager.Policy{}); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	paths := seenPaths()
-	if len(paths) == 0 {
-		t.Fatal("expected the server to have received at least one request")
-	}
-	if !strings.Contains(paths[0], "/api/v3/") {
-		t.Fatalf("expected the first request to hit the galaxy.ansible.com-shaped /api/v3 candidate, got %q (all: %v)",
-			paths[0], paths)
+	// The hub only routes - and therefore only counts - its own "/v3" shape;
+	// the "/api/v3" probe that preceded this one 404s before reaching any
+	// endpoint. Exactly one counted request proves the walk stopped at the
+	// first candidate the hub actually serves.
+	if got := srv.Count(fakegalaxy.EndpointRootMetadata); got != 1 {
+		t.Fatalf("expected exactly 1 served root metadata request against the hub, got %d", got)
 	}
 }
 

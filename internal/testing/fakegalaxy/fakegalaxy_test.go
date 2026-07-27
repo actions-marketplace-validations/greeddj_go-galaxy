@@ -855,9 +855,12 @@ func assertServersIndependentAfterS1Traffic(t *testing.T, s1, s2 *Server) {
 	}
 }
 
-// TestBasePathRouting asserts NewAtBasePath serves every endpoint under the
-// configured prefix, embeds that prefix in every self-generated URL, and
-// 404s a request to the unprefixed path.
+// TestBasePathRouting asserts NewAtBasePath serves a hub-shaped server:
+// every endpoint under "<prefix>/v3", every self-generated URL carrying
+// that same prefix, and a 404 both for the unprefixed path and for the
+// galaxy.ansible.com shaped "<prefix>/api/v3" path. That second 404 is the
+// point of the shape: a client probing API roots against a real hub gets
+// nothing from "/api/v3" and must fall through to "<base>/v3".
 func TestBasePathRouting(t *testing.T) {
 	t.Parallel()
 	s := NewAtBasePath(t, "/api/automation-hub")
@@ -871,9 +874,58 @@ func TestBasePathRouting(t *testing.T) {
 
 	// The unprefixed path must 404: this server only answers under its
 	// configured base path.
-	status := getJSON(t, s.Client(), s.URL()+"/api/v3/collections/ns/name", nil)
+	status := getJSON(t, s.Client(), s.URL()+"/v3/collections/ns/name", nil)
 	if status != http.StatusNotFound {
 		t.Errorf("unprefixed path status = %d, want %d", status, http.StatusNotFound)
+	}
+
+	// The galaxy.ansible.com shaped path must 404 even under the correct
+	// prefix: a hub does not mount its v3 API under a further "/api/v3".
+	status = getJSON(t, s.Client(), prefix+"/api/v3/collections/ns/name", nil)
+	if status != http.StatusNotFound {
+		t.Errorf("galaxy-shaped path status = %d, want %d", status, http.StatusNotFound)
+	}
+}
+
+// TestNewServesGalaxyShapeNotHubShape is the mirror of TestBasePathRouting:
+// New models galaxy.ansible.com, so its collection routes live under
+// "/api/v3" and the hub-shaped "/v3" path must 404. Together the two tests
+// pin each constructor to exactly one deployment shape.
+func TestNewServesGalaxyShapeNotHubShape(t *testing.T) {
+	t.Parallel()
+	s := New(t)
+	s.AddVersion("ns", "name", "1.0.0", nil)
+
+	var root types.GalaxyCollection
+	if status := getJSON(t, s.Client(), s.URL()+"/api/v3/collections/ns/name", &root); status != http.StatusOK {
+		t.Fatalf("galaxy-shaped root metadata status = %d, want %d", status, http.StatusOK)
+	}
+	if want := s.URL() + "/api/v3/collections/ns/name/versions/"; root.VersionsURL != want {
+		t.Errorf("versions_url = %q, want %q", root.VersionsURL, want)
+	}
+	if status := getJSON(t, s.Client(), s.URL()+"/v3/collections/ns/name", nil); status != http.StatusNotFound {
+		t.Errorf("hub-shaped path status = %d, want %d", status, http.StatusNotFound)
+	}
+}
+
+// TestNewAtBasePathEmptyPrefixServesHubShapeAtRoot asserts the shape is
+// fixed by the constructor rather than by whether a prefix is present: an
+// empty base path models a hub mounted at the root, so its routes live at
+// "/v3" and the galaxy-shaped "/api/v3" still 404s.
+func TestNewAtBasePathEmptyPrefixServesHubShapeAtRoot(t *testing.T) {
+	t.Parallel()
+	s := NewAtBasePath(t, "")
+	s.AddVersion("ns", "name", "1.0.0", nil)
+
+	var root types.GalaxyCollection
+	if status := getJSON(t, s.Client(), s.URL()+"/v3/collections/ns/name", &root); status != http.StatusOK {
+		t.Fatalf("hub-shaped root metadata status = %d, want %d", status, http.StatusOK)
+	}
+	if want := s.URL() + "/v3/collections/ns/name/versions/"; root.VersionsURL != want {
+		t.Errorf("versions_url = %q, want %q", root.VersionsURL, want)
+	}
+	if status := getJSON(t, s.Client(), s.URL()+"/api/v3/collections/ns/name", nil); status != http.StatusNotFound {
+		t.Errorf("galaxy-shaped path status = %d, want %d", status, http.StatusNotFound)
 	}
 }
 
@@ -883,14 +935,14 @@ func TestBasePathRouting(t *testing.T) {
 func assertBasePathRootMetadata(t *testing.T, s *Server, prefix string) {
 	t.Helper()
 	var root types.GalaxyCollection
-	status := getJSON(t, s.Client(), prefix+"/api/v3/collections/ns/name", &root)
+	status := getJSON(t, s.Client(), prefix+"/v3/collections/ns/name", &root)
 	if status != http.StatusOK {
 		t.Fatalf("root metadata status = %d, want %d", status, http.StatusOK)
 	}
-	if want := prefix + "/api/v3/collections/ns/name/versions/"; root.VersionsURL != want {
+	if want := prefix + "/v3/collections/ns/name/versions/"; root.VersionsURL != want {
 		t.Errorf("versions_url = %q, want %q", root.VersionsURL, want)
 	}
-	if want := prefix + "/api/v3/collections/ns/name/versions/1.0.0/"; root.HighestVersion.Href != want {
+	if want := prefix + "/v3/collections/ns/name/versions/1.0.0/"; root.HighestVersion.Href != want {
 		t.Errorf("highest_version.href = %q, want %q", root.HighestVersion.Href, want)
 	}
 }
@@ -900,14 +952,14 @@ func assertBasePathRootMetadata(t *testing.T, s *Server, prefix string) {
 func assertBasePathVersionsList(t *testing.T, s *Server, prefix string) {
 	t.Helper()
 	var versions types.GalaxyCollectionVersions
-	status := getJSON(t, s.Client(), prefix+"/api/v3/collections/ns/name/versions", &versions)
+	status := getJSON(t, s.Client(), prefix+"/v3/collections/ns/name/versions", &versions)
 	if status != http.StatusOK {
 		t.Fatalf("versions list status = %d, want %d", status, http.StatusOK)
 	}
 	if len(versions.Data) != 1 {
 		t.Fatalf("len(versions.Data) = %d, want 1", len(versions.Data))
 	}
-	if want := prefix + "/api/v3/collections/ns/name/versions/1.0.0/"; versions.Data[0].Href != want {
+	if want := prefix + "/v3/collections/ns/name/versions/1.0.0/"; versions.Data[0].Href != want {
 		t.Errorf("versions.Data[0].href = %q, want %q", versions.Data[0].Href, want)
 	}
 }
@@ -917,7 +969,7 @@ func assertBasePathVersionsList(t *testing.T, s *Server, prefix string) {
 func assertBasePathVersionDetail(t *testing.T, s *Server, prefix string, v Version) {
 	t.Helper()
 	var info types.GalaxyCollectionVersionInfo
-	status := getJSON(t, s.Client(), prefix+"/api/v3/collections/ns/name/versions/1.0.0/", &info)
+	status := getJSON(t, s.Client(), prefix+"/v3/collections/ns/name/versions/1.0.0/", &info)
 	if status != http.StatusOK {
 		t.Fatalf("version detail status = %d, want %d", status, http.StatusOK)
 	}

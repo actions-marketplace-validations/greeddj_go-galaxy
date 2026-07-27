@@ -92,8 +92,10 @@ type Server struct {
 	artifacts      map[string]fakeArtifact
 	baseURL        string
 	basePathPrefix string
+	apiRootPrefix  string
 	requiredAuth   string
 	basePath       []string
+	apiRoot        []string
 	faults         []faultRule
 	authSeen       [endpointCount]capturedAuth
 	mu             sync.Mutex
@@ -195,31 +197,45 @@ type Fault struct {
 	Hang            bool
 }
 
-// New starts an in-memory fake Galaxy v3 API server and registers its
-// shutdown with tb.Cleanup. Taking testing.TB - rather than nothing, or a
-// concrete *testing.T - is deliberate: it is the only interface
-// implementable exclusively by the stdlib testing package, so this
-// constructor, and therefore the server itself, can never be reached from
-// production code.
+// New starts an in-memory fake Galaxy v3 API server, shaped like
+// galaxy.ansible.com: mounted at the root, serving its collection routes
+// under "/api/v3". It registers its shutdown with tb.Cleanup. Taking
+// testing.TB - rather than nothing, or a concrete *testing.T - is
+// deliberate: it is the only interface implementable exclusively by the
+// stdlib testing package, so this constructor, and therefore the server
+// itself, can never be reached from production code.
 //
-// New is equivalent to NewAtBasePath(tb, ""): every route is served at its
-// plain path, with no prefix.
+// Use NewAtBasePath for the other shape a real deployment takes, a Galaxy
+// NG / Automation Hub.
 func New(tb testing.TB) *Server {
 	tb.Helper()
-	return NewAtBasePath(tb, "")
+	return newServer(tb, "", []string{apiSegment, v3Segment})
 }
 
-// NewAtBasePath starts an in-memory fake Galaxy v3 API server whose every
-// route is served under basePath, e.g. "/api/automation-hub", so a Galaxy
-// NG / Automation Hub shaped deployment - which mounts the same v3 API
-// under a non-root prefix - can be simulated. basePath is normalized by
-// trimming leading and trailing slashes; an empty basePath (or one that is
-// all slashes) serves every route at its plain path, identically to New.
-// Every URL this server generates for itself (root/version hrefs,
-// versions_url, download_url) carries the same prefix, so a client
-// following one lands back on this server. See New for why the
-// constructor takes testing.TB.
+// NewAtBasePath starts an in-memory fake Galaxy v3 API server shaped like a
+// Galaxy NG / Automation Hub: it mounts the v3 API directly under its own
+// base path, so with basePath "/api/automation-hub" a collection is served
+// at "/api/automation-hub/v3/collections/{ns}/{name}" - not under a further
+// "/api/v3", which no such deployment uses. A request for the
+// galaxy.ansible.com shaped path is answered with 404, exactly as a real
+// hub answers it, so a client's API-root probing is exercised honestly.
+//
+// basePath is normalized by trimming leading and trailing slashes and may
+// be empty, which models a hub mounted at the root ("/v3/collections/..."):
+// the route shape is fixed by this constructor, not by whether a prefix is
+// present. Every URL the server generates for itself (root and version
+// hrefs, versions_url, download_url) carries the same prefix, so a client
+// following one lands back on this server. See New for why the constructor
+// takes testing.TB.
 func NewAtBasePath(tb testing.TB, basePath string) *Server {
+	tb.Helper()
+	return newServer(tb, basePath, []string{v3Segment})
+}
+
+// newServer builds and starts a server serving its collection routes under
+// apiRoot's segments, itself nested under basePath's. It is the shared body
+// of New and NewAtBasePath, which differ only in those two values.
+func newServer(tb testing.TB, basePath string, apiRoot []string) *Server {
 	tb.Helper()
 
 	trimmed := strings.Trim(basePath, "/")
@@ -235,6 +251,8 @@ func NewAtBasePath(tb testing.TB, basePath string) *Server {
 		artifacts:      make(map[string]fakeArtifact),
 		basePath:       segments,
 		basePathPrefix: prefix,
+		apiRoot:        apiRoot,
+		apiRootPrefix:  "/" + strings.Join(apiRoot, "/"),
 	}
 	// The server is started before baseURL is known so ServeHTTP can be
 	// registered as its handler; no request can arrive before this
@@ -273,10 +291,13 @@ func (s *Server) AddVersion(namespace, name, version string, deps map[string]str
 	data, sum := buildArtifact(namespace, name, version, deps)
 	filename := fmt.Sprintf("%s-%s-%s.tar.gz", namespace, name, version)
 	// urlBase carries the base path prefix (empty unless NewAtBasePath was
-	// used), so every URL this fake hands back to a client resolves back to
-	// this server through the same prefix.
+	// used with one), and collectionsBase adds this server's API root on top
+	// of it, so every URL this fake hands back to a client resolves back to
+	// this server through the same prefix and the same API root it routes on.
+	// The download route lives beside the API root rather than under it.
 	urlBase := s.baseURL + s.basePathPrefix
-	href := fmt.Sprintf("%s/api/v3/collections/%s/%s/versions/%s/", urlBase, namespace, name, version)
+	collectionsBase := urlBase + s.apiRootPrefix
+	href := fmt.Sprintf("%s/collections/%s/%s/versions/%s/", collectionsBase, namespace, name, version)
 	downloadURL := fmt.Sprintf("%s/download/%s", urlBase, filename)
 	detailBody := buildVersionDetailBody(namespace, name, version, href, downloadURL, filename, sum, len(data), deps)
 
@@ -295,7 +316,7 @@ func (s *Server) AddVersion(namespace, name, version string, deps map[string]str
 	}
 	col.versions[version] = &fakeVersionEntry{version: version, href: href, sha256: sum, detailBody: detailBody}
 	col.sortedVersions = sortedVersionKeys(col.versions)
-	recomputeRootBody(col, urlBase)
+	recomputeRootBody(col, collectionsBase)
 
 	s.artifacts[filename] = fakeArtifact{namespace: namespace, name: name, data: data}
 
@@ -380,10 +401,12 @@ func (s *Server) ResetCounts() {
 	s.counts = [endpointCount]int{}
 }
 
-// ServeHTTP hand-rolls routing for the four endpoints this fake answers,
-// plus the two Galaxy v2/bare-API probe routes real clients use to detect
-// server flavor - which must 404 rather than serve v3 metadata, since a
-// client would otherwise mistake this fake for a different API version.
+// ServeHTTP hand-rolls routing for the four endpoints this fake answers.
+// Every other path 404s, including the API-root probes a real client walks
+// to detect a server's flavor - the Galaxy v2 and bare-API routes, and,
+// for a hub-shaped server, the galaxy.ansible.com "/api/v3" route. Those
+// must 404 rather than serve v3 metadata, since a client would otherwise
+// mistake this fake for a deployment shape it is not.
 //
 // Each matched route is handed off to a dispatchXxx method, which - in
 // this load-bearing order - increments the endpoint's counter first (so it
@@ -394,7 +417,7 @@ func (s *Server) ResetCounts() {
 // header.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	segments := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	segments, ok := stripBasePath(segments, s.basePath)
+	segments, ok := stripPrefixSegments(segments, s.basePath)
 	if !ok {
 		// The request does not carry this server's configured base path
 		// prefix at all - not even a known route under a wrong prefix - so
@@ -403,19 +426,27 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	switch {
-	case isDownloadPath(segments):
+	// The download route sits beside the API root rather than under it, so
+	// it is matched before the API root is stripped.
+	if isDownloadPath(segments) {
 		s.dispatchArtifact(w, r, segments[1])
-	case isRootMetadataPath(segments):
-		s.dispatchRootMetadata(w, r, segments[3], segments[4])
-	case isVersionsListPath(segments):
-		s.dispatchVersionsList(w, r, segments[3], segments[4])
-	case isVersionDetailPath(segments):
-		s.dispatchVersionDetail(w, r, segments[3], segments[4], segments[6])
+		return
+	}
+
+	collectionSegments, ok := stripPrefixSegments(segments, s.apiRoot)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	switch {
+	case isRootMetadataPath(collectionSegments):
+		s.dispatchRootMetadata(w, r, collectionSegments[1], collectionSegments[2])
+	case isVersionsListPath(collectionSegments):
+		s.dispatchVersionsList(w, r, collectionSegments[1], collectionSegments[2])
+	case isVersionDetailPath(collectionSegments):
+		s.dispatchVersionDetail(w, r, collectionSegments[1], collectionSegments[2], collectionSegments[4])
 	default:
-		// Covers the v2 ("api/v2/collections/ns/name") and bare-API
-		// ("api/collections/ns/name") probe routes, and anything else: none
-		// of them are served by this fake.
 		http.NotFound(w, r)
 	}
 }
@@ -464,22 +495,24 @@ func (s *Server) dispatchVersionDetail(w http.ResponseWriter, r *http.Request, n
 	s.handleVersionDetail(w, r, namespace, name, version)
 }
 
-// stripBasePath removes basePath's segments from the front of segments,
-// reporting false if segments does not start with them - the caller must
-// then 404 without dispatching to any known route. An empty basePath (set
-// by New, or NewAtBasePath with an empty or all-slash prefix) always
-// matches trivially, leaving segments unchanged, so behavior without a
-// base path is byte-identical to matching directly on segments.
-func stripBasePath(segments, basePath []string) ([]string, bool) {
-	if len(segments) < len(basePath) {
+// stripPrefixSegments removes prefix's segments from the front of
+// segments, reporting false if segments does not start with them - the
+// caller must then 404 without dispatching to any known route. It is used
+// for both prefixes a route carries, the server's base path and its API
+// root. An empty prefix (the base path of New, or of NewAtBasePath with an
+// empty or all-slash argument) always matches trivially, leaving segments
+// unchanged, so behavior without that prefix is byte-identical to matching
+// directly on segments.
+func stripPrefixSegments(segments, prefix []string) ([]string, bool) {
+	if len(segments) < len(prefix) {
 		return nil, false
 	}
-	for i, want := range basePath {
+	for i, want := range prefix {
 		if segments[i] != want {
 			return nil, false
 		}
 	}
-	return segments[len(basePath):], true
+	return segments[len(prefix):], true
 }
 
 // checkAuth captures the Authorization header r carried for ep - readable
@@ -521,30 +554,31 @@ func isDownloadPath(segments []string) bool {
 	return len(segments) == 2 && segments[0] == downloadSegment
 }
 
-// isAPIv3CollectionPath reports whether segments starts with
-// "api/v3/collections/{ns}/{name}", the common prefix of the three v3
-// collection routes.
-func isAPIv3CollectionPath(segments []string) bool {
-	return len(segments) >= 5 &&
-		segments[0] == apiSegment && segments[1] == v3Segment && segments[2] == collectionsSegment
+// isCollectionPath reports whether segments starts with
+// "collections/{ns}/{name}", the common prefix of the three collection
+// routes. Its input is what remains after ServeHTTP has stripped the
+// server's base path and API root, so the same predicates match both
+// deployment shapes this fake models.
+func isCollectionPath(segments []string) bool {
+	return len(segments) >= 3 && segments[0] == collectionsSegment
 }
 
 // isRootMetadataPath reports whether segments is exactly
-// "api/v3/collections/{ns}/{name}".
+// "collections/{ns}/{name}", relative to the API root.
 func isRootMetadataPath(segments []string) bool {
-	return len(segments) == 5 && isAPIv3CollectionPath(segments)
+	return len(segments) == 3 && isCollectionPath(segments)
 }
 
 // isVersionsListPath reports whether segments is
-// "api/v3/collections/{ns}/{name}/versions".
+// "collections/{ns}/{name}/versions", relative to the API root.
 func isVersionsListPath(segments []string) bool {
-	return len(segments) == 6 && isAPIv3CollectionPath(segments) && segments[5] == versionsSegment
+	return len(segments) == 4 && isCollectionPath(segments) && segments[3] == versionsSegment
 }
 
 // isVersionDetailPath reports whether segments is
-// "api/v3/collections/{ns}/{name}/versions/{version}".
+// "collections/{ns}/{name}/versions/{version}", relative to the API root.
 func isVersionDetailPath(segments []string) bool {
-	return len(segments) == 7 && isAPIv3CollectionPath(segments) && segments[5] == versionsSegment
+	return len(segments) == 5 && isCollectionPath(segments) && segments[3] == versionsSegment
 }
 
 // incr increments ep's request counter. It is called for every request
@@ -890,18 +924,18 @@ func parseDigits(s string) (int, bool) {
 // recomputeRootBody rebuilds col's premarshaled root metadata body after a
 // version has been added, since highest_version tracks whichever version
 // now sorts highest. It must be called with s.mu held, and requires
-// col.sortedVersions to already reflect the newly added version. urlBase is
-// the server's base URL with its base path prefix already appended (empty
-// unless NewAtBasePath was used), so the URLs embedded here resolve back to
-// this server through the same prefix.
-func recomputeRootBody(col *fakeCollection, urlBase string) {
+// col.sortedVersions to already reflect the newly added version.
+// collectionsBase is the server's base URL with its base path prefix and
+// its API root already appended, so the URLs embedded here resolve back to
+// this server through the same prefix and the same API root it routes on.
+func recomputeRootBody(col *fakeCollection, collectionsBase string) {
 	highest := col.sortedVersions[len(col.sortedVersions)-1]
 
 	var root types.GalaxyCollection
-	root.Href = fmt.Sprintf("%s/api/v3/collections/%s/%s/", urlBase, col.namespace, col.name)
+	root.Href = fmt.Sprintf("%s/collections/%s/%s/", collectionsBase, col.namespace, col.name)
 	root.Namespace = col.namespace
 	root.Name = col.name
-	root.VersionsURL = fmt.Sprintf("%s/api/v3/collections/%s/%s/versions/", urlBase, col.namespace, col.name)
+	root.VersionsURL = fmt.Sprintf("%s/collections/%s/%s/versions/", collectionsBase, col.namespace, col.name)
 	root.HighestVersion.Href = col.versions[highest].href
 	root.HighestVersion.Version = highest
 
