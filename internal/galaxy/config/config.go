@@ -55,7 +55,6 @@ type Config struct {
 	ClearCache                 bool
 	Offline                    bool
 	Frozen                     bool
-	WarmOnly                   bool
 	AnsibleCollectionsPathUsed bool
 	AnsibleCacheDirUsed        bool
 	AnsibleServerUsed          bool
@@ -83,28 +82,6 @@ func (c *Config) IsOffline() bool {
 		return false
 	}
 	return c.Offline
-}
-
-// CollectionOptions captures collection install options before normalization.
-type CollectionOptions struct {
-	CacheDir            string
-	RequirementsFile    string
-	LockFile            string
-	MetricsFile         string
-	Server              string
-	DownloadPath        string
-	Timeout             time.Duration
-	ClearCache          bool
-	Verbose             bool
-	NoCache             bool
-	Refresh             bool
-	NoDeps              bool
-	Offline             bool
-	Frozen              bool
-	WarmOnly            bool
-	DownloadPathSet     bool
-	RequirementsFileSet bool
-	Quiet               bool
 }
 
 // BuildCollectionConfig builds Config from CLI flags and ansible.cfg.

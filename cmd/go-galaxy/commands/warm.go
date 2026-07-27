@@ -5,8 +5,6 @@ import (
 
 	"github.com/greeddj/go-galaxy/cmd/go-galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/collections"
-	"github.com/greeddj/go-galaxy/internal/galaxy/config"
-	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 	"github.com/urfave/cli/v3"
 )
 
@@ -23,10 +21,7 @@ func Warm() *cli.Command {
 		Usage:   "Download and extract collections into cache without installing",
 		Flags:   flags,
 		Action: func(ctx context.Context, c *cli.Command) error {
-			return runCollectionCommand(ctx, c, func(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
-				cfg.WarmOnly = true
-				return collections.Warm(ctx, cfg, runtime)
-			})
+			return runCollectionCommand(ctx, c, collections.Warm)
 		},
 	}
 }
