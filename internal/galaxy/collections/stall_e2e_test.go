@@ -58,7 +58,7 @@ func newStallFixture(t *testing.T) (*config.Config, *infra.Infra, *fakegalaxy.Se
 		Timeout:          stallTimeout,
 		NoCache:          true,
 	}
-	runtime := infra.New(noopPrinter{}, fetch.New(cfg.Timeout))
+	runtime := infra.New(noopPrinter{}, fetch.New(cfg.Timeout, nil))
 	return cfg, runtime, s
 }
 
