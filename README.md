@@ -24,7 +24,7 @@ where applicable).
 | **frozen + offline**   |                         |                        |                        |
 | ・go-galaxy            |           1.33 ± 0.00 s |          2.07 ± 0.10 s |         11.93 ± 0.34 s |
 
-The speedup grows with the number of collections — `go-galaxy` parallelizes
+The speedup grows with the number of collections - `go-galaxy` parallelizes
 downloads and extractions across `--workers` cores, uses hard links from a
 content-addressable cache on warm runs, and skips the network entirely under
 `--frozen --offline`. With a lockfile and warm caches, installing 100
@@ -48,14 +48,14 @@ SCENARIOS="warm" RUNS=5 testing/bench.sh  # one scenario, more runs
 - **Both tools** invoked with `--no-deps` so the benchmark measures fetch +
   extract (the dep-resolution paths in the two tools differ; in particular
   `requirements-100.yml` has transitive constraint conflicts that `ansible-
-  galaxy` resolves leniently and `go-galaxy` rejects strictly — that's a
+  galaxy` resolves leniently and `go-galaxy` rejects strictly - that's a
   separate comparison).
 - **Cold cache:** `~/.ansible/galaxy_cache`, `~/.cache/go-galaxy` and the
   install dir wiped before each run. `ANSIBLE_COLLECTIONS_PATH=$TARGET` so
   `ansible-galaxy` doesn't see anything pre-installed in `~/.ansible/collections`.
 - **Warm cache:** caches primed once, only the install dir wiped between runs.
 - **Frozen + offline:** `go-galaxy lock` once, then `go-galaxy install --frozen
-  --offline` — zero network calls.
+  --offline` - zero network calls.
 - **Hardware:** single Apple Silicon laptop, runs on home Wi-Fi. Cold-cache
   numbers are network-bound; warm/frozen are CPU/IO-bound.
 
@@ -75,7 +75,10 @@ so pipelines finish sooner and changes ship faster.
 - ansible.cfg options supported:
   - `[defaults] collections_path`
   - `[galaxy] server`
+  - `[galaxy] server_list`
   - `[galaxy] cache_dir`
+  - `[galaxy_server.<id>]` sections (`url`, `token`, `validate_certs`; see
+    [Galaxy servers and authentication](#galaxy-servers-and-authentication))
 
 ## Features
 
@@ -134,11 +137,11 @@ Clean unreachable collections:
 
 ### Commands
 
-- `install` (`i`) — install collections from `requirements.yml`.
-- `lock` (`l`) — resolve and write `requirements.lock.yml` for reproducible CI.
-- `warm` (`w`) — populate the artifact + extracted caches without installing (for CI image bake).
-- `hash` (`h`) — print a deterministic cache key (`sha256:…`) for use as a CI cache key.
-- `cleanup` (`c`) — remove unused cached collections across projects.
+- `install` (`i`) - install collections from `requirements.yml`.
+- `lock` (`l`) - resolve and write `requirements.lock.yml` for reproducible CI.
+- `warm` (`w`) - populate the artifact + extracted caches without installing (for CI image bake).
+- `hash` (`h`) - print a deterministic cache key (`sha256:…`) for use as a CI cache key.
+- `cleanup` (`c`) - remove unused cached collections across projects.
 
 ### Global options
 
@@ -147,11 +150,15 @@ Clean unreachable collections:
 
 ### install options
 
-- `--verbose` — verbose output (`$GO_GALAXY_VERBOSE`)
-- `--quiet, -q` — quiet mode (`$GO_GALAXY_QUIET`)
+- `--verbose` - verbose output (`$GO_GALAXY_VERBOSE`)
+- `--quiet, -q` - quiet mode (`$GO_GALAXY_QUIET`)
 - `--dry-run`
 - `--cache-dir` (`$GO_GALAXY_CACHE_DIR`, `$ANSIBLE_GALAXY_CACHE_DIR`)
 - `--server` (`$GO_GALAXY_SERVER`, `$ANSIBLE_GALAXY_SERVER`)
+- `--token` (`$GO_GALAXY_TOKEN`) - Galaxy API token for the single effective server;
+  an error if a multi-entry `server_list` is configured, and setting it to the
+  empty string clears a previously configured token (see
+  [Galaxy servers and authentication](#galaxy-servers-and-authentication))
 - `--timeout` (`$GO_GALAXY_SERVER_TIMEOUT`, `$ANSIBLE_GALAXY_SERVER_TIMEOUT`)
 - `--download-path, -p` (`$GO_GALAXY_COLLECTIONS_PATH`, `$ANSIBLE_COLLECTIONS_PATH`)
 - `--requirements-file, -r` (`$GO_GALAXY_REQUIREMENTS_FILE`, `$ANSIBLE_GALAXY_REQUIREMENTS_FILE`)
@@ -161,10 +168,10 @@ Clean unreachable collections:
 - `--refresh` (`$GO_GALAXY_REFRESH`)
 - `--clear-cache` (`$GO_GALAXY_CLEAR_CACHE`)
 - `--no-deps` (`$GO_GALAXY_NO_DEPS`)
-- `--offline` (`$GO_GALAXY_OFFLINE`) — fail on any network access (cached state only)
+- `--offline` (`$GO_GALAXY_OFFLINE`) - fail on any network access (cached state only)
 - `--lock-file` (`$GO_GALAXY_LOCK_FILE`)
 - `--frozen` (`$GO_GALAXY_FROZEN`) - require a lockfile and verify each installed or cached artifact's SHA256 against its lockfile pin, aborting the run on any mismatch
-- `--metrics-file` (`$GO_GALAXY_METRICS_FILE`) — emit JSON run report
+- `--metrics-file` (`$GO_GALAXY_METRICS_FILE`) - emit JSON run report
 
 S3 cache options (if `--s3-bucket` is set, S3 backend is used):
 
@@ -179,8 +186,8 @@ S3 cache options (if `--s3-bucket` is set, S3 backend is used):
 
 ### cleanup options
 
-- `--verbose` — verbose output (`$GO_GALAXY_VERBOSE`)
-- `--quiet, -q` — quiet mode (`$GO_GALAXY_QUIET`)
+- `--verbose` - verbose output (`$GO_GALAXY_VERBOSE`)
+- `--quiet, -q` - quiet mode (`$GO_GALAXY_QUIET`)
 - `--dry-run`
 - `--cache-dir` (`$GO_GALAXY_CACHE_DIR`, `$ANSIBLE_GALAXY_CACHE_DIR`)
 - `--s3-bucket` (`$GO_GALAXY_S3_BUCKET`)
@@ -217,6 +224,141 @@ server = https://galaxy.ansible.com
 cache_dir = /home/ci/.cache/go-galaxy
 ```
 
+## Galaxy servers and authentication
+
+Beyond a single `[galaxy] server`, go-galaxy understands ansible's multi-server
+configuration surface, so a fleet of CI jobs can share one `ansible.cfg` with a
+private Automation Hub and the public Galaxy both configured.
+
+### server_list and per-server sections
+
+`[galaxy] server_list` (or `ANSIBLE_GALAXY_SERVER_LIST`, which wins outright
+whenever it is set at all, even to an empty string) is a comma-separated list of
+server ids. Each id gets its own `[galaxy_server.<id>]` section:
+
+```ini
+[galaxy]
+server_list = automation_hub, release_galaxy
+
+[galaxy_server.automation_hub]
+url = https://hub.example.internal/api/galaxy
+
+[galaxy_server.release_galaxy]
+url = https://galaxy.ansible.com
+```
+
+```bash
+export ANSIBLE_GALAXY_SERVER_AUTOMATION_HUB_TOKEN=xxxxxxxxxxxxxxxx
+go-galaxy install
+```
+
+Every collection is resolved independently against `automation_hub` first, falling
+back to `release_galaxy` only if the private hub doesn't have it - so one install
+can legitimately draw some collections from the private hub and the rest from the
+public Galaxy. go-galaxy also auto-discovers the API root under `url`, trying
+`/api/v3` (galaxy.ansible.com's shape) and then the bare `/v3` a Galaxy NG /
+Automation Hub deployment mounts directly under its own base path, so the same
+`url` works for either shape without an extra option.
+
+`[galaxy_server.<id>]` keys, and what go-galaxy does with them:
+
+| Key                     | Support                                                                                                                   |
+|:------------------------|:--------------------------------------------------------------------------------------------------------------------------|
+| `url`                   | Supported, required.                                                                                                      |
+| `token`                 | Supported.                                                                                                                |
+| `validate_certs`        | Supported (see TLS below).                                                                                                |
+| `api_version`           | Accepted only as `v3` (a no-op; this tool always speaks the v3 API); any other value is a config-load error.              |
+| `username`, `password`  | Hard config-load error naming the key: this is ansible's Basic auth, which this tool does not implement.                  |
+| `auth_url`, `client_id` | Hard config-load error naming the key: this is ansible's Keycloak/SSO token exchange, which this tool does not implement. |
+| anything else           | Warned about and ignored.                                                                                                 |
+
+Basic auth and Keycloak/SSO are refused outright rather than silently sending an
+unauthenticated request and surfacing a confusing 401 later - the error names the
+offending key so you know to configure a plain API token instead.
+
+Every key also has a per-id environment override, using the id **exactly as
+written** in `server_list` (no case- or dash-normalization):
+`ANSIBLE_GALAXY_SERVER_<ID>_URL`, `_TOKEN`, `_VALIDATE_CERTS`. An id with no
+`[galaxy_server.<id>]` section at all builds purely from its env overrides,
+which is the common shape in containerized CI where you'd rather not template
+an ansible.cfg for a secret.
+
+### --token
+
+`--token` / `GO_GALAXY_TOKEN` is go-galaxy's own convenience for the common
+single-server case - point the tool at one hub and hand it a credential without
+writing an `ansible.cfg` section for it. It only applies when exactly one server
+is effective (the built-in default, `[galaxy] server`, or `--server` - including
+`--server` naming a single `server_list` id); with a multi-entry `server_list`
+in effect it is a hard error, since there is no way to tell which server the
+credential belongs to - configure that server's own `[galaxy_server.<id>]`
+token instead. When it does apply, it overrides that one server's own
+configured token; setting it to the empty string clears the token entirely,
+letting a pipeline force an anonymous run by exporting `GO_GALAXY_TOKEN=`
+without editing any config.
+
+### Precedence
+
+Highest wins:
+
+1. An explicit `--server` collapses everything to one server: if its value
+   matches a configured `server_list` id exactly, that server's own token and
+   `validate_certs` apply; otherwise the value is used verbatim as an anonymous
+   URL, and `server_list` plays no further part - not even to validate it.
+2. Otherwise a non-empty `server_list` wins, in list order.
+3. Otherwise `[galaxy] server` from ansible.cfg.
+4. Otherwise the `--server` flag's built-in default.
+
+### Server selection at resolve time
+
+Resolving a collection against `server_list` deviates from ansible in two
+deliberate ways:
+
+- **First match wins, not a union.** For an unpinned collection, go-galaxy walks
+  the effective server list in order and installs from the first server that
+  has it. Unlike ansible, which unions results across every configured server,
+  go-galaxy never merges: a collection published on more than one server always
+  comes from the earliest one that has it.
+- **Fail closed, not fall through.** Only a 404 across all of one server's API
+  root candidates means "this server doesn't have it, try the next one". A
+  401/403 response, or a 5xx/network failure that survives the retry budget,
+  aborts the whole run naming the server that failed and exits with the network
+  exit code (`4`) - it never silently advances to the next server. A wrong
+  token or a brief outage on your private hub must never quietly redirect an
+  install to the public Galaxy instead.
+
+A `requirements.yml` collection's `source:` pins it to one server for the whole
+run: an exact `server_list` id match, or a URL matching a configured server's
+network origin (so `source: https://hub.example.internal/content/published/`
+still gets that server's own token and TLS policy, even though the path differs
+from the configured `url`).
+
+### TLS: validate_certs
+
+`validate_certs = false` really disables certificate verification for that
+server - but only for that one server's own network origin, never globally and
+never for a download host on a different origin. The run warns loudly about
+it, even in quiet mode (twice, if that server also carries a token, since the
+token would then cross a connection this run cannot authenticate). Prefer
+trusting a self-signed hub's CA instead of disabling verification: point
+`SSL_CERT_FILE` or `SSL_CERT_DIR` at it and leave `validate_certs` unset.
+
+### Rejected as configuration errors
+
+These are refused before any request is made, exiting with the usage exit code
+(`2`) - the operator has to fix `ansible.cfg`, an environment variable, or
+`requirements.yml`, not retry:
+
+- A server URL, or a `requirements.yml` `source:`, with embedded userinfo
+  (`https://user:pass@hub/`).
+- A token configured for a plaintext (`http://`) origin that isn't loopback.
+- Two configured servers that share a network origin but disagree on their
+  token or their `validate_certs`.
+
+By contrast, an auth failure (401/403) or an unavailable server exits with the
+network exit code (`4`) instead, since that's a runtime condition to retry or
+investigate, not a configuration mistake.
+
 ## Notes
 
 - Non-Galaxy sources (git/url/file/dir) are not supported.
@@ -249,6 +391,23 @@ Artifacts and cache metadata are stored in S3; collections are still installed l
   cacheable metadata sha, so a poisoned download URL or sha causes the install to fail
   closed instead of installing attacker content. Use `--frozen` with a committed
   lockfile in CI as the robust mitigation against a compromised cache.
+- **A cache must not be shared between principals holding different Galaxy
+  credentials.** A local cache directory or an S3 bucket is not scoped to a
+  credential: cached API responses, resolved versions, dependency graphs, and
+  artifacts are keyed by server, not by which token fetched them, so an entry a
+  privileged run fetched from a private server is served as-is to a later run
+  against the same server with no token at all. Keying by a token fingerprint
+  instead was considered and rejected: it would put a credential-linked
+  identifier into a shared, less-trusted store, which is exactly the trust
+  boundary above this design keeps clean. Give each distinct credential its own
+  cache directory or S3 prefix/bucket.
+- **No token ever reaches persisted state.** Neither a token nor any value
+  derived from one - not even a hash - is ever written to the local snapshot,
+  the S3 snapshot, the project registry, the lockfile, the metrics file, or
+  GALAXY.yml. A configured token is rendered as a fixed redacted placeholder by
+  every serialization path (`fmt`, JSON, YAML), and its plaintext is reachable
+  through exactly one call site in the whole program, immediately before it is
+  attached to an outgoing request.
 
 ## Reproducible CI
 
@@ -267,7 +426,7 @@ lockfile's recorded SHA256, so a poisoned cache or a mutated upstream artifact c
 install silently; lockfiles with no recorded SHA (older lockfiles) are not pin-checked.
 
 `go-galaxy hash` prints a deterministic `sha256:…` of the lockfile (or `requirements.yml`
-when no lockfile is present) — perfect as a CI cache key.
+when no lockfile is present) - perfect as a CI cache key.
 
 ### GitHub Actions
 
