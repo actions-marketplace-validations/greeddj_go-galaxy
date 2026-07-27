@@ -55,6 +55,32 @@ type InstalledEntry struct {
 	Deps           []string  `json:"deps"`
 }
 
+// WarmedEntry records that the warm command materialized a collection's
+// artifact into the content-addressable extracted store. Unlike
+// InstalledEntry, it has no install path and no project behind it: a
+// warm-only machine's project is recorded but its workspace never exists, so
+// this entry - and the age it was written - is the only signal cleanup has
+// that the extracted tree it names is still wanted (see
+// Store.WarmedArtifactSHAByKey and helpers.WarmedEntryMaxAge).
+//
+// The key is the plain ns.name@version collection key, deliberately not
+// scoped by server the way the deps cache and the artifact store are
+// (helpers.ScopedDepsCacheKey, helpers.ArtifactKey). Those two are lookup
+// keys, where a collision would serve one server's bytes in place of
+// another's; this map is never looked up by key at all - extractedKeepSet
+// discards the key and unions only the values - so the worst a collision can
+// do is under-protect. Two servers publishing the same ns.name@version with
+// different bytes resolve to different shas, the second warm overwrites the
+// first's entry, and the first tree loses its keep-set protection. That
+// self-heals with no network round trip: the artifact itself is server-scoped
+// and is never reclaimed on a warm-only machine, so the next warm or install
+// for that server re-extracts the tree from the still-cached tarball through
+// extracted.Store.Ensure.
+type WarmedEntry struct {
+	WarmedAt       time.Time `json:"warmed_at"`
+	ArtifactSHA256 string    `json:"artifact_sha256"`
+}
+
 // Store holds cached state for collections and metadata.
 type Store struct {
 	APICache     map[string]APICacheEntry   `json:"api_cache"`
@@ -65,6 +91,7 @@ type Store struct {
 	Roots        map[string][]string        `json:"roots"`
 	Resolved     map[string]ResolvedEntry   `json:"resolved"`
 	Versions     map[string]VersionsEntry   `json:"versions_cache"`
+	Warmed       map[string]WarmedEntry     `json:"warmed"`
 	Meta         SnapshotMeta               `json:"meta"`
 	mu           sync.RWMutex               `json:"-"`
 }
@@ -83,6 +110,7 @@ func New() *Store {
 		Roots:        make(map[string][]string),
 		Resolved:     make(map[string]ResolvedEntry),
 		Versions:     make(map[string]VersionsEntry),
+		Warmed:       make(map[string]WarmedEntry),
 	}
 }
 
@@ -158,6 +186,52 @@ func (m *Store) InstalledArtifactSHAByKey() map[string]string {
 		out[key] = entry.ArtifactSHA256
 	}
 	return out
+}
+
+// SetWarmed records that key's artifact (identified by artifactSHA) has been
+// materialized in the extracted store, stamping the current time. It returns
+// early on a nil receiver, an empty key, or an empty sha, so it can never
+// persist an entry that protects nothing. There is nothing to clone here,
+// unlike SetInstalled: WarmedEntry holds no reference-type field.
+func (m *Store) SetWarmed(key, artifactSHA string) {
+	if m == nil || key == "" || artifactSHA == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Warmed[key] = WarmedEntry{WarmedAt: time.Now().UTC(), ArtifactSHA256: artifactSHA}
+}
+
+// WarmedArtifactSHAByKey returns a fresh map from warmed collection key to
+// artifact sha, excluding entries with an empty sha and entries outside the
+// WarmedEntryMaxAge retention window. The window is enforced here, not just
+// at persist time: cleanup builds its keep set from this call and then saves
+// the snapshot in the same run, and the save prunes on the same predicate
+// (see snapshotData/copyFreshWarmed) - filtering here is what keeps the keep
+// set and the snapshot it is about to write in agreement, rather than leaving
+// every expiry lagging one whole cleanup cycle.
+func (m *Store) WarmedArtifactSHAByKey() map[string]string {
+	if m == nil {
+		return nil
+	}
+	cutoff := warmedRetentionCutoff()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make(map[string]string, len(m.Warmed))
+	for key, entry := range m.Warmed {
+		if entry.ArtifactSHA256 == "" || isStaleCacheEntry(entry.WarmedAt, cutoff) {
+			continue
+		}
+		out[key] = entry.ArtifactSHA256
+	}
+	return out
+}
+
+// warmedRetentionCutoff returns the instant before which a warmed entry is
+// stale. Shared by WarmedArtifactSHAByKey and snapshotData so the two sites
+// computing the same boundary cannot drift apart.
+func warmedRetentionCutoff() time.Time {
+	return time.Now().UTC().Add(-helpers.WarmedEntryMaxAge)
 }
 
 // GetDepsCache returns cached dependency constraints for a key. This is a
@@ -445,6 +519,7 @@ type snapshotData struct {
 	Roots        map[string][]string
 	Resolved     map[string]ResolvedEntry
 	Versions     map[string]VersionsEntry
+	Warmed       map[string]WarmedEntry
 	Meta         SnapshotMeta
 }
 
@@ -471,6 +546,7 @@ func (m *Store) MarshalSnapshot() ([]byte, error) {
 		Roots:        data.Roots,
 		Resolved:     data.Resolved,
 		Versions:     data.Versions,
+		Warmed:       data.Warmed,
 		Meta:         data.Meta,
 	}
 	return json.Marshal(snapshot)
@@ -500,6 +576,7 @@ func (m *Store) snapshotData() snapshotData {
 	defer m.mu.RUnlock()
 
 	cutoff := time.Now().UTC().Add(-helpers.CacheEntryMaxAge)
+	warmedCutoff := warmedRetentionCutoff()
 
 	data := snapshotData{
 		Meta:         m.Meta,
@@ -511,6 +588,7 @@ func (m *Store) snapshotData() snapshotData {
 		Roots:        make(map[string][]string, len(m.Roots)),
 		Resolved:     make(map[string]ResolvedEntry, len(m.Resolved)),
 		Versions:     make(map[string]VersionsEntry, len(m.Versions)),
+		Warmed:       make(map[string]WarmedEntry, len(m.Warmed)),
 	}
 
 	for key, entry := range m.APICache {
@@ -548,8 +626,23 @@ func (m *Store) snapshotData() snapshotData {
 		copy(clone, entry.List)
 		data.Versions[key] = VersionsEntry{FetchedAt: entry.FetchedAt, List: clone}
 	}
+	copyFreshWarmed(data.Warmed, m.Warmed, warmedCutoff)
 
 	return data
+}
+
+// copyFreshWarmed copies every entry from src into dst that was written at or
+// after cutoff. It is factored out of snapshotData, rather than inlined
+// there as a loop like the other buckets above, purely to keep snapshotData
+// under its cyclomatic complexity budget; the caller holds the store's read
+// lock for the duration of the call.
+func copyFreshWarmed(dst, src map[string]WarmedEntry, cutoff time.Time) {
+	for key, entry := range src {
+		if isStaleCacheEntry(entry.WarmedAt, cutoff) {
+			continue
+		}
+		dst[key] = entry
+	}
 }
 
 // Load reads cached state from the consolidated Bolt database. A schema
@@ -585,7 +678,7 @@ func Load(dbs *DBs) (*Store, error) {
 }
 
 // Save writes cached state to the consolidated Bolt database. The meta
-// bucket and all eight data buckets are written inside a single Bolt
+// bucket and all nine data buckets are written inside a single Bolt
 // transaction so a mid-save failure (e.g. a key or value exceeding Bolt's
 // limits) leaves the previously committed snapshot fully intact instead of
 // a partially overwritten mix of old and new data.
@@ -625,7 +718,7 @@ func ValidateSchema(version int) error {
 	}
 }
 
-// runLoadSteps reads the eight data buckets in the given transaction.
+// runLoadSteps reads the nine data buckets in the given transaction.
 func runLoadSteps(tx *bolt.Tx, store *Store) error {
 	steps := []func() error{
 		func() error { return loadAPICache(tx, store) },
@@ -636,6 +729,7 @@ func runLoadSteps(tx *bolt.Tx, store *Store) error {
 		func() error { return loadRoots(tx, store) },
 		func() error { return loadResolved(tx, store) },
 		func() error { return loadVersions(tx, store) },
+		func() error { return loadWarmed(tx, store) },
 	}
 	for _, step := range steps {
 		if err := step(); err != nil {
@@ -645,9 +739,10 @@ func runLoadSteps(tx *bolt.Tx, store *Store) error {
 	return nil
 }
 
-// runSaveSteps writes the eight data buckets in the given transaction, in a
+// runSaveSteps writes the nine data buckets in the given transaction, in a
 // fixed order (api_cache, deps_cache, installed, graph, requirements, roots,
-// resolved, versions_cache) that callers rely on for fault injection tests.
+// resolved, versions_cache, warmed) that callers rely on for fault injection
+// tests.
 func runSaveSteps(tx *bolt.Tx, data snapshotData) error {
 	steps := []func() error{
 		func() error { return saveAPICache(tx, data) },
@@ -658,6 +753,7 @@ func runSaveSteps(tx *bolt.Tx, data snapshotData) error {
 		func() error { return saveRoots(tx, data) },
 		func() error { return saveResolved(tx, data) },
 		func() error { return saveVersions(tx, data) },
+		func() error { return saveWarmed(tx, data) },
 	}
 	for _, step := range steps {
 		if err := step(); err != nil {
@@ -795,6 +891,17 @@ func loadVersions(tx *bolt.Tx, store *Store) error {
 	})
 }
 
+func loadWarmed(tx *bolt.Tx, store *Store) error {
+	return loadBucket(tx, helpers.StoreBucketWarmed, func(k, v []byte) error {
+		var entry WarmedEntry
+		if err := json.Unmarshal(v, &entry); err != nil {
+			return err
+		}
+		store.Warmed[string(k)] = entry
+		return nil
+	})
+}
+
 func saveMeta(tx *bolt.Tx, meta SnapshotMeta) error {
 	metaBucket, err := ensureEmptyBucket(tx, helpers.StoreBucketMeta)
 	if err != nil {
@@ -863,6 +970,12 @@ func saveResolved(tx *bolt.Tx, data snapshotData) error {
 
 func saveVersions(tx *bolt.Tx, data snapshotData) error {
 	return saveBucket(tx, helpers.StoreBucketVersions, data.Versions, func(entry VersionsEntry) ([]byte, error) {
+		return json.Marshal(&entry)
+	})
+}
+
+func saveWarmed(tx *bolt.Tx, data snapshotData) error {
+	return saveBucket(tx, helpers.StoreBucketWarmed, data.Warmed, func(entry WarmedEntry) ([]byte, error) {
 		return json.Marshal(&entry)
 	})
 }

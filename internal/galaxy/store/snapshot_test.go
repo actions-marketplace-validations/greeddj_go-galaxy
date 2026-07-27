@@ -38,6 +38,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	assertRoots(t, loaded)
 	assertResolved(t, loaded)
 	assertVersions(t, loaded)
+	assertWarmed(t, loaded)
 }
 
 func openTestDBs(t *testing.T) *DBs {
@@ -86,6 +87,7 @@ func buildTestStore(fixed time.Time) *Store {
 		"a.b": {Version: "1.0.0", Source: "https://example.com"},
 	})
 	st.SetVersionsCache("versions", []string{"1.0.0", "2.0.0"})
+	st.SetWarmed("a.b@1.0.0", "warmed-sha")
 	return st
 }
 
@@ -191,8 +193,16 @@ func assertVersions(t *testing.T, loaded *Store) {
 	}
 }
 
+func assertWarmed(t *testing.T, loaded *Store) {
+	t.Helper()
+	warmed := loaded.WarmedArtifactSHAByKey()
+	if got := warmed["a.b@1.0.0"]; got != "warmed-sha" {
+		t.Fatalf("unexpected warmed entry: %#v", warmed)
+	}
+}
+
 // TestSaveRollsBackWholeTransactionOnMidSaveFailure proves that Save writes
-// the meta bucket and all eight data buckets inside a single Bolt
+// the meta bucket and all nine data buckets inside a single Bolt
 // transaction: a failure partway through (here, an oversized key in the
 // installed bucket, which the fixed save order writes after api_cache)
 // must roll back the entire attempt, leaving the previously committed
@@ -447,9 +457,10 @@ func assertObjectShape(t *testing.T, payload []byte, bucket, key, firstField, se
 }
 
 // TestSnapshotPrunesStaleAcrossAllBuckets proves entries last written before
-// the CacheEntryMaxAge retention window are dropped from the persisted
-// snapshot in all three age-eviction buckets (APICache, DepsCache,
-// Versions), while entries within the window survive, across both persist
+// their retention window are dropped from the persisted snapshot in all four
+// age-eviction buckets (APICache, DepsCache, and Versions against
+// CacheEntryMaxAge; Warmed against its own separate helpers.WarmedEntryMaxAge
+// window), while entries within the window survive, across both persist
 // paths (local Bolt Save/Load and MarshalSnapshot/json.Unmarshal).
 func TestSnapshotPrunesStaleAcrossAllBuckets(t *testing.T) {
 	t.Parallel()
@@ -465,6 +476,8 @@ func TestSnapshotPrunesStaleAcrossAllBuckets(t *testing.T) {
 		st.DepsCache["deps-fresh"] = DepsCacheEntry{FetchedAt: fresh, Deps: map[string]string{"a.b": "1"}}
 		st.Versions["versions-stale"] = VersionsEntry{FetchedAt: stale, List: []string{"1.0.0"}}
 		st.Versions["versions-fresh"] = VersionsEntry{FetchedAt: fresh, List: []string{"1.0.0"}}
+		st.Warmed["warmed-stale"] = WarmedEntry{WarmedAt: stale, ArtifactSHA256: "sha-stale"}
+		st.Warmed["warmed-fresh"] = WarmedEntry{WarmedAt: fresh, ArtifactSHA256: "sha-fresh"}
 		return st
 	}
 
@@ -491,7 +504,7 @@ func TestSnapshotPrunesStaleAcrossAllBuckets(t *testing.T) {
 
 // assertStalePruned checks that every "-stale" entry seeded by
 // TestSnapshotPrunesStaleAcrossAllBuckets's build helper is gone and every
-// "-fresh" entry survived, across all three age-eviction buckets.
+// "-fresh" entry survived, across all four age-eviction buckets.
 func assertStalePruned(t *testing.T, loaded *Store) {
 	t.Helper()
 	if _, ok := loaded.APICache["api-stale"]; ok {
@@ -511,6 +524,12 @@ func assertStalePruned(t *testing.T, loaded *Store) {
 	}
 	if _, ok := loaded.Versions["versions-fresh"]; !ok {
 		t.Fatalf("expected fresh versions cache entry to survive")
+	}
+	if _, ok := loaded.Warmed["warmed-stale"]; ok {
+		t.Fatalf("expected stale warmed entry to be pruned")
+	}
+	if _, ok := loaded.Warmed["warmed-fresh"]; !ok {
+		t.Fatalf("expected fresh warmed entry to survive")
 	}
 }
 
@@ -575,5 +594,67 @@ func TestLoadDropsV3BoltAndRebuilds(t *testing.T) {
 	}
 	if !reflect.DeepEqual(loaded, New()) {
 		t.Fatalf("expected a fresh store after dropping a v3 snapshot, got %#v", loaded)
+	}
+}
+
+// TestSetWarmedIgnoresEmptyKeyOrSHA proves SetWarmed can never persist an
+// entry that would protect nothing: an empty key or an empty artifact sha is
+// silently ignored rather than stored, since a key or sha string that no
+// caller can ever look up again would just be dead weight in the snapshot.
+func TestSetWarmedIgnoresEmptyKeyOrSHA(t *testing.T) {
+	t.Parallel()
+	st := New()
+
+	st.SetWarmed("", "sha-1")
+	st.SetWarmed("a.b@1.0.0", "")
+
+	if got := st.WarmedArtifactSHAByKey(); len(got) != 0 {
+		t.Fatalf("expected no warmed entries after empty-key/empty-sha calls, got %#v", got)
+	}
+}
+
+// TestWarmedArtifactSHAByKeyExcludesStaleEntry proves WarmedArtifactSHAByKey
+// applies the same WarmedEntryMaxAge retention window SetWarmed's persisted
+// data is later pruned against, rather than returning every entry ever
+// written regardless of age.
+func TestWarmedArtifactSHAByKeyExcludesStaleEntry(t *testing.T) {
+	t.Parallel()
+	st := New()
+	st.SetWarmed("fresh.key@1.0.0", "sha-fresh")
+	// Seed the stale entry directly: SetWarmed always stamps time.Now, so a
+	// genuinely stale WarmedAt can only be produced by writing the map field.
+	st.Warmed["stale.key@1.0.0"] = WarmedEntry{
+		WarmedAt:       time.Now().UTC().Add(-40 * 24 * time.Hour),
+		ArtifactSHA256: "sha-stale",
+	}
+
+	got := st.WarmedArtifactSHAByKey()
+	if _, ok := got["stale.key@1.0.0"]; ok {
+		t.Fatalf("expected the stale warmed entry to be excluded, got %#v", got)
+	}
+	if got["fresh.key@1.0.0"] != "sha-fresh" {
+		t.Fatalf("expected the fresh warmed entry to survive, got %#v", got)
+	}
+}
+
+// TestWarmedArtifactSHAByKeyReturnsIndependentMap proves the map
+// WarmedArtifactSHAByKey returns is a fresh copy: mutating it must never
+// corrupt the store's own Warmed state, mirroring the same guarantee
+// InstalledArtifactSHAByKey already provides.
+func TestWarmedArtifactSHAByKeyReturnsIndependentMap(t *testing.T) {
+	t.Parallel()
+	st := New()
+	st.SetWarmed("a.b@1.0.0", "sha-1")
+
+	got := st.WarmedArtifactSHAByKey()
+	got["a.b@1.0.0"] = "tampered"
+	got["c.d@2.0.0"] = "injected"
+
+	fresh := st.WarmedArtifactSHAByKey()
+	if fresh["a.b@1.0.0"] != "sha-1" {
+		t.Fatalf("expected the store's own warmed entry to be unaffected by mutating a returned map, got %#v", fresh)
+	}
+	if _, ok := fresh["c.d@2.0.0"]; ok {
+		t.Fatalf("expected an injected key in a returned map to never appear in the store, got %#v", fresh)
 	}
 }

@@ -139,7 +139,7 @@ Clean unreachable collections:
 
 - `install` (`i`) - install collections from `requirements.yml`.
 - `lock` (`l`) - resolve and write `requirements.lock.yml` for reproducible CI.
-- `warm` (`w`) - populate the artifact + extracted caches without installing (for CI image bake). Requires a cache: `--no-cache` is rejected as a usage error rather than downloading everything and discarding it.
+- `warm` (`w`) - populate the artifact + extracted caches without installing (for CI image bake). Requires a cache: `--no-cache` is rejected as a usage error rather than downloading everything and discarding it. A warmed collection's extracted tree is protected from `cleanup` for 30 days after its last warm, so a machine that warms and then stops warming eventually reclaims the space.
 - `hash` (`h`) - print a deterministic cache key (`sha256:…`) for use as a CI cache key.
 - `cleanup` (`c`) - remove unused cached collections across projects.
 
@@ -200,6 +200,10 @@ S3 cache options (if `--s3-bucket` is set, S3 backend is used):
 - `--s3-path-style-disabled` (`$GO_GALAXY_S3_PATH_STYLE_DISABLED`)
 
 `cleanup` aborts with a non-zero exit and deletes nothing if a recorded project's `requirements.yml` is present but cannot be read or parsed.
+
+`cleanup`'s extracted-cache sweep keeps a collection warmed within the last 30 days even if no project currently installs it, so a `warm`-only machine does not lose the extracted trees it exists to produce; a warmed entry that goes stale (no warm run for 30 days) is swept like any other unreferenced entry.
+
+**Upgrade note:** this release bumps the cache snapshot schema, so the first `install`, `lock`, or `warm` run after upgrading rebuilds its metadata caches cold. If you run `cleanup` before any `install` or `warm` has run under the new version, it will sweep the extracted store once, since the installed set it derives its keep set from was just dropped along with the old snapshot. Artifacts and their sidecars in the artifact cache are untouched by this, so the recovery is a local re-extraction from the still-cached tarball, not a re-download.
 
 ## requirements.yml
 

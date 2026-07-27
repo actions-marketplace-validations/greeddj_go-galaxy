@@ -172,7 +172,30 @@ func warmOne(ctx context.Context, deps installDeps, col collection) error {
 	if payload.artifact.Cleanup != nil {
 		defer payload.artifact.Cleanup()
 	}
+	recordWarmed(deps, col, payload.artifactSHA)
 	return nil
+}
+
+// recordWarmed records that col's artifact has been materialized in the
+// extracted store, so cleanup keeps its tree even though warm never calls
+// recordInstall. It runs unconditionally on every warmOne call, including a
+// cache hit, which is what re-stamps a periodically re-warmed key and keeps
+// its WarmedEntryMaxAge retention window meaningful rather than frozen at the
+// key's first warm.
+//
+// install must never call this: recordInstall already writes an
+// InstalledEntry whose sha InstalledArtifactSHAByKey feeds into the very same
+// keep set (see extractedKeepSet), so a warmed entry there would be
+// redundant - and worse than redundant, since it would keep the extracted
+// tree alive for up to WarmedEntryMaxAge past the moment cleanup legitimately
+// garbage-collected the install that produced it, actively defeating
+// cleanup. lock never touches an artifact at all, so it has nothing to
+// record either.
+func recordWarmed(deps installDeps, col collection, artifactSHA string) {
+	if deps.st == nil || deps.extractStore == nil {
+		return
+	}
+	deps.st.SetWarmed(col.key(), artifactSHA)
 }
 
 // warmVerifyAndEnsure enforces col's pin (if any) and then populates the

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -695,6 +696,33 @@ func seedSnapshotInstalled(t *testing.T, cfg *config.Config, runtime *infra.Infr
 	}
 }
 
+// seedSnapshotWarmed saves a store snapshot at cfg.CacheDir whose Warmed set
+// is exactly entries, via the real local backend (SaveStore), mirroring how a
+// prior warm run would have persisted it. Entries are written directly into
+// the exported Warmed map rather than through Store.SetWarmed, so a caller
+// can seed a deliberately stale WarmedAt (SetWarmed always stamps the current
+// time and cannot produce that).
+func seedSnapshotWarmed(t *testing.T, cfg *config.Config, runtime *infra.Infra, entries map[string]store.WarmedEntry) {
+	t.Helper()
+	backend, err := cacheBackend.New(cfg, runtime)
+	if err != nil {
+		t.Fatalf("failed to build backend for seeding: %v", err)
+	}
+	if err := backend.Open(t.Context()); err != nil {
+		t.Fatalf("failed to open backend for seeding: %v", err)
+	}
+	defer func() {
+		if err := backend.Close(t.Context()); err != nil {
+			t.Errorf("failed to close seeding backend: %v", err)
+		}
+	}()
+	st := store.New()
+	maps.Copy(st.Warmed, entries)
+	if err := backend.SaveStore(t.Context(), st); err != nil {
+		t.Fatalf("failed to save seeded store: %v", err)
+	}
+}
+
 // seedExtractedDir creates <cacheDir>/extracted/<sha>/ with a ready marker,
 // mirroring the on-disk layout extracted.Store.Ensure/Promote produce, so
 // Sweep sees a real completed entry rather than an empty directory.
@@ -770,6 +798,148 @@ func TestSweepKeepsCacheWhenWorkspaceAbsent(t *testing.T) {
 			t.Fatalf("expected extracted dir %s to survive an absent workspace, stat error: %v", entry.ArtifactSHA256, statErr)
 		}
 	}
+}
+
+// seedSnapshotInstalledAndWarmed saves a store snapshot at cfg.CacheDir whose
+// Installed and Warmed sets are exactly installed and warmed, in a single
+// SaveStore call. Calling seedSnapshotInstalled and seedSnapshotWarmed back
+// to back would not work for a test needing both: each builds its own
+// store.New() and Save fully replaces every bucket from what it is given, so
+// the second, separate seeding call would silently wipe the bucket the first
+// one just wrote.
+func seedSnapshotInstalledAndWarmed(
+	t *testing.T,
+	cfg *config.Config,
+	runtime *infra.Infra,
+	installed map[string]store.InstalledEntry,
+	warmed map[string]store.WarmedEntry,
+) {
+	t.Helper()
+	backend, err := cacheBackend.New(cfg, runtime)
+	if err != nil {
+		t.Fatalf("failed to build backend for seeding: %v", err)
+	}
+	if err := backend.Open(t.Context()); err != nil {
+		t.Fatalf("failed to open backend for seeding: %v", err)
+	}
+	defer func() {
+		if err := backend.Close(t.Context()); err != nil {
+			t.Errorf("failed to close seeding backend: %v", err)
+		}
+	}()
+	st := store.New()
+	for key, entry := range installed {
+		st.SetInstalled(key, entry)
+	}
+	maps.Copy(st.Warmed, warmed)
+	if err := backend.SaveStore(t.Context(), st); err != nil {
+		t.Fatalf("failed to save seeded store: %v", err)
+	}
+}
+
+// TestSweepKeepsWarmedShaWithNoInstalledEntry is the core regression guard
+// for this commit's fix: a warm-only machine's snapshot has no Installed
+// entries at all (warm never calls recordInstall), only a Warmed entry, and
+// its recorded project's workspace does not exist (pickCollectionsPath
+// returns "" and the project is skipped entirely, exactly like
+// TestSweepKeepsCacheWhenWorkspaceAbsent's install-side scenario). Before
+// this fix, extractedKeepSet only ever consulted InstalledArtifactSHAByKey,
+// so this exact setup produced an empty keep set and Sweep(empty) wiped the
+// extracted tree warm had just materialized.
+func TestSweepKeepsWarmedShaWithNoInstalledEntry(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	seedSnapshotWarmed(t, cfg, runtime, map[string]store.WarmedEntry{
+		"ns.name@1.0.0": {WarmedAt: time.Now().UTC(), ArtifactSHA256: "sha-warmed"},
+	})
+	seedExtractedDir(t, cacheDir, "sha-warmed")
+	recordAbsentWorkspaceProject(t, cfg, runtime, downloadPath)
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+
+	assertExtractedDirsSurvive(t, cacheDir, "sha-warmed")
+}
+
+// TestSweepPrunesStaleWarmedSha proves a warmed entry only protects its
+// extracted tree while it is fresh: one seeded with a WarmedAt older than
+// helpers.WarmedEntryMaxAge no longer contributes to the keep set, so its
+// extracted tree is swept exactly like a genuine orphan would be.
+//
+// The stale entry never reaches cleanup's keep set: the persist-time prune
+// inside seedSnapshotWarmed's own SaveStore (snapshotData/copyFreshWarmed)
+// already drops it, so it is absent from the snapshot cleanup loads. This
+// test therefore pins the end-to-end retention outcome and stays green if
+// either retention site survives alone; WarmedArtifactSHAByKey's own
+// read-side filter - the one that matters when an entry goes stale between
+// its last save and a later cleanup run - is pinned separately by
+// TestWarmedArtifactSHAByKeyExcludesStaleEntry.
+func TestSweepPrunesStaleWarmedSha(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	staleAt := time.Now().UTC().Add(-40 * 24 * time.Hour)
+	seedSnapshotWarmed(t, cfg, runtime, map[string]store.WarmedEntry{
+		"ns.name@1.0.0": {WarmedAt: staleAt, ArtifactSHA256: "sha-stale-warmed"},
+	})
+	seedExtractedDir(t, cacheDir, "sha-stale-warmed")
+	recordAbsentWorkspaceProject(t, cfg, runtime, downloadPath)
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+
+	dir := filepath.Join(cacheDir, extracted.RootDirName, "sha-stale-warmed")
+	if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the stale warmed entry's extracted dir to be swept, stat error: %v", statErr)
+	}
+}
+
+// TestSweepKeepsWarmedShaWhenInstalledEntryRemovedAsUnreachable proves
+// the warmed half of extractedKeepSet is never filtered by the installed
+// half's wouldRemove exclusion: a key that is
+// both installed (and gets removed as unreachable in this very run) and
+// warmed must still have its extracted tree kept, since warm's intent is
+// independent of install reachability. seedInstallTree/registerCleanupProject
+// give ns.name@1.0.0 a real, unreferenced on-disk install, so removeUnused
+// actually deletes its InstalledEntry in this run - the exact case where the
+// two signals disagree and the warmed union must win.
+func TestSweepKeepsWarmedShaWhenInstalledEntryRemovedAsUnreachable(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+	installDir := seedInstallTree(t, downloadPath)
+	registerCleanupProject(t, cacheDir, downloadPath)
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	const sha = "sha-shared"
+	seedSnapshotInstalledAndWarmed(t, cfg, runtime,
+		map[string]store.InstalledEntry{"ns.name@1.0.0": {ArtifactSHA256: sha}},
+		map[string]store.WarmedEntry{"ns.name@1.0.0": {WarmedAt: time.Now().UTC(), ArtifactSHA256: sha}},
+	)
+	seedExtractedDir(t, cacheDir, sha)
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+
+	manifestPath := filepath.Join(installDir, "MANIFEST.json")
+	if _, statErr := os.Stat(manifestPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the unreferenced collection's install to be removed, stat error: %v", statErr)
+	}
+	assertExtractedDirsSurvive(t, cacheDir, sha)
 }
 
 // TestSweepDropsUnreferencedSha proves the snapshot-derived keep set still
@@ -1173,6 +1343,45 @@ func TestDryRunReportsExtractedSweep(t *testing.T) {
 	}
 	if printer.hasPrintContaining("sha-keep") {
 		t.Fatalf("expected no would-sweep report for the reachable, kept sha-keep, got prints: %v", printer.prints)
+	}
+}
+
+// TestDryRunReportsExtractedSweepExcludesWarmedSha is the dry-run mirror of
+// TestDryRunReportsExtractedSweep for a warmed entry: a warmed sha must never
+// appear in the would-sweep report (the same as a reachable installed sha
+// would not), while an unrelated true orphan is still reported, and dry-run
+// deletes nothing either way.
+func TestDryRunReportsExtractedSweepExcludesWarmedSha(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: true}
+	seedRuntime := newTestRuntime()
+	seedSnapshotWarmed(t, cfg, seedRuntime, map[string]store.WarmedEntry{
+		"ns.name@1.0.0": {WarmedAt: time.Now().UTC(), ArtifactSHA256: "sha-warmed"},
+	})
+	seedExtractedDir(t, cacheDir, "sha-warmed")
+	seedExtractedDir(t, cacheDir, "sha-orphan")
+	recordAbsentWorkspaceProject(t, cfg, seedRuntime, downloadPath)
+
+	printer := &recordingPrinter{}
+	runtime := infra.New(printer, http.DefaultClient)
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected dry-run Start to succeed, got %v", err)
+	}
+
+	// Primary, non-negotiable assertion: dry-run deletes nothing at all.
+	assertExtractedDirsSurvive(t, cacheDir, "sha-warmed", "sha-orphan")
+
+	// Secondary assertion: the report never names a warmed, kept sha, but
+	// still names the true orphan.
+	if printer.hasPrintContaining("sha-warmed") {
+		t.Fatalf("expected no would-sweep report for the warmed sha-warmed, got prints: %v", printer.prints)
+	}
+	if !printer.hasPrintContaining("sha-orphan") {
+		t.Fatalf("expected a would-sweep report for sha-orphan, got prints: %v", printer.prints)
 	}
 }
 

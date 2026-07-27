@@ -735,14 +735,18 @@ func reportLegacyArtifactSweepCandidate(ctx context.Context, runtime *infra.Infr
 }
 
 // sweepExtractedStore drops content-addressable extracted entries whose SHA
-// is not referenced by any entry in the persisted snapshot's Installed set.
-// The snapshot - not an on-disk workspace scan - is the correct source of
-// truth here: in a real run, removeUnused has already pruned it down to
-// installed entries that are either still reachable or belong to a project
-// whose workspace was absent this run (and so was never scanned or pruned at
-// all). An on-disk scan would see an empty keep set for every absent
-// workspace, which is the normal ephemeral-CI state, and would wipe the
-// entire extracted cache.
+// is not referenced by any entry in the persisted snapshot's Installed set,
+// nor by a still-fresh entry in its Warmed set. The snapshot - not an on-disk
+// workspace scan - is the correct source of truth here: in a real run,
+// removeUnused has already pruned it down to installed entries that are
+// either still reachable or belong to a project whose workspace was absent
+// this run (and so was never scanned or pruned at all). An on-disk scan
+// would see an empty keep set for every absent workspace, which is the
+// normal ephemeral-CI state, and would wipe the entire extracted cache. A
+// warmed entry is the only evidence a warm-only machine - no project
+// workspace exists at all, so pickCollectionsPath skips the project entirely
+// and it never contributes to installedByKey/reachable either - still wants
+// its extracted trees; it expires purely by age (helpers.WarmedEntryMaxAge).
 //
 // In a dry run, removeUnused does not prune the snapshot (it only reports
 // what it would remove), so the snapshot still contains the about-to-be-
@@ -774,10 +778,16 @@ func sweepExtractedStore(
 	_ = extractedStore.Sweep(keep)
 }
 
-// extractedKeepSet builds the set of extracted-store SHAs to keep from the
-// persisted snapshot, excluding any key that removeUnused would remove (or
-// already removed, in a real run) so a dry-run report matches what a real
-// run would actually sweep.
+// extractedKeepSet builds the set of extracted-store SHAs to keep: installed-
+// and-still-referenced union warmed-and-still-fresh. The installed half
+// excludes any key that removeUnused would remove (or already removed, in a
+// real run) so a dry-run report matches what a real run would actually
+// sweep. The warmed half is unioned in unconditionally: it is deliberately not
+// subject to the installed half's wouldRemove exclusion, since a key that is
+// both installed-unreachable and warmed must still keep its tree - warm's
+// intent is independent of install reachability. The two loops below are pure
+// additions to the same set, so their relative order is irrelevant; what is
+// load-bearing is that the warmed loop never consults wouldRemove.
 func extractedKeepSet(
 	st *store.Store,
 	reachable map[string]bool,
@@ -791,11 +801,15 @@ func extractedKeepSet(
 	}
 
 	shaByKey := st.InstalledArtifactSHAByKey()
-	keep := make(map[string]bool, len(shaByKey))
+	warmedByKey := st.WarmedArtifactSHAByKey()
+	keep := make(map[string]bool, len(shaByKey)+len(warmedByKey))
 	for key, sha := range shaByKey {
 		if wouldRemove[key] {
 			continue
 		}
+		keep[sha] = true
+	}
+	for _, sha := range warmedByKey {
 		keep[sha] = true
 	}
 	return keep

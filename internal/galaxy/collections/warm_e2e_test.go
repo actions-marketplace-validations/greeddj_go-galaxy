@@ -87,7 +87,10 @@ func assertMetricsCommand(t *testing.T, path, want string) {
 // artifact cache and the content-addressable extracted store, without ever
 // creating an ansible_collections tree under cfg.DownloadPath (warm never
 // installs) and without recording anything in the persisted snapshot's
-// installed set (warm never calls recordInstall).
+// installed set (warm never calls recordInstall). It also asserts warm's
+// side of this commit's fix: each collection gets a Warmed entry keyed by its
+// own ns.name@version, recording exactly the artifact sha the collection
+// actually resolved to.
 func TestWarmColdCachePopulatesCacheWithoutInstalling(t *testing.T) {
 	t.Parallel()
 	f := newE2EFixture(t)
@@ -106,6 +109,80 @@ func TestWarmColdCachePopulatesCacheWithoutInstalling(t *testing.T) {
 	st := loadStoreSnapshot(t, f.cfg, f.runtime)
 	if got := len(st.InstalledArtifactSHAByKey()); got != 0 {
 		t.Errorf("installed set size = %d, want 0 (warm never calls recordInstall)", got)
+	}
+
+	warmed := st.WarmedArtifactSHAByKey()
+	if got := warmed[collectionKey(f.appV1)]; got != f.appV1.SHA256 {
+		t.Errorf("warmed[%q] = %q, want %q", collectionKey(f.appV1), got, f.appV1.SHA256)
+	}
+	if got := warmed[collectionKey(f.libV1)]; got != f.libV1.SHA256 {
+		t.Errorf("warmed[%q] = %q, want %q", collectionKey(f.libV1), got, f.libV1.SHA256)
+	}
+}
+
+// TestInstallRecordsNoWarmedEntries proves installCollection never calls
+// recordWarmed: recordInstall alone already keeps a normal install's
+// extracted tree reachable through InstalledArtifactSHAByKey, and a warmed
+// entry there would be redundant at best (see recordWarmed's own doc
+// comment) - this guards that invariant against a future refactor
+// accidentally wiring the call in on the install path too.
+func TestInstallRecordsNoWarmedEntries(t *testing.T) {
+	t.Parallel()
+	f := newE2EFixture(t)
+
+	if err := collections.Start(context.Background(), f.cfg, f.runtime); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	st := loadStoreSnapshot(t, f.cfg, f.runtime)
+	if got := len(st.WarmedArtifactSHAByKey()); got != 0 {
+		t.Errorf("warmed set size = %d, want 0 (install never calls recordWarmed)", got)
+	}
+}
+
+// TestInstallPreservesWarmedEntries is TestInstallRecordsNoWarmedEntries's
+// guard pair from the opposite side: that test proves install never adds a
+// warmed entry, this one proves install never removes or rewrites one that
+// warm already wrote. This is pinned as its own regression test rather than
+// left to whatever installCollection and recordWarmed happen to do, because
+// initInstall loads the full snapshot and finalizeInstall writes it back
+// through the shared snapshotData copy path - the warmed set only survives an
+// install because nothing on the install path mutates m.Warmed, an invariant
+// a future change to either function could break with every other test still
+// green. Concretely, this guards against a future "prune warmed entries for
+// keys we just installed" optimization, which would silently reintroduce the
+// original bug (see TestWarmColdCachePopulatesCacheWithoutInstalling) with an
+// otherwise green suite.
+func TestInstallPreservesWarmedEntries(t *testing.T) {
+	t.Parallel()
+	f := newE2EFixture(t)
+
+	if err := collections.Warm(context.Background(), f.cfg, f.runtime); err != nil {
+		t.Fatalf("Warm (populate the warmed set): %v", err)
+	}
+
+	warmedBefore := loadStoreSnapshot(t, f.cfg, f.runtime).WarmedArtifactSHAByKey()
+	appKey, libKey := collectionKey(f.appV1), collectionKey(f.libV1)
+	if got := warmedBefore[appKey]; got != f.appV1.SHA256 {
+		t.Fatalf("warmedBefore[%q] = %q, want %q", appKey, got, f.appV1.SHA256)
+	}
+	if got := warmedBefore[libKey]; got != f.libV1.SHA256 {
+		t.Fatalf("warmedBefore[%q] = %q, want %q", libKey, got, f.libV1.SHA256)
+	}
+
+	if err := collections.Start(context.Background(), f.cfg, f.runtime); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	warmedAfter := loadStoreSnapshot(t, f.cfg, f.runtime).WarmedArtifactSHAByKey()
+	// A plain len() comparison would also pass if install rewrote both entries
+	// with different (but still two) values, so each key is checked against
+	// the exact sha recorded before install ran.
+	if got := warmedAfter[appKey]; got != warmedBefore[appKey] {
+		t.Errorf("warmedAfter[%q] = %q, want unchanged %q", appKey, got, warmedBefore[appKey])
+	}
+	if got := warmedAfter[libKey]; got != warmedBefore[libKey] {
+		t.Errorf("warmedAfter[%q] = %q, want unchanged %q", libKey, got, warmedBefore[libKey])
 	}
 }
 
@@ -250,7 +327,11 @@ func TestWarmOffline(t *testing.T) {
 // still saves the snapshot, and still records nothing in the installed set -
 // warm has no ordering dependency between collections and never calls
 // recordInstall, so a partial failure must not corrupt or roll back the work
-// that did succeed.
+// that did succeed. It also asserts the corresponding warmed-set split: the
+// successful acme.app has a warmed entry recording its extracted artifact
+// sha, while the failed acme.lib has none - recordWarmed only ever runs after
+// prepareWithRecovery/warmVerifyAndEnsure have already succeeded for that
+// one collection.
 func TestWarmPartialFailureKeepsSuccessfulCollectionCached(t *testing.T) {
 	t.Parallel()
 	f := newE2EFixture(t)
@@ -275,6 +356,21 @@ func TestWarmPartialFailureKeepsSuccessfulCollectionCached(t *testing.T) {
 	if got := len(st.InstalledArtifactSHAByKey()); got != 0 {
 		t.Errorf("installed set size = %d, want 0 (warm never calls recordInstall)", got)
 	}
+
+	warmed := st.WarmedArtifactSHAByKey()
+	if got := warmed[collectionKey(f.appV1)]; got != f.appV1.SHA256 {
+		t.Errorf("warmed[%q] = %q, want %q (the successful collection)", collectionKey(f.appV1), got, f.appV1.SHA256)
+	}
+	if _, ok := warmed[collectionKey(f.libV1)]; ok {
+		t.Errorf("warmed[%q] present, want absent (the collection whose download persistently failed)", collectionKey(f.libV1))
+	}
+}
+
+// collectionKey builds the ns.name@version snapshot key for a fakegalaxy
+// Version, matching the unexported collection.key() format the production
+// code stamps into the store.
+func collectionKey(v fakegalaxy.Version) string {
+	return v.Namespace + "." + v.Name + "@" + v.Version
 }
 
 // TestWarmLockReleasedAfterFailingRun asserts that a failing warm run still

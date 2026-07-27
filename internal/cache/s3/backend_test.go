@@ -237,7 +237,9 @@ func TestSaveStoreStampsSchemaAndTimestamp(t *testing.T) {
 
 // TestSaveStoreRoundTripsDataShape confirms MarshalSnapshot's JSON shape is
 // unchanged from a direct json.Marshal(st): a populated store saved through
-// SaveStore and read back through LoadStore preserves its data exactly.
+// SaveStore and read back through LoadStore preserves its data exactly,
+// including a warmed entry - the S3 backend's gzip-on-the-wire round trip
+// must not drop the warmed bucket any more than it drops the others.
 func TestSaveStoreRoundTripsDataShape(t *testing.T) {
 	t.Parallel()
 	b := newTestBackend(t)
@@ -250,6 +252,7 @@ func TestSaveStoreRoundTripsDataShape(t *testing.T) {
 	// regardless of the shape-preservation behavior under test.
 	st.SetAPICache("api", store.APICacheEntry{URL: "https://example.com/api", ETag: "etag", FetchedAt: time.Now().UTC()})
 	st.SetInstalled("a.b@1.0.0", store.InstalledEntry{ArtifactSHA256: "abc"})
+	st.SetWarmed("c.d@1.0.0", "warmed-sha")
 
 	if err := b.SaveStore(ctx, st); err != nil {
 		t.Fatalf("SaveStore error: %v", err)
@@ -266,6 +269,9 @@ func TestSaveStoreRoundTripsDataShape(t *testing.T) {
 	installed, ok := loaded.GetInstalled("a.b@1.0.0")
 	if !ok || installed.ArtifactSHA256 != "abc" {
 		t.Fatalf("unexpected installed entry after round trip: %#v (ok=%v)", installed, ok)
+	}
+	if got := loaded.WarmedArtifactSHAByKey()["c.d@1.0.0"]; got != "warmed-sha" {
+		t.Fatalf("unexpected warmed entry after round trip: %q", got)
 	}
 }
 

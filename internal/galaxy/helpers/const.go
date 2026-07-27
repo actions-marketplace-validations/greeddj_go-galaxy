@@ -142,17 +142,20 @@ const (
 
 	// StoreSnapshotSchemaVersion is the current snapshot schema version.
 	//
-	// Bumped to 5 when the deps-cache key gained a server-base scope (see
-	// helpers.ScopedDepsCacheKey) and the artifact cache key gained a
-	// server-fingerprint prefix (see helpers.ArtifactKey): both changes are
-	// pure additions to what a key looks like, not a change to any persisted
-	// struct's shape, so there is no field-level migration to write. The
-	// existing drop-and-rebuild policy already handles it - store.Load and
-	// the S3 schema probe discard a snapshot older than this version and
-	// rebuild cold - which is also what retires every old-format deps-cache
-	// key still on record: it never survives into a schema-5 snapshot to
-	// collide with anything.
-	StoreSnapshotSchemaVersion = 5
+	// Bumped to 6 when the snapshot gained a warmed set (StoreBucketWarmed):
+	// the collection keys `warm` materialized into the content-addressable
+	// extracted store, which cleanup must keep even though warm never writes
+	// an installed entry (see Store.SetWarmed / Store.WarmedArtifactSHAByKey).
+	// There is no field-level migration to write: a schema-5 snapshot simply
+	// has no warmed bucket, and the existing drop-and-rebuild policy already
+	// produces exactly the same end state any migration could - an empty
+	// warmed set that the next warm refills. The bump is deliberate rather
+	// than optional even though the change is purely additive: without it, an
+	// older binary sharing an S3 cache would silently drop the `warmed` key on
+	// its next SaveStore and re-expose the bug this schema version fixes, and
+	// a loud ErrUnsupportedSchemaVersion on that old binary is the intended
+	// failure instead.
+	StoreSnapshotSchemaVersion = 6
 
 	// CacheEntryMaxAge is the retention window for persisted cache entries
 	// (API responses, resolved versions lists, and dependency constraints).
@@ -160,6 +163,17 @@ const (
 	// entries, last written or last revalidated - is pruned from the snapshot,
 	// bounding both the local Bolt file and the S3 object in size and age.
 	CacheEntryMaxAge = 30 * 24 * time.Hour
+
+	// WarmedEntryMaxAge is the retention window for a warmed entry (see
+	// Store.SetWarmed). It is a separate constant from CacheEntryMaxAge, not a
+	// reuse of it: CacheEntryMaxAge bounds cached metadata in the snapshot,
+	// while this one decides how long real on-disk content - an extracted
+	// tree, potentially hundreds of MB - stays protected from cleanup after
+	// its last warm. This is the entire reachability rule for a warmed entry:
+	// it has no project and no install path behind it, so the only evidence
+	// that it is still wanted is that a warm run re-recorded it within this
+	// window.
+	WarmedEntryMaxAge = 30 * 24 * time.Hour
 
 	// StoreDBLock is the cache lock file name.
 	StoreDBLock = ".go-galaxy.lock"
@@ -213,6 +227,8 @@ const (
 	StoreBucketResolved = "resolved"
 	// StoreBucketVersions is the bucket name for versions cache.
 	StoreBucketVersions = "versions_cache"
+	// StoreBucketWarmed is the bucket name for warmed extracted entries.
+	StoreBucketWarmed = "warmed"
 
 	// StoreMetaSchemaVersion is the metadata key for the snapshot schema version.
 	StoreMetaSchemaVersion = "schema_version"
