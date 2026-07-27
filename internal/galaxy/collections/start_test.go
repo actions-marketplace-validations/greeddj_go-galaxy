@@ -14,26 +14,39 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 )
 
-// capturingPrinter is an output.Printer stub that records Printf, Warnf, and
-// Debugf calls (into separate slices, mirroring the Printer interface's
-// separate transient, always-emitted, and debug-only tiers) so a test can
-// assert a best-effort failure, a security-relevant warning, or a
-// debug-tier-only signal surfaced on the expected channel rather than being
-// silently swallowed or emitted on the wrong tier. It embeds noopPrinter
-// (defined in lock_pin_test.go) for the other Printer methods.
+// capturingPrinter is an output.Printer stub that records Printf,
+// PersistentPrintf, Warnf, and Debugf calls into separate slices, one per
+// method, so a test can assert a best-effort failure (Printf, suppressed in
+// quiet mode), a user-facing result announcement (PersistentPrintf, always
+// emitted to stdout), a security-relevant warning (Warnf, always emitted to
+// stderr - PersistentPrintf and Warnf both route through Progress.persist and
+// are both always-emitted, differing only in which stream they write to, per
+// the stdout-purity rule), or a debug-only signal (Debugf, verbose mode only)
+// surfaced on the expected channel rather than being silently swallowed or
+// emitted on the wrong one. It embeds noopPrinter (defined in
+// lock_pin_test.go) for the other Printer methods.
 type capturingPrinter struct {
 	noopPrinter
 
-	prints []string
-	warns  []string
-	debugs []string
-	mu     sync.Mutex
+	prints   []string
+	persists []string
+	warns    []string
+	debugs   []string
+	mu       sync.Mutex
 }
 
 func (p *capturingPrinter) Printf(format string, args ...any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.prints = append(p.prints, fmt.Sprintf(format, args...))
+}
+
+// PersistentPrintf records a result-tier line: output that must survive even
+// in quiet mode (see the Printer interface doc comment for the tier split).
+func (p *capturingPrinter) PersistentPrintf(format string, args ...any) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.persists = append(p.persists, fmt.Sprintf(format, args...))
 }
 
 func (p *capturingPrinter) Warnf(format string, args ...any) {
@@ -53,6 +66,19 @@ func (p *capturingPrinter) hasPrintContaining(substr string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, line := range p.prints {
+		if strings.Contains(line, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasPersistentPrintContaining reports whether any recorded PersistentPrintf
+// line contains substr.
+func (p *capturingPrinter) hasPersistentPrintContaining(substr string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, line := range p.persists {
 		if strings.Contains(line, substr) {
 			return true
 		}

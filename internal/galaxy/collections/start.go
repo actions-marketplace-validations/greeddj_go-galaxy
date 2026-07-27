@@ -109,15 +109,19 @@ func warmWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra
 	}
 
 	failures := warmCollections(ctx, cfg, runtime, state, collections)
-	// Mirror runInstall's precedence: writeRunMetrics always runs, even when
-	// SaveStore fails, and a save error wins over a nonzero failure count.
+	// Same tail contract as finalizeInstall (see its doc comment): the save is
+	// attempted first but does not short-circuit, writeRunMetrics always runs
+	// regardless of whether it succeeded, and a nonzero collection-failure
+	// count stays the primary error even when the save also failed - folded
+	// together via annotateSaveFailure so errors.Is still matches
+	// ErrInstallationFailed instead of degrading to the save error's own class.
 	saveErr := state.backend.SaveStore(ctx, state.store)
 	writeRunMetrics(cfg, runtime, "warm", start, len(collections), int(failures))
+	if failures > 0 {
+		return annotateSaveFailure(fmt.Errorf("%w: warm failed for %d collections", helpers.ErrInstallationFailed, failures), saveErr)
+	}
 	if saveErr != nil {
 		return saveErr
-	}
-	if failures > 0 {
-		return fmt.Errorf("%w: warm failed for %d collections", helpers.ErrInstallationFailed, failures)
 	}
 	runtime.Output.PersistentPrintf("🔥 Warm complete: %d collections cached", len(collections))
 	return nil
@@ -224,6 +228,11 @@ func Lock(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
 	return err
 }
 
+// runLock owns the backend lifecycle for the lock command: it opens the
+// backend, takes its exclusive lock, and registers the release/close defers
+// that must run on every exit path - including one from lockWithState, which
+// owns the actual work once state is initialized. Same lifecycle/work
+// boundary runInstall and runWarm already draw.
 func runLock(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
 	runtime.Output.Printf("🔒 Generating lockfile")
 	start := time.Now()
@@ -242,6 +251,15 @@ func runLock(ctx context.Context, cfg *config.Config, runtime *infra.Infra) erro
 		_ = state.backend.Close(ctx)
 	}()
 
+	return lockWithState(ctx, cfg, runtime, state, start)
+}
+
+// lockWithState performs lock's actual work against an already-initialized
+// state: resolve requirements, build and write the lockfile, save the
+// resulting snapshot, and write the run metrics report. It assumes the
+// backend is already open and locked - runLock holds that lifecycle - so it
+// never touches state.release or state.backend.Close.
+func lockWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra, state *installState, start time.Time) error {
 	prep, err := loadRoots(cfg, runtime)
 	if err != nil {
 		return err
@@ -259,14 +277,33 @@ func runLock(ctx context.Context, cfg *config.Config, runtime *infra.Infra) erro
 	if err := lockfile.Save(path, lf); err != nil {
 		return err
 	}
-	if err := state.backend.SaveStore(ctx, state.store); err != nil {
-		return err
-	}
-	writeRunMetrics(cfg, runtime, "lock", start, len(lf.Collections), 0)
+	// The lockfile is this command's entire product and stays valid whether or
+	// not the snapshot save below succeeds - a failed save costs the next run
+	// a cold metadata cache, it does not invalidate the file just written.
+	// This is the single emission point for the announcement, placed right
+	// after the write it describes so the operator is told the file landed
+	// instead of guessing from a nonzero exit code alone; the run still exits
+	// nonzero when the save fails.
 	runtime.Output.PersistentPrintf("✅ Lockfile written to %s (%d collections)", path, len(lf.Collections))
-	return nil
+	saveErr := state.backend.SaveStore(ctx, state.store)
+	// writeRunMetrics runs unconditionally, after the save, so its recorded
+	// duration includes the save: the report describes the run's work, not
+	// its verdict. Failures is a truthful zero here, not a placeholder: across
+	// commands the field counts collections that failed to install or warm,
+	// and lock has no per-collection failure that could ever reach this line -
+	// a resolve or lockfile-build failure returns before writeRunMetrics runs
+	// at all. A save failure is not encoded in this field either, matching
+	// install and warm - do not add one here.
+	writeRunMetrics(cfg, runtime, "lock", start, len(lf.Collections), 0)
+	return saveErr
 }
 
+// runInstall owns the backend lifecycle for the install command: it opens
+// the backend, takes its exclusive lock, and registers the release/close
+// defers that must run on every exit path - including one from
+// installWithState, which owns the actual work once state is initialized.
+// This is what makes the save/metrics tail reachable from a test with an
+// already-initialized state and no production seam.
 func runInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
 	runtime.Output.Printf("🚀 Starting installation process")
 	start := time.Now()
@@ -285,15 +322,30 @@ func runInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) e
 		_ = state.backend.Close(ctx)
 	}()
 
+	return installWithState(ctx, cfg, runtime, state, start)
+}
+
+// installWithState performs install's actual work against an
+// already-initialized state: build the plan, install every level, save the
+// snapshot, write the run metrics report - in that order, since the report
+// always runs regardless of whether the save succeeded. It assumes the
+// backend is already open and locked - runInstall holds that lifecycle - so
+// it never touches state.release or state.backend.Close.
+func installWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra, state *installState, start time.Time) error {
 	plan, err := prepareInstallPlan(ctx, cfg, runtime, state)
 	if err != nil {
 		return err
 	}
-	// Registered after the lock-release and backend-close defers above, so by
-	// LIFO it runs first: every prefetch worker is canceled and joined before
-	// the backend is closed and the lock released, so a late worker can never
-	// call backend.Artifacts().Commit (or mutate the Store) after the lock is
-	// gone.
+	// A callee's defers always run before its caller's: installWithState is a
+	// callee of runInstall, so this defer - registered here, inside
+	// installWithState - is guaranteed to run and finish (canceling and
+	// joining every prefetch worker) before installWithState returns control
+	// to runInstall, which only then unwinds its own lock-release and
+	// backend-close defers. A late prefetch worker can therefore never call
+	// backend.Artifacts().Commit (or mutate the Store) after the lock is gone
+	// - structurally, by Go's defer-then-return ordering across this call
+	// boundary, not by convention of registering this defer after two other
+	// defers within one function.
 	defer plan.prefetch.Close()
 	failures, err := installLevels(
 		ctx,
@@ -663,6 +715,15 @@ func runInstallLevel(
 	return nil
 }
 
+// finalizeInstall saves the run's snapshot and reports the run's outcome.
+// The save is attempted first but does not short-circuit: whether it
+// succeeds or fails, the returned error still classifies by the
+// collection-failure count, so the exit class a CI script branches on does
+// not depend on whether the tail also happened to hit a full disk. The one
+// classification that still outranks it is cancellation - cmd/go-galaxy/exitcode
+// checks context.Canceled ahead of every class - so a save that fails because
+// the run was interrupted still exits as interrupted, which is what an
+// interrupted run should report and is what the pre-fix code did too.
 func finalizeInstall(
 	ctx context.Context,
 	runtime *infra.Infra,
@@ -672,14 +733,30 @@ func finalizeInstall(
 	start time.Time,
 ) error {
 	saveStart := time.Now()
-	if err := backend.SaveStore(ctx, st); err != nil {
-		return err
+	saveErr := backend.SaveStore(ctx, st)
+	if saveErr == nil {
+		runtime.Output.DebugSincef(saveStart, "%s", "save snapshot")
 	}
-	runtime.Output.DebugSincef(saveStart, "%s", "save snapshot")
 	if failures > 0 {
 		runtime.Output.PersistentPrintf("⚠️ Completed with errors: %d failed. Took %s", failures, time.Since(start).Round(time.Second))
-		return fmt.Errorf("%w for %d collections", helpers.ErrInstallationFailed, failures)
+		return annotateSaveFailure(fmt.Errorf("%w for %d collections", helpers.ErrInstallationFailed, failures), saveErr)
+	}
+	if saveErr != nil {
+		return saveErr
 	}
 	runtime.Output.PersistentPrintf("🤩 All done. Took %s", time.Since(start).Round(time.Second))
 	return nil
+}
+
+// annotateSaveFailure folds a snapshot-save failure into a run's primary
+// error. The primary error keeps the classification - errors.Is still matches
+// it, so cmd/go-galaxy/exitcode maps a partially failed run to the install
+// exit class instead of degrading it to the generic one just because the disk
+// also filled up at the tail - while the save failure stays in the message and
+// matchable via errors.Is. Returns primary unchanged when the save succeeded.
+func annotateSaveFailure(primary, saveErr error) error {
+	if saveErr == nil {
+		return primary
+	}
+	return fmt.Errorf("%w; snapshot save failed: %w", primary, saveErr)
 }

@@ -542,6 +542,17 @@ The report is written atomically (temp file plus rename), so a consumer never
 reads a partial JSON, and a symlink at the operator-specified path is replaced
 rather than followed.
 
+The report is written whenever a run reaches its finalize step - including a
+run that failed to install some collections and a run whose snapshot save
+itself failed - and is not written when the run aborts earlier (unreadable
+`requirements.yml`, a resolution failure, or a missing lockfile). Its
+existence is therefore not a success signal: gate automation on the process
+exit code (see the table above), never on whether the metrics file exists or
+looks clean. This matters most for `lock`: `failures` is always `0` in a
+`lock` report, so the report carries no failure signal at all for that
+command, and a `lock` run whose snapshot save failed still leaves a
+clean-looking report next to a nonzero exit code.
+
 `cache_hits`, `cache_misses`, and `bytes_downloaded` are artifact-level counters,
 not collection-level: a hit is one artifact served from the artifact cache and a
 miss is one artifact fetched from the origin, so `cache_hits + cache_misses`
