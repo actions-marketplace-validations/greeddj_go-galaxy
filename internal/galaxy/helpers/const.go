@@ -221,8 +221,6 @@ const (
 	StoreBucketGraph = "graph"
 	// StoreBucketRequirements is the bucket name for requirements.
 	StoreBucketRequirements = "requirements"
-	// StoreBucketRoots is the bucket name for root collections.
-	StoreBucketRoots = "roots"
 	// StoreBucketResolved is the bucket name for resolved collections.
 	StoreBucketResolved = "resolved"
 	// StoreBucketVersions is the bucket name for versions cache.

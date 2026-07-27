@@ -22,6 +22,10 @@ var errTestResolvedBucketMissing = errors.New("resolved bucket missing")
 // several deps-cache test fixtures.
 const testDepsConstraint = ">=1.0.0"
 
+// testArtifactSHA is the shared artifact sha value seeded across several
+// installed-entry test fixtures.
+const testArtifactSHA = "abc"
+
 func TestSaveLoadRoundTrip(t *testing.T) {
 	t.Parallel()
 	dbs := openTestDBs(t)
@@ -35,7 +39,6 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	assertInstalled(t, loaded)
 	assertGraph(t, loaded)
 	assertRequirements(t, loaded)
-	assertRoots(t, loaded)
 	assertResolved(t, loaded)
 	assertVersions(t, loaded)
 	assertWarmed(t, loaded)
@@ -74,7 +77,7 @@ func buildTestStore(fixed time.Time) *Store {
 	st.SetInstalled("a.b@1.0.0", InstalledEntry{
 		InstallPath:    "/tmp/a/b",
 		Source:         "https://example.com",
-		ArtifactSHA256: "abc",
+		ArtifactSHA256: testArtifactSHA,
 		InstalledAt:    fixed,
 		Deps:           []string{"c.d@1.2.3"},
 	})
@@ -82,7 +85,6 @@ func buildTestStore(fixed time.Time) *Store {
 	st.SetRequirements(map[string]RequirementSpec{
 		"a.b": {Constraint: "1.0.0", Source: "https://example.com", Type: "galaxy"},
 	})
-	st.SetRoots("last_run", []string{"a.b@1.0.0"})
 	st.SetResolvedAll(map[string]ResolvedEntry{
 		"a.b": {Version: "1.0.0", Source: "https://example.com"},
 	})
@@ -148,7 +150,7 @@ func assertDepsCache(t *testing.T, loaded *Store) {
 func assertInstalled(t *testing.T, loaded *Store) {
 	t.Helper()
 	installed, ok := loaded.GetInstalled("a.b@1.0.0")
-	if !ok || installed.ArtifactSHA256 != "abc" {
+	if !ok || installed.ArtifactSHA256 != testArtifactSHA {
 		t.Fatalf("unexpected installed entry: %#v", installed)
 	}
 }
@@ -166,14 +168,6 @@ func assertRequirements(t *testing.T, loaded *Store) {
 	reqs := loaded.RequirementsSnapshot()
 	if reqs["a.b"].Constraint != "1.0.0" {
 		t.Fatalf("unexpected requirements: %#v", reqs)
-	}
-}
-
-func assertRoots(t *testing.T, loaded *Store) {
-	t.Helper()
-	roots := loaded.Roots["last_run"]
-	if len(roots) != 1 || roots[0] != "a.b@1.0.0" {
-		t.Fatalf("unexpected roots: %#v", roots)
 	}
 }
 
@@ -202,7 +196,7 @@ func assertWarmed(t *testing.T, loaded *Store) {
 }
 
 // TestSaveRollsBackWholeTransactionOnMidSaveFailure proves that Save writes
-// the meta bucket and all nine data buckets inside a single Bolt
+// the meta bucket and all eight data buckets inside a single Bolt
 // transaction: a failure partway through (here, an oversized key in the
 // installed bucket, which the fixed save order writes after api_cache)
 // must roll back the entire attempt, leaving the previously committed
@@ -594,6 +588,48 @@ func TestLoadDropsV3BoltAndRebuilds(t *testing.T) {
 	}
 	if !reflect.DeepEqual(loaded, New()) {
 		t.Fatalf("expected a fresh store after dropping a v3 snapshot, got %#v", loaded)
+	}
+}
+
+// TestLoadToleratesLegacyRootsBucket proves Load tolerates a leftover "roots"
+// Bolt bucket from before the field was removed from Store: a current-schema
+// snapshot with real installed data, plus a legacy roots bucket planted
+// directly (bypassing Save, which no longer writes one), must still load
+// successfully with the installed entry intact, and a subsequent Save must
+// still succeed. This deliberately does not assert that the roots bucket
+// still exists after Load/Save: whether a future sweep drops that leftover
+// bucket is an incidental detail this test is not pinning down, only that its
+// mere presence does not break loading or saving.
+func TestLoadToleratesLegacyRootsBucket(t *testing.T) {
+	t.Parallel()
+	dbs := openTestDBs(t)
+
+	st := New()
+	st.SetInstalled("a.b@1.0.0", InstalledEntry{InstallPath: "/tmp/a/b", ArtifactSHA256: testArtifactSHA})
+	mustSave(t, dbs, st)
+
+	err := dbs.db.Update(func(tx *bolt.Tx) error {
+		// "roots" is the literal legacy bucket name, no longer a named
+		// constant since helpers.StoreBucketRoots was removed along with the
+		// field it backed.
+		rootsBucket, err := tx.CreateBucketIfNotExists([]byte("roots"))
+		if err != nil {
+			return err
+		}
+		return rootsBucket.Put([]byte("last_run"), []byte(`["a.b@1.0.0"]`))
+	})
+	if err != nil {
+		t.Fatalf("failed to plant a legacy roots bucket: %v", err)
+	}
+
+	loaded := mustLoad(t, dbs)
+	installed, ok := loaded.GetInstalled("a.b@1.0.0")
+	if !ok || installed.ArtifactSHA256 != testArtifactSHA {
+		t.Fatalf("unexpected installed entry: %#v (ok=%v)", installed, ok)
+	}
+
+	if err := Save(dbs, loaded); err != nil {
+		t.Fatalf("expected Save to succeed with a legacy roots bucket present, got %v", err)
 	}
 }
 

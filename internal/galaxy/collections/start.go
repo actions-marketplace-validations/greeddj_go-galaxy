@@ -332,11 +332,9 @@ func prepareInstallPlan(ctx context.Context, cfg *config.Config, runtime *infra.
 		return nil, err
 	}
 
-	roots, err := buildRootKeys(prep, resolved)
-	if err != nil {
+	if err := verifyRootsResolved(prep, resolved); err != nil {
 		return nil, err
 	}
-	state.store.SetRoots("last_run", roots)
 
 	// Compute install levels before scheduling the prefetcher: a level-build
 	// failure (a dependency cycle) now surfaces before any prefetch worker
@@ -570,17 +568,25 @@ func buildCollectionsMap(resolved map[string]collection) (map[string]collection,
 	return collections, nil
 }
 
-func buildRootKeys(prep *rootPreparation, resolved map[string]collection) ([]string, error) {
-	roots := make([]string, 0, len(prep.AllRoots))
+// verifyRootsResolved is a post-condition on resolution: it asserts that
+// every requirements root came back with a resolved version, returning
+// helpers.ErrMissingResolvedRoot naming the first one that did not.
+//
+// This check is redundant on two of the three resolution paths -
+// verifyRootsAgainstLockfile plus materializeLockfile already guarantee it
+// under --frozen, and rootsMatchSnapshot guarantees it on the snapshot-reuse
+// path - but it is load-bearing on the third: solverResultToResolvedGraph
+// builds resolved purely from result.Versions and never cross-checks it
+// against the requirements, so this is the only place a solver that silently
+// drops a root is caught on a fresh solve.
+func verifyRootsResolved(prep *rootPreparation, resolved map[string]collection) error {
 	for _, col := range prep.AllRoots {
 		fqdn := fmt.Sprintf("%s.%s", col.Namespace, col.Name)
-		resolvedCol, ok := resolved[fqdn]
-		if !ok {
-			return nil, fmt.Errorf("%w: %s", helpers.ErrMissingResolvedRoot, fqdn)
+		if _, ok := resolved[fqdn]; !ok {
+			return fmt.Errorf("%w: %s", helpers.ErrMissingResolvedRoot, fqdn)
 		}
-		roots = append(roots, resolvedCol.key())
 	}
-	return roots, nil
+	return nil
 }
 
 func installLevels(

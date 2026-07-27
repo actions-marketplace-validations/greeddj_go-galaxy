@@ -75,6 +75,11 @@ var fromErrorCases = []exitCase{
 		wantCode: ExitResolution,
 	},
 	{
+		name:     "missing resolved root",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrMissingResolvedRoot),
+		wantCode: ExitResolution,
+	},
+	{
 		name:     "fs.ErrNotExist",
 		err:      fmt.Errorf("%w: ctx", fs.ErrNotExist),
 		wantCode: ExitUsage,

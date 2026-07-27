@@ -16,6 +16,10 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
 )
 
+// testArtifactSHA is the shared artifact sha value seeded across several
+// installed-entry test fixtures.
+const testArtifactSHA = "abc"
+
 // TestLoadStoreRejectsNewerSchema mirrors the local backend's contract: a
 // snapshot stamped with a schema version newer than this binary supports
 // must be reported as an error rather than partially trusted.
@@ -144,7 +148,7 @@ func TestLoadStoreLoadsCurrentSchema(t *testing.T) {
 
 	putStoreObject(ctx, t, b, helpers.StoreSnapshotSchemaVersion, func(st *store.Store) {
 		st.SetAPICache("api", store.APICacheEntry{URL: "https://example.com/api"})
-		st.SetInstalled("a.b@1.0.0", store.InstalledEntry{ArtifactSHA256: "abc"})
+		st.SetInstalled("a.b@1.0.0", store.InstalledEntry{ArtifactSHA256: testArtifactSHA})
 	})
 
 	loaded, err := b.LoadStore(ctx)
@@ -156,7 +160,90 @@ func TestLoadStoreLoadsCurrentSchema(t *testing.T) {
 		t.Fatalf("unexpected api cache entry: %#v (ok=%v)", entry, ok)
 	}
 	installed, ok := loaded.GetInstalled("a.b@1.0.0")
-	if !ok || installed.ArtifactSHA256 != "abc" {
+	if !ok || installed.ArtifactSHA256 != testArtifactSHA {
+		t.Fatalf("unexpected installed entry: %#v (ok=%v)", installed, ok)
+	}
+}
+
+// TestLoadStoreToleratesLegacyRootsKey confirms LoadStore ignores an unknown
+// "roots" key left over from before the field was removed from Store: a
+// current-schema payload carrying a populated legacy roots bucket alongside
+// real data must decode successfully, with the real data intact. json.Decode
+// has no DisallowUnknownFields call anywhere on this path, so an unrecognized
+// key is silently skipped rather than rejected - this test locks in that a
+// removed-but-still-present key does not turn into a decode error.
+func TestLoadStoreToleratesLegacyRootsKey(t *testing.T) {
+	t.Parallel()
+	b := newTestBackend(t)
+	ctx := t.Context()
+
+	rawJSON := fmt.Appendf(nil, `{
+		"meta": {"schema_version": %d, "last_snapshot": "2024-01-02T03:04:05Z"},
+		"api_cache": {},
+		"deps_cache": {},
+		"installed": {"a.b@1.0.0": {"install_path": "/tmp/a/b", "artifact_sha256": "abc"}},
+		"graph": {},
+		"requirements": {},
+		"roots": {"last_run": ["a.b@1.0.0"]},
+		"resolved": {},
+		"versions_cache": {},
+		"warmed": {}
+	}`, helpers.StoreSnapshotSchemaVersion)
+	putRawStoreObject(ctx, t, b, rawJSON)
+
+	loaded, err := b.LoadStore(ctx)
+	if err != nil {
+		t.Fatalf("LoadStore error: %v", err)
+	}
+	installed, ok := loaded.GetInstalled("a.b@1.0.0")
+	if !ok || installed.ArtifactSHA256 != testArtifactSHA {
+		t.Fatalf("unexpected installed entry: %#v (ok=%v)", installed, ok)
+	}
+}
+
+// TestLoadStoreToleratesNullRootsKey pins that an explicit "roots": null is
+// tolerated as an unknown key and decodes with the real data intact.
+//
+// It exists separately from TestLoadStoreToleratesLegacyRootsKey because null
+// and {} are different decoder inputs: only an explicit null overwrites a
+// pre-initialized map with a nil one, while {} and an absent key leave it
+// alone. That difference is exactly why this shape, and not {}, used to
+// trigger a panic. Against the pre-removal code, "roots": null nilled Store's
+// Roots map and the very next production SetRoots call panicked with
+// "assignment to entry in nil map", crashing the process with exit status 2 -
+// which this program's exit-code taxonomy classifies as ExitUsage, so a
+// poisoned or merely stale snapshot masqueraded as a config error.
+//
+// This test does NOT pin that panic, and claiming otherwise would retire
+// scrutiny it never earned: it passes against the pre-removal code too, since
+// LoadStore itself always returned normally and the crash came later, at the
+// SetRoots call site. What prevents the panic recurring is that the field and
+// its only mutator no longer exist, which the compiler enforces.
+func TestLoadStoreToleratesNullRootsKey(t *testing.T) {
+	t.Parallel()
+	b := newTestBackend(t)
+	ctx := t.Context()
+
+	rawJSON := fmt.Appendf(nil, `{
+		"meta": {"schema_version": %d, "last_snapshot": "2024-01-02T03:04:05Z"},
+		"api_cache": {},
+		"deps_cache": {},
+		"installed": {"a.b@1.0.0": {"install_path": "/tmp/a/b", "artifact_sha256": "abc"}},
+		"graph": {},
+		"requirements": {},
+		"roots": null,
+		"resolved": {},
+		"versions_cache": {},
+		"warmed": {}
+	}`, helpers.StoreSnapshotSchemaVersion)
+	putRawStoreObject(ctx, t, b, rawJSON)
+
+	loaded, err := b.LoadStore(ctx)
+	if err != nil {
+		t.Fatalf("LoadStore error: %v", err)
+	}
+	installed, ok := loaded.GetInstalled("a.b@1.0.0")
+	if !ok || installed.ArtifactSHA256 != testArtifactSHA {
 		t.Fatalf("unexpected installed entry: %#v (ok=%v)", installed, ok)
 	}
 }
@@ -251,7 +338,7 @@ func TestSaveStoreRoundTripsDataShape(t *testing.T) {
 	// FetchedAt would make this entry vanish from SaveStore's payload
 	// regardless of the shape-preservation behavior under test.
 	st.SetAPICache("api", store.APICacheEntry{URL: "https://example.com/api", ETag: "etag", FetchedAt: time.Now().UTC()})
-	st.SetInstalled("a.b@1.0.0", store.InstalledEntry{ArtifactSHA256: "abc"})
+	st.SetInstalled("a.b@1.0.0", store.InstalledEntry{ArtifactSHA256: testArtifactSHA})
 	st.SetWarmed("c.d@1.0.0", "warmed-sha")
 
 	if err := b.SaveStore(ctx, st); err != nil {
@@ -267,7 +354,7 @@ func TestSaveStoreRoundTripsDataShape(t *testing.T) {
 		t.Fatalf("unexpected api cache entry after round trip: %#v (ok=%v)", entry, ok)
 	}
 	installed, ok := loaded.GetInstalled("a.b@1.0.0")
-	if !ok || installed.ArtifactSHA256 != "abc" {
+	if !ok || installed.ArtifactSHA256 != testArtifactSHA {
 		t.Fatalf("unexpected installed entry after round trip: %#v (ok=%v)", installed, ok)
 	}
 	if got := loaded.WarmedArtifactSHAByKey()["c.d@1.0.0"]; got != "warmed-sha" {

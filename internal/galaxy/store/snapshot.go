@@ -88,7 +88,6 @@ type Store struct {
 	Installed    map[string]InstalledEntry  `json:"installed"`
 	Graph        map[string][]string        `json:"graph"`
 	Requirements map[string]RequirementSpec `json:"requirements"`
-	Roots        map[string][]string        `json:"roots"`
 	Resolved     map[string]ResolvedEntry   `json:"resolved"`
 	Versions     map[string]VersionsEntry   `json:"versions_cache"`
 	Warmed       map[string]WarmedEntry     `json:"warmed"`
@@ -107,7 +106,6 @@ func New() *Store {
 		Installed:    make(map[string]InstalledEntry),
 		Graph:        make(map[string][]string),
 		Requirements: make(map[string]RequirementSpec),
-		Roots:        make(map[string][]string),
 		Resolved:     make(map[string]ResolvedEntry),
 		Versions:     make(map[string]VersionsEntry),
 		Warmed:       make(map[string]WarmedEntry),
@@ -475,19 +473,6 @@ func (m *Store) RequirementsSnapshot() map[string]RequirementSpec {
 	return clone
 }
 
-// SetRoots stores root collection keys under a label. roots is cloned
-// before storing, so a later caller mutation of its backing array cannot
-// corrupt the stored snapshot state.
-func (m *Store) SetRoots(key string, roots []string) {
-	if m == nil {
-		return
-	}
-	clone := slices.Clone(roots)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.Roots[key] = clone
-}
-
 // MetaSnapshot returns the current snapshot metadata.
 func (m *Store) MetaSnapshot() SnapshotMeta {
 	if m == nil {
@@ -516,7 +501,6 @@ type snapshotData struct {
 	Installed    map[string]InstalledEntry
 	Graph        map[string][]string
 	Requirements map[string]RequirementSpec
-	Roots        map[string][]string
 	Resolved     map[string]ResolvedEntry
 	Versions     map[string]VersionsEntry
 	Warmed       map[string]WarmedEntry
@@ -543,7 +527,6 @@ func (m *Store) MarshalSnapshot() ([]byte, error) {
 		Installed:    data.Installed,
 		Graph:        data.Graph,
 		Requirements: data.Requirements,
-		Roots:        data.Roots,
 		Resolved:     data.Resolved,
 		Versions:     data.Versions,
 		Warmed:       data.Warmed,
@@ -585,7 +568,6 @@ func (m *Store) snapshotData() snapshotData {
 		Installed:    make(map[string]InstalledEntry, len(m.Installed)),
 		Graph:        make(map[string][]string, len(m.Graph)),
 		Requirements: make(map[string]RequirementSpec, len(m.Requirements)),
-		Roots:        make(map[string][]string, len(m.Roots)),
 		Resolved:     make(map[string]ResolvedEntry, len(m.Resolved)),
 		Versions:     make(map[string]VersionsEntry, len(m.Versions)),
 		Warmed:       make(map[string]WarmedEntry, len(m.Warmed)),
@@ -612,11 +594,6 @@ func (m *Store) snapshotData() snapshotData {
 		data.Graph[key] = clone
 	}
 	maps.Copy(data.Requirements, m.Requirements)
-	for key, roots := range m.Roots {
-		clone := make([]string, len(roots))
-		copy(clone, roots)
-		data.Roots[key] = clone
-	}
 	maps.Copy(data.Resolved, m.Resolved)
 	for key, entry := range m.Versions {
 		if isStaleCacheEntry(entry.FetchedAt, cutoff) {
@@ -678,7 +655,7 @@ func Load(dbs *DBs) (*Store, error) {
 }
 
 // Save writes cached state to the consolidated Bolt database. The meta
-// bucket and all nine data buckets are written inside a single Bolt
+// bucket and all eight data buckets are written inside a single Bolt
 // transaction so a mid-save failure (e.g. a key or value exceeding Bolt's
 // limits) leaves the previously committed snapshot fully intact instead of
 // a partially overwritten mix of old and new data.
@@ -718,7 +695,7 @@ func ValidateSchema(version int) error {
 	}
 }
 
-// runLoadSteps reads the nine data buckets in the given transaction.
+// runLoadSteps reads the eight data buckets in the given transaction.
 func runLoadSteps(tx *bolt.Tx, store *Store) error {
 	steps := []func() error{
 		func() error { return loadAPICache(tx, store) },
@@ -726,7 +703,6 @@ func runLoadSteps(tx *bolt.Tx, store *Store) error {
 		func() error { return loadDepsCache(tx, store) },
 		func() error { return loadGraph(tx, store) },
 		func() error { return loadRequirements(tx, store) },
-		func() error { return loadRoots(tx, store) },
 		func() error { return loadResolved(tx, store) },
 		func() error { return loadVersions(tx, store) },
 		func() error { return loadWarmed(tx, store) },
@@ -739,8 +715,8 @@ func runLoadSteps(tx *bolt.Tx, store *Store) error {
 	return nil
 }
 
-// runSaveSteps writes the nine data buckets in the given transaction, in a
-// fixed order (api_cache, deps_cache, installed, graph, requirements, roots,
+// runSaveSteps writes the eight data buckets in the given transaction, in a
+// fixed order (api_cache, deps_cache, installed, graph, requirements,
 // resolved, versions_cache, warmed) that callers rely on for fault injection
 // tests.
 func runSaveSteps(tx *bolt.Tx, data snapshotData) error {
@@ -750,7 +726,6 @@ func runSaveSteps(tx *bolt.Tx, data snapshotData) error {
 		func() error { return saveInstalled(tx, data) },
 		func() error { return saveGraph(tx, data) },
 		func() error { return saveRequirements(tx, data) },
-		func() error { return saveRoots(tx, data) },
 		func() error { return saveResolved(tx, data) },
 		func() error { return saveVersions(tx, data) },
 		func() error { return saveWarmed(tx, data) },
@@ -854,17 +829,6 @@ func loadRequirements(tx *bolt.Tx, store *Store) error {
 	})
 }
 
-func loadRoots(tx *bolt.Tx, store *Store) error {
-	return loadBucket(tx, helpers.StoreBucketRoots, func(k, v []byte) error {
-		var roots []string
-		if err := json.Unmarshal(v, &roots); err != nil {
-			return err
-		}
-		store.Roots[string(k)] = roots
-		return nil
-	})
-}
-
 // loadResolved decodes the resolved bucket. Every current-schema value is
 // written by saveResolved as a JSON-encoded ResolvedEntry, so an unmarshal
 // failure means the value is genuinely corrupt: it is reported as an error
@@ -952,12 +916,6 @@ func saveGraph(tx *bolt.Tx, data snapshotData) error {
 
 func saveRequirements(tx *bolt.Tx, data snapshotData) error {
 	return saveBucket(tx, helpers.StoreBucketRequirements, data.Requirements, func(entry RequirementSpec) ([]byte, error) {
-		return json.Marshal(&entry)
-	})
-}
-
-func saveRoots(tx *bolt.Tx, data snapshotData) error {
-	return saveBucket(tx, helpers.StoreBucketRoots, data.Roots, func(entry []string) ([]byte, error) {
 		return json.Marshal(&entry)
 	})
 }

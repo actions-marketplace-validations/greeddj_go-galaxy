@@ -31,22 +31,6 @@ func TestSetGraphClonesInput(t *testing.T) {
 	}
 }
 
-// TestSetRootsClonesInput proves SetRoots does not alias the caller's roots
-// slice.
-func TestSetRootsClonesInput(t *testing.T) {
-	t.Parallel()
-	st := New()
-	roots := []string{"a.b@1.0.0", "c.d@2.0.0"}
-
-	st.SetRoots("last_run", roots)
-	roots[0] = mutatedMarker
-
-	stored := st.Roots["last_run"]
-	if len(stored) != 2 || stored[0] != "a.b@1.0.0" || stored[1] != "c.d@2.0.0" {
-		t.Fatalf("expected stored roots to be unaffected by caller mutation, got %#v", stored)
-	}
-}
-
 // TestSetInstalledClonesDeps proves SetInstalled does not alias the
 // caller's InstalledEntry.Deps slice, even though the entry itself is
 // passed by value.
