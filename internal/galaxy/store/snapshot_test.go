@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
@@ -58,7 +59,17 @@ func openTestDBs(t *testing.T) *DBs {
 }
 
 func buildTestStore(fixed time.Time) *Store {
-	st := New()
+	return populateTestStore(New(), fixed)
+}
+
+// populateTestStore writes a fixed, known fixture into every one of Store's
+// eight map buckets via their normal mutators (SetAPICache, SetDepsCache,
+// SetInstalled, SetGraph, SetRequirements, SetResolvedAll, SetVersionsCache,
+// SetWarmed). It is factored out of buildTestStore so a test can also apply
+// this same fixture to a store obtained some other way (e.g. one just
+// decoded from JSON), then reuse the assert* helpers below to verify it
+// without duplicating the fixture values.
+func populateTestStore(st *Store, fixed time.Time) *Store {
 	st.SetMetaRequirements("req-hash", "https://example.com")
 	st.SetAPICache("api", APICacheEntry{
 		// FetchedAt uses the current time rather than the fixed fixture
@@ -692,5 +703,142 @@ func TestWarmedArtifactSHAByKeyReturnsIndependentMap(t *testing.T) {
 	}
 	if _, ok := fresh["c.d@2.0.0"]; ok {
 		t.Fatalf("expected an injected key in a returned map to never appear in the store, got %#v", fresh)
+	}
+}
+
+// assertStoreMapsNonNil fails (via Error, not Fatal) for every one of
+// Store's eight map fields that is still nil. It never stops early: the
+// caller relies on every field being checked even if an earlier one already
+// failed, since the point of the test calling this is to then go on and
+// exercise the mutators regardless.
+func assertStoreMapsNonNil(t *testing.T, st *Store) {
+	t.Helper()
+	fields := []struct {
+		name  string
+		isNil bool
+	}{
+		{"APICache", st.APICache == nil},
+		{"DepsCache", st.DepsCache == nil},
+		{"Installed", st.Installed == nil},
+		{"Graph", st.Graph == nil},
+		{"Requirements", st.Requirements == nil},
+		{"Resolved", st.Resolved == nil},
+		{"Versions", st.Versions == nil},
+		{"Warmed", st.Warmed == nil},
+	}
+	for _, f := range fields {
+		if f.isNil {
+			t.Errorf("expected %s to be non-nil after decode", f.name)
+		}
+	}
+}
+
+// TestUnmarshalJSONRestoresEveryNilMap proves that decoding a payload where
+// every one of Store's eight map fields is an explicit JSON null still
+// leaves every field writable afterward. It reuses populateTestStore - the
+// exact same mutator calls (SetAPICache, SetDepsCache, SetInstalled,
+// SetGraph, SetVersionsCache, SetWarmed, plus the two wholesale replacers
+// SetRequirements and SetResolvedAll) TestSaveLoadRoundTrip exercises against
+// a freshly constructed Store - against the just-decoded one instead, then
+// reads every value back through the matching assert* helpers. Without
+// Store.ensureMaps running after the decode, populateTestStore's first
+// map-indexing call panics with "assignment to entry in nil map" - see the
+// revert-check note in the developer report for the observed panic output.
+func TestUnmarshalJSONRestoresEveryNilMap(t *testing.T) {
+	t.Parallel()
+	fixed := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+	payload := fmt.Sprintf(`{
+		"meta": {"schema_version": %d},
+		"api_cache": null,
+		"deps_cache": null,
+		"installed": null,
+		"graph": null,
+		"requirements": null,
+		"resolved": null,
+		"versions_cache": null,
+		"warmed": null
+	}`, helpers.StoreSnapshotSchemaVersion)
+
+	st := New()
+	if err := json.Unmarshal([]byte(payload), st); err != nil {
+		t.Fatalf("Unmarshal error: %v", err)
+	}
+	assertStoreMapsNonNil(t, st)
+
+	populateTestStore(st, fixed)
+
+	assertAPICache(t, st)
+	assertDepsCache(t, st)
+	assertInstalled(t, st)
+	assertGraph(t, st)
+	assertRequirements(t, st)
+	assertResolved(t, st)
+	assertVersions(t, st)
+	assertWarmed(t, st)
+}
+
+// TestUnmarshalJSONKeepsDecodedData proves ensureMaps only fills in a field a
+// decode actually nilled: a bucket with real decoded entries must survive
+// untouched, and Meta must come from the payload rather than being reset to
+// New()'s defaults, while the one nulled bucket (warmed) ends up non-nil and
+// empty rather than losing the rest of the payload. The payload mirrors
+// populateTestStore's fixture values exactly, so this reuses the same
+// assertMeta/assertAPICache/... helpers TestSaveLoadRoundTrip uses to verify
+// a Bolt round trip, here verifying a JSON decode instead.
+func TestUnmarshalJSONKeepsDecodedData(t *testing.T) {
+	t.Parallel()
+	payload := fmt.Sprintf(`{
+		"meta": {
+			"schema_version": %d,
+			"requirements_hash": "req-hash",
+			"server": "https://example.com",
+			"last_snapshot": "2024-01-02T03:04:05Z"
+		},
+		"api_cache": {"api": {"url": "https://example.com/api", "etag": "etag", "body": "eyJvayI6dHJ1ZX0="}},
+		"deps_cache": {"deps": {"fetched_at": "2024-01-02T03:04:05Z", "deps": {"a.b": ">=1.0.0"}}},
+		"installed": {"a.b@1.0.0": {"artifact_sha256": "abc"}},
+		"graph": {"a.b@1.0.0": ["c.d@1.2.3"]},
+		"requirements": {"a.b": {"constraint": "1.0.0"}},
+		"resolved": {"a.b": {"version": "1.0.0"}},
+		"versions_cache": {"versions": {"list": ["1.0.0", "2.0.0"]}},
+		"warmed": null
+	}`, helpers.StoreSnapshotSchemaVersion)
+
+	st := New()
+	if err := json.Unmarshal([]byte(payload), st); err != nil {
+		t.Fatalf("Unmarshal error: %v", err)
+	}
+
+	assertMeta(t, st)
+	assertAPICache(t, st)
+	assertDepsCache(t, st)
+	assertInstalled(t, st)
+	assertGraph(t, st)
+	assertRequirements(t, st)
+	assertResolved(t, st)
+	assertVersions(t, st)
+
+	if st.Warmed == nil {
+		t.Fatal("expected Warmed to be non-nil after decoding an explicit null")
+	}
+	if len(st.Warmed) != 0 {
+		t.Fatalf("expected Warmed to be empty, got %#v", st.Warmed)
+	}
+}
+
+// TestUnmarshalJSONPropagatesDecodeError proves UnmarshalJSON does not
+// swallow a genuine decode failure: ensureMaps must never mask bad input
+// into a silently-empty, well-formed Store.
+//
+// The payload must be syntactically valid but type-invalid. encoding/json
+// validates the whole document before it dispatches to an Unmarshaler, so a
+// malformed payload is rejected without this method ever being entered, and
+// the test would then pass no matter what the method did with the error.
+func TestUnmarshalJSONPropagatesDecodeError(t *testing.T) {
+	t.Parallel()
+	st := New()
+	err := json.Unmarshal([]byte(`{"installed": 42}`), st)
+	if err == nil {
+		t.Fatal("expected an error decoding a type-invalid installed bucket, got nil")
 	}
 }

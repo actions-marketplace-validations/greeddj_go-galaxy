@@ -248,6 +248,54 @@ func TestLoadStoreToleratesNullRootsKey(t *testing.T) {
 	}
 }
 
+// TestLoadStoreToleratesNullBuckets pins that LoadStore survives a payload
+// where all eight of Store's nil-able map buckets are an explicit JSON null,
+// and that the loaded store's mutators for those buckets remain usable
+// afterward.
+//
+// Unlike TestLoadStoreToleratesNullRootsKey above - which documents that it
+// does NOT pin the panic, because Roots and its only mutator were deleted
+// entirely - this test DOES pin the panic: Installed, Warmed, and the other
+// six map fields, and their mutators, still exist on Store, so without
+// store.Store.UnmarshalJSON re-allocating a decode-nilled map, the SetInstalled
+// / SetWarmed calls below panic with "assignment to entry in nil map" inside
+// LoadStore's caller, exactly as production code would when the next install
+// or warm worker writes to that bucket.
+func TestLoadStoreToleratesNullBuckets(t *testing.T) {
+	t.Parallel()
+	b := newTestBackend(t)
+	ctx := t.Context()
+
+	rawJSON := fmt.Appendf(nil, `{
+		"meta": {"schema_version": %d, "last_snapshot": "2024-01-02T03:04:05Z"},
+		"api_cache": null,
+		"deps_cache": null,
+		"installed": null,
+		"graph": null,
+		"requirements": null,
+		"resolved": null,
+		"versions_cache": null,
+		"warmed": null
+	}`, helpers.StoreSnapshotSchemaVersion)
+	putRawStoreObject(ctx, t, b, rawJSON)
+
+	loaded, err := b.LoadStore(ctx)
+	if err != nil {
+		t.Fatalf("LoadStore error: %v", err)
+	}
+
+	loaded.SetInstalled("a.b@1.0.0", store.InstalledEntry{ArtifactSHA256: testArtifactSHA})
+	installed, ok := loaded.GetInstalled("a.b@1.0.0")
+	if !ok || installed.ArtifactSHA256 != testArtifactSHA {
+		t.Fatalf("unexpected installed entry: %#v (ok=%v)", installed, ok)
+	}
+
+	loaded.SetWarmed("a.b@1.0.0", "sha-1")
+	if warmed := loaded.WarmedArtifactSHAByKey(); warmed["a.b@1.0.0"] != "sha-1" {
+		t.Fatalf("unexpected warmed entry: %#v", warmed)
+	}
+}
+
 // TestSaveStoreConcurrentMutationIsRaceFree proves SaveStore never touches
 // the live store's maps directly: a goroutine hammers SetInstalled and
 // SetAPICache in a tight loop while SaveStore runs repeatedly on the same

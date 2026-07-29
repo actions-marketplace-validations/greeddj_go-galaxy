@@ -95,7 +95,9 @@ type Store struct {
 	mu           sync.RWMutex               `json:"-"`
 }
 
-// New creates an initialized Store with empty maps.
+// New creates an initialized Store with empty maps. UnmarshalJSON is the
+// method that restores this same all-maps-non-nil invariant after a decode,
+// since a decode can nil a map in a way this constructor never does.
 func New() *Store {
 	return &Store{
 		Meta: SnapshotMeta{
@@ -110,6 +112,42 @@ func New() *Store {
 		Versions:     make(map[string]VersionsEntry),
 		Warmed:       make(map[string]WarmedEntry),
 	}
+}
+
+// UnmarshalJSON decodes a Store, then re-allocates any map field an explicit
+// JSON null nilled. An explicit `null` in the payload differs from both an
+// absent key and `{}`: only `null` nils a pre-initialized map field during
+// decode, while an absent key or `{}` leaves it alone (or empty). Without
+// this guard, the next write into that map panics with "assignment to entry
+// in nil map"; nothing in this program calls recover, and both the install
+// and warm pipelines run their per-collection work inside wg.Go goroutines,
+// so that panic kills the whole process before state.release runs. On the S3
+// backend that means the exclusive lock object is never released and
+// survives to its own 10-minute TTL, stalling every other run against that
+// bucket for the whole window.
+//
+// The guard lives here, on the type, rather than being called explicitly at
+// each decode site (e.g. LoadStore): every present and future decode path -
+// including one nobody has written yet - inherits it automatically, and a
+// ninth map added to Store later cannot reopen this hole just by a call site
+// forgetting to guard it.
+//
+// The local Bolt path never needed this: loadBucket only ever populates an
+// already-initialized map key by key and never assigns a whole map field, so
+// there is no decode step there that can replace a map with nil.
+func (m *Store) UnmarshalJSON(data []byte) error {
+	// storeJSON strips the json.Unmarshaler method set, so the decode below
+	// cannot recurse back into this method. The conversion is on the pointer,
+	// so the RWMutex is never copied.
+	type storeJSON Store
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := json.Unmarshal(data, (*storeJSON)(m)); err != nil {
+		return err
+	}
+	m.ensureMaps()
+	return nil
 }
 
 // ResolvedEntry stores a resolved collection version and source.
@@ -533,6 +571,28 @@ func (m *Store) MarshalSnapshot() ([]byte, error) {
 		Meta:         data.Meta,
 	}
 	return json.Marshal(snapshot)
+}
+
+// ensureMaps re-allocates every map a decode may have nilled. The caller must
+// hold the write lock. Every map New() initializes is listed here; a new map
+// on Store must be added to both.
+func (m *Store) ensureMaps() {
+	m.APICache = ensureMap(m.APICache)
+	m.DepsCache = ensureMap(m.DepsCache)
+	m.Installed = ensureMap(m.Installed)
+	m.Graph = ensureMap(m.Graph)
+	m.Requirements = ensureMap(m.Requirements)
+	m.Resolved = ensureMap(m.Resolved)
+	m.Versions = ensureMap(m.Versions)
+	m.Warmed = ensureMap(m.Warmed)
+}
+
+// ensureMap returns m when it is non-nil and a fresh empty map otherwise.
+func ensureMap[K comparable, V any](m map[K]V) map[K]V {
+	if m == nil {
+		return make(map[K]V)
+	}
+	return m
 }
 
 // isStaleCacheEntry reports whether fetchedAt is older than cutoff. It uses
