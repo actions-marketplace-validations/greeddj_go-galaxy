@@ -6,7 +6,9 @@ package collections_test
 // cache, a frozen lockfile-pinned warm (both honoring and rejecting a pin),
 // an offline warm, a partial failure that still caches the collection that
 // succeeded, lock discipline across a failing run, the --no-cache usage
-// rejection, and the metrics file warm now shares with install.
+// rejection (with and without --dry-run), and the metrics file warm now
+// shares with install. `warm --dry-run`'s own real preview behavior is
+// covered in dry_run_e2e_test.go instead, alongside install's.
 
 import (
 	"context"
@@ -401,50 +403,54 @@ func TestWarmLockReleasedAfterFailingRun(t *testing.T) {
 // TestWarmNoCacheRejectsBeforeResolving asserts warm --no-cache is rejected
 // as a usage error, before any resolution or network call, rather than
 // silently downloading every artifact and discarding it uncommitted while
-// reporting success.
+// reporting success. Its --dry-run sub-case proves this holds even combined
+// with --dry-run: --no-cache makes warm meaningless regardless of dry-run, so
+// runWarm's --no-cache guard runs first and unconditionally, before the
+// dry-run guard would even matter - previewing a meaningless run is still
+// meaningless.
 func TestWarmNoCacheRejectsBeforeResolving(t *testing.T) {
 	t.Parallel()
-	f := newE2EFixture(t)
-	f.cfg.NoCache = true
 
-	err := collections.Warm(context.Background(), f.cfg, f.runtime)
-	if !errors.Is(err, helpers.ErrWarmCacheDisabled) {
-		t.Fatalf("expected errors.Is ErrWarmCacheDisabled, got %v", err)
-	}
-	if got := f.server.Total(); got != 0 {
-		t.Errorf("Total() = %d, want 0 (--no-cache must reject before resolving anything)", got)
-	}
-	if got := exitcode.FromError(err); got != exitcode.ExitUsage {
-		t.Errorf("exitcode.FromError(err) = %d, want ExitUsage (%d)", got, exitcode.ExitUsage)
-	}
-}
+	t.Run("without dry-run", func(t *testing.T) {
+		t.Parallel()
+		f := newE2EFixture(t)
+		f.cfg.NoCache = true
 
-// TestWarmDryRunRejectsBeforeAnythingOpens asserts warm --dry-run is refused
-// as a usage error before the backend is even opened, rather than silently
-// downloading and committing every artifact while announcing a normal warm -
-// warm has no dry-run implementation, and an ambient GO_GALAXY_DRY_RUN must
-// not make it do the opposite of what was asked.
-func TestWarmDryRunRejectsBeforeAnythingOpens(t *testing.T) {
-	t.Parallel()
-	f := newE2EFixture(t)
-	f.cfg.DryRun = true
+		err := collections.Warm(context.Background(), f.cfg, f.runtime)
+		if !errors.Is(err, helpers.ErrWarmCacheDisabled) {
+			t.Fatalf("expected errors.Is ErrWarmCacheDisabled, got %v", err)
+		}
+		if got := f.server.Total(); got != 0 {
+			t.Errorf("Total() = %d, want 0 (--no-cache must reject before resolving anything)", got)
+		}
+		if got := exitcode.FromError(err); got != exitcode.ExitUsage {
+			t.Errorf("exitcode.FromError(err) = %d, want ExitUsage (%d)", got, exitcode.ExitUsage)
+		}
+	})
 
-	err := collections.Warm(context.Background(), f.cfg, f.runtime)
-	if !errors.Is(err, helpers.ErrDryRunUnsupported) {
-		t.Fatalf("expected errors.Is ErrDryRunUnsupported, got %v", err)
-	}
-	if got := f.server.Total(); got != 0 {
-		t.Errorf("Total() = %d, want 0 (--dry-run must reject before any network call)", got)
-	}
-	// The cache directory is never created: proof the backend was never
-	// opened at all (cacheBackend.New/backend.Open both create it), not just
-	// that no lock survived to be released.
-	if _, statErr := os.Stat(f.cfg.CacheDir); !os.IsNotExist(statErr) {
-		t.Errorf("expected cacheDir to never be created, stat error = %v", statErr)
-	}
-	if got := exitcode.FromError(err); got != exitcode.ExitUsage {
-		t.Errorf("exitcode.FromError(err) = %d, want ExitUsage (%d)", got, exitcode.ExitUsage)
-	}
+	t.Run("with dry-run", func(t *testing.T) {
+		t.Parallel()
+		f := newE2EFixture(t)
+		f.cfg.NoCache = true
+		f.cfg.DryRun = true
+
+		err := collections.Warm(context.Background(), f.cfg, f.runtime)
+		if !errors.Is(err, helpers.ErrWarmCacheDisabled) {
+			t.Fatalf("expected errors.Is ErrWarmCacheDisabled, got %v", err)
+		}
+		if got := f.server.Total(); got != 0 {
+			t.Errorf("Total() = %d, want 0 (--no-cache must reject before any network call)", got)
+		}
+		// The cache directory is never created: proof the backend was never
+		// opened at all (cacheBackend.New/backend.Open both create it), not just
+		// that no lock survived to be released.
+		if _, statErr := os.Stat(f.cfg.CacheDir); !os.IsNotExist(statErr) {
+			t.Errorf("expected cacheDir to never be created, stat error = %v", statErr)
+		}
+		if got := exitcode.FromError(err); got != exitcode.ExitUsage {
+			t.Errorf("exitcode.FromError(err) = %d, want ExitUsage (%d)", got, exitcode.ExitUsage)
+		}
+	})
 }
 
 // TestWarmMetricsWrittenForSuccessAndFailure asserts a metrics file is

@@ -240,7 +240,7 @@ type extractMarkerOutcome struct {
 }
 
 // matches reports whether the marker was found valid - the single bit a
-// caller that only cares about the yes/no answer (classifyOneDryRun) needs,
+// caller that only cares about the yes/no answer (installDryRunProbe) needs,
 // without inspecting status itself.
 func (o extractMarkerOutcome) matches() bool {
 	return o.status == extractMarkerMatches
@@ -257,9 +257,10 @@ func extractMarkerPath(installPath, sha string) string {
 // checkExtractMarker reports whether installPath's on-disk extract-done
 // marker for sha is present, well-formed, and its recorded tally still
 // matches what scanTree observes for installPath right now. It is a pure
-// read: no logging, no marker deletion, no side effects at all - callers
-// that only want a read-only answer (classifyOneDryRun, for the dry-run
-// preview) can use this directly. verifyExtractMarker below is the
+// read: no logging, no marker deletion, no side effects at all - a caller
+// that only wants a read-only answer can use this directly, currently
+// installDryRunProbe (for the dry-run preview), though nothing about this
+// predicate ties it to that one caller. verifyExtractMarker below is the
 // install-path wrapper that adds logging and the best-effort cleanup on a
 // negative outcome; see its own doc comment for what this predicate does and
 // does not catch, and why cleanup lives in the wrapper rather than here.

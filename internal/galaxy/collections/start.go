@@ -54,22 +54,12 @@ func Warm(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
 }
 
 // runWarm owns the backend lifecycle for the warm command: it rejects
-// --dry-run first and --no-cache second, before anything is opened, then
-// opens the backend, takes its exclusive lock, and registers the
-// release/close defers that must run on every exit path - including one from
-// warmWithState, which owns the actual work once state is initialized. This
-// is the same lifecycle/work boundary runInstall already draws around
-// prepareInstallPlan.
+// --no-cache first, before anything is opened, then opens the backend, takes
+// its exclusive lock, and registers the release/close defers that must run
+// on every exit path - including one from warmWithState, which owns the
+// actual work once state is initialized. This is the same lifecycle/work
+// boundary runInstall already draws around prepareInstallPlan.
 func runWarm(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
-	// warm does not implement --dry-run: it would still download every
-	// artifact and commit it, the sidecar, and the extracted store, with
-	// nothing in its output marking the run as a dry run at all. Checked
-	// ahead of the --no-cache guard below and before anything is opened,
-	// locked, or printed, for the same reason that guard is: no lock, no
-	// network, on a config this command refuses to run under.
-	if cfg.DryRun {
-		return fmt.Errorf("%w: warm would still download and commit every artifact", helpers.ErrDryRunUnsupported)
-	}
 	// warm's entire output IS cache state: with --no-cache, initInstall would
 	// build a nil extract store and every download would be thrown away
 	// uncommitted (see helpers.ErrWarmCacheDisabled), so this is rejected
@@ -118,6 +108,10 @@ func warmWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra
 		return err
 	}
 
+	if cfg.DryRun {
+		return warmDryRun(ctx, cfg, runtime, state, collections, start)
+	}
+
 	failures := warmCollections(ctx, cfg, runtime, state, collections)
 	// Same tail contract as finalizeInstall (see its doc comment): the save is
 	// attempted first but does not short-circuit, writeRunMetrics always runs
@@ -135,6 +129,52 @@ func warmWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra
 	}
 	runtime.Output.PersistentPrintf("🔥 Warm complete: %d collections cached", len(collections))
 	return nil
+}
+
+// warmDryRun substitutes for warmCollections wholesale on a dry-run warm,
+// rather than passing a flag into it: a boolean inside the worker deciding
+// whether to download hundreds of megabytes is exactly the wrong seam - it
+// would leave cfg.DryRun readable from warmOne downward, exactly what the
+// prohibition on a mode parameter in that call chain exists to prevent.
+//
+// It reuses saveDryRunSnapshotIfPersisted unchanged because warm's exposure
+// to a fabricated snapshot is identical to install's and in fact sharper: a
+// warm-only machine's extracted trees are protected solely by the warmed set
+// (recordWarmed), since such a machine has no ansible_collections workspace
+// at all and so never contributes an installed entry either. A fabricated
+// persisted-and-empty snapshot on that machine would hand a later cleanup run
+// the evidence to wipe the whole content-addressable store, with nothing on
+// disk to re-derive it from.
+//
+// The error deliberately matches warmWithState's real failure wrap
+// (ErrInstallationFailed, mapping to exitcode.ExitInstall) rather than
+// inventing a new class, so the preview and the real run exit identically.
+//
+// SaveStore on this path still age-evicts expired APICache/DepsCache/
+// Versions/Warmed entries inside snapshotData(), exactly as every other
+// command's save does: that is shared retention maintenance on
+// reconstructible/expired state, not warm's product, and special-casing it
+// here would mean a second save path for no gain.
+func warmDryRun(
+	ctx context.Context,
+	cfg *config.Config,
+	runtime *infra.Infra,
+	state *installState,
+	collections map[string]collection,
+	start time.Time,
+) error {
+	warmed := state.store.WarmedArtifactSHAByKey()
+	probe := warmDryRunProbe(cfg, state.backend.Artifacts(), state.extractStore, warmed)
+	wouldFail := classifyDryRun(ctx, runtime, cfg, collections, warmDryRunVerbs, probe)
+	saveErr := saveDryRunSnapshotIfPersisted(ctx, runtime, state)
+	writeRunMetrics(cfg, runtime, "warm", start, len(collections), wouldFail, cfg.Frozen)
+	if wouldFail > 0 {
+		return annotateSaveFailure(
+			fmt.Errorf("%w: %d collections cannot be warmed offline: %w", helpers.ErrInstallationFailed, wouldFail, helpers.ErrOfflineMode),
+			saveErr,
+		)
+	}
+	return saveErr
 }
 
 func warmCollections(
@@ -170,6 +210,13 @@ func warmCollections(
 	// wait only because it returns an error and reports failures through a
 	// caller-owned *int32 instead of a return value - do not "fix" this to
 	// match that shape.
+	//
+	// A per-collection failure's cause is reported to the operator on the
+	// error-tier "Failed:" line above and is deliberately not propagated into
+	// the error the caller builds: this function returns a count, the caller
+	// classifies the whole run through helpers.ErrInstallationFailed once that
+	// count is nonzero, and joining N causes into one message would only grow
+	// it without moving a single exit code.
 	wg.Wait()
 	return failures.Load()
 }
@@ -366,9 +413,6 @@ func runInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) e
 // backend is already open and locked - runInstall holds that lifecycle - so
 // it never touches state.release or state.backend.Close.
 func installWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra, state *installState, start time.Time) error {
-	if cfg.DryRun {
-		dryRunBanner(runtime)
-	}
 	plan, err := prepareInstallPlan(ctx, cfg, runtime, state)
 	if err != nil {
 		return err
@@ -444,7 +488,9 @@ func installDryRun(
 	plan *installPlan,
 	start time.Time,
 ) error {
-	wouldFail := classifyDryRun(ctx, runtime, cfg, state.store, state.backend.Artifacts(), plan.collections, true)
+	wouldFail := classifyDryRun(
+		ctx, runtime, cfg, plan.collections, installDryRunVerbs, installDryRunProbe(cfg, state.store, state.backend.Artifacts()),
+	)
 	saveErr := saveDryRunSnapshotIfPersisted(ctx, runtime, state)
 	writeRunMetrics(cfg, runtime, "install", start, len(plan.collections), wouldFail, cfg.Frozen)
 	if wouldFail > 0 {
@@ -519,7 +565,15 @@ func prepareInstallPlan(ctx context.Context, cfg *config.Config, runtime *infra.
 	}, nil
 }
 
+// initInstall is the single function every collection command that can be in
+// dry-run mode must pass through, so emitting dryRunBanner here makes "no
+// command is in dry-run mode silently" a structural property rather than a
+// per-call-site convention - a future lock --dry-run inherits it by deleting
+// its own guard in runLock, with nothing else to remember.
 func initInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) (*installState, error) {
+	if cfg.DryRun {
+		dryRunBanner(runtime)
+	}
 	runtime.Output.Printf("🚀 init cache backend")
 	backend, err := cacheBackend.New(cfg, runtime)
 	if err != nil {

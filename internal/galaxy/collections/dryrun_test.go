@@ -1,13 +1,14 @@
 package collections
 
-// This file covers dryrun.go's two shared helpers directly: classifyDryRun's
-// deterministic report order, its checkInstalled gate (reusing
-// installRecordMatches rather than a second, hand-rolled check), its cache-hit
-// classification, and dryRunBanner's exclusive use of Warnf. installWithState's
-// end-to-end dry-run substitution (no download, no install tree, no
-// recordInstall, the snapshot still saved) is covered against a live fake
-// Galaxy server in dry_run_e2e_test.go instead, since that is the level at
-// which "nothing was downloaded" is actually observable.
+// This file covers dryrun.go's shared machinery directly: classifyDryRun's
+// deterministic report order, installDryRunProbe's settled gate (reusing
+// installRecordMatches rather than a second, hand-rolled check), warmDryRunProbe's
+// independence from install state, the shared cache-hit classification, and
+// dryRunBanner's exclusive use of Warnf. installWithState's and warmWithState's
+// end-to-end dry-run substitutions (no download, no install tree, no
+// recordInstall/recordWarmed, the snapshot still saved) are covered against a
+// live fake Galaxy server in dry_run_e2e_test.go instead, since that is the
+// level at which "nothing was downloaded" is actually observable.
 
 import (
 	"context"
@@ -16,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,7 +72,7 @@ func TestClassifyDryRunSortedOrder(t *testing.T) {
 		// artifacts is nil throughout: dryRunArtifactCached treats a nil store as
 		// "not cached", which is the only classification this test needs and
 		// avoids depending on any real cache state.
-		classifyDryRun(context.Background(), runtime, cfg, nil, nil, cols, false)
+		classifyDryRun(context.Background(), runtime, cfg, cols, installDryRunVerbs, installDryRunProbe(cfg, nil, nil))
 
 		got := printer.okLines()
 		if len(got) != len(want) {
@@ -80,6 +82,14 @@ func TestClassifyDryRunSortedOrder(t *testing.T) {
 			if got[j] != want[j] {
 				t.Fatalf("iteration %d: okLines[%d] = %q, want %q (report order must be sorted, not completion order)", i, j, got[j], want[j])
 			}
+		}
+		// installDryRunVerbs.summaryAction/summarySettled assemble this line at
+		// runtime now, rather than it being a single literal format string, so
+		// this pins install's summary wording as byte-identical to what it was
+		// before dryRunVerbs existed.
+		wantSummary := fmt.Sprintf("Dry run: %d would install, 0 already up to date, 0 would fail", keyCount)
+		if !printer.hasPersistentPrintContaining(wantSummary) {
+			t.Fatalf("iteration %d: expected persistent print containing %q, got %v", i, wantSummary, printer.persists)
 		}
 	}
 }
@@ -120,7 +130,12 @@ func TestClassifyDryRunReportsCacheHitVsMiss(t *testing.T) {
 	}
 	printer := &capturingPrinter{}
 	reportRuntime := infra.New(printer, srv.Client())
-	classifyDryRun(context.Background(), reportRuntime, cfg, state.store, state.backend.Artifacts(), cols, false)
+	// A fresh, empty store - not state.store, which really does hold acme.app's
+	// installed record - so the probe's install-record arm can never match
+	// either collection, isolating the cache-hit classification this test is
+	// about from acme.app's genuine install record.
+	probe := installDryRunProbe(cfg, store.New(), state.backend.Artifacts())
+	classifyDryRun(context.Background(), reportRuntime, cfg, cols, installDryRunVerbs, probe)
 
 	if !printer.hasOkContaining("acme.app@1.0.0 (artifact cached)") {
 		t.Errorf("expected acme.app reported as cached, got okLines %v", printer.okLines())
@@ -133,14 +148,14 @@ func TestClassifyDryRunReportsCacheHitVsMiss(t *testing.T) {
 	}
 }
 
-// TestClassifyDryRunCheckInstalledMarksUpToDate proves checkInstalled=true
-// reports a collection whose on-disk install already satisfies
-// installRecordMatches as already up to date, not as "would install", and
-// that this reuses installRecordMatches rather than a second, independent
-// check: acme.app is installed for real, then reported on with the exact
-// same collection/installPath installRecordMatches itself would be given at
-// real install time.
-func TestClassifyDryRunCheckInstalledMarksUpToDate(t *testing.T) {
+// TestInstallDryRunProbeMarksUpToDate proves installDryRunProbe reports a
+// collection whose on-disk install already satisfies installRecordMatches as
+// already up to date, not as "would install", and that this reuses
+// installRecordMatches rather than a second, independent check: acme.app is
+// installed for real, then reported on with the exact same
+// collection/installPath installRecordMatches itself would be given at real
+// install time.
+func TestInstallDryRunProbeMarksUpToDate(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	cacheDir := filepath.Join(root, "cache")
@@ -168,7 +183,8 @@ func TestClassifyDryRunCheckInstalledMarksUpToDate(t *testing.T) {
 	}
 	printer := &capturingPrinter{}
 	reportRuntime := infra.New(printer, srv.Client())
-	classifyDryRun(context.Background(), reportRuntime, cfg, state.store, state.backend.Artifacts(), cols, true)
+	probe := installDryRunProbe(cfg, state.store, state.backend.Artifacts())
+	classifyDryRun(context.Background(), reportRuntime, cfg, cols, installDryRunVerbs, probe)
 
 	if !printer.hasPersistentPrintContaining("Up to date: acme.app@1.0.0") {
 		t.Errorf("expected acme.app reported as up to date, got %v", printer.persists)
@@ -219,7 +235,12 @@ func TestClassifyDryRunMirrorsIsCacheHitUnderNoCache(t *testing.T) {
 	}
 	printer := &capturingPrinter{}
 	reportRuntime := infra.New(printer, srv.Client())
-	classifyDryRun(context.Background(), reportRuntime, cfg, state.store, state.backend.Artifacts(), cols, false)
+	// A fresh, empty store - not state.store, which really does hold acme.app's
+	// installed record - so the probe's install-record arm can never match,
+	// isolating the --no-cache classification this test is about from
+	// acme.app's genuine install record.
+	probe := installDryRunProbe(cfg, store.New(), state.backend.Artifacts())
+	classifyDryRun(context.Background(), reportRuntime, cfg, cols, installDryRunVerbs, probe)
 
 	if !printer.hasOkContaining("acme.app@1.0.0 (would download)") {
 		t.Errorf("expected acme.app reported as would-download under --no-cache despite a warm cache, got %v", printer.okLines())
@@ -284,7 +305,8 @@ func TestClassifyDryRunNeverDeletesDriftedExtractMarker(t *testing.T) {
 	}
 	printer := &capturingPrinter{}
 	reportRuntime := infra.New(printer, srv.Client())
-	classifyDryRun(context.Background(), reportRuntime, cfg, state.store, state.backend.Artifacts(), cols, true)
+	probe := installDryRunProbe(cfg, state.store, state.backend.Artifacts())
+	classifyDryRun(context.Background(), reportRuntime, cfg, cols, installDryRunVerbs, probe)
 
 	if printer.hasPersistentPrintContaining("Up to date") {
 		t.Errorf("expected the drifted install NOT reported up to date, got %v", printer.persists)
@@ -385,7 +407,7 @@ func assertFailsOfflineClosed(t *testing.T, err error) {
 // replacement artifact; the dry run must report the same "would fail"
 // verdict and return the same error class, not the optimistic "up to date"
 // this exact scenario used to produce before checkExtractMarker replaced the
-// installRecordMatches-only gate in classifyOneDryRun.
+// installRecordMatches-only gate in installDryRunProbe.
 func TestInstallDryRunDriftedOfflineEvictedReportsWouldFailAndFails(t *testing.T) {
 	t.Parallel()
 	cfg, state, cols := newDriftedOfflineEvictedFixture(t)
@@ -393,7 +415,8 @@ func TestInstallDryRunDriftedOfflineEvictedReportsWouldFailAndFails(t *testing.T
 
 	printer := &capturingPrinter{}
 	reportRuntime := infra.New(printer, http.DefaultClient)
-	wouldFail := classifyDryRun(context.Background(), reportRuntime, cfg, state.store, state.backend.Artifacts(), cols, true)
+	probe := installDryRunProbe(cfg, state.store, state.backend.Artifacts())
+	wouldFail := classifyDryRun(context.Background(), reportRuntime, cfg, cols, installDryRunVerbs, probe)
 	assertReportsSingleWouldFail(t, printer, wouldFail, "acme.app@1.0.0")
 
 	// installDryRun's own error-wrap must classify identically to a real
@@ -403,12 +426,13 @@ func TestInstallDryRunDriftedOfflineEvictedReportsWouldFailAndFails(t *testing.T
 	assertFailsOfflineClosed(t, err)
 }
 
-// TestClassifyDryRunCheckInstalledFalseIgnoresInstallState proves that
-// checkInstalled=false - the shape a future warm caller will use - never
-// consults installRecordMatches at all: even an actually-installed
-// collection is reported as "would install", since warm tracks no install
-// path to compare against.
-func TestClassifyDryRunCheckInstalledFalseIgnoresInstallState(t *testing.T) {
+// TestWarmDryRunProbeIgnoresInstallState proves warmDryRunProbe never
+// consults install state at all: a collection with a valid install record and
+// a matching extract marker - installDryRunProbe's own settled case - is
+// still reported "Would warm" once its cached artifact is evicted, since
+// warm's product is the artifact cache plus the extracted tree, not an
+// install path warm tracks nothing about.
+func TestWarmDryRunProbeIgnoresInstallState(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	cacheDir := filepath.Join(root, "cache")
@@ -431,18 +455,27 @@ func TestClassifyDryRunCheckInstalledFalseIgnoresInstallState(t *testing.T) {
 		t.Fatalf("installWithState (perform the real install): %v", err)
 	}
 
-	cols := map[string]collection{
-		"acme.app@1.0.0": {Namespace: "acme", Name: "app", Version: "1.0.0", Source: srv.URL()},
+	col := collection{Namespace: "acme", Name: "app", Version: "1.0.0", Source: srv.URL()}
+	// Evict the cached artifact even though the install itself (and its extract
+	// marker) still stands: this is the one state where installDryRunProbe would
+	// call the collection settled (a matching install record) but warm's own
+	// product - the artifact cache - is absent.
+	if err := state.backend.Artifacts().Delete(context.Background(), artifactKey(col)); err != nil {
+		t.Fatalf("evict cached artifact: %v", err)
 	}
+
+	cols := map[string]collection{"acme.app@1.0.0": col}
 	printer := &capturingPrinter{}
 	reportRuntime := infra.New(printer, srv.Client())
-	classifyDryRun(context.Background(), reportRuntime, cfg, state.store, state.backend.Artifacts(), cols, false)
+	warmed := state.store.WarmedArtifactSHAByKey()
+	probe := warmDryRunProbe(cfg, state.backend.Artifacts(), state.extractStore, warmed)
+	classifyDryRun(context.Background(), reportRuntime, cfg, cols, warmDryRunVerbs, probe)
 
-	if len(printer.okLines()) != 1 {
-		t.Fatalf("expected exactly one would-install line, got %v", printer.okLines())
+	if !printer.hasOkContaining("Would warm: acme.app@1.0.0 (would download)") {
+		t.Errorf("expected acme.app reported as would-warm, got okLines %v", printer.okLines())
 	}
-	if printer.hasPersistentPrintContaining("Up to date") {
-		t.Errorf("checkInstalled=false must never report \"up to date\", got %v", printer.persists)
+	if printer.hasPersistentPrintContaining("Already warm") {
+		t.Errorf("warmDryRunProbe must never report \"Already warm\" from install state alone, got %v", printer.persists)
 	}
 }
 
@@ -467,6 +500,58 @@ func TestDryRunBannerOnlyWarns(t *testing.T) {
 	if len(printer.prints) != 0 || len(printer.persists) != 0 || len(printer.oks) != 0 {
 		t.Errorf("expected no output on any other tier, got prints=%v persists=%v oks=%v", printer.prints, printer.persists, printer.oks)
 	}
+}
+
+// TestDryRunBannerEmittedExactlyOnceAcrossCommands proves initInstall's
+// hoisted dryRunBanner call fires exactly once per run, for both install and
+// warm, rather than once per call site the way it did before the hoist (only
+// installWithState's own cfg.DryRun branch printed it).
+func TestDryRunBannerEmittedExactlyOnceAcrossCommands(t *testing.T) {
+	t.Parallel()
+
+	assertBannerOnce := func(t *testing.T, run func(context.Context, *config.Config, *infra.Infra) error) {
+		t.Helper()
+		root := t.TempDir()
+		cacheDir := filepath.Join(root, "cache")
+		reqPath := filepath.Join(root, "requirements.yml")
+		mustWriteFile(t, reqPath, []byte("collections:\n  - name: acme.app\n    version: \"*\"\n"))
+
+		srv := fakegalaxy.New(t)
+		srv.AddVersion("acme", "app", "1.0.0", nil)
+
+		cfg := &config.Config{
+			Server:           srv.URL(),
+			CacheDir:         cacheDir,
+			DownloadPath:     filepath.Join(root, "install"),
+			RequirementsFile: reqPath,
+			Workers:          1,
+			DryRun:           true,
+		}
+		printer := &capturingPrinter{}
+		runtime := infra.New(printer, srv.Client())
+
+		if err := run(context.Background(), cfg, runtime); err != nil {
+			t.Fatalf("run: %v", err)
+		}
+		count := 0
+		for _, w := range printer.warns {
+			if strings.Contains(w, "--dry-run is active") {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("banner warn count = %d, want exactly 1, warns=%v", count, printer.warns)
+		}
+	}
+
+	t.Run("install", func(t *testing.T) {
+		t.Parallel()
+		assertBannerOnce(t, Start)
+	})
+	t.Run("warm", func(t *testing.T) {
+		t.Parallel()
+		assertBannerOnce(t, Warm)
+	})
 }
 
 // TestInitInstallDryRunSkipsClearCache proves --clear-cache is suppressed

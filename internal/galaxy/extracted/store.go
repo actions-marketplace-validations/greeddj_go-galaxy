@@ -55,6 +55,10 @@ var (
 	ErrStoreNotConfigured = errors.New("extracted store is not configured")
 	// ErrSHAEmpty indicates a missing SHA256 identifier.
 	ErrSHAEmpty = errors.New("artifact sha is empty")
+	// ErrSHAUnsafe indicates a SHA256 identifier that is not safe to use as a
+	// single path element - see storePath's own doc comment for where such a
+	// value can originate.
+	ErrSHAUnsafe = errors.New("artifact sha is not a single path element")
 )
 
 // Store materializes tarballs once per SHA and reuses them via hardlinks.
@@ -94,7 +98,10 @@ func (s *Store) Ensure(sha, tarPath string) (string, error) {
 	if sha == "" {
 		return "", ErrSHAEmpty
 	}
-	final := filepath.Join(s.root, sha)
+	final, ok := s.storePath(sha)
+	if !ok {
+		return "", ErrSHAUnsafe
+	}
 	if isReady(final) {
 		return final, nil
 	}
@@ -124,6 +131,29 @@ func (s *Store) Ensure(sha, tarPath string) (string, error) {
 		return "", err
 	}
 	return s.extractInto(final, tarPath)
+}
+
+// Ready reports whether sha's content-addressable tree is present and
+// finalized, without extracting, promoting, or mutating anything. It is the
+// pure read half of Ensure's own isReady short-circuit, exported for a
+// preview that must describe the store's state without changing it.
+//
+// It checks the ready marker's exact payload, not merely its presence: a tree
+// extracted by an older binary carries the legacy sentinel and unhardened
+// write bits, and Ensure would rebuild it, so Ready must report false for it
+// too. A caller that stat'ed the marker itself would silently miss that and
+// drift from Ensure.
+//
+// sha reaches this method from a lockfile pin or the persisted snapshot's
+// warmed record, neither of which is validated before it gets here (see
+// storePath), so an unsafe sha - one that is not a single path element -
+// reports false rather than joining it into a path at all.
+func (s *Store) Ready(sha string) bool {
+	if s == nil {
+		return false
+	}
+	p, ok := s.storePath(sha)
+	return ok && isReady(p)
 }
 
 // verifyTarballSHA reports nil when the file at tarPath hashes to sha,
@@ -172,6 +202,12 @@ func (s *Store) IngestReader(r io.Reader) (string, error) {
 // Promote atomically renames a tmpRoot from IngestReader into <root>/<sha>.
 // If <sha> is already finalized, tmpRoot is removed and the existing path
 // returned.
+//
+// sha is hex by construction on every caller today (a hash of the bytes just
+// streamed), so the storePath check below is defense in depth against a
+// future caller, not a case reachable now - but it still guards a
+// RemoveAll-then-Rename pair, and a Rename target built from an unvalidated
+// sha is exactly the kind of path this package must never construct.
 func (s *Store) Promote(tmpRoot, sha string) (string, error) {
 	if s == nil {
 		_ = os.RemoveAll(tmpRoot)
@@ -181,7 +217,11 @@ func (s *Store) Promote(tmpRoot, sha string) (string, error) {
 		_ = os.RemoveAll(tmpRoot)
 		return "", ErrSHAEmpty
 	}
-	final := filepath.Join(s.root, sha)
+	final, ok := s.storePath(sha)
+	if !ok {
+		_ = os.RemoveAll(tmpRoot)
+		return "", ErrSHAUnsafe
+	}
 
 	lock := s.lockFor(sha)
 	lock.Lock()
@@ -203,12 +243,21 @@ func (s *Store) Promote(tmpRoot, sha string) (string, error) {
 	return final, nil
 }
 
-// Remove deletes the extracted entry for sha. Best-effort.
+// Remove deletes the extracted entry for sha. Best-effort: it has zero
+// production callers today, so this exists for a future caller that will
+// pass whatever the persisted snapshot or a lockfile pin recorded, neither
+// validated (see storePath) - an unsafe sha makes Remove refuse rather than
+// remove, returning nil exactly as it does for an empty sha, so the nil must
+// not be read as "the entry is gone"; it means "nothing was touched".
 func (s *Store) Remove(sha string) error {
 	if s == nil || sha == "" {
 		return nil
 	}
-	return os.RemoveAll(filepath.Join(s.root, sha))
+	p, ok := s.storePath(sha)
+	if !ok {
+		return nil
+	}
+	return os.RemoveAll(p)
 }
 
 // SweepPlan lists the extracted entries under the store root whose name is
@@ -293,6 +342,20 @@ func isTempEntryName(name string) bool {
 	return strings.HasPrefix(name, ingestPrefix) || strings.HasSuffix(name, tmpSuffix)
 }
 
+// storePath returns the on-disk path of sha's content-addressable tree, or
+// ok=false when sha is not a single, safe path element. Every method that
+// turns a sha into a path goes through this: a sha reaches this package from
+// a lockfile pin (lockfile.File.validate checks only duplicate names, never
+// hex shape) and from the persisted snapshot's warmed and installed records,
+// neither of which is validated, and filepath.Join would happily clean
+// "../../.." into an escape from the store root.
+func (s *Store) storePath(sha string) (string, bool) {
+	if !helpers.IsPathElement(sha) {
+		return "", false
+	}
+	return filepath.Join(s.root, sha), true
+}
+
 func (s *Store) extractInto(final, tarPath string) (string, error) {
 	if err := os.MkdirAll(s.root, helpers.DirMod); err != nil {
 		return "", err
@@ -350,7 +413,8 @@ func writeReadyMarker(dir string) error {
 // least one byte over the cap - mirroring
 // collections.readExtractMarker's same bounded-read shape.
 func readReadyMarker(path string) (string, bool) {
-	f, err := os.Open(path) //nolint:gosec // path is this store's own marker path, not attacker-controlled input.
+	//nolint:gosec // path is built from storePath's validated single sha element under s.root, never a raw untrusted path.
+	f, err := os.Open(path)
 	if err != nil {
 		return "", false
 	}

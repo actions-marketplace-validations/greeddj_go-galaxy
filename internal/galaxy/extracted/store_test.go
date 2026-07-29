@@ -796,6 +796,128 @@ func TestLegacyReadyMarkerForcesRebuild(t *testing.T) {
 	}
 }
 
+// TestStoreReady proves the pure read-only predicate Ready mirrors Ensure's
+// own isReady short-circuit exactly: false before a tree is ever extracted,
+// false for an empty sha, true once the tree is genuinely promoted, and false
+// again for a tree whose ready marker carries the legacy "ok" payload - the
+// same pre-hardening shape TestLegacyReadyMarkerForcesRebuild proves Ensure
+// rejects and rebuilds rather than trusts. A bare os.Stat of the marker would
+// report true for that legacy case, so this pins Ready against exactly the
+// regression its own doc comment warns about.
+func TestStoreReady(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	tarPath := filepath.Join(dir, "src.tar.gz")
+	writeTarball(t, tarPath, map[string]string{"foo.txt": helloFileContent})
+	sha := mustHash(t, tarPath)
+
+	store := NewStore(filepath.Join(dir, "cache"))
+
+	if store.Ready(sha) {
+		t.Error("expected Ready to report false before the tree is ever extracted")
+	}
+	if store.Ready("") {
+		t.Error("expected Ready to report false for an empty sha")
+	}
+
+	if _, err := store.Ensure(sha, tarPath); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if !store.Ready(sha) {
+		t.Error("expected Ready to report true for a genuinely promoted tree")
+	}
+
+	// Overwrite the marker with the legacy pre-hardening payload - the exact
+	// shape TestLegacyReadyMarkerForcesRebuild builds by hand - and prove Ready
+	// rejects it just as Ensure's own isReady check would.
+	markerPath := filepath.Join(store.Root(), sha, ReadyMarker)
+	if err := os.WriteFile(markerPath, []byte("ok"), helpers.FileMod); err != nil {
+		t.Fatalf("write legacy marker: %v", err)
+	}
+	if store.Ready(sha) {
+		t.Error("expected Ready to report false for a tree carrying the legacy \"ok\" marker payload")
+	}
+
+	// Traversal guard: a sha crafted to escape the store root, naming a real
+	// sibling directory that genuinely holds a valid-looking ready marker,
+	// must still report false. storePath rejects any sha containing a path
+	// separator before Ready ever calls isReady, so this never even joins
+	// into a path that could reach the sibling.
+	siblingDir := filepath.Join(store.Root(), "..", "sibling")
+	if err := os.MkdirAll(siblingDir, helpers.DirMod); err != nil {
+		t.Fatalf("mkdir sibling: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(siblingDir, ReadyMarker), []byte(ReadyMarkerPayload), helpers.FileMod); err != nil {
+		t.Fatalf("write sibling ready marker: %v", err)
+	}
+	if store.Ready("../sibling") {
+		t.Error("expected Ready to report false for a traversal sha, even one naming a directory with a valid ready marker")
+	}
+}
+
+// TestEnsureAndPromoteRejectTraversalSHA proves both of the store's
+// tree-creating entry points refuse an unsafe sha - one that is not a single
+// path element - rather than joining it into a filepath.Join/os.Rename target
+// that could escape the store root. Neither call may create or remove
+// anything outside store.Root().
+func TestEnsureAndPromoteRejectTraversalSHA(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	tarPath := filepath.Join(dir, "src.tar.gz")
+	writeTarball(t, tarPath, map[string]string{"foo.txt": helloFileContent})
+
+	store := NewStore(filepath.Join(dir, "cache"))
+	const traversalSHA = "../../../../../../etc/ssh"
+
+	if _, err := store.Ensure(traversalSHA, tarPath); !errors.Is(err, ErrSHAUnsafe) {
+		t.Errorf("Ensure(%q, ...) error = %v, want ErrSHAUnsafe", traversalSHA, err)
+	}
+	// The rejection happens before Ensure ever reaches extractInto's own
+	// os.MkdirAll(s.root, ...), so the store root itself must not exist yet -
+	// the strongest available proof that nothing was created anywhere, inside
+	// the root or out.
+	if _, err := os.Stat(store.Root()); !os.IsNotExist(err) {
+		t.Errorf("expected Ensure to create nothing at all for a rejected sha, store.Root() stat error = %v", err)
+	}
+
+	tmpRoot := t.TempDir()
+	if _, err := store.Promote(tmpRoot, traversalSHA); !errors.Is(err, ErrSHAUnsafe) {
+		t.Errorf("Promote(_, %q) error = %v, want ErrSHAUnsafe", traversalSHA, err)
+	}
+	if _, err := os.Stat(store.Root()); !os.IsNotExist(err) {
+		t.Errorf("expected Promote to create nothing at all for a rejected sha, store.Root() stat error = %v", err)
+	}
+	if _, err := os.Stat(tmpRoot); !os.IsNotExist(err) {
+		t.Errorf("expected Promote to still remove tmpRoot on rejection, stat error = %v", err)
+	}
+}
+
+// TestRemoveRefusesTraversalSHA proves Remove leaves a traversal target
+// intact and returns nil (its normal best-effort "nothing to do" result,
+// matching an empty sha) rather than removing whatever path an unsafe sha
+// would otherwise resolve to outside the store root.
+func TestRemoveRefusesTraversalSHA(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	store := NewStore(filepath.Join(dir, "cache"))
+
+	target := filepath.Join(dir, "sibling-victim")
+	if err := os.MkdirAll(target, helpers.DirMod); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+	marker := filepath.Join(target, "keepme")
+	if err := os.WriteFile(marker, []byte("keep"), helpers.FileMod); err != nil {
+		t.Fatalf("write marker file: %v", err)
+	}
+
+	if err := store.Remove("../sibling-victim"); err != nil {
+		t.Errorf("Remove: %v, want nil", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("expected the traversal target to survive Remove, stat error: %v", err)
+	}
+}
+
 // TestTarballShippingReadyMarkerPromotes is the regression test for the bug
 // hardening introduces: a tarball that ships its own root-level ".ready"
 // entry now extracts it read-only along with everything else, so a naive
