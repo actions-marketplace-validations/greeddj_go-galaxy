@@ -21,6 +21,14 @@ const foreignToken = "foreign-token"
 // every other interval shrunk to make the lock's state machine fast and
 // deterministic in tests. Callers needing a non-default waitCeiling,
 // heartbeatInterval, etc. can copy the returned value and override fields.
+//
+// These shrunken intervals sit on top of the client's fixed retry policy
+// (s3RetryPolicy, base s3RetryBackoffBase = 200ms, 4 attempts), which tests
+// cannot shrink; heartbeatOpTimeout and releaseTimeout are sized for clean
+// round trips, so a single jittered retry backoff can consume a whole op
+// budget. Therefore any test that injects a retryable 5xx on a lock-path key
+// must synchronize on the fault having been consumed, never sleep a number
+// of intervals.
 func testLockTiming(ttl time.Duration) lockTiming {
 	return lockTiming{
 		ttl:                ttl,
@@ -30,6 +38,36 @@ func testLockTiming(ttl time.Duration) lockTiming {
 		waitCeiling:        time.Second,
 		backoffBase:        10 * time.Millisecond,
 		backoffCap:         50 * time.Millisecond,
+	}
+}
+
+// lockEventWaitCeiling is a LIVENESS ceiling, not a timing margin - the
+// tests using waitForLockEvent assert on observed events, so a slow machine
+// only makes them slower, never wrong, and the ceiling fires only when the
+// event genuinely never happens.
+const lockEventWaitCeiling = 10 * time.Second
+
+// lockEventPollInterval is how often waitForLockEvent re-checks its
+// condition while waiting.
+const lockEventPollInterval = 2 * time.Millisecond
+
+// waitForLockEvent blocks until cond reports true, polling every
+// lockEventPollInterval, and fails the test once lockEventWaitCeiling
+// elapses without cond becoming true. It lets tests synchronize on something
+// the heartbeat observably did - a request the fake served, a deadline the
+// lock object now records - instead of sleeping a fixed number of heartbeat
+// intervals, which only ever buys a probabilistic head start.
+func waitForLockEvent(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(lockEventWaitCeiling)
+	for {
+		if cond() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %v waiting for %s", lockEventWaitCeiling, what)
+		}
+		time.Sleep(lockEventPollInterval)
 	}
 }
 
@@ -195,7 +233,6 @@ func TestLockReclaimsExpiredLock(t *testing.T) {
 
 	pastDeadline := time.Now().UTC().Add(-time.Hour)
 	seedLockObject(ctx, t, b, foreignToken, pastDeadline)
-	time.Sleep(2 * b.lock.ttl) // let the seeded lock's TTL elapse per Last-Modified
 
 	release, err := b.Lock(ctx)
 	if err != nil {
@@ -289,6 +326,14 @@ func TestLockAcquirePropagatesCallerCancellation(t *testing.T) {
 // TestHeartbeatRefreshesDeadline confirms the background heartbeat advances
 // the lock object's deadline while the holder keeps it, without any
 // explicit refresh call from the caller.
+//
+// Rather than sleeping past several heartbeat ticks and comparing two reads
+// (the old approach needed a 1.5s sleep just to guarantee the two RFC3339,
+// second-resolution timestamps differed), the test rolls the deadline an
+// hour into the past under the holder's own token - the same unconditional
+// same-token write the heartbeat itself performs - and waits for the
+// heartbeat to observably push it forward again. That is unambiguous at any
+// resolution and needs no scheduling margin.
 func TestHeartbeatRefreshesDeadline(t *testing.T) {
 	t.Parallel()
 	b := newTestBackend(t)
@@ -301,30 +346,42 @@ func TestHeartbeatRefreshesDeadline(t *testing.T) {
 	}
 
 	key := b.key(locksPrefix, lockObject)
-	firstHeaders, err := b.client.headObject(ctx, key)
-	if err != nil {
-		t.Fatalf("headObject: %v", err)
-	}
-	firstDeadline, err := time.Parse(time.RFC3339, firstHeaders.Get("X-Amz-Meta-Deadline"))
-	if err != nil {
-		t.Fatalf("parse first deadline: %v", err)
+	readLock := func() (string, time.Time) {
+		t.Helper()
+		headers, err := b.client.headObject(ctx, key)
+		if err != nil {
+			t.Fatalf("headObject: %v", err)
+		}
+		deadline, err := time.Parse(time.RFC3339, headers.Get("X-Amz-Meta-Deadline"))
+		if err != nil {
+			t.Fatalf("parse deadline: %v", err)
+		}
+		return headers.Get("X-Amz-Meta-Token"), deadline
 	}
 
-	// Sleep well past several heartbeat ticks. 1.5s guarantees the real
-	// wall-clock gap between the two deadline reads exceeds a full second,
-	// so their RFC3339 (second-resolution) values are certain to differ.
-	time.Sleep(1500 * time.Millisecond)
+	token, acquiredDeadline := readLock()
+	// The same unconditional same-token write the heartbeat itself performs,
+	// with the deadline moved an hour into the past, so the refresh that
+	// follows is observable without waiting for the wall clock to cross the
+	// second boundary RFC3339 resolution otherwise requires.
+	rolledBack := time.Now().UTC().Add(-time.Hour)
+	if err := b.putLock(ctx, key, token, rolledBack, false); err != nil {
+		t.Fatalf("roll the deadline back: %v", err)
+	}
 
-	secondHeaders, err := b.client.headObject(ctx, key)
-	if err != nil {
-		t.Fatalf("headObject: %v", err)
-	}
-	secondDeadline, err := time.Parse(time.RFC3339, secondHeaders.Get("X-Amz-Meta-Deadline"))
-	if err != nil {
-		t.Fatalf("parse second deadline: %v", err)
-	}
-	if !secondDeadline.After(firstDeadline) {
-		t.Fatalf("expected the heartbeat to advance the deadline, first=%v second=%v", firstDeadline, secondDeadline)
+	var refreshed time.Time
+	waitForLockEvent(t, "the heartbeat to advance the rolled-back deadline", func() bool {
+		holder, deadline := readLock()
+		if holder != token {
+			t.Fatalf("expected the holder token to stay %q, got %q", token, holder)
+		}
+		refreshed = deadline
+		return deadline.After(rolledBack)
+	})
+	// The refresh writes a full ttl ahead of its own now, so it can never
+	// land before the deadline the acquisition recorded.
+	if refreshed.Before(acquiredDeadline) {
+		t.Fatalf("expected the refresh to be at least the acquired deadline (%v), got %v", acquiredDeadline, refreshed)
 	}
 
 	if err := release(); err != nil {
@@ -354,6 +411,17 @@ func TestHeartbeatDetectsLostOwnershipAndReleaseSkipsDelete(t *testing.T) {
 		t.Fatalf("seed foreign takeover: %v", err)
 	}
 
+	// Deliberately a sleep, unlike the two heartbeat tests above. Loss
+	// detection has no observable downstream of itself: the heartbeat's
+	// answer to a takeover is to store the flag and exit, issuing no further
+	// request, and the fake counts a request when it is served - before the
+	// holder has processed the response. Waiting on the fake's HEAD counter
+	// therefore lets release's hbCancel abort the very HEAD that would have
+	// revealed the takeover, leaving the flag unset; polled tightly, that
+	// variant fails outright. Three intervals of a heartbeat that needs one
+	// round trip is a scheduling margin only, and releaseLock's own token
+	// check - not this flag - is what keeps the foreign lock from being
+	// deleted.
 	time.Sleep(3 * b.lock.heartbeatInterval)
 
 	if err := release(); !errors.Is(err, errS3LockLost) {
@@ -376,13 +444,22 @@ func TestHeartbeatDetectsLostOwnershipAndReleaseSkipsDelete(t *testing.T) {
 // definitive token mismatch may do that. Release afterward must succeed
 // (not errS3LockLost) and must actually delete the lock object, proving the
 // heartbeat kept refreshing normally once the forced failures were spent.
+//
+// The fault is sized to the client's whole retry budget
+// (s3RetryMaxAttempts) on purpose: a 500 is retryable, so a smaller fault is
+// absorbed by headObject's own retry and heartbeatTick never sees an error
+// at all - the branch this test is named for would go untested while the
+// test still passed. A full budget guarantees the tick that runs first
+// exhausts its retries and hands verifyOwner a real error. How long that
+// takes is not predictable (a single full-jitter backoff draw can outlast a
+// whole heartbeat interval), so the test waits for the refresh PUT that only
+// follows a successful verifyOwner HEAD, rather than sleeping a number of
+// ticks.
 func TestHeartbeatSurvivesTransientHeadFailures(t *testing.T) {
 	t.Parallel()
 	fake := newFakeS3()
 	b := newTestBackendWithFake(t, fake)
-	timing := testLockTiming(10 * time.Second)
-	timing.heartbeatInterval = 20 * time.Millisecond
-	b.lock = timing
+	b.lock = testLockTiming(10 * time.Second)
 	ctx := context.Background()
 
 	release, err := b.Lock(ctx)
@@ -391,13 +468,24 @@ func TestHeartbeatSurvivesTransientHeadFailures(t *testing.T) {
 	}
 
 	key := b.key(locksPrefix, lockObject)
-	// Fail the next two HEAD requests on the lock key (two heartbeat
-	// ticks' worth), then let the fake behave normally again.
-	fake.failNext(key, http.MethodHead, http.StatusInternalServerError, 2)
+	headsAtArm := fake.requestCount(key, http.MethodHead)
+	putsAtArm := fake.requestCount(key, http.MethodPut)
+	fake.failNext(key, http.MethodHead, http.StatusInternalServerError, s3RetryMaxAttempts)
 
-	// Give the heartbeat enough ticks to hit both forced failures and then
-	// tick again successfully at least once before we release.
-	time.Sleep(6 * b.lock.heartbeatInterval)
+	// The heartbeat only issues a refresh PUT after a verifyOwner HEAD
+	// succeeded, and a HEAD can only succeed once every armed failure has
+	// been served - so one new PUT proves the forced failures were spent and
+	// the heartbeat recovered, and proves nothing is left armed to ambush
+	// release's own HEAD.
+	waitForLockEvent(t, "a heartbeat refresh PUT after the forced HEAD failures", func() bool {
+		return fake.requestCount(key, http.MethodPut) > putsAtArm
+	})
+
+	// Every forced failure plus the HEAD that finally succeeded: proof the
+	// fault was really injected and really exhausted, not silently skipped.
+	if heads := fake.requestCount(key, http.MethodHead) - headsAtArm; heads < s3RetryMaxAttempts+1 {
+		t.Fatalf("expected %d forced failures and a successful HEAD, got %d HEADs after arming", s3RetryMaxAttempts, heads)
+	}
 
 	if err := release(); err != nil {
 		t.Fatalf("expected release to succeed after transient HEAD failures, got %v", err)
