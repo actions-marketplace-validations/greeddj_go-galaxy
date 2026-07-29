@@ -1930,3 +1930,194 @@ func TestSweepExtractedStoreNoopWhenCacheDirEmpty(t *testing.T) {
 
 	sweepExtractedStore(cfg, runtime, st, map[string]bool{}, map[string][]installedCollection{})
 }
+
+// TestStartLeavesExtractedCacheWhenNoSnapshotPersisted is THE regression test
+// for this fix: an absent workspace plus a project registered for GC plus NO
+// persisted snapshot at all (a fresh cache dir - no seedSnapshotInstalled,
+// no seedSnapshotWarmed) used to hand sweepExtractedStore an empty keep set
+// indistinguishable from "nothing is installed or warmed anywhere", wiping
+// the entire extracted store on the strength of having no evidence at all.
+// With the WasPersisted guard in place, the extracted dir must survive.
+func TestStartLeavesExtractedCacheWhenNoSnapshotPersisted(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	seedExtractedDir(t, cacheDir, "sha-orphaned-by-no-snapshot")
+	recordAbsentWorkspaceProject(t, cfg, runtime, downloadPath)
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+
+	assertExtractedDirsSurvive(t, cacheDir, "sha-orphaned-by-no-snapshot")
+}
+
+// TestStartDoesNotFabricatePersistedSnapshot proves the write-side half of
+// this fix: when Start runs with no persisted snapshot to begin with, it must
+// not call SaveStore at all, since doing so would stamp Meta.LastSnapshot for
+// the first time and fabricate a persisted-and-empty snapshot the next run
+// would read as positive evidence that nothing is installed or warmed
+// anywhere. Reloading through a fresh backend after Start must still report
+// WasPersisted() == false.
+func TestStartDoesNotFabricatePersistedSnapshot(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	seedExtractedDir(t, cacheDir, "sha-orphaned-by-no-snapshot")
+	recordAbsentWorkspaceProject(t, cfg, runtime, downloadPath)
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+
+	reloaded := reloadStoreThroughFreshBackend(t, cfg, runtime)
+	if reloaded.WasPersisted() {
+		t.Fatal("expected no snapshot to have been persisted by a cleanup run that never loaded one")
+	}
+}
+
+// reloadStoreThroughFreshBackend opens a brand-new backend against cfg and
+// loads its store, mirroring what the next real run would see on disk -
+// as opposed to inspecting the *store.Store instance Start itself used,
+// which would not prove anything actually reached the backend.
+func reloadStoreThroughFreshBackend(t *testing.T, cfg *config.Config, runtime *infra.Infra) *store.Store {
+	t.Helper()
+	backend, err := cacheBackend.New(cfg, runtime)
+	if err != nil {
+		t.Fatalf("failed to build a fresh backend: %v", err)
+	}
+	if err := backend.Open(t.Context()); err != nil {
+		t.Fatalf("failed to open a fresh backend: %v", err)
+	}
+	defer func() {
+		if err := backend.Close(t.Context()); err != nil {
+			t.Errorf("failed to close the fresh backend: %v", err)
+		}
+	}()
+	st, err := backend.LoadStore(t.Context())
+	if err != nil {
+		t.Fatalf("failed to load store through a fresh backend: %v", err)
+	}
+	return st
+}
+
+// TestStartTwiceWithNoSnapshotLeavesExtractedCacheIntact proves the guard
+// holds across repeated runs, not just a single one: two consecutive Start
+// calls against a cache dir that never gains a persisted snapshot must both
+// leave the extracted store untouched. This only passes when both halves of
+// the fix are in place together - if the read-side guard alone landed
+// without the write-side guard, the first run would still fabricate a
+// persisted-and-empty snapshot that the second run would then read as real
+// evidence and wipe the extracted dir on.
+func TestStartTwiceWithNoSnapshotLeavesExtractedCacheIntact(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	seedExtractedDir(t, cacheDir, "sha-orphaned-by-no-snapshot")
+	recordAbsentWorkspaceProject(t, cfg, runtime, downloadPath)
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected first Start to succeed, got %v", err)
+	}
+	assertExtractedDirsSurvive(t, cacheDir, "sha-orphaned-by-no-snapshot")
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected second Start to succeed, got %v", err)
+	}
+	assertExtractedDirsSurvive(t, cacheDir, "sha-orphaned-by-no-snapshot")
+}
+
+// TestStartSweepsExtractedCacheWhenSnapshotIsPersistedButEmpty is the
+// narrowness guard for the read-side half of this fix: a snapshot that was
+// actually persisted - even one whose Installed/Warmed maps are both empty -
+// is real evidence ("nothing is referenced"), unlike an absent snapshot
+// ("unknown"), and the guard must not treat the two the same. An orphaned
+// extracted dir must still be swept in this case.
+func TestStartSweepsExtractedCacheWhenSnapshotIsPersistedButEmpty(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	// An empty but persisted snapshot: SaveStore still stamps Meta.LastSnapshot
+	// even though the Installed map given to it is empty.
+	seedSnapshotInstalled(t, cfg, runtime, map[string]store.InstalledEntry{})
+	seedExtractedDir(t, cacheDir, "sha-orphan-with-persisted-empty-snapshot")
+	recordAbsentWorkspaceProject(t, cfg, runtime, downloadPath)
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+
+	assertExtractedDirGone(t, cacheDir, "sha-orphan-with-persisted-empty-snapshot")
+}
+
+// TestStartRemovesUnreferencedInstallWithNoPersistedSnapshot is the
+// narrowness guard on the other half of this fix: removeUnused is driven by
+// the on-disk workspace scan plus each project's requirements.yml, not by
+// the snapshot, so it must stay authoritative regardless of whether any
+// snapshot was ever persisted. A present workspace holding an unreferenced
+// collection must still have its on-disk install tree removed even with no
+// snapshot seeded at all.
+func TestStartRemovesUnreferencedInstallWithNoPersistedSnapshot(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+	installDir := seedInstallTree(t, downloadPath)
+	registerCleanupProject(t, cacheDir, downloadPath)
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+
+	manifestPath := filepath.Join(installDir, "MANIFEST.json")
+	if _, statErr := os.Stat(manifestPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the unreferenced install to be removed even with no persisted snapshot, stat error: %v", statErr)
+	}
+}
+
+// TestDryRunReportsNoExtractedSweepWithNoPersistedSnapshot proves the guard
+// in sweepExtractedStore runs before the cfg.DryRun branch: a dry run against
+// a cache dir with no persisted snapshot must not print any "would sweep
+// extracted" line, matching what a real run would (not) do in the same
+// situation.
+func TestDryRunReportsNoExtractedSweepWithNoPersistedSnapshot(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: true}
+	runtime := newTestRuntime()
+
+	seedExtractedDir(t, cacheDir, "sha-orphaned-by-no-snapshot")
+	recordAbsentWorkspaceProject(t, cfg, runtime, downloadPath)
+
+	printer := &recordingPrinter{}
+	dryRunRuntime := infra.New(printer, http.DefaultClient)
+
+	if err := Start(t.Context(), cfg, dryRunRuntime); err != nil {
+		t.Fatalf("expected dry-run Start to succeed, got %v", err)
+	}
+
+	if printer.hasPrintContaining("would sweep extracted") {
+		t.Fatalf("expected no would-sweep-extracted report with no persisted snapshot, got prints: %v", printer.prints)
+	}
+	assertExtractedDirsSurvive(t, cacheDir, "sha-orphaned-by-no-snapshot")
+}

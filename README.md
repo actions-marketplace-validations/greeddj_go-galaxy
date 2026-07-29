@@ -203,7 +203,7 @@ S3 cache options (if `--s3-bucket` is set, S3 backend is used):
 
 `cleanup`'s extracted-cache sweep keeps a collection warmed within the last 30 days even if no project currently installs it, so a `warm`-only machine does not lose the extracted trees it exists to produce; a warmed entry that goes stale (no warm run for 30 days) is swept like any other unreferenced entry.
 
-**Upgrade note:** this release bumps the cache snapshot schema, so the first `install`, `lock`, or `warm` run after upgrading rebuilds its metadata caches cold. If you run `cleanup` before any `install` or `warm` has run under the new version, it will sweep the extracted store once, since the installed set it derives its keep set from was just dropped along with the old snapshot. Artifacts and their sidecars in the artifact cache are untouched by this, so the recovery is a local re-extraction from the still-cached tarball, not a re-download.
+**Upgrade note:** this release bumps the cache snapshot schema, so the first `install`, `lock`, or `warm` run after upgrading rebuilds its metadata caches cold. If you run `cleanup` before that first run, it finds no persisted snapshot - the old one was dropped by the schema bump - so it skips the extracted-cache sweep entirely and leaves the snapshot untouched; the metadata caches still rebuild cold on the first `install`, `lock`, or `warm`.
 
 ## requirements.yml
 

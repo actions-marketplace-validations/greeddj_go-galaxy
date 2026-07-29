@@ -76,6 +76,7 @@ func Start(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error 
 		runtime.Output.Printf("ℹ️ No projects recorded for GC.")
 		return nil
 	}
+	warnIfSnapshotNotPersisted(runtime, state.store)
 
 	reachable, installedByKey, err := buildReachable(runtime, state.registry)
 	if err != nil {
@@ -88,6 +89,23 @@ func Start(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error 
 	sweepLegacyArtifacts(ctx, cfg, runtime, state.backend, installedByKey)
 	sweepExtractedStore(cfg, runtime, state.store, reachable, installedByKey)
 	return finalizeCleanup(ctx, cfg, runtime, state.backend, state.store, removed)
+}
+
+// warnIfSnapshotNotPersisted emits a single operator-facing warning when st
+// carries no evidence of a persisted snapshot (a fresh cache dir, a schema
+// bump that dropped it, or a missing/expired S3 state object): the
+// extracted-cache sweep (sweepExtractedStore) and the snapshot save
+// (finalizeCleanup) both act on evidence this store does not have, so both
+// are skipped this run and the persisted snapshot - if any exists in the
+// backend - is left untouched. This is the only place that message is printed; the two
+// guarded functions themselves stay silent about why they no-op.
+func warnIfSnapshotNotPersisted(runtime *infra.Infra, st *store.Store) {
+	if st.WasPersisted() {
+		return
+	}
+	runtime.Output.Warnf(
+		"no persisted snapshot was found; skipping the extracted-cache sweep and leaving the snapshot untouched this run",
+	)
 }
 
 func initCleanup(ctx context.Context, cfg *config.Config, runtime *infra.Infra) (*cleanupState, error) {
@@ -251,7 +269,16 @@ func finalizeCleanup(
 	st *store.Store,
 	removed int,
 ) error {
-	if !cfg.DryRun {
+	// A store that was never persisted (st.WasPersisted() false) never had a
+	// registry-driven pass run against it either: with no persisted snapshot,
+	// removeUnused's DeleteInstalled/DeleteGraph/DeleteDepsCache calls were all
+	// no-ops against st's empty in-memory maps, so there is nothing this save
+	// would actually preserve. Saving anyway would not preserve state - it
+	// would fabricate a persisted-and-empty snapshot, stamping LastSnapshot
+	// for the first time, that the next run reads as positive evidence that
+	// nothing is installed or warmed anywhere. Skipping the save leaves the
+	// backend's snapshot exactly as untouched as it was before this run.
+	if !cfg.DryRun && st.WasPersisted() {
 		if err := backend.SaveStore(ctx, st); err != nil {
 			return err
 		}
@@ -755,6 +782,16 @@ func reportLegacyArtifactSweepCandidate(ctx context.Context, runtime *infra.Infr
 // used to decide what it would remove - so the reported plan matches what a
 // real run would actually do. This exclusion is a no-op in a real run, since
 // those keys are already absent from the snapshot by the time this runs.
+//
+// The !st.WasPersisted() guard lives here, inside the function, rather than
+// at the Start call site, so that a future second caller of sweepExtractedStore
+// inherits it automatically instead of having to remember to repeat it. It
+// runs before the cfg.DryRun branch so a dry run reports no sweep candidates
+// that a real run would not act on either. Without it, an absent workspace
+// plus a never-loaded (or dropped/expired) snapshot hands this function an
+// empty keep set indistinguishable from "nothing is installed or warmed
+// anywhere", which would wipe the entire extracted store on the strength of
+// having no evidence at all.
 func sweepExtractedStore(
 	cfg *config.Config,
 	runtime *infra.Infra,
@@ -762,7 +799,7 @@ func sweepExtractedStore(
 	reachable map[string]bool,
 	installedByKey map[string][]installedCollection,
 ) {
-	if cfg == nil || cfg.CacheDir == "" || st == nil {
+	if cfg == nil || cfg.CacheDir == "" || st == nil || !st.WasPersisted() {
 		return
 	}
 	extractedStore := extracted.NewStore(cfg.CacheDir)

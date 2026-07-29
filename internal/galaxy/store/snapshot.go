@@ -517,6 +517,36 @@ func (m *Store) MetaSnapshot() SnapshotMeta {
 	return m.Meta
 }
 
+// WasPersisted reports whether this store was ever actually loaded from a
+// persisted snapshot, as opposed to being a fresh, never-saved store. It is
+// equivalent to !m.Meta.LastSnapshot.IsZero(): LastSnapshot is zero exactly
+// when no persisted snapshot was loaded - New() leaves it zero, Load returns
+// New() outright for ErrOutdatedSchemaVersion (a dropped, pre-migration
+// snapshot), the S3 backend's LoadStore returns store.New() for both
+// errS3NotFound and a failed outdated-schema probe, and an absent meta
+// bucket leaves LastSnapshot zero on an otherwise normally-loaded store -
+// loadMeta returns early on a missing bucket, so the data buckets still
+// load as usual; that combination only a hand-edited database can produce,
+// and skipping is the conservative answer there anyway - while Save and
+// MarshalSnapshot both stamp it unconditionally on every persisted write.
+// It reads m.Meta.LastSnapshot directly under the read lock rather than
+// through MetaSnapshot, which would copy the whole SnapshotMeta struct just
+// to check one field.
+//
+// Callers need this because a store that was never persisted carries no
+// evidence about what is actually in use anywhere: any pass that deletes
+// content or narrows state on the strength of such a store is acting on
+// ignorance, not on evidence, and must not treat an empty in-memory map as
+// proof that nothing is installed or warmed.
+func (m *Store) WasPersisted() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return !m.Meta.LastSnapshot.IsZero()
+}
+
 // SetMetaRequirements stores the requirements hash and server.
 func (m *Store) SetMetaRequirements(hash, server string) {
 	if m == nil {

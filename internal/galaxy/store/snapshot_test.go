@@ -303,6 +303,92 @@ func stampSchemaVersion(t *testing.T, dbs *DBs, version int) {
 	}
 }
 
+// TestWasPersistedFalseForFreshStore proves a brand-new store built via New()
+// - never saved to or loaded from any backend - reports no persisted
+// snapshot, since New() leaves Meta.LastSnapshot at its zero value.
+func TestWasPersistedFalseForFreshStore(t *testing.T) {
+	t.Parallel()
+	if New().WasPersisted() {
+		t.Fatal("expected a fresh store to report WasPersisted() == false")
+	}
+}
+
+// TestWasPersistedFalseForNilStore proves WasPersisted follows the package's
+// nil-receiver convention (and is the conservative answer here): a nil
+// *Store carries no evidence of anything, so it must never be read as "yes,
+// a snapshot was persisted".
+func TestWasPersistedFalseForNilStore(t *testing.T) {
+	t.Parallel()
+	var st *Store
+	if st.WasPersisted() {
+		t.Fatal("expected a nil store to report WasPersisted() == false")
+	}
+}
+
+// TestWasPersistedTrueAfterLocalSaveLoadRoundTrip proves a store that went
+// through a real local Save -> Load round trip reports a persisted snapshot,
+// since Save unconditionally stamps Meta.LastSnapshot before writing.
+func TestWasPersistedTrueAfterLocalSaveLoadRoundTrip(t *testing.T) {
+	t.Parallel()
+	dbs := openTestDBs(t)
+	fixed := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+	st := buildTestStore(fixed)
+	mustSave(t, dbs, st)
+
+	loaded := mustLoad(t, dbs)
+	if !loaded.WasPersisted() {
+		t.Fatal("expected a store loaded after a real Save to report WasPersisted() == true")
+	}
+}
+
+// TestWasPersistedTrueAfterMarshalSnapshotUnmarshal pins the S3 wire path:
+// MarshalSnapshot stamps Meta.LastSnapshot exactly as Save does, so a store
+// decoded from its JSON output - the shape the S3 backend's LoadStore
+// produces on a successful fetch - must also report a persisted snapshot.
+func TestWasPersistedTrueAfterMarshalSnapshotUnmarshal(t *testing.T) {
+	t.Parallel()
+	fixed := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+	st := buildTestStore(fixed)
+
+	data, err := st.MarshalSnapshot()
+	if err != nil {
+		t.Fatalf("MarshalSnapshot error: %v", err)
+	}
+
+	decoded := New()
+	if err := json.Unmarshal(data, decoded); err != nil {
+		t.Fatalf("json.Unmarshal error: %v", err)
+	}
+	if !decoded.WasPersisted() {
+		t.Fatal("expected a store decoded from MarshalSnapshot's output to report WasPersisted() == true")
+	}
+}
+
+// TestWasPersistedFalseAfterOutdatedSchemaLoad is the exact post-schema-bump
+// scenario: a Bolt DB was genuinely saved by an older binary (so its meta
+// bucket carries a real, non-zero last_snapshot), but its schema_version is
+// then downgraded below the current one - simulating a snapshot schema bump
+// landing on a cache directory a previous binary version already wrote to.
+// Load drops it and returns a fresh store (New()) rather than partially
+// trusting it, so WasPersisted must report false even though the underlying
+// Bolt bytes do contain a non-zero last_snapshot value - that stale value
+// belongs to the dropped store, not to the one Load actually returned.
+func TestWasPersistedFalseAfterOutdatedSchemaLoad(t *testing.T) {
+	t.Parallel()
+	dbs := openTestDBs(t)
+	fixed := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+	st := buildTestStore(fixed)
+	mustSave(t, dbs, st)
+
+	olderVersion := helpers.StoreSnapshotSchemaVersion - 1
+	stampSchemaVersion(t, dbs, olderVersion)
+
+	loaded := mustLoad(t, dbs)
+	if loaded.WasPersisted() {
+		t.Fatal("expected a store dropped for an outdated schema to report WasPersisted() == false")
+	}
+}
+
 // TestLoadRejectsCorruptResolvedEntry proves loadResolved reports an error
 // instead of silently coercing a genuinely corrupt resolved value into a
 // garbage version string. Every current-schema value is written as valid
