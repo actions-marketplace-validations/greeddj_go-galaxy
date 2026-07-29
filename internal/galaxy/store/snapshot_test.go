@@ -461,28 +461,35 @@ func assertObjectShape(t *testing.T, payload []byte, bucket, key, firstField, se
 	}
 }
 
-// TestSnapshotPrunesStaleAcrossAllBuckets proves entries last written before
-// their retention window are dropped from the persisted snapshot in all four
-// age-eviction buckets (APICache, DepsCache, and Versions against
-// CacheEntryMaxAge; Warmed against its own separate helpers.WarmedEntryMaxAge
-// window), while entries within the window survive, across both persist
-// paths (local Bolt Save/Load and MarshalSnapshot/json.Unmarshal).
-func TestSnapshotPrunesStaleAcrossAllBuckets(t *testing.T) {
+// TestSnapshotPrunesStaleAndFutureAcrossAllBuckets proves entries outside
+// their retention window - both a stale entry last written before the window
+// and a future entry stamped ahead of the sampling instant - are dropped
+// from the persisted snapshot in all four age-eviction buckets (APICache,
+// DepsCache, and Versions against CacheEntryMaxAge; Warmed against its own
+// separate helpers.WarmedEntryMaxAge window), while entries within the
+// window survive, across both persist paths (local Bolt Save/Load and
+// MarshalSnapshot/json.Unmarshal).
+func TestSnapshotPrunesStaleAndFutureAcrossAllBuckets(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
 	stale := now.Add(-40 * 24 * time.Hour)
 	fresh := now.Add(-1 * 24 * time.Hour)
+	future := now.Add(365 * 24 * time.Hour)
 
 	build := func() *Store {
 		st := New()
 		st.APICache["api-stale"] = APICacheEntry{URL: "stale", FetchedAt: stale}
 		st.APICache["api-fresh"] = APICacheEntry{URL: "fresh", FetchedAt: fresh}
+		st.APICache["api-future"] = APICacheEntry{URL: "future", FetchedAt: future}
 		st.DepsCache["deps-stale"] = DepsCacheEntry{FetchedAt: stale, Deps: map[string]string{"a.b": "1"}}
 		st.DepsCache["deps-fresh"] = DepsCacheEntry{FetchedAt: fresh, Deps: map[string]string{"a.b": "1"}}
+		st.DepsCache["deps-future"] = DepsCacheEntry{FetchedAt: future, Deps: map[string]string{"a.b": "1"}}
 		st.Versions["versions-stale"] = VersionsEntry{FetchedAt: stale, List: []string{"1.0.0"}}
 		st.Versions["versions-fresh"] = VersionsEntry{FetchedAt: fresh, List: []string{"1.0.0"}}
+		st.Versions["versions-future"] = VersionsEntry{FetchedAt: future, List: []string{"1.0.0"}}
 		st.Warmed["warmed-stale"] = WarmedEntry{WarmedAt: stale, ArtifactSHA256: "sha-stale"}
 		st.Warmed["warmed-fresh"] = WarmedEntry{WarmedAt: fresh, ArtifactSHA256: "sha-fresh"}
+		st.Warmed["warmed-future"] = WarmedEntry{WarmedAt: future, ArtifactSHA256: "sha-future"}
 		return st
 	}
 
@@ -507,53 +514,101 @@ func TestSnapshotPrunesStaleAcrossAllBuckets(t *testing.T) {
 	})
 }
 
-// assertStalePruned checks that every "-stale" entry seeded by
-// TestSnapshotPrunesStaleAcrossAllBuckets's build helper is gone and every
-// "-fresh" entry survived, across all four age-eviction buckets.
+// bucketHasKey reports whether key is present in m. It is generic purely so
+// assertStalePruned can drive one loop over all four differently-typed
+// buckets instead of repeating the same three-way presence check per bucket,
+// which is what previously pushed that function over its cyclomatic
+// complexity budget.
+func bucketHasKey[T any](m map[string]T, key string) bool {
+	_, ok := m[key]
+	return ok
+}
+
+// assertStalePruned checks that every "-stale" and "-future" entry seeded by
+// TestSnapshotPrunesStaleAndFutureAcrossAllBuckets's build helper is gone and
+// every "-fresh" entry survived, across all four age-eviction buckets.
 func assertStalePruned(t *testing.T, loaded *Store) {
 	t.Helper()
-	if _, ok := loaded.APICache["api-stale"]; ok {
-		t.Fatalf("expected stale api cache entry to be pruned")
+	cases := []struct {
+		bucket                        string
+		hasStale, hasFresh, hasFuture bool
+	}{
+		{
+			"api cache",
+			bucketHasKey(loaded.APICache, "api-stale"),
+			bucketHasKey(loaded.APICache, "api-fresh"),
+			bucketHasKey(loaded.APICache, "api-future"),
+		},
+		{
+			"deps cache",
+			bucketHasKey(loaded.DepsCache, "deps-stale"),
+			bucketHasKey(loaded.DepsCache, "deps-fresh"),
+			bucketHasKey(loaded.DepsCache, "deps-future"),
+		},
+		{
+			"versions cache",
+			bucketHasKey(loaded.Versions, "versions-stale"),
+			bucketHasKey(loaded.Versions, "versions-fresh"),
+			bucketHasKey(loaded.Versions, "versions-future"),
+		},
+		{
+			"warmed",
+			bucketHasKey(loaded.Warmed, "warmed-stale"),
+			bucketHasKey(loaded.Warmed, "warmed-fresh"),
+			bucketHasKey(loaded.Warmed, "warmed-future"),
+		},
 	}
-	if _, ok := loaded.APICache["api-fresh"]; !ok {
-		t.Fatalf("expected fresh api cache entry to survive")
-	}
-	if _, ok := loaded.DepsCache["deps-stale"]; ok {
-		t.Fatalf("expected stale deps cache entry to be pruned")
-	}
-	if _, ok := loaded.DepsCache["deps-fresh"]; !ok {
-		t.Fatalf("expected fresh deps cache entry to survive")
-	}
-	if _, ok := loaded.Versions["versions-stale"]; ok {
-		t.Fatalf("expected stale versions cache entry to be pruned")
-	}
-	if _, ok := loaded.Versions["versions-fresh"]; !ok {
-		t.Fatalf("expected fresh versions cache entry to survive")
-	}
-	if _, ok := loaded.Warmed["warmed-stale"]; ok {
-		t.Fatalf("expected stale warmed entry to be pruned")
-	}
-	if _, ok := loaded.Warmed["warmed-fresh"]; !ok {
-		t.Fatalf("expected fresh warmed entry to survive")
+	for _, c := range cases {
+		assertBucketRetention(t, c.bucket, c.hasStale, c.hasFresh, c.hasFuture)
 	}
 }
 
-// TestSnapshotBoundaryEntryIsKept proves isStaleCacheEntry's exact-equality
-// boundary: an entry stamped exactly at the cutoff instant is kept
-// (FetchedAt.Before(cutoff) is false at equality), while an entry one
-// nanosecond earlier is pruned. This tests the comparison directly rather
-// than through a full Save/MarshalSnapshot round trip, since the real
-// cutoff is computed from the wall clock at persist time and cannot be
-// predicted precisely enough from a test goroutine to hit the boundary
-// deterministically.
+// assertBucketRetention fails (via Error, not Fatal) unless a single bucket's
+// stale entry was pruned, its fresh entry survived, and its future entry was
+// pruned. It never stops early, so a single call to assertStalePruned reports
+// every failing bucket in one test run instead of only the first.
+func assertBucketRetention(t *testing.T, bucket string, hasStale, hasFresh, hasFuture bool) {
+	t.Helper()
+	if hasStale {
+		t.Errorf("expected stale %s entry to be pruned", bucket)
+	}
+	if !hasFresh {
+		t.Errorf("expected fresh %s entry to survive", bucket)
+	}
+	if hasFuture {
+		t.Errorf("expected future %s entry to be pruned", bucket)
+	}
+}
+
+// TestSnapshotBoundaryEntryIsKept proves retentionWindow.isStale's
+// exact-equality boundary on both ends of the closed [oldest, newest]
+// interval: an entry stamped exactly at oldest is kept (strict Before is
+// false at equality), an entry one nanosecond before oldest is pruned, an
+// entry stamped exactly at newest is kept (strict After is false at
+// equality), and an entry one nanosecond after newest - the future case - is
+// pruned. This tests the comparison directly against a constructed window
+// rather than through a full Save/MarshalSnapshot round trip, since the real
+// window is sampled from the wall clock at persist time and cannot be
+// predicted precisely enough from a test goroutine to hit either boundary
+// deterministically. The zero time.Time needs no separate rule: it is
+// already stale via the oldest bound, since it falls before any window built
+// from time.Now().
 func TestSnapshotBoundaryEntryIsKept(t *testing.T) {
 	t.Parallel()
-	cutoff := time.Now().UTC()
-	if isStaleCacheEntry(cutoff, cutoff) {
-		t.Fatalf("expected an entry stamped exactly at the cutoff to be kept")
+	now := time.Now().UTC()
+	w := newRetentionWindow(now, time.Hour)
+
+	if w.isStale(w.oldest) {
+		t.Fatalf("expected an entry stamped exactly at the oldest bound to be kept")
 	}
-	if !isStaleCacheEntry(cutoff.Add(-time.Nanosecond), cutoff) {
-		t.Fatalf("expected an entry stamped one nanosecond before the cutoff to be pruned")
+	if !w.isStale(w.oldest.Add(-time.Nanosecond)) {
+		t.Fatalf("expected an entry stamped one nanosecond before the oldest bound to be pruned")
+	}
+	if w.isStale(w.newest) {
+		t.Fatalf("expected an entry stamped exactly at the newest bound to be kept")
+	}
+	if !w.isStale(w.newest.Add(time.Nanosecond)) {
+		t.Fatalf("expected an entry stamped one nanosecond after the newest bound (future) to be pruned")
 	}
 }
 
@@ -678,6 +733,31 @@ func TestWarmedArtifactSHAByKeyExcludesStaleEntry(t *testing.T) {
 	got := st.WarmedArtifactSHAByKey()
 	if _, ok := got["stale.key@1.0.0"]; ok {
 		t.Fatalf("expected the stale warmed entry to be excluded, got %#v", got)
+	}
+	if got["fresh.key@1.0.0"] != "sha-fresh" {
+		t.Fatalf("expected the fresh warmed entry to survive, got %#v", got)
+	}
+}
+
+// TestWarmedArtifactSHAByKeyExcludesFutureEntry proves WarmedArtifactSHAByKey
+// treats a warmed entry stamped ahead of the current window's sampling
+// instant as stale too, mirroring TestWarmedArtifactSHAByKeyExcludesStaleEntry
+// for the opposite (future) edge: a keep-set built from a corrupt or
+// clock-skewed future stamp must not protect its extracted tree forever.
+func TestWarmedArtifactSHAByKeyExcludesFutureEntry(t *testing.T) {
+	t.Parallel()
+	st := New()
+	st.SetWarmed("fresh.key@1.0.0", "sha-fresh")
+	// Seed the future entry directly: SetWarmed always stamps time.Now, so a
+	// future WarmedAt can only be produced by writing the map field.
+	st.Warmed["future.key@1.0.0"] = WarmedEntry{
+		WarmedAt:       time.Now().UTC().Add(365 * 24 * time.Hour),
+		ArtifactSHA256: "sha-future",
+	}
+
+	got := st.WarmedArtifactSHAByKey()
+	if _, ok := got["future.key@1.0.0"]; ok {
+		t.Fatalf("expected the future warmed entry to be excluded, got %#v", got)
 	}
 	if got["fresh.key@1.0.0"] != "sha-fresh" {
 		t.Fatalf("expected the fresh warmed entry to survive, got %#v", got)

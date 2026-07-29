@@ -242,32 +242,28 @@ func (m *Store) SetWarmed(key, artifactSHA string) {
 // artifact sha, excluding entries with an empty sha and entries outside the
 // WarmedEntryMaxAge retention window. The window is enforced here, not just
 // at persist time: cleanup builds its keep set from this call and then saves
-// the snapshot in the same run, and the save prunes on the same predicate
-// (see snapshotData/copyFreshWarmed) - filtering here is what keeps the keep
-// set and the snapshot it is about to write in agreement, rather than leaving
-// every expiry lagging one whole cleanup cycle.
+// the snapshot in the same run, and the save prunes on the same window (see
+// snapshotData/copyFreshWarmed) - filtering here is what keeps the keep set
+// and the snapshot it is about to write in agreement, rather than leaving
+// every expiry lagging one whole cleanup cycle. The shared thing is
+// helpers.WarmedEntryMaxAge, passed to newRetentionWindow at both sites; each
+// site samples its own now, so the two windows share a width but not an
+// instant.
 func (m *Store) WarmedArtifactSHAByKey() map[string]string {
 	if m == nil {
 		return nil
 	}
-	cutoff := warmedRetentionCutoff()
+	window := newRetentionWindow(time.Now().UTC(), helpers.WarmedEntryMaxAge)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make(map[string]string, len(m.Warmed))
 	for key, entry := range m.Warmed {
-		if entry.ArtifactSHA256 == "" || isStaleCacheEntry(entry.WarmedAt, cutoff) {
+		if entry.ArtifactSHA256 == "" || window.isStale(entry.WarmedAt) {
 			continue
 		}
 		out[key] = entry.ArtifactSHA256
 	}
 	return out
-}
-
-// warmedRetentionCutoff returns the instant before which a warmed entry is
-// stale. Shared by WarmedArtifactSHAByKey and snapshotData so the two sites
-// computing the same boundary cannot drift apart.
-func warmedRetentionCutoff() time.Time {
-	return time.Now().UTC().Add(-helpers.WarmedEntryMaxAge)
 }
 
 // GetDepsCache returns cached dependency constraints for a key. This is a
@@ -595,14 +591,47 @@ func ensureMap[K comparable, V any](m map[K]V) map[K]V {
 	return m
 }
 
-// isStaleCacheEntry reports whether fetchedAt is older than cutoff. It uses
-// strict Before so an entry written exactly at the cutoff instant is
-// retained rather than pruned, and is factored out (rather than inlined at
-// each of the three call sites below) so the exact-equality boundary
-// behavior can be exercised directly by a test without racing the wall
-// clock.
-func isStaleCacheEntry(fetchedAt, cutoff time.Time) bool {
-	return fetchedAt.Before(cutoff)
+// retentionWindow is the closed interval of write stamps a persist pass or a
+// keep-set pass accepts: [oldest, newest]. Both bounds come from one wall-clock
+// sample, so every entry judged against a given window is judged against the
+// same instant - two entries in one save can never be classified by two
+// different clocks.
+type retentionWindow struct {
+	oldest time.Time
+	newest time.Time
+}
+
+// newRetentionWindow builds the window [now-maxAge, now] for a single
+// wall-clock sample now, shared by every entry classified against the
+// returned window.
+func newRetentionWindow(now time.Time, maxAge time.Duration) retentionWindow {
+	return retentionWindow{oldest: now.Add(-maxAge), newest: now}
+}
+
+// isStale reports whether stampedAt falls outside the window.
+//
+// Both bounds are inclusive. Strict Before keeps an entry stamped exactly at
+// oldest (see TestSnapshotBoundaryEntryIsKept); strict After keeps an entry
+// stamped exactly at newest, so an entry written in the same instant the
+// window was sampled never expires the moment it is written.
+//
+// A future stamp is dropped, not clamped and not fatal. Clamping to newest
+// would launder an invalid stamp into a valid one and hand it a fresh
+// full-length lease; rejecting the whole snapshot would turn a droppable
+// cache into an outage and would diverge from the local Bolt path. Dropping
+// is the only option that both stops the entry surviving forever (before
+// this fix, a stamp like "9999-01-01" passed the old strict-Before check
+// against the oldest bound and was rewritten verbatim into every later save)
+// and self-heals, since every bucket this guards is rebuildable.
+//
+// No skew tolerance, deliberately. With several machines on one cache, an
+// entry written by a machine whose clock runs ahead looks future to the
+// others and is refetched (or, for a warmed entry, re-extracted from a
+// tarball that is still cached locally) - bounded, network-cheap,
+// self-correcting. A tolerance constant would be an unfalsifiable number and
+// a second definition of "now". Do not add one.
+func (w retentionWindow) isStale(stampedAt time.Time) bool {
+	return stampedAt.Before(w.oldest) || stampedAt.After(w.newest)
 }
 
 // snapshotData builds a snapshot payload from the store. Entries in
@@ -618,8 +647,9 @@ func (m *Store) snapshotData() snapshotData {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	cutoff := time.Now().UTC().Add(-helpers.CacheEntryMaxAge)
-	warmedCutoff := warmedRetentionCutoff()
+	now := time.Now().UTC()
+	window := newRetentionWindow(now, helpers.CacheEntryMaxAge)
+	warmedWindow := newRetentionWindow(now, helpers.WarmedEntryMaxAge)
 
 	data := snapshotData{
 		Meta:         m.Meta,
@@ -634,13 +664,13 @@ func (m *Store) snapshotData() snapshotData {
 	}
 
 	for key, entry := range m.APICache {
-		if isStaleCacheEntry(entry.FetchedAt, cutoff) {
+		if window.isStale(entry.FetchedAt) {
 			continue
 		}
 		data.APICache[key] = entry
 	}
 	for key, entry := range m.DepsCache {
-		if isStaleCacheEntry(entry.FetchedAt, cutoff) {
+		if window.isStale(entry.FetchedAt) {
 			continue
 		}
 		clone := make(map[string]string, len(entry.Deps))
@@ -656,26 +686,26 @@ func (m *Store) snapshotData() snapshotData {
 	maps.Copy(data.Requirements, m.Requirements)
 	maps.Copy(data.Resolved, m.Resolved)
 	for key, entry := range m.Versions {
-		if isStaleCacheEntry(entry.FetchedAt, cutoff) {
+		if window.isStale(entry.FetchedAt) {
 			continue
 		}
 		clone := make([]string, len(entry.List))
 		copy(clone, entry.List)
 		data.Versions[key] = VersionsEntry{FetchedAt: entry.FetchedAt, List: clone}
 	}
-	copyFreshWarmed(data.Warmed, m.Warmed, warmedCutoff)
+	copyFreshWarmed(data.Warmed, m.Warmed, warmedWindow)
 
 	return data
 }
 
-// copyFreshWarmed copies every entry from src into dst that was written at or
-// after cutoff. It is factored out of snapshotData, rather than inlined
-// there as a loop like the other buckets above, purely to keep snapshotData
-// under its cyclomatic complexity budget; the caller holds the store's read
+// copyFreshWarmed copies every entry from src into dst that falls inside
+// window. It is factored out of snapshotData, rather than inlined there as a
+// loop like the other buckets above, purely to keep snapshotData under its
+// cyclomatic complexity budget; the caller holds the store's read
 // lock for the duration of the call.
-func copyFreshWarmed(dst, src map[string]WarmedEntry, cutoff time.Time) {
+func copyFreshWarmed(dst, src map[string]WarmedEntry, window retentionWindow) {
 	for key, entry := range src {
-		if isStaleCacheEntry(entry.WarmedAt, cutoff) {
+		if window.isStale(entry.WarmedAt) {
 			continue
 		}
 		dst[key] = entry

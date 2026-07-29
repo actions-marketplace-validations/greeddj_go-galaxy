@@ -135,6 +135,71 @@ func TestFetchJSONWithCachePolicyRevalidate(t *testing.T) {
 	}
 }
 
+// TestFetchJSONWithCachePolicyFutureStampIsRevalidated mirrors
+// TestFetchJSONWithCachePolicyRevalidate but seeds a FetchedAt ahead of now
+// instead of behind it. time.Since is negative for a future stamp, which
+// would otherwise pass the TTL test forever and pin the entry as permanently
+// fresh; tryServeFromCache must instead treat it as expired and revalidate,
+// so this must observe the same 2 hits and If-None-Match as the
+// behind-now case.
+func TestFetchJSONWithCachePolicyFutureStampIsRevalidated(t *testing.T) {
+	t.Parallel()
+	var hits atomic.Int32
+	etag := "v2"
+	payload := []byte(`{"ok":true}`)
+	var sawIfNoneMatch atomic.Bool
+
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			hits.Add(1)
+			header := make(http.Header)
+			if req.Header.Get("If-None-Match") == etag {
+				sawIfNoneMatch.Store(true)
+				return &http.Response{
+					StatusCode: http.StatusNotModified,
+					Status:     http.StatusText(http.StatusNotModified),
+					Header:     header,
+					Body:       io.NopCloser(bytes.NewReader(nil)),
+				}, nil
+			}
+			header.Set("ETag", etag)
+			header.Set("Content-Type", "application/json")
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     http.StatusText(http.StatusOK),
+				Header:     header,
+				Body:       io.NopCloser(bytes.NewReader(payload)),
+			}, nil
+		}),
+	}
+
+	st := store.New()
+	policy := Policy{Read: true, Write: true, TTL: time.Millisecond}
+	var out map[string]any
+	url := testAPIURL
+
+	if err := FetchJSONWithCachePolicy(context.Background(), client, url, st, &out, policy); err != nil {
+		t.Fatalf("FetchJSONWithCachePolicy error: %v", err)
+	}
+	key := apiCacheKey(url)
+	entry, ok := st.GetAPICache(key)
+	if !ok {
+		t.Fatalf("expected cache entry")
+	}
+	entry.FetchedAt = time.Now().Add(time.Hour)
+	st.SetAPICache(key, entry)
+
+	if err := FetchJSONWithCachePolicy(context.Background(), client, url, st, &out, policy); err != nil {
+		t.Fatalf("FetchJSONWithCachePolicy error: %v", err)
+	}
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("expected 2 requests, got %d", got)
+	}
+	if !sawIfNoneMatch.Load() {
+		t.Fatalf("expected If-None-Match on revalidate")
+	}
+}
+
 // TestFetchJSONWithCachePolicyCorruptBodyRefetchesUnconditional asserts that
 // a cached entry whose body fails to decode - fresh or not - is treated as a
 // corrupt cache miss: the fetch is unconditional (no validators sent), and

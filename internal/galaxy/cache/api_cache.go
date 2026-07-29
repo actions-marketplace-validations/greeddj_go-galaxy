@@ -65,7 +65,14 @@ func tryServeFromCache(
 	if err := json.Unmarshal(entry.Body, out); err != nil {
 		return false, nil
 	}
-	if policy.TTL != 0 && time.Since(entry.FetchedAt) > policy.TTL {
+	// A FetchedAt in the future cannot come from this program - every writer
+	// stamps time.Now().UTC() - so it is a corrupt or clock-skewed entry, not a
+	// fresh one. time.Since is negative for it, which would otherwise pass the
+	// TTL test forever and pin the entry as permanently fresh; treat it as
+	// expired and revalidate. Both sides are wall-clock only (.UTC() strips the
+	// monotonic reading, and a decoded stamp never had one).
+	age := time.Since(entry.FetchedAt)
+	if policy.TTL != 0 && (age > policy.TTL || age < 0) {
 		// Accepted micro-cost: on the rare TTL-expired-and-changed path, the
 		// stale (but valid) body decoded above into out is simply overwritten
 		// by revalidateCache's fresh decode below. This second decode is
