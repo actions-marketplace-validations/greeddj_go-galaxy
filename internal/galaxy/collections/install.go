@@ -462,6 +462,31 @@ func fetchArtifact(
 // let drifted-on-disk bytes slip past a frozen install by coincidentally
 // matching a stale pin. Without a pin, the cheaper recorded sources are used
 // in order, falling back to hashing the file only when none are available.
+//
+// meta.Artifact.Sha256 and artifactMeta["sha256"] are each validated against
+// helpers.IsSHA256Hex before being returned, and artifactSHA and the two
+// archive.FileHashSHA256 results are deliberately not: the rule is validate
+// what crossed a trust boundary, never what this process just computed.
+// meta.Artifact.Sha256 is raw Galaxy API JSON a server controls; a poisoned
+// or lying value there would otherwise flow unchecked into recordInstall and
+// recordWarmed, and from there into the persisted snapshot - re-entering
+// every later run against that cache, including one against a different,
+// honest server. artifactMeta["sha256"] carries the same risk one hop later:
+// it is a cache sidecar that could itself have been poisoned by an earlier
+// run that took this same path with an unvalidated value. artifactSHA, by
+// contrast, is hex.EncodeToString(hasher.Sum(nil)) computed by this process
+// over bytes it just streamed, and archive.FileHashSHA256 is this same
+// encoder's output over a file already on disk; checking either would only
+// be checking our own encoder, at the cost of an extra file hash on the hot
+// fresh-download path. Do not "complete" this by validating those too.
+//
+// A failure here is a hard error, not a fall-through to the next source:
+// silently accepting a malformed value and moving on would still let a
+// lying server or a corrupt cache pick the sha this run installs under,
+// which is exactly the "influence what a run installs" capability the
+// project's trust model bounds to a cache writer, not a Galaxy server. The
+// blast radius is one collection failing on a server or cache entry already
+// broken by verifyDownloadSHA's standards.
 func resolveArtifactSHA(
 	path string,
 	meta *types.GalaxyCollectionVersionInfo,
@@ -477,11 +502,17 @@ func resolveArtifactSHA(
 	}
 	if meta != nil {
 		if sha := strings.TrimSpace(meta.Artifact.Sha256); sha != "" {
+			if !helpers.IsSHA256Hex(sha) {
+				return "", fmt.Errorf("%w: %q", helpers.ErrMalformedArtifactSHA256, sha)
+			}
 			return sha, nil
 		}
 	}
 	if artifactMeta != nil {
 		if sha := strings.TrimSpace(artifactMeta["sha256"]); sha != "" {
+			if !helpers.IsSHA256Hex(sha) {
+				return "", fmt.Errorf("%w: %q", helpers.ErrMalformedArtifactSHA256, sha)
+			}
 			return sha, nil
 		}
 	}
@@ -554,7 +585,10 @@ func installRecordMatches(cfg *config.Config, col collection, installPath string
 		return false
 	}
 
-	marker := filepath.Join(installPath, helpers.ExtractMarkerPrefix+entry.ArtifactSHA256)
+	marker, ok := extractMarkerPath(installPath, entry.ArtifactSHA256)
+	if !ok {
+		return false
+	}
 	if _, err := os.Stat(marker); err != nil {
 		return false
 	}

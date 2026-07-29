@@ -1,6 +1,7 @@
 package collections
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/archive"
@@ -26,6 +27,17 @@ func extractCollection(
 			return err
 		}
 		artifactSHA = hash
+	}
+	// Refused here, before any of the destructive work below, rather than
+	// left to writeExtractMarker's own guard at the end of this function:
+	// verifyExtractMarker, os.RemoveAll, MkdirAll, and a full unpack all sit
+	// between this point and that one, so deferring the refusal would
+	// guarantee installPath gets wiped and fully re-extracted for a value
+	// that was never usable, before the failure is ever reported.
+	// writeExtractMarker keeps its own guard regardless - that is its own
+	// invariant, independent of any caller, not made redundant by this one.
+	if !helpers.IsSHA256Hex(artifactSHA) {
+		return fmt.Errorf("%w: %q", helpers.ErrMalformedArtifactSHA256, artifactSHA)
 	}
 	if verifyExtractMarker(runtime.Output, installPath, artifactSHA) {
 		runtime.Output.Printf("⏭️ Skipping extraction, already done: %s/%s", col.Namespace, col.Name)

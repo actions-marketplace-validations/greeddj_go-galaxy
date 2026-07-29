@@ -13,10 +13,12 @@ package collections
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,6 +27,11 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
 )
+
+// validMarkerSHA is a syntactically valid 64-character lowercase hex digest
+// used wherever a marker test needs a sha that passes helpers.IsSHA256Hex
+// without caring what content it is a hash of.
+const validMarkerSHA = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 // seedValidExtractMarker writes a syntactically and semantically valid
 // extract-done marker for installPath by calling writeExtractMarker itself,
@@ -345,7 +352,7 @@ func testCheckExtractMarkerScanFailed(t *testing.T) {
 		t.Skip("running as root; permission-based read guard cannot be tested")
 	}
 	installPath := t.TempDir()
-	const sha = "deadbeefcafe"
+	const sha = "deadbeefcafedeadbeefcafedeadbeefcafedeadbeefcafedeadbeefcafedead"
 	seedValidExtractMarker(t, installPath, sha)
 	markerPath := filepath.Join(installPath, helpers.ExtractMarkerPrefix+sha)
 
@@ -421,7 +428,7 @@ func assertVerifyExtractMarkerScanFailed(t *testing.T, installPath, sha, markerP
 // remove), logged at Debugf by the latter.
 func testCheckExtractMarkerMissing(t *testing.T) {
 	installPath := t.TempDir()
-	const sha = "deadbeefcafe"
+	const sha = "deadbeefcafedeadbeefcafedeadbeefcafedeadbeefcafedeadbeefcafedead"
 	markerPath := filepath.Join(installPath, helpers.ExtractMarkerPrefix+sha)
 
 	outcome := checkExtractMarker(installPath, sha)
@@ -480,6 +487,199 @@ func TestPrefetchScanUsesCheapCheck(t *testing.T) {
 
 	if shouldSchedulePrefetch(t.Context(), deps, col) {
 		t.Fatalf("expected shouldSchedulePrefetch to report already-installed via the cheap check, even with a legacy marker")
+	}
+}
+
+// buildTraversalFixture builds an installPath four real path elements deep
+// under a "containment" directory (collections/ansible_collections/ns/name -
+// the exact shape collectionInstallPath produces), itself nested one level
+// inside a t.TempDir() sandbox. This mirrors the architect's own verified
+// proof of concept (an installPath of this same four-element depth under a
+// root) while keeping every path this fixture's tests can possibly reach -
+// including an unbounded escape - inside the sandbox this test owns and
+// t.TempDir() cleans up, never a real host path. The traversal counts below
+// are load-bearing: six ".." segments (no leading dot) exactly cancel the
+// four real installPath elements plus the one pop that only undoes the
+// ".extract-done.." literal filename the join produces (never a real ".."
+// token on its own), landing the escape exactly at containment - matching
+// the architect's own root/home/ci/.ssh/authorized_keys arithmetic. A
+// leading "./" on that same six-segment sha adds one more real pop with no
+// corresponding cancellation, landing one level further out, at sandbox
+// itself - the unbounded property: capping ".." tokens at installPath's own
+// component count would not have stopped this, since the leading "./"
+// buys an extra pop for free.
+//
+// Returns sandbox, containment, installPath, in that order (unnamed, per
+// nonamedreturns).
+func buildTraversalFixture(t *testing.T) (string, string, string) {
+	t.Helper()
+	sandbox := t.TempDir()
+	containment := filepath.Join(sandbox, "root")
+	installPath := filepath.Join(containment, "collections", "ansible_collections", "ns", "name")
+	mustMkdirAll(t, installPath)
+	return sandbox, containment, installPath
+}
+
+// TestVerifyExtractMarkerRefusesTraversalSHA proves verifyExtractMarker
+// rejects a traversal sha before ever computing a marker path from it: a
+// victim seeded at exactly the location the pre-fix join would have reached
+// (containment/home/ci/.ssh/authorized_keys, six ".." segments popping
+// installPath's four real elements plus the one that only cancels the
+// ".extract-done.." literal name) survives byte-identical, and exactly one
+// Warnf line is emitted - never a Debugf, since an unsafe sha is a live
+// integrity signal, not an expected upgrade artifact.
+func TestVerifyExtractMarkerRefusesTraversalSHA(t *testing.T) {
+	t.Parallel()
+	_, containment, installPath := buildTraversalFixture(t)
+
+	victim := filepath.Join(containment, "home", "ci", ".ssh", "authorized_keys")
+	const victimContent = "ssh-ed25519 AAAA... ci@legit\n"
+	mustMkdirAll(t, filepath.Dir(victim))
+	mustWriteFile(t, victim, []byte(victimContent))
+
+	const traversalSHA = "../../../../../../home/ci/.ssh/authorized_keys"
+	printer := &capturingPrinter{}
+	if verifyExtractMarker(printer, installPath, traversalSHA) {
+		t.Fatal("expected verifyExtractMarker to reject a traversal sha")
+	}
+	assertFileContent(t, victim, victimContent)
+	if len(printer.warns) != 1 {
+		t.Fatalf("expected exactly one Warnf line, got %v", printer.warns)
+	}
+	if len(printer.debugs) != 0 {
+		t.Fatalf("expected no Debugf line for an unsafe sha, got %v", printer.debugs)
+	}
+}
+
+// TestVerifyExtractMarkerRefusesUnboundedTraversalSHA covers the leading
+// "./" variant: the same six ".." segments as
+// TestVerifyExtractMarkerRefusesTraversalSHA, but with one more real pop
+// than that capped case buys for free, landing one level past containment
+// (at sandbox itself, standing in for the architect's real /etc/passwd
+// escape past the test root entirely). Nothing under sandbox - not just
+// under installPath - may be touched.
+func TestVerifyExtractMarkerRefusesUnboundedTraversalSHA(t *testing.T) {
+	t.Parallel()
+	sandbox, _, installPath := buildTraversalFixture(t)
+
+	victim := filepath.Join(sandbox, "etc", "passwd")
+	const victimContent = "root:x:0:0:root:/root:/bin/sh\n"
+	mustMkdirAll(t, filepath.Dir(victim))
+	mustWriteFile(t, victim, []byte(victimContent))
+
+	const traversalSHA = "./../../../../../../etc/passwd"
+	printer := &capturingPrinter{}
+	if verifyExtractMarker(printer, installPath, traversalSHA) {
+		t.Fatal("expected verifyExtractMarker to reject an unbounded traversal sha")
+	}
+	assertFileContent(t, victim, victimContent)
+	if len(printer.warns) != 1 {
+		t.Fatalf("expected exactly one Warnf line, got %v", printer.warns)
+	}
+}
+
+// TestWriteExtractMarkerRefusesTraversalSHA proves writeExtractMarker - the
+// hard-error side of this guard, since it runs only after a real extraction
+// - refuses the same traversal sha before scanTree, os.Remove, or
+// os.WriteFile ever run: the victim survives untouched, no marker is created
+// anywhere under installPath, and the returned error wraps
+// helpers.ErrMalformedArtifactSHA256.
+func TestWriteExtractMarkerRefusesTraversalSHA(t *testing.T) {
+	t.Parallel()
+	_, containment, installPath := buildTraversalFixture(t)
+
+	victim := filepath.Join(containment, "home", "ci", ".ssh", "authorized_keys")
+	const victimContent = "ssh-ed25519 AAAA... ci@legit\n"
+	mustMkdirAll(t, filepath.Dir(victim))
+	mustWriteFile(t, victim, []byte(victimContent))
+
+	const traversalSHA = "../../../../../../home/ci/.ssh/authorized_keys"
+	err := writeExtractMarker(installPath, traversalSHA)
+	// t.Errorf, not t.Fatalf: the victim-survival and empty-installPath
+	// assertions below must still run even if this one fails, so a mutation
+	// that returns the wrong error class but still touches the filesystem is
+	// caught by those, not masked by an early abort here.
+	if !errors.Is(err, helpers.ErrMalformedArtifactSHA256) {
+		t.Errorf("writeExtractMarker error = %v, want errors.Is helpers.ErrMalformedArtifactSHA256", err)
+	}
+	assertFileContent(t, victim, victimContent)
+
+	entries, readErr := os.ReadDir(installPath)
+	if readErr != nil {
+		t.Fatalf("read installPath: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected installPath to remain empty (no marker written), got %v", entries)
+	}
+}
+
+// TestCheckExtractMarkerReportsUnsafeSHA proves the pure predicate side of
+// this guard: checkExtractMarker reports extractMarkerUnsafeSHA (never
+// matches()) for a traversal sha, and never touches installPath at all -
+// consistent with it being a pure read on every other status.
+func TestCheckExtractMarkerReportsUnsafeSHA(t *testing.T) {
+	t.Parallel()
+	_, _, installPath := buildTraversalFixture(t)
+
+	before, err := os.ReadDir(installPath)
+	if err != nil {
+		t.Fatalf("read installPath before: %v", err)
+	}
+
+	const traversalSHA = "../../../../../../home/ci/.ssh/authorized_keys"
+	outcome := checkExtractMarker(installPath, traversalSHA)
+	if outcome.status != extractMarkerUnsafeSHA {
+		t.Fatalf("outcome.status = %v, want extractMarkerUnsafeSHA", outcome.status)
+	}
+	if outcome.matches() {
+		t.Fatal("expected matches() to be false")
+	}
+
+	after, err := os.ReadDir(installPath)
+	if err != nil {
+		t.Fatalf("read installPath after: %v", err)
+	}
+	if len(before) != len(after) {
+		t.Fatalf("installPath directory listing changed: before=%v after=%v", before, after)
+	}
+}
+
+// TestExtractMarkerPathRejectsNonDigest is extractMarkerPath's own table: it
+// must return ok=false for anything that is not exactly 64 lowercase hex
+// characters - including short-but-hex, uppercase, a multi-element path, and
+// both dot forms - and ok=true with the exact expected join for one real
+// digest.
+func TestExtractMarkerPathRejectsNonDigest(t *testing.T) {
+	t.Parallel()
+	installPath := filepath.Join(t.TempDir(), "ansible_collections", "ns", "name")
+
+	badCases := []struct {
+		name string
+		sha  string
+	}{
+		{"empty", ""},
+		{"short but hex", "deadbeef"},
+		{"uppercase", strings.ToUpper(validMarkerSHA)},
+		{"multi-element path", "a/b"},
+		{"double dot", ".."},
+		{"traversal", "../../../../../../home/ci/.ssh/authorized_keys"},
+	}
+	for _, tc := range badCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if _, ok := extractMarkerPath(installPath, tc.sha); ok {
+				t.Fatalf("extractMarkerPath(%q, %q) ok = true, want false", installPath, tc.sha)
+			}
+		})
+	}
+
+	got, ok := extractMarkerPath(installPath, validMarkerSHA)
+	if !ok {
+		t.Fatalf("extractMarkerPath with a valid 64-hex sha: ok = false, want true")
+	}
+	want := filepath.Join(installPath, helpers.ExtractMarkerPrefix+validMarkerSHA)
+	if got != want {
+		t.Fatalf("extractMarkerPath = %q, want %q", got, want)
 	}
 }
 

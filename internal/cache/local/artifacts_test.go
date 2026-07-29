@@ -211,26 +211,7 @@ func TestArtifactsDeleteToleratesMissingSidecar(t *testing.T) {
 	}
 }
 
-func TestIsSHA256Hex(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		in   string
-		want bool
-	}{
-		{name: "valid lowercase hex", in: testSHA, want: true},
-		{name: "empty", in: "", want: false},
-		{name: "too short", in: testSHA[:10], want: false},
-		{name: "too long", in: testSHA + "a", want: false},
-		{name: "uppercase hex rejected", in: strings.ToUpper(testSHA), want: false},
-		{name: "non-hex characters", in: strings.Repeat("z", 64), want: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if got := isSHA256Hex(tt.in); got != tt.want {
-				t.Fatalf("isSHA256Hex(%q) = %v, want %v", tt.in, got, tt.want)
-			}
-		})
-	}
-}
+// The digest-shape predicate itself (valid hex, wrong length, uppercase,
+// non-hex characters) moved to helpers.IsSHA256Hex and is exercised by
+// helpers.TestIsSHA256Hex; this package now only calls it, so it no longer
+// needs its own copy of that table.

@@ -10,12 +10,6 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 )
 
-// sha256HexLen is the length of a sha256 digest written as lowercase hex
-// (32 bytes -> 64 hex chars). A sidecar's content is validated against this
-// exact shape so a torn write or unrelated file content can never be
-// mistaken for a real digest.
-const sha256HexLen = 64
-
 // Artifacts implements ArtifactStore for filesystem-backed artifacts.
 type Artifacts struct {
 	cacheDir string
@@ -59,7 +53,7 @@ func (s *Artifacts) Fetch(_ context.Context, key string) (cacheManager.ArtifactF
 	result := cacheManager.ArtifactFile{Path: path}
 	//nolint:gosec // path is derived from the process-controlled artifact key, not user input.
 	if data, readErr := os.ReadFile(path + helpers.ArtifactSHASidecarSuffix); readErr == nil {
-		if sha := strings.TrimSpace(string(data)); isSHA256Hex(sha) {
+		if sha := strings.TrimSpace(string(data)); helpers.IsSHA256Hex(sha) {
 			result.Meta = map[string]string{"sha256": sha}
 		}
 	}
@@ -100,7 +94,7 @@ func (s *Artifacts) Commit(_ context.Context, key, tmpPath string, meta map[stri
 		return cacheManager.ArtifactFile{}, err
 	}
 	result := cacheManager.ArtifactFile{Path: path}
-	if sha := strings.TrimSpace(meta["sha256"]); isSHA256Hex(sha) {
+	if sha := strings.TrimSpace(meta["sha256"]); helpers.IsSHA256Hex(sha) {
 		_ = os.WriteFile(path+helpers.ArtifactSHASidecarSuffix, []byte(sha), helpers.FileMod)
 		result.Meta = map[string]string{"sha256": sha}
 	}
@@ -122,22 +116,6 @@ func (s *Artifacts) Delete(_ context.Context, key string) error {
 		return err
 	}
 	return nil
-}
-
-// isSHA256Hex reports whether s is exactly 64 lowercase hexadecimal
-// characters, the canonical form written to and read from an artifact's
-// sha256 sidecar.
-func isSHA256Hex(s string) bool {
-	if len(s) != sha256HexLen {
-		return false
-	}
-	for i := range len(s) {
-		c := s[i]
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return false
-		}
-	}
-	return true
 }
 
 // dir returns the base cache directory for artifacts.

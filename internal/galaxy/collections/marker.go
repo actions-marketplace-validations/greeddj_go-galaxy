@@ -188,11 +188,21 @@ func readExtractMarker(path string) (string, bool) {
 // happens but is worth making an explicit step rather than an implicit
 // side effect.
 func writeExtractMarker(installPath, sha string) error {
+	marker, ok := extractMarkerPath(installPath, sha)
+	if !ok {
+		// Hard error here, unlike checkExtractMarker/verifyExtractMarker: this
+		// runs only after a successful extraction, so sha has already passed
+		// resolveArtifactSHA's own validation - reaching here with an unsafe
+		// value means that guard was bypassed. Returning nil while writing
+		// nothing would leave a real extracted tree with no marker at all,
+		// which re-triggers a full re-extraction on every future run rather
+		// than just this one; failing loudly is strictly better than that.
+		return fmt.Errorf("%w: %q", helpers.ErrMalformedArtifactSHA256, sha)
+	}
 	tally, err := scanTree(installPath)
 	if err != nil {
 		return err
 	}
-	marker := filepath.Join(installPath, helpers.ExtractMarkerPrefix+sha)
 	if err := os.Remove(marker); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
@@ -226,6 +236,10 @@ const (
 	// extractMarkerDrifted means the marker parsed fine, the scan succeeded,
 	// but the two tallies disagree.
 	extractMarkerDrifted
+	// extractMarkerUnsafeSHA means sha itself is not helpers.IsSHA256Hex, so
+	// no marker path was even computed - see extractMarkerPath's doc comment
+	// for why the sha, not the joined path, is what gets rejected.
+	extractMarkerUnsafeSHA
 )
 
 // extractMarkerOutcome is checkExtractMarker's result: a status plus
@@ -247,11 +261,27 @@ func (o extractMarkerOutcome) matches() bool {
 }
 
 // extractMarkerPath returns the on-disk path of installPath's extract-done
-// marker for sha - the one join both checkExtractMarker and its
-// verifyExtractMarker wrapper need, so they cannot compute it two different
-// ways.
-func extractMarkerPath(installPath, sha string) string {
-	return filepath.Join(installPath, helpers.ExtractMarkerPrefix+sha)
+// marker for sha, and whether sha was safe to use at all - the single
+// validating chokepoint every construction of this path must go through, so
+// it cannot be computed two different ways, one of them unguarded.
+//
+// sha must be helpers.IsSHA256Hex before it is ever joined: filepath.Join
+// fuses a leading ".." in sha into the constant helpers.ExtractMarkerPrefix
+// element (".extract-done."), turning it into ".extract-done.." - a real "up
+// one directory" element - so the join absorbs sha's first ".." for free and
+// every later ".." in sha pops a real path component off installPath. A
+// leading "./" makes this unbounded rather than capped at installPath's own
+// depth: "./../../../../../../etc/passwd" walks all the way past the
+// filesystem root before the extra ".." components run out, rather than
+// stopping once installPath's components are exhausted. Validating the
+// joined result after the fact cannot close this - by the time a path
+// exists to inspect, the escape has already happened - so sha itself is what
+// is validated, before any join is computed.
+func extractMarkerPath(installPath, sha string) (string, bool) {
+	if !helpers.IsSHA256Hex(sha) {
+		return "", false
+	}
+	return filepath.Join(installPath, helpers.ExtractMarkerPrefix+sha), true
 }
 
 // checkExtractMarker reports whether installPath's on-disk extract-done
@@ -265,7 +295,10 @@ func extractMarkerPath(installPath, sha string) string {
 // negative outcome; see its own doc comment for what this predicate does and
 // does not catch, and why cleanup lives in the wrapper rather than here.
 func checkExtractMarker(installPath, sha string) extractMarkerOutcome {
-	marker := extractMarkerPath(installPath, sha)
+	marker, ok := extractMarkerPath(installPath, sha)
+	if !ok {
+		return extractMarkerOutcome{status: extractMarkerUnsafeSHA}
+	}
 
 	content, ok := readExtractMarker(marker)
 	if !ok {
@@ -306,30 +339,49 @@ func checkExtractMarker(installPath, sha string) extractMarkerOutcome {
 // TestExtractMarkerMissesEqualSizeEdit pins this limit so it is never
 // mistaken for a stronger guarantee than it actually is.
 //
-// On any negative outcome - marker missing or unreadable, unparseable
-// (including the legacy "ok" sentinel this format replaces), or a tally
-// mismatch - the marker is removed on a best-effort basis before returning
-// false. That is what avoids a second tree walk: extractCollection's own
-// presence check runs after this and finds nothing, so it goes straight to
-// re-extraction at the cost of one unlink rather than a second traversal.
-// It is also self-healing: a rejected marker never survives the run that
-// rejected it, so the next run starts clean instead of re-detecting the same
-// drift forever.
+// On any negative outcome that reaches a real marker path - missing or
+// unreadable, unparseable (including the legacy "ok" sentinel this format
+// replaces), or a tally mismatch - that marker is removed on a best-effort
+// basis before returning false. That is what avoids a second tree walk:
+// extractCollection's own presence check runs after this and finds nothing,
+// so it goes straight to re-extraction at the cost of one unlink rather than
+// a second traversal. It is also self-healing: a rejected marker never
+// survives the run that rejected it, so the next run starts clean instead of
+// re-detecting the same drift forever.
+//
+// sha failing helpers.IsSHA256Hex is the one outcome that does NOT reach a
+// real marker path at all: extractMarkerPath refuses to construct one (see
+// its own doc comment for the path-traversal mechanic this closes), so there
+// is nothing to remove and this returns false immediately, before
+// checkExtractMarker is even called.
 //
 // Severity is deliberately asymmetric. A marker that is absent, in the
 // legacy format, or otherwise unparseable is logged at Debugf only: every
 // user upgrading past the marker-format change would otherwise see a
 // one-time warning storm for a condition that is expected and harmless. A
-// marker that IS in the current format but whose tally does not match is
-// logged at Warnf, mirroring warnIfOffServerDownloadHost: this is a live
-// integrity signal, so it must reach stderr and survive --quiet rather than
-// risk being silenced in the very CI runs where it matters most.
+// marker that IS in the current format but whose tally does not match, or a
+// sha that fails the digest-shape check entirely, is logged at Warnf,
+// mirroring warnIfOffServerDownloadHost: both are live integrity signals, so
+// they must reach stderr and survive --quiet rather than risk being silenced
+// in the very CI runs where they matter most.
 //
-// This never fails the run: a detected drift is recovered by re-extraction,
-// so turning this signal into a hard error would convert a recoverable
-// cache-corruption event into a CI outage for no benefit.
+// This never fails the run: a detected drift, and an unsafe sha, are both
+// recovered by re-extraction, so turning either signal into a hard error
+// would convert a recoverable event into a CI outage for no benefit.
 func verifyExtractMarker(out output.Printer, installPath, sha string) bool {
-	marker := extractMarkerPath(installPath, sha)
+	marker, ok := extractMarkerPath(installPath, sha)
+	if !ok {
+		// An unsafe sha is never expected the way a missing or legacy-format
+		// marker is - it means either a corrupt snapshot or a lying server -
+		// so unlike those, it is reported at Warnf, not Debugf, matching
+		// extractMarkerDrifted and warnIfOffServerDownloadHost: it must reach
+		// stderr and survive --quiet. %q (never %s) guards against a
+		// newline or control byte in sha forging a log line. There is no
+		// marker path to log or remove - extractMarkerPath refused to
+		// construct one - and no os.Remove is reachable on this arm at all.
+		out.Warnf("refusing to use unsafe artifact sha256 %q as an extract marker for %s, will re-extract", sha, installPath)
+		return false
+	}
 	outcome := checkExtractMarker(installPath, sha)
 
 	switch outcome.status {
@@ -338,6 +390,11 @@ func verifyExtractMarker(out output.Printer, installPath, sha string) bool {
 		// site sets status explicitly) - this exists purely so the zero value
 		// falls through to the same remove-and-fail-closed tail every other
 		// non-match status does, rather than being silently treated as valid.
+	case extractMarkerUnsafeSHA:
+		// Unreachable from here: the ok check above already returned before
+		// checkExtractMarker could be called with this same sha, so it can
+		// never hand back extractMarkerUnsafeSHA to this switch. Listed only
+		// so this switch stays exhaustive over extractMarkerStatus.
 	case extractMarkerMatches:
 		return true
 	case extractMarkerMissing:

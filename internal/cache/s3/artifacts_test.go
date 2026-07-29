@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
@@ -35,5 +36,30 @@ func TestVerifyArtifactSHAWrapsBothSentinels(t *testing.T) {
 
 	if err := verifyArtifactSHA(map[string]string{"sha256": expected}, expectedSum[:]); err != nil {
 		t.Errorf("matching sum: got %v, want nil", err)
+	}
+}
+
+// TestVerifyArtifactSHARejectsCaseOnlyDifference proves the comparison is
+// exact (==), not strings.EqualFold: an expected digest that differs from
+// the actual, real sha256 only by case is rejected as
+// helpers.ErrSHA256Mismatch, not silently accepted as an equivalent
+// spelling. Lowercase hex is the only shape this program ever writes, so an
+// uppercase (or mixed-case) expected value can only mean a non-canonical
+// metadata sidecar - exactly the condition the local backend has always
+// refused via its own IsSHA256Hex gate, and that a case-insensitive
+// comparison here would let through instead.
+func TestVerifyArtifactSHARejectsCaseOnlyDifference(t *testing.T) {
+	t.Parallel()
+
+	sum := sha256.Sum256([]byte("real artifact bytes"))
+	actual := hex.EncodeToString(sum[:])
+	upper := strings.ToUpper(actual)
+
+	err := verifyArtifactSHA(map[string]string{"sha256": upper}, sum[:])
+	if err == nil {
+		t.Fatal("expected a case-only difference to be rejected, got nil")
+	}
+	if !errors.Is(err, helpers.ErrSHA256Mismatch) {
+		t.Errorf("errors.Is(err, helpers.ErrSHA256Mismatch) = false, want true (err: %v)", err)
 	}
 }

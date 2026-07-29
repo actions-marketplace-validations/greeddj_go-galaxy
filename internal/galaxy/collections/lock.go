@@ -27,11 +27,27 @@ func buildLockfile(
 		if err != nil {
 			return nil, fmt.Errorf("lockfile: %s: %w", fqdn, err)
 		}
+		// A non-empty sha here is raw Galaxy API JSON a server controls, the
+		// same trust boundary resolveArtifactSHA validates - and lock is the
+		// command that manufactures the pin every later --frozen install
+		// trusts. Rejecting a non-canonical value here, before it is ever
+		// written to the lockfile, means a poisoned or lying server can
+		// never get its bad digest committed to version control in the
+		// first place; catching it only at install time would still be
+		// fail-closed, but with the wrong error class for what actually
+		// went wrong. An empty sha is left alone: verifyPinnedSHA treats an
+		// empty pin as no pin at all, which is what keeps a server that
+		// does not publish digests usable, and weakening that here would
+		// break every such server.
+		sha := strings.TrimSpace(meta.Artifact.Sha256)
+		if sha != "" && !helpers.IsSHA256Hex(sha) {
+			return nil, fmt.Errorf("lockfile: %s: %w: %q", fqdn, helpers.ErrMalformedArtifactSHA256, sha)
+		}
 		entries = append(entries, lockfile.Entry{
 			Name:    fqdn,
 			Version: col.Version,
 			Source:  col.Source,
-			SHA256:  strings.TrimSpace(meta.Artifact.Sha256),
+			SHA256:  sha,
 			Deps:    lockfileDepsFromGraph(graph, col.key()),
 		})
 	}

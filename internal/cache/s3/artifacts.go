@@ -63,6 +63,31 @@ func (s *Artifacts) Fetch(ctx context.Context, key string) (cacheManager.Artifac
 	return cacheManager.ArtifactFile{Path: tmpFile.Name(), Cleanup: cleanup, Meta: meta}, nil
 }
 
+// verifyArtifactSHA compares a fetched object's real sha256 (computed by this
+// process, hence hex.EncodeToString - always lowercase) against the object's
+// metadata sidecar. The comparison is exact (==), not strings.EqualFold: a
+// case-only difference is a rejection, not a match. Lowercase hex is the
+// only shape anything in this program ever writes - hex.EncodeToString at
+// every producer, including this package's own Commit and hashReader - and
+// the local backend (local.Artifacts.Fetch) has required exactly that shape
+// on its own sidecar since before this comparison was tightened, leaving this
+// backend the last one that still accepted a second, uppercase spelling. That
+// spelling now has nowhere to go: helpers.IsSHA256Hex gates resolveArtifactSHA,
+// so a digest accepted here but rejected there fails the install with
+// helpers.ErrMalformedArtifactSHA256, which is deliberately outside the
+// evict-and-refetch class - every run against such an object would fail
+// identically, with no recovery. Rejecting it here instead is what turns that
+// dead end into the recoverable path described below. Tightening this to == is
+// also the only place in this file where that matters: an uppercase actual can
+// never happen (this process's own hex.EncodeToString), so the entire
+// discriminating power is on expected, the metadata read back from the object.
+//
+// The rejection is deliberately still classified as helpers.ErrSHA256Mismatch,
+// not helpers.ErrMalformedArtifactSHA256: prepareWithRecovery's
+// prepareInstall-error arm retries exactly on ErrSHA256Mismatch, so a
+// case-only mismatch evicts the object and refetches it, and the refetch
+// re-commits canonical lowercase metadata via this package's own Commit -
+// clearing the condition in one online run instead of failing forever.
 func verifyArtifactSHA(meta map[string]string, sum []byte) error {
 	if meta == nil {
 		return nil
@@ -72,7 +97,7 @@ func verifyArtifactSHA(meta map[string]string, sum []byte) error {
 		return nil
 	}
 	actual := hex.EncodeToString(sum)
-	if strings.EqualFold(actual, expected) {
+	if actual == expected {
 		return nil
 	}
 	// Wrap both the package-local sentinel (kept for any existing callers

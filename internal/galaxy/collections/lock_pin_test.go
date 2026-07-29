@@ -377,7 +377,7 @@ func TestCanSkipInstallSourceGate(t *testing.T) {
 
 	col := collection{Namespace: "acme", Name: "widgets", Version: "1.0.0", Source: "https://a.example.com"}
 	installPath := filepath.Join(downloadPath, "ansible_collections", col.Namespace, col.Name)
-	const installedSHA = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	const installedSHA = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 
 	if err := os.MkdirAll(installPath, helpers.DirMod); err != nil {
 		t.Fatalf("mkdir installPath: %v", err)

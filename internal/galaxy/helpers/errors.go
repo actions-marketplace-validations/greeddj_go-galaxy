@@ -317,4 +317,22 @@ var (
 	// evidence the collection is absent there, so silently falling through
 	// would risk installing from the wrong server once the outage clears.
 	ErrGalaxyServerUnavailable = errors.New("galaxy server unavailable")
+
+	// ErrMalformedArtifactSHA256 indicates a value that was supposed to be an
+	// artifact's sha256 digest is not a 64-character lowercase hex string.
+	// This is deliberately distinct from ErrSHA256Mismatch: a mismatch means
+	// two valid digests disagree, while a malformed digest is not a digest
+	// at all - most often a poisoned snapshot or a lying server.
+	//
+	// This exclusion is specific to one arm of prepareWithRecovery, not a
+	// global claim about retrying: that function's prepareInstall-error arm
+	// classifies on ErrSHA256Mismatch and this sentinel is deliberately not
+	// in that class, since retrying cannot repair the metadata cache entry
+	// that produced a malformed value in the first place. Its separate
+	// action-error arm evicts on any failure at all, unclassified, per the
+	// tradeoff documented on prepareWithRecovery itself ("every cache-hit
+	// action failure - regardless of cause - spends exactly one
+	// evict-and-refetch attempt with no classification") - a deliberate
+	// decision this sentinel does not reopen or except itself from.
+	ErrMalformedArtifactSHA256 = errors.New("artifact sha256 is not a 64-character lowercase hex digest")
 )
