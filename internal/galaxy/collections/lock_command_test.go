@@ -37,11 +37,13 @@ package collections
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/greeddj/go-galaxy/cmd/go-galaxy/exitcode"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
@@ -285,5 +287,54 @@ func assertReportNotFrozen(t *testing.T, written map[string]any) {
 	}
 	if b, isBool := v.(bool); !isBool || b {
 		t.Errorf("metrics frozen = %v, want absent or false (lock never consumes the lockfile it writes)", v)
+	}
+}
+
+// TestLockDryRunRejectsBeforeAnythingOpens asserts lock --dry-run is refused
+// as a usage error before the backend is even opened, rather than silently
+// overwriting the lockfile while announcing a normal lock run - lock has no
+// dry-run implementation, and an ambient GO_GALAXY_DRY_RUN must not make it
+// do the opposite of what was asked. Deliberately builds its own fixture
+// rather than reusing newLockRun, which pre-creates cacheDir: this test's own
+// point is that cacheDir must never come into existence at all.
+func TestLockDryRunRejectsBeforeAnythingOpens(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cacheDir := filepath.Join(root, "cache")
+	reqPath := filepath.Join(root, "requirements.yml")
+	mustWriteFile(t, reqPath, []byte("collections:\n  - name: acme.widgets\n    version: \"*\"\n"))
+
+	srv := fakegalaxy.New(t)
+	srv.AddVersion("acme", "widgets", testVersion100, nil)
+
+	cfg := &config.Config{
+		Server:           srv.URL(),
+		CacheDir:         cacheDir,
+		RequirementsFile: reqPath,
+		DownloadPath:     filepath.Join(root, "install"),
+		Workers:          1,
+		DryRun:           true,
+	}
+	runtime := infra.New(noopPrinter{}, srv.Client())
+
+	err := Lock(context.Background(), cfg, runtime)
+	if !errors.Is(err, helpers.ErrDryRunUnsupported) {
+		t.Fatalf("expected errors.Is ErrDryRunUnsupported, got %v", err)
+	}
+
+	lockPath := lockfile.ResolveDefaultPath(cfg.RequirementsFile, cfg.LockFile)
+	if _, statErr := os.Stat(lockPath); !os.IsNotExist(statErr) {
+		t.Errorf("expected no lockfile to be written, stat error = %v", statErr)
+	}
+	if got := srv.Total(); got != 0 {
+		t.Errorf("Total() = %d, want 0 (--dry-run must reject before any network call)", got)
+	}
+	// The cache directory is never created: proof the backend was never
+	// opened at all, not just that no lock survived to be released.
+	if _, statErr := os.Stat(cacheDir); !os.IsNotExist(statErr) {
+		t.Errorf("expected cacheDir to never be created, stat error = %v", statErr)
+	}
+	if got := exitcode.FromError(err); got != exitcode.ExitUsage {
+		t.Errorf("exitcode.FromError(err) = %d, want ExitUsage (%d)", got, exitcode.ExitUsage)
 	}
 }

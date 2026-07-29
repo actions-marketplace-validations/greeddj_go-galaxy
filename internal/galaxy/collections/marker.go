@@ -199,9 +199,98 @@ func writeExtractMarker(installPath, sha string) error {
 	return os.WriteFile(marker, []byte(formatExtractMarker(tally)), helpers.FileMod)
 }
 
+// extractMarkerStatus discriminates why checkExtractMarker did or did not
+// find installPath's extract-done marker still valid.
+type extractMarkerStatus int
+
+const (
+	// extractMarkerUnknown is the zero value of extractMarkerStatus. It
+	// exists so a zero-value extractMarkerOutcome{} can never satisfy
+	// matches(): every real construction site below sets status explicitly
+	// (by field name, never positionally), so this value is never produced
+	// by checkExtractMarker itself, but a future error path that forgets to
+	// set status - or simply returns extractMarkerOutcome{} - fails closed
+	// (treated as invalid, triggering re-extraction) instead of silently
+	// reporting a valid marker.
+	extractMarkerUnknown extractMarkerStatus = iota
+	// extractMarkerMatches means the marker is present, well-formed, and its
+	// recorded tally equals what scanTree observes right now.
+	extractMarkerMatches
+	// extractMarkerMissing means the marker file is absent or unreadable.
+	extractMarkerMissing
+	// extractMarkerMalformed means the marker exists but does not parse as
+	// the current format (including the legacy "ok" sentinel it replaced).
+	extractMarkerMalformed
+	// extractMarkerScanFailed means scanTree itself returned an error.
+	extractMarkerScanFailed
+	// extractMarkerDrifted means the marker parsed fine, the scan succeeded,
+	// but the two tallies disagree.
+	extractMarkerDrifted
+)
+
+// extractMarkerOutcome is checkExtractMarker's result: a status plus
+// whatever detail that status carries. want/got are only meaningful when
+// status is extractMarkerDrifted; scanErr is only set when status is
+// extractMarkerScanFailed.
+type extractMarkerOutcome struct {
+	scanErr error
+	want    treeTally
+	got     treeTally
+	status  extractMarkerStatus
+}
+
+// matches reports whether the marker was found valid - the single bit a
+// caller that only cares about the yes/no answer (classifyOneDryRun) needs,
+// without inspecting status itself.
+func (o extractMarkerOutcome) matches() bool {
+	return o.status == extractMarkerMatches
+}
+
+// extractMarkerPath returns the on-disk path of installPath's extract-done
+// marker for sha - the one join both checkExtractMarker and its
+// verifyExtractMarker wrapper need, so they cannot compute it two different
+// ways.
+func extractMarkerPath(installPath, sha string) string {
+	return filepath.Join(installPath, helpers.ExtractMarkerPrefix+sha)
+}
+
+// checkExtractMarker reports whether installPath's on-disk extract-done
+// marker for sha is present, well-formed, and its recorded tally still
+// matches what scanTree observes for installPath right now. It is a pure
+// read: no logging, no marker deletion, no side effects at all - callers
+// that only want a read-only answer (classifyOneDryRun, for the dry-run
+// preview) can use this directly. verifyExtractMarker below is the
+// install-path wrapper that adds logging and the best-effort cleanup on a
+// negative outcome; see its own doc comment for what this predicate does and
+// does not catch, and why cleanup lives in the wrapper rather than here.
+func checkExtractMarker(installPath, sha string) extractMarkerOutcome {
+	marker := extractMarkerPath(installPath, sha)
+
+	content, ok := readExtractMarker(marker)
+	if !ok {
+		return extractMarkerOutcome{status: extractMarkerMissing}
+	}
+	want, ok := parseExtractMarker(content)
+	if !ok {
+		return extractMarkerOutcome{status: extractMarkerMalformed}
+	}
+	got, err := scanTree(installPath)
+	if err != nil {
+		return extractMarkerOutcome{status: extractMarkerScanFailed, scanErr: err}
+	}
+	if got != want {
+		return extractMarkerOutcome{status: extractMarkerDrifted, want: want, got: got}
+	}
+	return extractMarkerOutcome{status: extractMarkerMatches}
+}
+
 // verifyExtractMarker reports whether installPath's on-disk extract-done
 // marker for sha is present, well-formed, and its recorded tally still
-// matches what scanTree observes for installPath right now.
+// matches what scanTree observes for installPath right now - checkExtractMarker
+// answers that question; this wrapper adds the install path's own logging and
+// best-effort cleanup around it, so those two concerns (the pure comparison,
+// and what an install does in reaction to it) cannot drift apart from a
+// caller that only wants the former.
 //
 // What this catches: any file or directory added or removed under installPath
 // since extraction, and any file whose size changed - which is the dominant
@@ -239,34 +328,30 @@ func writeExtractMarker(installPath, sha string) error {
 // so turning this signal into a hard error would convert a recoverable
 // cache-corruption event into a CI outage for no benefit.
 func verifyExtractMarker(out output.Printer, installPath, sha string) bool {
-	marker := filepath.Join(installPath, helpers.ExtractMarkerPrefix+sha)
+	marker := extractMarkerPath(installPath, sha)
+	outcome := checkExtractMarker(installPath, sha)
 
-	content, ok := readExtractMarker(marker)
-	if !ok {
+	switch outcome.status {
+	case extractMarkerUnknown:
+		// Never actually produced by checkExtractMarker (every construction
+		// site sets status explicitly) - this exists purely so the zero value
+		// falls through to the same remove-and-fail-closed tail every other
+		// non-match status does, rather than being silently treated as valid.
+	case extractMarkerMatches:
+		return true
+	case extractMarkerMissing:
 		out.Debugf("extract marker missing or unreadable at %s, will re-extract", marker)
-		_ = os.Remove(marker)
-		return false
-	}
-	want, ok := parseExtractMarker(content)
-	if !ok {
+	case extractMarkerMalformed:
 		out.Debugf("extract marker at %s is not in the current format (legacy or corrupt), will re-extract", marker)
-		_ = os.Remove(marker)
-		return false
-	}
-	got, err := scanTree(installPath)
-	if err != nil {
-		out.Debugf("failed to scan %s to verify its extract marker: %v, will re-extract", installPath, err)
-		_ = os.Remove(marker)
-		return false
-	}
-	if got != want {
+	case extractMarkerScanFailed:
+		out.Debugf("failed to scan %s to verify its extract marker: %v, will re-extract", installPath, outcome.scanErr)
+	case extractMarkerDrifted:
 		out.Warnf(
 			"installed tree %s no longer matches its extract marker (recorded entries=%d dirs=%d bytes=%d, "+
 				"found entries=%d dirs=%d bytes=%d): the cache may have been modified after extraction; re-extracting",
-			installPath, want.Entries, want.Dirs, want.Bytes, got.Entries, got.Dirs, got.Bytes,
+			installPath, outcome.want.Entries, outcome.want.Dirs, outcome.want.Bytes, outcome.got.Entries, outcome.got.Dirs, outcome.got.Bytes,
 		)
-		_ = os.Remove(marker)
-		return false
 	}
-	return true
+	_ = os.Remove(marker)
+	return false
 }

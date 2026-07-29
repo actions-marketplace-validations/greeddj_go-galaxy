@@ -52,7 +52,7 @@ func installCollection(
 	}()
 
 	filename := fmt.Sprintf("%s-%s-%s.tar.gz", col.Namespace, col.Name, col.Version)
-	installPath := filepath.Join(cfg.DownloadPath, "ansible_collections", col.Namespace, col.Name)
+	installPath := collectionInstallPath(cfg, col)
 
 	if canSkipInstall(cfg, col, installPath, st, runtime.Output) {
 		runtime.Output.Printf("⏭️ Skipping install, already installed: %s/%s/%s", col.Namespace, col.Name, col.Version)
@@ -526,6 +526,15 @@ func installEntryMatches(col collection, entry store.InstalledEntry, installPath
 		return false
 	}
 	return true
+}
+
+// collectionInstallPath returns the fixed ansible_collections path col would
+// land at (or already occupies) under cfg.DownloadPath. This is the single
+// definition of that layout; installCollection, shouldSchedulePrefetch, and
+// classifyDryRun all call it rather than each computing the join inline, so
+// the three call sites can never drift out of sync with each other.
+func collectionInstallPath(cfg *config.Config, col collection) string {
+	return filepath.Join(cfg.DownloadPath, "ansible_collections", col.Namespace, col.Name)
 }
 
 // installRecordMatches reports whether a collection's store entry, extract

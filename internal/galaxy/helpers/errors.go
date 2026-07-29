@@ -149,6 +149,21 @@ var (
 	// any network request is made.
 	ErrWarmCacheDisabled = errors.New("warm requires a cache: --no-cache leaves nothing to warm")
 
+	// ErrDryRunUnsupported indicates --dry-run was passed to a command that
+	// does not yet implement it. --dry-run is env-sourced (GO_GALAXY_DRY_RUN),
+	// so an ambient value set for a shared CI job would otherwise make these
+	// commands do exactly what the operator asked them not to do, silently:
+	// warm would still download every artifact and commit it, the sidecar,
+	// and the extracted store; lock would still overwrite a version-controlled
+	// lockfile - and both would still print their normal success output, with
+	// nothing marking the run as a dry run at all. Refusing outright beats
+	// proceeding: a loud, immediate usage error is recoverable by dropping the
+	// flag, while a silent full mutation announced as a dry run is not.
+	// install and cleanup do implement --dry-run; outdated needs no guard at
+	// all, since a read-only command has no product for --dry-run to
+	// suppress in the first place.
+	ErrDryRunUnsupported = errors.New("--dry-run is not implemented for this command")
+
 	// ErrDbNil indicates a nil Bolt DB was provided.
 	ErrDbNil = errors.New("bolt DB is nil")
 	// ErrStoreNil indicates a nil store was provided.

@@ -305,6 +305,149 @@ func TestScanTreeDoesNotFollowSymlinks(t *testing.T) {
 	}
 }
 
+// TestExtractMarkerOutcomeZeroValueFailsClosed proves a zero-value
+// extractMarkerOutcome{} - the shape a future error path might return by
+// mistake, e.g. a bare `return extractMarkerOutcome{}` - never satisfies
+// matches(): extractMarkerUnknown is deliberately the zero value of
+// extractMarkerStatus, so a construction site that forgets to set status
+// explicitly fails closed (treated as invalid) rather than silently
+// reporting a valid marker.
+func TestExtractMarkerOutcomeZeroValueFailsClosed(t *testing.T) {
+	t.Parallel()
+	if (extractMarkerOutcome{}).matches() {
+		t.Fatal("expected a zero-value extractMarkerOutcome{} to never satisfy matches()")
+	}
+}
+
+// TestCheckExtractMarkerScanFailedAndMissing covers two checkExtractMarker
+// outcomes no other test in this file reaches directly: a scanTree failure
+// (the installed tree becomes unreadable after a valid marker was already
+// written) and a marker that is simply absent (the shape of every
+// first-ever extraction, before writeExtractMarker has ever run). Both
+// subtests also prove checkExtractMarker itself never touches the marker -
+// unlike verifyExtractMarker, exercised here for the exact messages, tiers,
+// and best-effort cleanup its own doc comment promises. Each subtest's body
+// lives in its own named function, kept out of this dispatcher, to stay
+// under the cognitive-complexity budget.
+func TestCheckExtractMarkerScanFailedAndMissing(t *testing.T) {
+	t.Run("scan failed", testCheckExtractMarkerScanFailed)
+	t.Run("missing", testCheckExtractMarkerMissing)
+}
+
+// testCheckExtractMarkerScanFailed makes the installed tree itself
+// unreadable after seeding a valid marker, so scanTree's own
+// filepath.WalkDir fails, and proves checkExtractMarker reports that
+// failure faithfully (status, scanErr, no removal) while verifyExtractMarker
+// logs it at Debugf (never Warnf - a scan failure is not a confirmed tally
+// mismatch) and still performs its best-effort removal.
+func testCheckExtractMarkerScanFailed(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; permission-based read guard cannot be tested")
+	}
+	installPath := t.TempDir()
+	const sha = "deadbeefcafe"
+	seedValidExtractMarker(t, installPath, sha)
+	markerPath := filepath.Join(installPath, helpers.ExtractMarkerPrefix+sha)
+
+	// 0o311 (write+execute, no read): a directory missing the read bit still
+	// fails os.ReadDir - so scanTree's filepath.WalkDir fails, as required -
+	// but keeping the write bit lets the directory entry for the marker
+	// actually be unlinked afterward (verified empirically: a bare
+	// execute-only 0o111 blocks os.Remove outright on this filesystem, which
+	// would make the removal assertion below untestable rather than
+	// genuinely exercised). Deliberately more permissive than 0600 for that
+	// reason, not an oversight.
+	//nolint:gosec // G302: 0o311 is this test's own fixture permission; see comment above.
+	if err := os.Chmod(installPath, 0o311); err != nil {
+		t.Fatalf("chmod installPath: %v", err)
+	}
+	// Restored before t.TempDir's own cleanup runs, which needs to list (and
+	// remove) installPath itself.
+	t.Cleanup(func() {
+		if err := os.Chmod(installPath, helpers.DirMod); err != nil {
+			t.Errorf("restore installPath perms: %v", err)
+		}
+	})
+
+	assertScanFailedOutcome(t, checkExtractMarker(installPath, sha), markerPath)
+	assertVerifyExtractMarkerScanFailed(t, installPath, sha, markerPath)
+}
+
+// assertScanFailedOutcome checks checkExtractMarker's own return value for
+// the scan-failed scenario, and that it never touched the marker file - it
+// is a pure read.
+func assertScanFailedOutcome(t *testing.T, outcome extractMarkerOutcome, markerPath string) {
+	t.Helper()
+	if outcome.status != extractMarkerScanFailed {
+		t.Fatalf("outcome.status = %v, want extractMarkerScanFailed", outcome.status)
+	}
+	if outcome.scanErr == nil {
+		t.Fatal("expected a non-nil scanErr")
+	}
+	if outcome.matches() {
+		t.Fatal("expected matches() to be false")
+	}
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatalf("expected checkExtractMarker to leave the marker untouched, stat error: %v", err)
+	}
+}
+
+// assertVerifyExtractMarkerScanFailed calls verifyExtractMarker for the
+// scan-failed scenario and checks its return value, its Debugf-tier message
+// (and the absence of a Warnf line - a scan failure is not a confirmed tally
+// mismatch), and that its best-effort removal actually removed the marker.
+func assertVerifyExtractMarkerScanFailed(t *testing.T, installPath, sha, markerPath string) {
+	t.Helper()
+	printer := &capturingPrinter{}
+	if verifyExtractMarker(printer, installPath, sha) {
+		t.Fatal("expected verifyExtractMarker to return false")
+	}
+	wantMsg := "failed to scan " + installPath + " to verify its extract marker"
+	if !printer.hasDebugContaining(wantMsg) {
+		t.Errorf("expected a Debugf line containing %q, got %v", wantMsg, printer.debugs)
+	}
+	if len(printer.warns) != 0 {
+		t.Errorf("expected no Warnf line for a scan failure, got %v", printer.warns)
+	}
+	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+		t.Errorf("expected verifyExtractMarker's best-effort removal to have actually removed the marker, stat error = %v", err)
+	}
+}
+
+// testCheckExtractMarkerMissing leaves installPath with no marker at all -
+// the shape of every first-ever extraction - and proves checkExtractMarker
+// and verifyExtractMarker both treat that identically to any other
+// unverifiable marker: reported, not removed by the former (nothing to
+// remove), logged at Debugf by the latter.
+func testCheckExtractMarkerMissing(t *testing.T) {
+	installPath := t.TempDir()
+	const sha = "deadbeefcafe"
+	markerPath := filepath.Join(installPath, helpers.ExtractMarkerPrefix+sha)
+
+	outcome := checkExtractMarker(installPath, sha)
+	if outcome.status != extractMarkerMissing {
+		t.Fatalf("outcome.status = %v, want extractMarkerMissing", outcome.status)
+	}
+	if outcome.matches() {
+		t.Fatal("expected matches() to be false")
+	}
+	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+		t.Fatalf("checkExtractMarker must never create a marker; stat error = %v", err)
+	}
+
+	printer := &capturingPrinter{}
+	if verifyExtractMarker(printer, installPath, sha) {
+		t.Fatal("expected verifyExtractMarker to return false")
+	}
+	wantMsg := "extract marker missing or unreadable at " + markerPath
+	if !printer.hasDebugContaining(wantMsg) {
+		t.Errorf("expected a Debugf line containing %q, got %v", wantMsg, printer.debugs)
+	}
+	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+		t.Errorf("expected no marker to exist (there was nothing to remove), stat error = %v", err)
+	}
+}
+
 // TestPrefetchScanUsesCheapCheck proves shouldSchedulePrefetch still calls
 // installRecordMatches - the bare-os.Stat cheap check - rather than
 // canSkipInstall's strict tally verification: a seeded install whose marker

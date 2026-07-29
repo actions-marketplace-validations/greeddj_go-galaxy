@@ -2,7 +2,6 @@ package collections
 
 import (
 	"context"
-	"path/filepath"
 	"sort"
 	"sync"
 
@@ -36,7 +35,11 @@ func startPrefetcher(ctx context.Context, deps prefetchDeps, collections map[str
 		done:       make(map[string]chan struct{}),
 		prefetched: make(map[string]downloadResult),
 	}
-	if cfg == nil || cfg.NoCache || artifacts == nil {
+	// --dry-run must never download an artifact ahead of time - that is
+	// exactly the write a dry run suppresses - so it disables the prefetcher
+	// here, the same structural way NoCache already does, rather than
+	// threading a dry-run flag into prefetchOne itself.
+	if cfg == nil || cfg.NoCache || cfg.DryRun || artifacts == nil {
 		return p
 	}
 
@@ -149,7 +152,7 @@ func shouldSchedulePrefetch(ctx context.Context, deps prefetchDeps, col collecti
 	if !isGalaxyType(col.Type) {
 		return false
 	}
-	installPath := filepath.Join(deps.cfg.DownloadPath, "ansible_collections", col.Namespace, col.Name)
+	installPath := collectionInstallPath(deps.cfg, col)
 	if installRecordMatches(deps.cfg, col, installPath, deps.st) {
 		return false
 	}

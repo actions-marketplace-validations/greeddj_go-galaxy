@@ -32,6 +32,8 @@ type capturingPrinter struct {
 	persists []string
 	warns    []string
 	debugs   []string
+	oks      []string
+	errs     []string
 	mu       sync.Mutex
 }
 
@@ -39,6 +41,15 @@ func (p *capturingPrinter) Printf(format string, args ...any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.prints = append(p.prints, fmt.Sprintf(format, args...))
+}
+
+// Okf records a success-tier line, the same tier canSkipInstall's
+// "Installed:"/"Cached:" lines use and classifyDryRun's "Would install:"
+// lines share.
+func (p *capturingPrinter) Okf(format string, args ...any) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.oks = append(p.oks, fmt.Sprintf(format, args...))
 }
 
 // PersistentPrintf records a result-tier line: output that must survive even
@@ -53,6 +64,14 @@ func (p *capturingPrinter) Warnf(format string, args ...any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.warns = append(p.warns, fmt.Sprintf(format, args...))
+}
+
+// Errorf records an error-tier line, the tier classifyDryRun's "Would fail:"
+// lines share with a real install's own "Failed:" lines.
+func (p *capturingPrinter) Errorf(format string, args ...any) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.errs = append(p.errs, fmt.Sprintf(format, args...))
 }
 
 func (p *capturingPrinter) Debugf(format string, args ...any) {
@@ -108,6 +127,41 @@ func (p *capturingPrinter) hasDebugContaining(substr string) bool {
 		}
 	}
 	return false
+}
+
+// hasOkContaining reports whether any recorded Okf line contains substr.
+func (p *capturingPrinter) hasOkContaining(substr string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, line := range p.oks {
+		if strings.Contains(line, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasErrContaining reports whether any recorded Errorf line contains substr.
+func (p *capturingPrinter) hasErrContaining(substr string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, line := range p.errs {
+		if strings.Contains(line, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// okLines returns a snapshot copy of every recorded Okf line, in recording
+// order - used by tests asserting classifyDryRun's per-collection report
+// order rather than just membership.
+func (p *capturingPrinter) okLines() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]string, len(p.oks))
+	copy(out, p.oks)
+	return out
 }
 
 // TestSweepDeadRunTempsIsBestEffort proves sweepDeadRunTemps never panics or

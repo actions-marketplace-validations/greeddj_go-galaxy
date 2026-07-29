@@ -54,12 +54,22 @@ func Warm(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
 }
 
 // runWarm owns the backend lifecycle for the warm command: it rejects
-// --no-cache before anything is opened, then opens the backend, takes its
-// exclusive lock, and registers the release/close defers that must run on
-// every exit path - including one from warmWithState, which owns the actual
-// work once state is initialized. This is the same lifecycle/work boundary
-// runInstall already draws around prepareInstallPlan.
+// --dry-run first and --no-cache second, before anything is opened, then
+// opens the backend, takes its exclusive lock, and registers the
+// release/close defers that must run on every exit path - including one from
+// warmWithState, which owns the actual work once state is initialized. This
+// is the same lifecycle/work boundary runInstall already draws around
+// prepareInstallPlan.
 func runWarm(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
+	// warm does not implement --dry-run: it would still download every
+	// artifact and commit it, the sidecar, and the extracted store, with
+	// nothing in its output marking the run as a dry run at all. Checked
+	// ahead of the --no-cache guard below and before anything is opened,
+	// locked, or printed, for the same reason that guard is: no lock, no
+	// network, on a config this command refuses to run under.
+	if cfg.DryRun {
+		return fmt.Errorf("%w: warm would still download and commit every artifact", helpers.ErrDryRunUnsupported)
+	}
 	// warm's entire output IS cache state: with --no-cache, initInstall would
 	// build a nil extract store and every download would be thrown away
 	// uncommitted (see helpers.ErrWarmCacheDisabled), so this is rejected
@@ -234,6 +244,15 @@ func Lock(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
 // owns the actual work once state is initialized. Same lifecycle/work
 // boundary runInstall and runWarm already draw.
 func runLock(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
+	// lock does not implement --dry-run: it would still overwrite the
+	// lockfile from a fresh resolve, with nothing in its output marking the
+	// run as a dry run at all. Checked first, ahead of the --frozen warning
+	// below, so a run that cannot proceed emits nothing else - and before
+	// anything is opened, locked, or printed, matching runWarm's identical
+	// guard.
+	if cfg.DryRun {
+		return fmt.Errorf("%w: lock would still overwrite the lockfile", helpers.ErrDryRunUnsupported)
+	}
 	// --frozen is registered on lock only because lock shares
 	// helpers.CollectionFlags with install and warm; lock never consumes a
 	// lockfile - it always rewrites one from a fresh resolve - so the flag
@@ -347,6 +366,9 @@ func runInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) e
 // backend is already open and locked - runInstall holds that lifecycle - so
 // it never touches state.release or state.backend.Close.
 func installWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra, state *installState, start time.Time) error {
+	if cfg.DryRun {
+		dryRunBanner(runtime)
+	}
 	plan, err := prepareInstallPlan(ctx, cfg, runtime, state)
 	if err != nil {
 		return err
@@ -360,8 +382,16 @@ func installWithState(ctx context.Context, cfg *config.Config, runtime *infra.In
 	// backend.Artifacts().Commit (or mutate the Store) after the lock is gone
 	// - structurally, by Go's defer-then-return ordering across this call
 	// boundary, not by convention of registering this defer after two other
-	// defers within one function.
+	// defers within one function. On the dry-run path below, this defer is
+	// still harmless: prepareInstallPlan never started the prefetcher (see
+	// startPrefetcher's own cfg.DryRun guard), so plan.prefetch.Close() is a
+	// no-op against a prefetcher that was never armed.
 	defer plan.prefetch.Close()
+
+	if cfg.DryRun {
+		return installDryRun(ctx, cfg, runtime, state, plan, start)
+	}
+
 	failures, err := installLevels(
 		ctx,
 		cfg,
@@ -381,6 +411,64 @@ func installWithState(ctx context.Context, cfg *config.Config, runtime *infra.In
 	finalErr := finalizeInstall(ctx, runtime, state.backend, state.store, failures, start)
 	writeRunMetrics(cfg, runtime, "install", start, len(plan.collections), int(failures), cfg.Frozen)
 	return finalErr
+}
+
+// installDryRun is installLevels' dry-run substitute: instead of downloading,
+// extracting, writing GALAXY.yml, or calling recordInstall for any
+// collection, it reports what install would do (classifyDryRun) and stops
+// there. writeRunMetrics is still called, unconditionally, matching every
+// other command's tail - it self-suppresses under cfg.DryRun (see its own
+// doc comment), so this call site does not need to know that.
+//
+// The snapshot is saved only when state.store.WasPersisted() was already
+// true when this run loaded it - i.e. only when a persisted snapshot already
+// existed. When it did, the resolve-side caches this run's fresh solve wrote
+// (Meta.RequirementsHash/Meta.Server, Requirements, the resolved/graph snapshot, plus
+// APICache/DepsCache/Versions picked up along the way) are pure,
+// reconstructible cache, not this command's product, so saving them is free
+// value - exactly the half of this write --dry-run must not suppress. When
+// no persisted snapshot existed, the save is skipped, mirroring
+// finalizeCleanup's identical guard in internal/galaxy/cleanup: a fresh
+// snapshot's Save/MarshalSnapshot both stamp Meta.LastSnapshot
+// unconditionally, and doing that here would manufacture the exact
+// persisted-and-empty-installed shape sweepExtractedStore's own
+// WasPersisted() guard exists to distinguish from "nothing is installed or
+// warmed anywhere" - handing a later cleanup run false positive evidence to
+// wipe the whole extracted store on a cold-cache preview that touched
+// nothing.
+func installDryRun(
+	ctx context.Context,
+	cfg *config.Config,
+	runtime *infra.Infra,
+	state *installState,
+	plan *installPlan,
+	start time.Time,
+) error {
+	wouldFail := classifyDryRun(ctx, runtime, cfg, state.store, state.backend.Artifacts(), plan.collections, true)
+	saveErr := saveDryRunSnapshotIfPersisted(ctx, runtime, state)
+	writeRunMetrics(cfg, runtime, "install", start, len(plan.collections), wouldFail, cfg.Frozen)
+	if wouldFail > 0 {
+		return annotateSaveFailure(
+			fmt.Errorf("%w: %d collections cannot be installed offline: %w", helpers.ErrInstallationFailed, wouldFail, helpers.ErrOfflineMode),
+			saveErr,
+		)
+	}
+	return saveErr
+}
+
+// saveDryRunSnapshotIfPersisted saves state.store only when it was already
+// persisted before this run - see installDryRun's own doc comment for why an
+// unpersisted store must not be saved here. The warning is this guard's only
+// output; the save path itself (SaveStore, or a save failure) speaks for
+// itself the same way it does on every other command.
+func saveDryRunSnapshotIfPersisted(ctx context.Context, runtime *infra.Infra, state *installState) error {
+	if !state.store.WasPersisted() {
+		runtime.Output.Warnf(
+			"no persisted snapshot was found; a dry run will not create one, so the metadata caches this run built are discarded",
+		)
+		return nil
+	}
+	return state.backend.SaveStore(ctx, state.store)
 }
 
 func prepareInstallPlan(ctx context.Context, cfg *config.Config, runtime *infra.Infra, state *installState) (*installPlan, error) {
@@ -461,17 +549,12 @@ func initInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) 
 		return nil, err
 	}
 	runtime.Output.DebugSincef(snapshotStart, "%s", "load snapshot")
-	if cfg.ClearCache {
-		st.ClearCaches()
-		if err := backend.ClearFiles(ctx); err != nil {
-			_ = releaseLock()
-			_ = backend.Close(ctx)
-			return nil, err
-		}
+	if err := clearCacheIfRequested(ctx, cfg, runtime, backend, st); err != nil {
+		_ = releaseLock()
+		_ = backend.Close(ctx)
+		return nil, err
 	}
-	if err := backend.RecordProject(ctx, cfg.RequirementsFile, cfg.DownloadPath); err != nil {
-		runtime.Output.Printf("⚠️ Failed to record project: %v", err)
-	}
+	recordProjectUnlessDryRun(ctx, cfg, runtime, backend)
 
 	return &installState{
 		backend:      backend,
@@ -479,6 +562,51 @@ func initInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) 
 		release:      releaseLock,
 		extractStore: extractStore,
 	}, nil
+}
+
+// clearCacheIfRequested honors --clear-cache by wiping the in-memory caches
+// and the cached artifact files on disk, unless a dry run is in effect:
+// --clear-cache is a destructive mutation, so a dry run must never honor it,
+// on top of everything else --dry-run already suppresses. Factored out of
+// initInstall to keep its own branching under the cyclomatic complexity
+// budget.
+func clearCacheIfRequested(
+	ctx context.Context,
+	cfg *config.Config,
+	runtime *infra.Infra,
+	backend cacheManager.Backend,
+	st *store.Store,
+) error {
+	if !cfg.ClearCache {
+		return nil
+	}
+	if cfg.DryRun {
+		runtime.Output.Warnf("--dry-run: skipping --clear-cache")
+		return nil
+	}
+	st.ClearCaches()
+	return backend.ClearFiles(ctx)
+}
+
+// recordProjectUnlessDryRun records this project in the persistent project
+// registry, unless a dry run is in effect. initInstall is shared by install,
+// warm, and lock, so this guard applies identically to all three - not just
+// to install. RecordProject is the only persistent, non-cache,
+// non-reconstructible write in initInstall, and it feeds a DESTRUCTIVE
+// command: cleanup walks every registered project's requirements.yml and
+// aborts its whole run if one is unreadable or unparseable. `install
+// --dry-run -r broken.yml` enrolling that project would then abort every
+// cleanup run on every machine sharing this cache, for a project that never
+// actually installed anything. ProjectRecord.LastRun is read by nobody, so
+// there is no cost to simply not writing it here. Factored out of initInstall
+// to keep its own branching under the cyclomatic complexity budget.
+func recordProjectUnlessDryRun(ctx context.Context, cfg *config.Config, runtime *infra.Infra, backend cacheManager.Backend) {
+	if cfg.DryRun {
+		return
+	}
+	if err := backend.RecordProject(ctx, cfg.RequirementsFile, cfg.DownloadPath); err != nil {
+		runtime.Output.Printf("⚠️ Failed to record project: %v", err)
+	}
 }
 
 // newExtractStore returns a content-addressable extraction store, or nil
@@ -495,6 +623,12 @@ func newExtractStore(cfg *config.Config) *extracted.Store {
 // exclusive lock. It is best-effort: each failure is logged and the install
 // proceeds, since leaked temp space is not worth failing an otherwise-valid
 // install over.
+//
+// This runs unconditionally, even under --dry-run, unlike clearCacheIfRequested
+// - deliberately, not by oversight. What it deletes is provably a dead-run
+// orphan (the exclusive lock rules out any live writer), never something a
+// later read treats as an assertion about reality, so it is not the kind of
+// write --dry-run exists to suppress in the first place.
 func sweepDeadRunTemps(ctx context.Context, runtime *infra.Infra, backend cacheManager.Backend, extractStore *extracted.Store) {
 	if err := backend.SweepTemp(ctx); err != nil {
 		runtime.Output.Printf("⚠️ Failed to sweep leftover download temps: %v", err)
@@ -539,6 +673,18 @@ func writeRunMetrics(
 	frozen bool,
 ) {
 	if cfg == nil || cfg.MetricsFile == "" {
+		return
+	}
+	// metrics.Report has no field distinguishing a dry run from a real one, so
+	// a dry run's report is indistinguishable from an install that actually
+	// happened - the same class of untruth as a report claiming a run honored
+	// a flag it never honored. Worse, tryLockfileHash below reads the
+	// lockfile fresh off disk, so a dry run's report would pair an OLD
+	// lockfile hash with a NEW resolve's counts. This guard lives inside
+	// writeRunMetrics itself, not at each call site, so install, warm, and
+	// lock all inherit it for free.
+	if cfg.DryRun {
+		runtime.Output.Warnf("--dry-run: skipping metrics report to %s", cfg.MetricsFile)
 		return
 	}
 	now := time.Now()

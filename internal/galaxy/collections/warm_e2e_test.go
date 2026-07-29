@@ -419,6 +419,34 @@ func TestWarmNoCacheRejectsBeforeResolving(t *testing.T) {
 	}
 }
 
+// TestWarmDryRunRejectsBeforeAnythingOpens asserts warm --dry-run is refused
+// as a usage error before the backend is even opened, rather than silently
+// downloading and committing every artifact while announcing a normal warm -
+// warm has no dry-run implementation, and an ambient GO_GALAXY_DRY_RUN must
+// not make it do the opposite of what was asked.
+func TestWarmDryRunRejectsBeforeAnythingOpens(t *testing.T) {
+	t.Parallel()
+	f := newE2EFixture(t)
+	f.cfg.DryRun = true
+
+	err := collections.Warm(context.Background(), f.cfg, f.runtime)
+	if !errors.Is(err, helpers.ErrDryRunUnsupported) {
+		t.Fatalf("expected errors.Is ErrDryRunUnsupported, got %v", err)
+	}
+	if got := f.server.Total(); got != 0 {
+		t.Errorf("Total() = %d, want 0 (--dry-run must reject before any network call)", got)
+	}
+	// The cache directory is never created: proof the backend was never
+	// opened at all (cacheBackend.New/backend.Open both create it), not just
+	// that no lock survived to be released.
+	if _, statErr := os.Stat(f.cfg.CacheDir); !os.IsNotExist(statErr) {
+		t.Errorf("expected cacheDir to never be created, stat error = %v", statErr)
+	}
+	if got := exitcode.FromError(err); got != exitcode.ExitUsage {
+		t.Errorf("exitcode.FromError(err) = %d, want ExitUsage (%d)", got, exitcode.ExitUsage)
+	}
+}
+
 // TestWarmMetricsWrittenForSuccessAndFailure asserts a metrics file is
 // produced with command == "warm" both when warm succeeds and when it fails,
 // mirroring writeRunMetrics's unconditional call on both outcomes.
