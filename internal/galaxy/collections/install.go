@@ -385,15 +385,35 @@ func prepareFromCache(ctx context.Context, deps installDeps, col collection) (in
 	return installPayload{meta: nil, artifact: artifact, artifactSHA: artifactSHA}, nil
 }
 
+// writeGalaxyInfoIfPresent writes col's GALAXY.yml sidecar and reports any
+// failure on the tier matching its severity. An unsafe identifier is an
+// integrity signal - the same class verifyExtractMarker's unsafe-sha arm
+// warns on - so it must survive --quiet; an ordinary I/O failure is not.
+// Neither tier fails the run: the collection has already been extracted by
+// the time this runs, and this call has never failed an install.
+//
+// The unsafe-identifier warning does not also name the collection: err
+// already renders namespace, name, and version with %q (collectionInfoDir's
+// caller wraps them that way), and interpolating the raw identifier a second
+// time with %s would put an attacker-controlled string - one that could
+// carry newlines or ANSI escapes - onto CI stderr verbatim for no added
+// information. Same reason verifyExtractMarker uses %q and never %s for a
+// sha.
 func writeGalaxyInfoIfPresent(
 	runtime *infra.Infra,
 	cfg *config.Config,
 	col collection,
 	meta *types.GalaxyCollectionVersionInfo,
 ) {
-	if err := writeGalaxyInfo(cfg, col, meta); err != nil {
-		runtime.Output.Printf("⚠️ Failed to write GALAXY.yml: %v", err)
+	err := writeGalaxyInfo(cfg, col, meta)
+	if err == nil {
+		return
 	}
+	if errors.Is(err, helpers.ErrUnsafeCollectionIdentifier) {
+		runtime.Output.Warnf("Refusing to write GALAXY.yml: %v", err)
+		return
+	}
+	runtime.Output.Printf("⚠️ Failed to write GALAXY.yml: %v", err)
 }
 
 func recordInstall(st *store.Store, col collection, installPath, artifactSHA string, deps []string) {
@@ -568,6 +588,37 @@ func collectionInstallPath(cfg *config.Config, col collection) string {
 	return filepath.Join(cfg.DownloadPath, "ansible_collections", col.Namespace, col.Name)
 }
 
+// collectionInfoDir returns the on-disk path of col's GALAXY.yml sidecar
+// directory under cfg.DownloadPath, and whether col's identity was safe to
+// use at all - the single validating chokepoint every construction of this
+// path must go through, so it cannot be computed two different ways, one of
+// them unguarded.
+//
+// col.Namespace, col.Name, and col.Version must each be helpers.IsPathElement
+// before they are ever joined: filepath.Join fuses a leading ".." in Version
+// into the synthetic "<ns>.<name>-.." element, turning it into a real "up one
+// directory" element, so the join absorbs Version's first ".." for free and
+// every later ".." in Version pops a real path component off DownloadPath.
+// Validating the joined result after the fact cannot close this - by the
+// time a path exists to inspect, the escape has already happened - so the
+// three components are what is validated, before any join is computed, and
+// never the composed "<ns>.<name>-<version>.info" element: cleanup.go's
+// removeInstalled validates the same three components with the same
+// predicate, so the deleter never refuses a sidecar directory this function
+// created as an unsafe identifier. That symmetry is specific to the
+// sidecar path: collectionInstallPath performs no such validation on the
+// identifiers it joins.
+func collectionInfoDir(cfg *config.Config, col collection) (string, bool) {
+	if !helpers.IsPathElement(col.Namespace) || !helpers.IsPathElement(col.Name) || !helpers.IsPathElement(col.Version) {
+		return "", false
+	}
+	return filepath.Join(
+		cfg.DownloadPath,
+		"ansible_collections",
+		fmt.Sprintf("%s.%s-%s.info", col.Namespace, col.Name, col.Version),
+	), true
+}
+
 // installRecordMatches reports whether a collection's store entry, extract
 // marker, and GALAXY.yml sidecar are all present and consistent for
 // installPath, using only cheap os.Stat calls - no tree walk. This is the
@@ -593,8 +644,11 @@ func installRecordMatches(cfg *config.Config, col collection, installPath string
 		return false
 	}
 
-	infoDir := filepath.Join(cfg.DownloadPath, "ansible_collections", fmt.Sprintf("%s.%s-%s.info", col.Namespace, col.Name, col.Version))
-	if _, err := os.Stat(filepath.Join(infoDir, "GALAXY.yml")); err != nil {
+	infoDir, ok := collectionInfoDir(cfg, col)
+	if !ok {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(infoDir, galaxyYAMLFileName)); err != nil {
 		return false
 	}
 

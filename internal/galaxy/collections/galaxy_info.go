@@ -12,6 +12,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// galaxyYAMLFileName is the sidecar file name inside a collection's .info
+// directory. Both writeGalaxyInfo and installRecordMatches join it onto the
+// same collectionInfoDir; a single constant keeps a typo in either literal
+// from silently reproducing the disagreement this file's chokepoint closes.
+const galaxyYAMLFileName = "GALAXY.yml"
+
 // GalaxyYAML represents the GALAXY.yml metadata file.
 type GalaxyYAML struct {
 	DownloadURL string `yaml:"download_url"`
@@ -27,13 +33,19 @@ type GalaxyYAML struct {
 // writeGalaxyInfo writes GALAXY.yml for the installed collection. When meta
 // is nil (artifact-cache-hit fast path), a minimal GALAXY.yml is written
 // using fields available from the collection identity.
+//
+// The chokepoint call is the first statement, before buildGalaxyYAML and
+// before any filesystem call: a guard whose refusal is deferred past a
+// destructive operation is not a guard. Nothing on disk is touched, and no
+// GALAXY.yml content is even computed, until col's identity is known safe to
+// use as a path.
 func writeGalaxyInfo(cfg *config.Config, col collection, meta *types.GalaxyCollectionVersionInfo) error {
+	infoDir, ok := collectionInfoDir(cfg, col)
+	if !ok {
+		return fmt.Errorf("%w: ns=%q name=%q version=%q",
+			helpers.ErrUnsafeCollectionIdentifier, col.Namespace, col.Name, col.Version)
+	}
 	g := buildGalaxyYAML(cfg, col, meta)
-	infoDir := filepath.Join(
-		cfg.DownloadPath,
-		"ansible_collections",
-		fmt.Sprintf("%s.%s-%s.info", g.Namespace, g.Name, g.Version),
-	)
 	if err := os.MkdirAll(infoDir, helpers.DirMod); err != nil {
 		return err
 	}
@@ -41,29 +53,32 @@ func writeGalaxyInfo(cfg *config.Config, col collection, meta *types.GalaxyColle
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(infoDir, "GALAXY.yml"), data, helpers.FileMod)
+	return os.WriteFile(filepath.Join(infoDir, galaxyYAMLFileName), data, helpers.FileMod)
 }
 
+// buildGalaxyYAML builds the GALAXY.yml document for col. The identity
+// fields (namespace, name, version) always come from col, never from meta:
+// col is the resolved identity - the same one the store key, the install
+// path, the lockfile, and the artifact key already use - so the file name
+// (collectionInfoDir, derived from col) and the file body agree by
+// construction rather than by coincidence. meta, when present, contributes
+// only the informational fields col has no equivalent for: the download and
+// version URLs (with any capability-bearing query string stripped, see
+// withoutQuery) and the signatures Galaxy attached to this version.
 func buildGalaxyYAML(cfg *config.Config, col collection, meta *types.GalaxyCollectionVersionInfo) GalaxyYAML {
-	if meta == nil {
-		return GalaxyYAML{
-			FormatVer: "1.0.0",
-			Name:      col.Name,
-			Namespace: col.Namespace,
-			Server:    cfg.Server,
-			Version:   col.Version,
-		}
+	g := GalaxyYAML{
+		FormatVer: "1.0.0",
+		Name:      col.Name,
+		Namespace: col.Namespace,
+		Server:    cfg.Server,
+		Version:   col.Version,
 	}
-	return GalaxyYAML{
-		DownloadURL: withoutQuery(meta.DownloadURL),
-		FormatVer:   "1.0.0",
-		Name:        meta.Name,
-		Namespace:   meta.Namespace.Name,
-		Server:      cfg.Server,
-		Signatures:  meta.Signatures,
-		Version:     meta.Version,
-		VersionURL:  withoutQuery(meta.Href),
+	if meta != nil {
+		g.DownloadURL = withoutQuery(meta.DownloadURL)
+		g.Signatures = meta.Signatures
+		g.VersionURL = withoutQuery(meta.Href)
 	}
+	return g
 }
 
 // withoutQuery returns raw up to, but not including, its first "?".
