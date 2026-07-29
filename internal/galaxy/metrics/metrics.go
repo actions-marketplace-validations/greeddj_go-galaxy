@@ -31,6 +31,13 @@ import (
 // alone. None of the three carries `omitempty`: a consumer must be able to
 // tell "zero hits" apart from "field absent" (an older binary that predates
 // these counters).
+//
+// Frozen reports whether the run actually resolved from the lockfile, not
+// merely whether --frozen was passed: lock accepts the flag because it
+// shares the collection flag set, yet always regenerates the lockfile from a
+// fresh resolve, so a lock report never sets it. Offline is
+// configuration-wide - it governs the HTTP transport for every command - and
+// is reported as configured.
 type Report struct {
 	StartedAt       time.Time     `json:"started_at"`
 	FinishedAt      time.Time     `json:"finished_at"`

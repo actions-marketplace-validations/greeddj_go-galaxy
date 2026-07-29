@@ -267,9 +267,21 @@ func setAppPin(lf *lockfile.File, sha string) {
 
 // assertFrozenPinOverridesHighestVersion runs a frozen install and asserts it
 // installs the lockfile's pinned acme.app@1.0.0 - not the higher 2.0.0 also
-// registered on the server - without ever listing versions.
+// registered on the server - without ever listing versions, and that a
+// successful frozen install's metrics report still claims "frozen": true.
+// Nothing else in the suite pins this: install and warm pass cfg.Frozen
+// through to writeRunMetrics, and this is the regression net proving that
+// still happens, mirrored by TestLockFrozenIsIgnoredAndNotReported's negative
+// counterpart in lock_command_test.go, which proves lock never does.
 func assertFrozenPinOverridesHighestVersion(t *testing.T, f *e2eFixture) {
 	t.Helper()
+	// f.cfg is shared with the corrupted-pin subtest that runs right after
+	// this one (see TestFrozenInstallHonorsLockfilePins), so MetricsFile is
+	// set here and restored afterward rather than being added to the shared
+	// fixture, leaving it exactly as newFrozenPinFixture/newE2EFixture left it.
+	f.cfg.MetricsFile = filepath.Join(t.TempDir(), "metrics.json")
+	defer func() { f.cfg.MetricsFile = "" }()
+
 	if err := collections.Start(context.Background(), f.cfg, f.runtime); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -279,6 +291,21 @@ func assertFrozenPinOverridesHighestVersion(t *testing.T, f *e2eFixture) {
 	}
 	if got := f.server.Count(fakegalaxy.EndpointVersionsList); got != 0 {
 		t.Errorf("EndpointVersionsList count = %d, want 0 (frozen resolution never consults the versions listing)", got)
+	}
+
+	data, err := os.ReadFile(f.cfg.MetricsFile)
+	if err != nil {
+		t.Fatalf("read metrics file %s: %v", f.cfg.MetricsFile, err)
+	}
+	// Unmarshal into a map, not metrics.Report, for the same reason
+	// TestArtifactMetricsWrittenToMetricsFile above does: the literal wire
+	// key is what a CI dashboard actually parses.
+	var written map[string]any
+	if err := json.Unmarshal(data, &written); err != nil {
+		t.Fatalf("unmarshal metrics file %s: %v", f.cfg.MetricsFile, err)
+	}
+	if got, _ := written["frozen"].(bool); !got {
+		t.Errorf("metrics frozen = %v, want true (a successful frozen install honors the lockfile)", written["frozen"])
 	}
 }
 

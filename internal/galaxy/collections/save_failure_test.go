@@ -61,7 +61,6 @@ package collections
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -106,18 +105,12 @@ func (saveFailBackend) SaveStore(context.Context, *store.Store) error {
 }
 
 // readMetricsCommand reads the metrics file at path and returns its "command"
-// field, failing the test on any I/O or decode error.
+// field, failing the test on any I/O or decode error. A thin wrapper over
+// readMetricsReport (lock_command_test.go) so the package has one decoder for
+// the metrics file's wire keys.
 func readMetricsCommand(t *testing.T, path string) string {
 	t.Helper()
-	data, err := os.ReadFile(path) //nolint:gosec // path is this test's own fixed cfg.MetricsFile, not user input.
-	if err != nil {
-		t.Fatalf("read metrics file %s: %v", path, err)
-	}
-	var written map[string]any
-	if err := json.Unmarshal(data, &written); err != nil {
-		t.Fatalf("unmarshal metrics file %s: %v", path, err)
-	}
-	command, _ := written["command"].(string)
+	command, _ := readMetricsReport(t, path)["command"].(string)
 	return command
 }
 

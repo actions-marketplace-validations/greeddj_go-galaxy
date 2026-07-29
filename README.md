@@ -138,7 +138,7 @@ Clean unreachable collections:
 ### Commands
 
 - `install` (`i`) - install collections from `requirements.yml`.
-- `lock` (`l`) - resolve and write `requirements.lock.yml` for reproducible CI.
+- `lock` (`l`) - resolve and write `requirements.lock.yml` for reproducible CI. `--frozen` has no effect on `lock` - the lockfile is always regenerated from a fresh resolve and the run warns on stderr; use `install --frozen` or `warm --frozen` to actually consume an existing lockfile.
 - `warm` (`w`) - populate the artifact + extracted caches without installing (for CI image bake). Requires a cache: `--no-cache` is rejected as a usage error rather than downloading everything and discarding it. A warmed collection's extracted tree is protected from `cleanup` for 30 days after its last warm, so a machine that warms and then stops warming eventually reclaims the space.
 - `hash` (`h`) - print a deterministic cache key (`sha256:…`) for use as a CI cache key.
 - `cleanup` (`c`) - remove unused cached collections across projects.
@@ -170,7 +170,7 @@ Clean unreachable collections:
 - `--no-deps` (`$GO_GALAXY_NO_DEPS`)
 - `--offline` (`$GO_GALAXY_OFFLINE`) - fail on any network access (cached state only)
 - `--lock-file` (`$GO_GALAXY_LOCK_FILE`)
-- `--frozen` (`$GO_GALAXY_FROZEN`) - require a lockfile and verify each installed or cached artifact's SHA256 against its lockfile pin, aborting the run on any mismatch
+- `--frozen` (`$GO_GALAXY_FROZEN`) - require a lockfile and verify each installed or cached artifact's SHA256 against its lockfile pin, aborting the run on any mismatch; no effect on lock, which always regenerates the lockfile (the run warns)
 - `--metrics-file` (`$GO_GALAXY_METRICS_FILE`) - emit JSON run report
 
 S3 cache options (if `--s3-bucket` is set, S3 backend is used):
@@ -551,7 +551,10 @@ exit code (see the table above), never on whether the metrics file exists or
 looks clean. This matters most for `lock`: `failures` is always `0` in a
 `lock` report, so the report carries no failure signal at all for that
 command, and a `lock` run whose snapshot save failed still leaves a
-clean-looking report next to a nonzero exit code.
+clean-looking report next to a nonzero exit code. `frozen` is also never set
+in a `lock` report, even when `--frozen` was passed: `lock` accepts the flag
+because it shares the same flag set as `install`/`warm`, but it never
+consumes the lockfile it writes, so the report never claims a frozen run.
 
 `cache_hits`, `cache_misses`, and `bytes_downloaded` are artifact-level counters,
 not collection-level: a hit is one artifact served from the artifact cache and a

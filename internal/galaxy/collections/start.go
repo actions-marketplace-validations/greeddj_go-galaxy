@@ -116,7 +116,7 @@ func warmWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra
 	// together via annotateSaveFailure so errors.Is still matches
 	// ErrInstallationFailed instead of degrading to the save error's own class.
 	saveErr := state.backend.SaveStore(ctx, state.store)
-	writeRunMetrics(cfg, runtime, "warm", start, len(collections), int(failures))
+	writeRunMetrics(cfg, runtime, "warm", start, len(collections), int(failures), cfg.Frozen)
 	if failures > 0 {
 		return annotateSaveFailure(fmt.Errorf("%w: warm failed for %d collections", helpers.ErrInstallationFailed, failures), saveErr)
 	}
@@ -234,6 +234,19 @@ func Lock(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
 // owns the actual work once state is initialized. Same lifecycle/work
 // boundary runInstall and runWarm already draw.
 func runLock(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
+	// --frozen is registered on lock only because lock shares
+	// helpers.CollectionFlags with install and warm; lock never consumes a
+	// lockfile - it always rewrites one from a fresh resolve - so the flag
+	// cannot be honored here. This warns rather than failing the run: the
+	// realistic way the flag reaches a lock invocation is an ambient
+	// GO_GALAXY_FROZEN in a CI environment block shared by every job, and
+	// failing a lock job that is otherwise exactly right is a worse trade
+	// than one line on stderr. Warnf, not Printf: it must survive --quiet
+	// and must not touch stdout.
+	if cfg.Frozen {
+		runtime.Output.Warnf("--frozen has no effect on lock: the lockfile is always regenerated from a fresh resolve. " +
+			"Use install --frozen or warm --frozen to consume an existing lockfile.")
+	}
 	runtime.Output.Printf("🔒 Generating lockfile")
 	start := time.Now()
 	state, err := initInstall(ctx, cfg, runtime)
@@ -293,8 +306,10 @@ func lockWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra
 	// and lock has no per-collection failure that could ever reach this line -
 	// a resolve or lockfile-build failure returns before writeRunMetrics runs
 	// at all. A save failure is not encoded in this field either, matching
-	// install and warm - do not add one here.
-	writeRunMetrics(cfg, runtime, "lock", start, len(lf.Collections), 0)
+	// install and warm - do not add one here. The literal false is not a
+	// placeholder: it is the truth for this command, which never reads
+	// cfg.Frozen (see runLock's warning above, printed instead of honoring it).
+	writeRunMetrics(cfg, runtime, "lock", start, len(lf.Collections), 0, false)
 	return saveErr
 }
 
@@ -364,7 +379,7 @@ func installWithState(ctx context.Context, cfg *config.Config, runtime *infra.In
 	}
 
 	finalErr := finalizeInstall(ctx, runtime, state.backend, state.store, failures, start)
-	writeRunMetrics(cfg, runtime, "install", start, len(plan.collections), int(failures))
+	writeRunMetrics(cfg, runtime, "install", start, len(plan.collections), int(failures), cfg.Frozen)
 	return finalErr
 }
 
@@ -506,7 +521,23 @@ func sweepDeadRunTemps(ctx context.Context, runtime *infra.Infra, backend cacheM
 // a worker can still land its own miss and bytes after Totals() is read here
 // (Close only cancels and joins it afterward, once runInstall unwinds), so a
 // failed run's counters in this report are a lower bound, not an exact count.
-func writeRunMetrics(cfg *config.Config, runtime *infra.Infra, command string, start time.Time, collections, failures int) {
+//
+// frozen is passed by the caller rather than read from cfg because the
+// report's frozen field states what the run HONORED, not what was
+// CONFIGURED: install and warm route resolution through
+// resolveOrLoadLockfile, which branches on cfg.Frozen, so they pass it
+// through; lock accepts the flag (it shares the collection flag set) but
+// never consumes a lockfile, so it passes false. Offline stays cfg-derived ON
+// PURPOSE - it governs the HTTP transport for every command, lock included -
+// so cfg.Offline is always the truth there.
+func writeRunMetrics(
+	cfg *config.Config,
+	runtime *infra.Infra,
+	command string,
+	start time.Time,
+	collections, failures int,
+	frozen bool,
+) {
 	if cfg == nil || cfg.MetricsFile == "" {
 		return
 	}
@@ -523,7 +554,7 @@ func writeRunMetrics(cfg *config.Config, runtime *infra.Infra, command string, s
 		Collections:     collections,
 		Failures:        failures,
 		Server:          cfg.Server,
-		Frozen:          cfg.Frozen,
+		Frozen:          frozen,
 		Offline:         cfg.Offline,
 		LockfilePath:    lockfile.ResolveDefaultPath(cfg.RequirementsFile, cfg.LockFile),
 		LockfileHash:    tryLockfileHash(cfg),
