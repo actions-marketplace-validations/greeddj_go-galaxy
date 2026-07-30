@@ -201,6 +201,23 @@ Clean unreachable collections:
   empty string clears a previously configured token (see
   [Galaxy servers and authentication](#galaxy-servers-and-authentication))
 - `--timeout` (`$GO_GALAXY_SERVER_TIMEOUT`, `$ANSIBLE_GALAXY_SERVER_TIMEOUT`)
+  `--timeout` is a no-progress budget - it bounds the response-header wait and the gap between two
+  body reads. It bounds neither total transfer time nor a byte-drip: a server that keeps dribbling a
+  few bytes into every idle window counts as making progress on every single read, so it never trips
+  this timeout and can drag a download out indefinitely. Every artifact acquisition additionally
+  carries a fixed, non-configurable 15-minute ceiling on the whole acquisition - the response, the
+  streamed body, extraction running alongside it, the cache commit, and every retry attempt and
+  backoff sleep together, not per attempt - which is what actually bounds a slow-drip transfer. This
+  ceiling also covers a cache-resident artifact fetched from an S3-backed cache, since that is a full
+  artifact body transfer over HTTP too, not a cheap metadata check. An ordinary collection spends
+  this budget twice - once when the background prefetcher acquires it, once again when the install
+  worker acquires it - so the effective per-collection ceiling is 30 minutes. On a slow enough link
+  the collection fails closed with `artifact download deadline exceeded` and is not installed, rather
+  than hanging or completing arbitrarily late: a maximum-size (4 GiB) artifact needs roughly
+  38 Mbit/s sustained to finish inside the budget, while a real collection needs well under 1 Mbit/s.
+  This ceiling is not configurable, unlike `--timeout` above: a knob on a safety ceiling is a knob an
+  operator would raise in direct response to a truncation, which is exactly how the slow-drip attack
+  this closes would succeed.
 - `--download-path, -p` (`$GO_GALAXY_COLLECTIONS_PATH`, `$ANSIBLE_COLLECTIONS_PATH`)
 - `--requirements-file, -r` (`$GO_GALAXY_REQUIREMENTS_FILE`, `$ANSIBLE_GALAXY_REQUIREMENTS_FILE`)
 - `--ansible-config` (`$GO_GALAXY_ANSIBLE_CONFIG`, `$ANSIBLE_CONFIG`)

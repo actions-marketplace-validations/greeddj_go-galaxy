@@ -387,6 +387,56 @@ func TestFaultStallAfterBytesDeliversRealPrefixThenBlocks(t *testing.T) {
 	}
 }
 
+// TestArtifactDripFaultKeepsWritingUntilTheContextEnds asserts a DripInterval
+// fault never lets the body complete: a client whose context has a short
+// deadline reads at least two bytes (proving the drip really writes more than
+// once) and then a read error (proving the request is eventually aborted, not
+// hung forever) - never a successful end-of-body. The positive control in the
+// same test, on the same fixture with no fault armed, reads the artifact to
+// completion and confirms its sha256 matches the Version AddVersion returned,
+// proving the fixture itself is capable of a normal, complete download.
+func TestArtifactDripFaultKeepsWritingUntilTheContextEnds(t *testing.T) {
+	t.Parallel()
+	s := New(t)
+	v := s.AddVersion("ns", "name", "1.0.0", nil)
+	s.Fail(EndpointArtifact, "ns", "name", Fault{DripInterval: 5 * time.Millisecond, Count: 1})
+
+	url := s.URL() + "/download/ns-name-1.0.0.tar.gz"
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	resp, err := s.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	n, err := io.ReadFull(resp.Body, make([]byte, 2))
+	if err != nil {
+		t.Fatalf("read first 2 dripped bytes: n=%d, err=%v, want 2 bytes and no error", n, err)
+	}
+
+	if _, err := io.ReadAll(resp.Body); err == nil {
+		t.Fatal("expected a read error once the context ended, got nil (the drip must never complete the body)")
+	}
+
+	// Positive control: the same fixture, no fault armed, must still serve a
+	// complete artifact whose bytes hash to the sha256 AddVersion reported.
+	full := doGet(t, s.Client(), url)
+	body, err := io.ReadAll(full.Body)
+	_ = full.Body.Close()
+	if err != nil {
+		t.Fatalf("read unstalled artifact body: %v", err)
+	}
+	sum := sha256.Sum256(body)
+	if got := hex.EncodeToString(sum[:]); got != v.SHA256 {
+		t.Errorf("unstalled artifact sha256 = %q, want %q", got, v.SHA256)
+	}
+}
+
 // TestCounters asserts per-endpoint and total request counts, and ResetCounts
 // zeroing them.
 func TestCounters(t *testing.T) {

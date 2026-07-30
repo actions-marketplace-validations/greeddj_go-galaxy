@@ -149,6 +149,24 @@ var fromErrorCases = []exitCase{
 		err:      errTestGeneric,
 		wantCode: ExitError,
 	},
+	{
+		name:     "bare artifact download deadline",
+		err:      helpers.ErrArtifactDownloadDeadline,
+		wantCode: ExitNetwork,
+	},
+	{
+		// The real shape downloadCollectionToCache/fetchArtifact produce:
+		// helpers.ErrArtifactDownloadDeadline deliberately does not wrap its
+		// context.DeadlineExceeded cause with %w (see the sentinel's own doc
+		// comment), so this must classify as ExitNetwork through the
+		// sentinel match alone, never as ExitInterrupt via a reachable
+		// context.Canceled/context.DeadlineExceeded.
+		name: "artifact download deadline wraps its cause with %v, not %w",
+		// Pinning the real, deliberately non-wrapping shape; see
+		// helpers.ErrArtifactDownloadDeadline's own doc comment for why.
+		err:      fmt.Errorf("%w after 15m0s: %v", helpers.ErrArtifactDownloadDeadline, context.DeadlineExceeded), //nolint:errorlint
+		wantCode: ExitNetwork,
+	},
 }
 
 // TestFromError walks fromErrorCases, checking one representative error per
@@ -332,6 +350,38 @@ func TestSolverConflictMapsToResolution(t *testing.T) {
 	}
 	if got := FromError(fmt.Errorf("resolve: %w", err)); got != ExitResolution {
 		t.Fatalf("FromError(wrapped) = %d, want ExitResolution (%d)", got, ExitResolution)
+	}
+}
+
+// TestArtifactDownloadDeadlineClassification pins helpers.ErrArtifactDownloadDeadline's
+// full classification story beyond the single representative case already
+// covered in fromErrorCases: unaggregated it is ExitNetwork, joined behind
+// collections.Start's helpers.ErrInstallationFailed headline it is ExitInstall
+// (identical to every other per-collection failure, helpers.ErrDownloadFailed
+// included - this is not a behavior change), and it is never ExitInterrupt in
+// either shape, which is exactly what the sentinel's deliberate %v-not-%w
+// cause rendering buys: leaving context.DeadlineExceeded or context.Canceled
+// reachable via errors.Is would let FromError's cancellation check (checked
+// first, ahead of every other class) misclassify a hostile or slow server as
+// a caught Ctrl-C.
+func TestArtifactDownloadDeadlineClassification(t *testing.T) {
+	bare := helpers.ErrArtifactDownloadDeadline
+	if got := FromError(bare); got != ExitNetwork {
+		t.Errorf("FromError(bare sentinel) = %d, want ExitNetwork (%d)", got, ExitNetwork)
+	}
+	if got := FromError(bare); got == ExitInterrupt {
+		t.Errorf("FromError(bare sentinel) = ExitInterrupt, want anything else")
+	}
+
+	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
+	//nolint:errorlint // pinning the real, deliberately non-wrapping shape; see ErrArtifactDownloadDeadline's doc comment.
+	deadlineCause := fmt.Errorf("%w after 15m0s: %v", helpers.ErrArtifactDownloadDeadline, context.DeadlineExceeded)
+	joined := errors.Join(headline, deadlineCause)
+	if got := FromError(joined); got != ExitInstall {
+		t.Errorf("FromError(joined) = %d, want ExitInstall (%d)", got, ExitInstall)
+	}
+	if got := FromError(joined); got == ExitInterrupt {
+		t.Errorf("FromError(joined) = ExitInterrupt, want anything else")
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
+	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 )
 
 // recordingPrinter is a minimal output.Printer stub that records every
@@ -86,4 +87,46 @@ func TestDebugAnsibleConfigNilSafe(t *testing.T) {
 	i := &Infra{}
 	i.DebugAnsibleConfig(&config.Config{})
 	i.DebugAnsibleConfig(nil)
+}
+
+// TestArtifactDeadlineDefaultsToTheConstantAndHonorsAnOverride pins
+// ArtifactDeadline's fallback contract: a nil receiver, a zero-value Infra, a
+// freshly constructed one, and an explicitly non-positive override all report
+// helpers.ArtifactDownloadDeadline, while a positive override is honored
+// verbatim. The nil and zero-value cases matter because ArtifactDeadline must
+// never panic or silently return 0 for an Infra a test built by hand without
+// going through New.
+func TestArtifactDeadlineDefaultsToTheConstantAndHonorsAnOverride(t *testing.T) {
+	t.Parallel()
+
+	var nilInfra *Infra
+
+	cases := []struct {
+		infra *Infra
+		name  string
+		want  time.Duration
+	}{
+		{name: "New sets the real constant", infra: New(&recordingPrinter{}, nil), want: helpers.ArtifactDownloadDeadline},
+		{name: "zero-value Infra falls back to the constant", infra: &Infra{}, want: helpers.ArtifactDownloadDeadline},
+		{name: "nil Infra falls back to the constant", infra: nilInfra, want: helpers.ArtifactDownloadDeadline},
+		{
+			name:  "a negative override falls back to the constant",
+			infra: &Infra{ArtifactDownloadDeadline: -1},
+			want:  helpers.ArtifactDownloadDeadline,
+		},
+		{
+			name:  "a positive override is honored verbatim",
+			infra: &Infra{ArtifactDownloadDeadline: 7 * time.Millisecond},
+			want:  7 * time.Millisecond,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.infra.ArtifactDeadline(); got != tc.want {
+				t.Errorf("ArtifactDeadline() = %s, want %s", got, tc.want)
+			}
+		})
+	}
 }

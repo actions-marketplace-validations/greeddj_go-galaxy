@@ -63,6 +63,78 @@ const (
 	// to.
 	ArtifactMaxDownloadSize = ArchiveMaxTotalSize
 
+	// ArtifactDownloadDeadline bounds the wall-clock time one artifact
+	// acquisition (a fetchArtifact/downloadCollectionToCache call) may take
+	// from start to finish: the response-header phase, the streamed body, the
+	// single-pass extraction running alongside it when an extracted store is
+	// configured, the cache commit, and every retry attempt and backoff sleep
+	// in between - one shared budget covering the whole acquisition, not one
+	// spent per attempt.
+	//
+	// It exists because the read-inactivity watchdog (see the fetch package)
+	// bounds the gap between two consecutive body reads, not the total
+	// transfer time: a byte-drip that keeps making genuine (if glacial)
+	// progress never leaves the watchdog's idle window and so never trips it,
+	// no matter how long the transfer runs. ArtifactMaxDownloadSize bounds
+	// disk, not time, so it does not catch this either - a drip can stay well
+	// under the byte ceiling forever. This deadline is the only thing that
+	// bounds wall-clock time for a slow-but-technically-progressing transfer.
+	//
+	// It is deliberately NOT --timeout and never derived from it. --timeout
+	// (config.Config.Timeout, wired into fetch.New) is a no-progress budget:
+	// ResponseHeaderTimeout plus the watchdog's idle window, redefined that
+	// way precisely so a large, healthy, but slow transfer is never bounded by
+	// it. This constant is the opposite kind of budget - it fires even while
+	// progress is being made - so conflating the two would either make
+	// --timeout falsely fail a healthy multi-minute download or make this
+	// deadline falsely tolerate an indefinite drip.
+	//
+	// The value, 15 minutes, is sized against ArtifactMaxDownloadSize (4 GiB):
+	// a maximum-size artifact must sustain 4 GiB / 900 s = 4,772,186 B/s
+	// (4.55 MiB/s, about 38.2 Mbit/s) to finish inside the budget - trivial
+	// for any real network. A deliberately generous 100 MiB artifact needs
+	// only 116,508 B/s (114 KiB/s, about 0.93 Mbit/s). Real Galaxy collections
+	// are single-digit megabytes, so the headroom above is roughly three
+	// orders of magnitude.
+	//
+	// This budget bounds one acquisition - not a collection, and not a run.
+	//
+	// A collection spends it twice on every ordinary path involving a hostile
+	// origin: the prefetcher acquires the artifact ahead of time under its own
+	// budget, and - since a prefetch failure is deliberately non-fatal, with
+	// runInstallLevel logging it and proceeding - the install worker acquires
+	// it again under a fresh budget. That doubling is why this is 15 minutes
+	// rather than 30: the owner-intended per-collection ceiling is 30 minutes,
+	// spent across those two acquisitions.
+	//
+	// One corner spends it three times, for 45 minutes: the prefetcher spends
+	// the first, the install worker's cache-hit artifacts.Fetch spends the
+	// second and ends in ErrSHA256Mismatch from the S3 backend's read-time
+	// integrity check, and prepareWithRecovery's evict-and-refetch then spends
+	// a third against the origin. Reaching it needs a hostile origin AND a
+	// bucket writer AND the artifact unknown or absent at prefetch-scan time
+	// (a failing Has probe fail-opens to "schedule a prefetch") but present at
+	// install time - a conjunction of capabilities the S3 trust model already
+	// names, not a new one. It is recorded rather than defended against: a
+	// hard per-collection ceiling would take a budget threaded through the
+	// prefetcher and prepareWithRecovery, which is a different mechanism from
+	// this one.
+	//
+	// Nothing here bounds the run. One install level of N collections over
+	// cfg.Workers workers can hold a runner for roughly ceil(N/Workers) times
+	// the per-collection ceiling before installLevels breaks on that level's
+	// failure count. That is inherent to a per-artifact budget; bounding a
+	// whole run means a root-context deadline, which is a separate decision.
+	//
+	// It is not configurable, for the same reason ArtifactMaxDownloadSize and
+	// MetadataMaxSize are not: a knob for a safety ceiling is a knob an
+	// operator raises in direct response to a truncation, which is exactly
+	// how the attack this ceiling defends against succeeds. Infra's
+	// ArtifactDownloadDeadline field exists solely so a test can shrink this
+	// value; it must never be wired to a CLI flag, an environment variable, or
+	// an ansible.cfg key.
+	ArtifactDownloadDeadline = 15 * time.Minute
+
 	// StateObjectMaxCompressedSize caps the raw (on-the-wire) bytes read for a
 	// persisted cache-state object (the S3 snapshot and the project registry).
 	// A real state object is far smaller; anything past this is pathological, so

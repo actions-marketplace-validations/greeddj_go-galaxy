@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
+	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/metrics"
 	"github.com/greeddj/go-galaxy/internal/galaxy/output"
 )
@@ -21,17 +22,38 @@ type Infra struct {
 	// this run: New always allocates a fresh Counters, so totals never carry
 	// over from a prior run sharing the same process.
 	Metrics *metrics.Counters
+	// ArtifactDownloadDeadline overrides helpers.ArtifactDownloadDeadline for
+	// this run. It is test-only: production code never sets it, and nothing
+	// wires it to a CLI flag, an environment variable, or an ansible.cfg key
+	// (see helpers.ArtifactDownloadDeadline's own doc comment for why). Read
+	// it only through ArtifactDeadline, never directly, so an unset or
+	// nonsensical value structurally falls back to the real constant.
+	ArtifactDownloadDeadline time.Duration
 }
 
 // New builds Infra with default helpers for time and temp paths.
 func New(out output.Printer, httpClient *http.Client) *Infra {
 	return &Infra{
-		Output:  out,
-		HTTP:    httpClient,
-		Now:     time.Now,
-		TempDir: os.TempDir,
-		Metrics: &metrics.Counters{},
+		Output:                   out,
+		HTTP:                     httpClient,
+		Now:                      time.Now,
+		TempDir:                  os.TempDir,
+		Metrics:                  &metrics.Counters{},
+		ArtifactDownloadDeadline: helpers.ArtifactDownloadDeadline,
 	}
+}
+
+// ArtifactDeadline returns the per-acquisition artifact download budget this
+// run uses: i.ArtifactDownloadDeadline when it is set to a positive duration,
+// or helpers.ArtifactDownloadDeadline otherwise. Every call site reads the
+// budget through this method rather than the field directly, so a nil Infra,
+// a zero-value Infra, or a nonsensical (non-positive) override all fall back
+// to the real constant structurally, instead of by caller convention.
+func (i *Infra) ArtifactDeadline() time.Duration {
+	if i == nil || i.ArtifactDownloadDeadline <= 0 {
+		return helpers.ArtifactDownloadDeadline
+	}
+	return i.ArtifactDownloadDeadline
 }
 
 // DebugAnsibleConfig logs which settings were sourced from ansible.cfg, then

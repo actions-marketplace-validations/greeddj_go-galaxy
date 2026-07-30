@@ -49,11 +49,17 @@ func (e *downloadAttemptError) Unwrap() error {
 // while writing the temp file or extracting the archive, for instance - is
 // left non-retryable, since repeating the same local operation would not be
 // expected to succeed where it just failed.
+//
+// The checks below are split into isEarlyTerminalDownloadError,
+// isLateTerminalDownloadError, and isRetryableAttemptError purely to stay
+// under the cyclomatic-complexity budget; together with the inline
+// ErrReadStalled/context checks between them, they cover the exact same
+// classification in the exact same order as before the split.
 func downloadRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, helpers.ErrOfflineMode) {
+	if isEarlyTerminalDownloadError(err) {
 		return false
 	}
 	// Classify a stalled read before the context checks: the watchdog aborts a
@@ -67,16 +73,40 @@ func downloadRetryable(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	if errors.Is(err, helpers.ErrSHA256Mismatch) {
+	if isLateTerminalDownloadError(err) {
 		return false
 	}
-	// An oversized artifact is terminal by the same reasoning as a sha256
-	// mismatch, but the default-deny fallthrough below would already cover
-	// it: this check is explicit so a future reordering of the classifier
-	// cannot accidentally start retrying a hostile or broken oversized body.
-	if errors.Is(err, helpers.ErrArtifactTooLarge) {
-		return false
-	}
+	return isRetryableAttemptError(err)
+}
+
+// isEarlyTerminalDownloadError reports whether err is one of the two
+// sentinels checked ahead of ErrReadStalled: offline mode, and this
+// acquisition's own artifact download deadline. The deadline specifically
+// must be checked here, ahead of ErrReadStalled, so a watchdog stall that
+// raced the deadline resolves deterministically toward terminal rather than
+// burning a backoff on a context that is already gone. Like
+// isLateTerminalDownloadError below, the default-deny fallthrough in
+// downloadRetryable would already cover both of these; the checks are
+// explicit so a future reordering cannot start retrying either one.
+func isEarlyTerminalDownloadError(err error) bool {
+	return errors.Is(err, helpers.ErrOfflineMode) || errors.Is(err, helpers.ErrArtifactDownloadDeadline)
+}
+
+// isLateTerminalDownloadError reports whether err is a terminal artifact
+// content failure discovered only after a complete read: a sha256 mismatch,
+// or an oversized body. Both are terminal by the same reasoning, and both
+// are checked explicitly - rather than relying on the default-deny
+// fallthrough - so a future reordering of the classifier cannot accidentally
+// start retrying a corrupt, tampered, hostile, or broken oversized artifact.
+func isLateTerminalDownloadError(err error) bool {
+	return errors.Is(err, helpers.ErrSHA256Mismatch) || errors.Is(err, helpers.ErrArtifactTooLarge)
+}
+
+// isRetryableAttemptError reports whether err is a *downloadAttemptError
+// worth retrying: a transport-level failure (status 0, no HTTP response at
+// all) or a retryable HTTP status. Any other error - including one that is
+// not a *downloadAttemptError at all - is not retryable.
+func isRetryableAttemptError(err error) bool {
 	var attemptErr *downloadAttemptError
 	if errors.As(err, &attemptErr) {
 		if attemptErr.status == 0 {

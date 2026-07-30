@@ -184,16 +184,43 @@ type Version struct {
 // request's context is done, writing nothing further - a mid-body stall,
 // distinct from Hang's before-any-byte stall. On any other endpoint,
 // StallAfterBytes is a no-op: the fault still consumes one Count, but
-// enactFault then falls through to that endpoint's normal response. A
-// well-formed Fault sets exactly one of Status, Hang, or StallAfterBytes; on
-// the artifact endpoint, StallAfterBytes is checked before Status/Hang, so it
-// takes precedence if more than one is set. StallAfterBytes composes with
-// Count exactly like Status and Hang: Count 1 stalls only the next matching
-// request, a negative Count stalls every one.
+// enactFault then falls through to that endpoint's normal response.
+//
+// DripInterval also only applies to the artifact endpoint: on a request
+// there, a matching Fault with DripInterval > 0 writes the artifact one byte
+// at a time, flushing each byte onto the wire and sleeping DripInterval
+// between them, cycling back to the start of the artifact's bytes when it
+// runs out, until the request's context is done. Unlike StallAfterBytes - a
+// real prefix of progress followed by blocking forever, exactly the shape a
+// read-inactivity watchdog exists to catch - a drip never stops making
+// progress, so it defeats an inactivity watchdog outright: it is caught only
+// by a whole-transfer deadline, never by a per-read idle timeout. The
+// cycling back to the start is deliberate: the body can never legitimately
+// complete, so the only way a client ever ends the request is by aborting
+// it, and a test's parameters do not depend on the length of the generated
+// artifact. On the artifact endpoint, StallAfterBytes is checked first (see
+// handleArtifact for the exact ordering), then DripInterval, then
+// Status/Hang, so DripInterval takes precedence over Status/Hang but not
+// over StallAfterBytes if more than one is set on the same Fault. It is the
+// one fault in this package that uses a wall clock rather than only the
+// request's own context - inherent to
+// the drip-then-sleep behavior being modeled - but no test assertion in this
+// package depends on precise timing, only on the request eventually being
+// aborted by its caller. A caller arming DripInterval must eventually abort
+// the request itself - by canceling its context, closing the response body,
+// or letting a client-side deadline fire - since a faulted response left
+// neither read, closed, nor canceled will block httptest.Server.Close; this
+// obligation is shared with StallAfterBytes above.
+//
+// A well-formed Fault sets exactly one of Status, Hang, StallAfterBytes, or
+// DripInterval. StallAfterBytes and DripInterval compose with Count exactly
+// like Status and Hang: Count 1 affects only the next matching request, a
+// negative Count affects every one.
 type Fault struct {
 	Status          int
 	Count           int
 	StallAfterBytes int
+	DripInterval    time.Duration
 	Hang            bool
 }
 
@@ -696,6 +723,10 @@ func (s *Server) handleArtifact(w http.ResponseWriter, r *http.Request, filename
 			serveArtifactStall(w, r, art.data, fault.StallAfterBytes)
 			return
 		}
+		if fault.DripInterval > 0 && ok && len(art.data) > 0 {
+			serveArtifactDrip(w, r, art.data, fault.DripInterval)
+			return
+		}
 		if enactFault(w, r, fault) {
 			return
 		}
@@ -723,6 +754,33 @@ func serveArtifactStall(w http.ResponseWriter, r *http.Request, data []byte, aft
 		f.Flush()
 	}
 	<-r.Context().Done()
+}
+
+// serveArtifactDrip writes data one byte at a time, flushing each byte onto
+// the wire and sleeping interval between them, cycling back to data[0] when
+// it reaches the end, until r's context is done - see the DripInterval doc
+// comment on Fault for why this never legitimately completes and why that is
+// exactly the point: a byte-drip always makes progress, so it defeats a
+// read-inactivity watchdog outright and is caught only by a whole-transfer
+// deadline. data must be non-empty; the caller guards that precondition the
+// same way serveArtifactStall's caller guards ok.
+func serveArtifactDrip(w http.ResponseWriter, r *http.Request, data []byte, interval time.Duration) {
+	w.Header().Set("Content-Type", "application/gzip")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	for i := 0; ; i++ {
+		if _, err := w.Write([]byte{data[i%len(data)]}); err != nil {
+			return
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(interval):
+		}
+	}
 }
 
 // applyFault consumes the first armed fault rule matching ep/namespace/name,

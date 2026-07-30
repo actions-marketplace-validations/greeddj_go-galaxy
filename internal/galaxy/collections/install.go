@@ -522,9 +522,23 @@ func fetchArtifact(
 	if artifacts == nil {
 		return artifactData{}, helpers.ErrArtifactCacheNotConfigured
 	}
-	cached, err := artifacts.Fetch(ctx, artifactKey(col))
+	// The same helpers.ArtifactDownloadDeadline budget that bounds a fresh
+	// origin download (see downloadCollectionToCache) also bounds a
+	// cache-hit fetch: the S3 artifact store's Fetch streams a full artifact
+	// body over HTTP (internal/cache/s3's downloadToFile), so a byte-drip on
+	// that read pins a worker exactly as it would on a fresh download. The
+	// local backend's Fetch is a Stat plus a small sidecar read that ignores
+	// its context entirely, so the deadline is inert there by construction -
+	// applying it here, in collections, rather than inside internal/cache/s3
+	// means the backend merely honors the context it is handed, exactly as it
+	// already honors caller cancellation, with no constant, sentinel, or
+	// policy crossing the Backend seam.
+	budget := runtime.ArtifactDeadline()
+	fetchCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	cached, err := artifacts.Fetch(fetchCtx, artifactKey(col))
 	if err != nil {
-		return artifactData{}, err
+		return artifactData{}, artifactDeadlineError(ctx, fetchCtx, budget, err)
 	}
 	runtime.Metrics.AddCacheHit()
 	return artifactData{Path: cached.Path, Cleanup: cached.Cleanup, Meta: cached.Meta}, nil
@@ -737,6 +751,39 @@ type downloadResult struct {
 // attempt opens a fresh HTTP response and a fresh temporary file (or
 // extraction session), via attemptDownloadToCache, so nothing from a failed
 // attempt - including any temp file it created - survives into the next one.
+//
+// The whole call - every attempt and every backoff sleep between them - runs
+// under one shared helpers.ArtifactDownloadDeadline budget (deps.runtime.
+// ArtifactDeadline()), established once around the outer helpers.Retry loop
+// rather than re-derived per attempt: the unit this budget bounds is
+// "acquire one artifact into the cache", the whole of what pins an install
+// worker, not any single attempt within it. This deliberately covers more
+// than the GET: when deps.extractStore is configured, streamDownloadAndExtract
+// runs the single-pass extraction concurrently with the body read, and
+// commitDownload's artifacts.Commit can itself be an S3 PUT streaming the
+// tarball upstream - a stalled request-body write there is bounded by this
+// same deadline even though ResponseHeaderTimeout, which only covers waiting
+// for a response, does not reach it. This is the single funnel for the
+// origin download from every producer: the install path's fetchArtifact, warm
+// (through the same prepareInstall -> fetchArtifact path), and the
+// prefetcher's prefetchOne, which calls this function directly.
+//
+// The outer artifactDeadlineError call after helpers.Retry returns is not
+// redundant with the one inside the retry closure: helpers.Retry's own
+// backoff wait returns a bare ctx.Err() straight from its select statement,
+// never routing that value through the closure, so only the outer call
+// normalizes a deadline that expired during a backoff sleep rather than
+// during an attempt itself. This path is defensive and deliberately
+// uncovered by a test: reaching it needs an attempt to fail retryably while
+// dlCtx is still live and the budget to then expire during the jittered
+// backoff sleep that follows, a race not deterministically constructible
+// without a test seam inside helpers.Retry itself, which is not worth adding
+// for this. Its failure mode if this call were ever removed is diagnostic,
+// not behavioral: the error would surface as a bare context.DeadlineExceeded
+// instead of the wrapped sentinel, and isNetworkError already classifies
+// that bare value to the identical ExitNetwork exit code (see
+// cmd/go-galaxy/exitcode), so a missing outer call would degrade a log line,
+// not a run's outcome.
 func downloadCollectionToCache(
 	ctx context.Context,
 	deps installDeps,
@@ -749,17 +796,21 @@ func downloadCollectionToCache(
 		return downloadResult{}, err
 	}
 
+	budget := deps.runtime.ArtifactDeadline()
+	dlCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+
 	var result downloadResult
-	err := helpers.Retry(ctx, helpers.FetchRetryPolicy(), func() error {
-		attempted, attemptErr := attemptDownloadToCache(ctx, deps, key, base, meta, useCache)
+	err := helpers.Retry(dlCtx, helpers.FetchRetryPolicy(), func() error {
+		attempted, attemptErr := attemptDownloadToCache(dlCtx, deps, key, base, meta, useCache)
 		if attemptErr != nil {
-			return attemptErr
+			return artifactDeadlineError(ctx, dlCtx, budget, attemptErr)
 		}
 		result = attempted
 		return nil
 	}, downloadRetryable)
 	if err != nil {
-		return downloadResult{}, err
+		return downloadResult{}, artifactDeadlineError(ctx, dlCtx, budget, err)
 	}
 	// Counted once per successful, retry-bounded acquisition - not inside
 	// attemptDownloadToCache - so a retried 5xx counts one miss, not one per

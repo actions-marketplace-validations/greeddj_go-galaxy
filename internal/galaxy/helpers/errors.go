@@ -185,6 +185,25 @@ var (
 	// still live. A parent-context cancellation is reported as
 	// context.Canceled instead, never as ErrReadStalled.
 	ErrReadStalled = errors.New("network read stalled")
+	// ErrArtifactDownloadDeadline indicates one artifact's acquisition exceeded
+	// ArtifactDownloadDeadline: the whole-transfer ceiling the read-inactivity
+	// watchdog cannot enforce, since a byte-drip makes real progress in every
+	// idle window and so never trips it. It is deliberately distinct from
+	// ErrReadStalled (no progress at all within one idle window) and from a
+	// caller cancellation, which still surfaces as context.Canceled.
+	//
+	// It deliberately does NOT wrap its cause with %w. The cause is
+	// context.DeadlineExceeded, or - when the watchdog's own derived-context
+	// cancel raced the deadline - context.Canceled, and either one left in the
+	// error tree would steal this failure's exit-code classification:
+	// exitcode.FromError checks context.Canceled first and would report a
+	// hostile server as ExitInterrupt, i.e. as a Ctrl-C. The cause is rendered
+	// into the message with %v instead, so it stays diagnosable without being
+	// matchable.
+	//
+	// It is never retried: the budget is spent, so every remaining attempt
+	// would fail instantly against the same dead context.
+	ErrArtifactDownloadDeadline = errors.New("artifact download deadline exceeded")
 	// ErrLockfileMismatch indicates the lockfile content does not match the resolution.
 	ErrLockfileMismatch = errors.New("lockfile does not match resolved requirements")
 	// ErrLockfileMissing indicates a lockfile was required but not found.

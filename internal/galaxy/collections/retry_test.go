@@ -51,6 +51,19 @@ func TestDownloadRetryable(t *testing.T) {
 		{name: "sha256 mismatch after a complete read is terminal", err: shaMismatch, want: false},
 		{name: "an oversized artifact download is never retried", err: helpers.ErrArtifactTooLarge, want: false},
 		{
+			// This case is DELIBERATELY a non-killing regression pin, exactly
+			// like the ErrArtifactTooLarge case above: helpers.ErrArtifactDownloadDeadline
+			// never wraps its cause with %w (see its own doc comment), so
+			// this error does not match context.Canceled or
+			// context.DeadlineExceeded either, and the default-deny
+			// fallthrough at the bottom of downloadRetryable already returns
+			// false for it even with the explicit arm deleted. Do not
+			// fabricate a killing mutation for this case; there isn't one.
+			name: "an expired artifact download deadline is never retried",
+			err:  fmt.Errorf("%w after 1s: boom", helpers.ErrArtifactDownloadDeadline),
+			want: false,
+		},
+		{
 			name: "retryable status is retryable",
 			err:  &downloadAttemptError{err: fmt.Errorf("%w: boom", helpers.ErrDownloadFailed), status: http.StatusServiceUnavailable},
 			want: true,

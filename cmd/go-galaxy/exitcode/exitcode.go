@@ -150,17 +150,43 @@ func isSymlinkError(err error) bool {
 // isNetworkError reports whether err is a network or Galaxy API sentinel,
 // including request timeouts, offline-mode violations, and a server-list
 // walk aborting on a credential failure or an exhausted retry budget.
+// helpers.ErrArtifactDownloadDeadline classifies here, unaggregated, as
+// ExitNetwork; once collections.Start joins it behind
+// helpers.ErrInstallationFailed the isInstallError case above claims it
+// first, as ExitInstall - identical to every other per-collection failure,
+// helpers.ErrDownloadFailed included, so this is not a behavior change. It
+// never classifies as ExitInterrupt: the sentinel deliberately does not wrap
+// its context.DeadlineExceeded/context.Canceled cause with %w (see its own
+// doc comment), so that raw signal never reaches errors.Is(err,
+// context.Canceled) above. Split into two sub-checks purely to stay under
+// the cyclomatic-complexity budget; the two together still cover the exact
+// same sentinel set.
 func isNetworkError(err error) bool {
+	return isTransportError(err) || isMetadataFetchError(err)
+}
+
+// isTransportError reports whether err is a request-level network sentinel:
+// a timeout, an offline-mode violation, this acquisition's own artifact
+// download deadline, a bare download failure, or a server-list walk aborting
+// on a credential failure or an exhausted retry budget.
+func isTransportError(err error) bool {
 	return errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, helpers.ErrArtifactDownloadDeadline) ||
 		errors.Is(err, helpers.ErrOfflineMode) ||
 		errors.Is(err, helpers.ErrDownloadFailed) ||
-		errors.Is(err, helpers.ErrMetadataUnavailable) ||
+		errors.Is(err, helpers.ErrGalaxyAuthFailed) ||
+		errors.Is(err, helpers.ErrGalaxyServerUnavailable)
+}
+
+// isMetadataFetchError reports whether err is a Galaxy metadata-response
+// sentinel: metadata that could not be fetched or parsed into the shape this
+// tool expects.
+func isMetadataFetchError(err error) bool {
+	return errors.Is(err, helpers.ErrMetadataUnavailable) ||
 		errors.Is(err, helpers.ErrMetadataIsNil) ||
 		errors.Is(err, helpers.ErrMissingDownloadURL) ||
 		errors.Is(err, helpers.ErrVersionsPayloadEmpty) ||
-		errors.Is(err, helpers.ErrVersionsPayloadUnsupported) ||
-		errors.Is(err, helpers.ErrGalaxyAuthFailed) ||
-		errors.Is(err, helpers.ErrGalaxyServerUnavailable)
+		errors.Is(err, helpers.ErrVersionsPayloadUnsupported)
 }
 
 // isResolutionError reports whether err is a dependency-resolution sentinel

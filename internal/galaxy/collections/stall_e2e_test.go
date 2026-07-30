@@ -104,6 +104,17 @@ func TestArtifactPersistentStallFailsBounded(t *testing.T) {
 	if !errors.Is(err, helpers.ErrInstallationFailed) {
 		t.Fatalf("expected errors.Is ErrInstallationFailed, got %v", err)
 	}
+	// The watchdog, not the artifact download deadline, must be what ended
+	// this run: every attempt here stalls well within the fixture's generous
+	// runtime.ArtifactDeadline(), so a failing assertion here would mean the
+	// deadline fired first and raced ahead of the watchdog's own bounded
+	// retry loop, not that the watchdog itself is broken. Killing mutation:
+	// setting this fixture's runtime.ArtifactDownloadDeadline below
+	// stallTimeout makes the deadline win that race, and this assertion
+	// fires.
+	if errors.Is(err, helpers.ErrArtifactDownloadDeadline) {
+		t.Fatalf("expected the watchdog, not the artifact download deadline, to end this run: %v", err)
+	}
 	assertPathAbsent(t, installPathFor(cfg.DownloadPath, "solo"))
 	// The test reaching this assertion at all already proves the watchdog
 	// fired on every attempt: without it, the very first attempt would
