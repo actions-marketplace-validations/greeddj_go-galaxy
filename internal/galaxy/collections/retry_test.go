@@ -21,21 +21,31 @@ var (
 	errTestLocalIO   = errors.New("write /tmp/x: no space left on device")
 )
 
-// TestDownloadRetryable pins the artifact-download retry classification: the
-// ordering that a stalled read is retryable even though the read-inactivity
-// watchdog aborts it by canceling its own derived context (so the error also
-// matches context.Canceled), a terminal sha256 mismatch after a complete
-// read is never retried, and - unlike the Galaxy API GET predicate
+// TestDownloadRetryable pins the artifact-download retry classification: a
+// stalled read is retryable in both its real production rendering (the cause
+// left unreachable through errors.Is, see helpers.ErrReadStalled's doc
+// comment) and a deliberately synthetic one that still carries
+// context.Canceled, since downloadRetryable classifies ErrReadStalled before
+// the context.Canceled check; a terminal sha256 mismatch after a complete
+// read is never retried; and - unlike the Galaxy API GET predicate
 // (fetchRetryable in package cache) - a bare transport-level failure (no
 // HTTP response at all) is retryable here.
 func TestDownloadRetryable(t *testing.T) {
 	t.Parallel()
 
-	// stalled mirrors the exact shape the fetch watchdog produces: an
-	// ErrReadStalled wrapping the context.Canceled its own derived-context
-	// cancel raised. If downloadRetryable checked context.Canceled before
-	// ErrReadStalled, this would be misclassified as non-retryable.
-	stalled := fmt.Errorf("%w: no data for %s: %w", helpers.ErrReadStalled, time.Second, context.Canceled)
+	// stalledProduction mirrors the real shape watchdogBody.Read builds: the
+	// cause rendered with %v, not wrapped with %w, so it does not carry
+	// context.Canceled through errors.Is (see helpers.ErrReadStalled's doc
+	// comment). This is the shape downloadRetryable actually receives today.
+	//nolint:errorlint // pinning the real, deliberately non-wrapping shape watchdogBody.Read builds.
+	stalledProduction := fmt.Errorf("%w: no data for %s: %v", helpers.ErrReadStalled, time.Second, context.Canceled)
+	// stalledSynthetic is deliberately NOT the production shape: it
+	// double-wraps context.Canceled with %w, a signature the current producer
+	// never builds. It is kept to pin downloadRetryable's ordering guard
+	// (ErrReadStalled classified before the context.Canceled check)
+	// independently of how the producer happens to render its cause, so that
+	// guard stays tested even if a future call site reintroduces %w somewhere.
+	stalledSynthetic := fmt.Errorf("%w: no data for %s: %w", helpers.ErrReadStalled, time.Second, context.Canceled)
 	shaMismatch := fmt.Errorf("%w: aaaa != bbbb", helpers.ErrSHA256Mismatch)
 
 	cases := []struct {
@@ -45,7 +55,12 @@ func TestDownloadRetryable(t *testing.T) {
 	}{
 		{name: "nil is not retryable", err: nil, want: false},
 		{name: "offline is not retryable", err: helpers.ErrOfflineMode, want: false},
-		{name: "stalled read matches both ErrReadStalled and context.Canceled", err: stalled, want: true},
+		{name: "stalled read in its production shape is retryable", err: stalledProduction, want: true},
+		{
+			name: "a stall signature that also carries context.Canceled is still retryable",
+			err:  stalledSynthetic,
+			want: true,
+		},
 		{name: "raw context.Canceled is not retryable", err: context.Canceled, want: false},
 		{name: "raw context.DeadlineExceeded is not retryable", err: context.DeadlineExceeded, want: false},
 		{name: "sha256 mismatch after a complete read is terminal", err: shaMismatch, want: false},

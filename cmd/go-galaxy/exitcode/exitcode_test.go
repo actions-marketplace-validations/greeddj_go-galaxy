@@ -8,6 +8,7 @@ import (
 	"os"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/solver"
@@ -165,6 +166,11 @@ var fromErrorCases = []exitCase{
 		// Pinning the real, deliberately non-wrapping shape; see
 		// helpers.ErrArtifactDownloadDeadline's own doc comment for why.
 		err:      fmt.Errorf("%w after 15m0s: %v", helpers.ErrArtifactDownloadDeadline, context.DeadlineExceeded), //nolint:errorlint
+		wantCode: ExitNetwork,
+	},
+	{
+		name:     "read stalled",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrReadStalled),
 		wantCode: ExitNetwork,
 	},
 }
@@ -382,6 +388,93 @@ func TestArtifactDownloadDeadlineClassification(t *testing.T) {
 	}
 	if got := FromError(joined); got == ExitInterrupt {
 		t.Errorf("FromError(joined) = ExitInterrupt, want anything else")
+	}
+}
+
+// TestReadStalledClassification pins helpers.ErrReadStalled's full
+// classification story beyond the single representative case already
+// covered in fromErrorCases, mirroring TestArtifactDownloadDeadlineClassification:
+// (a) the bare sentinel is ExitNetwork; (b) the real production shape
+// watchdogBody.Read builds - the cause rendered with %v, not wrapped with %w
+// - is also ExitNetwork; (c) joined behind collections.Start's
+// helpers.ErrInstallationFailed headline it is ExitInstall, identical to
+// every other per-collection failure. This test does NOT prove the watchdog
+// fix itself: it builds its own error shape rather than calling into
+// package fetch, so reverting internal/galaxy/fetch/watchdog.go's %v back to
+// %w does not make this test fail - only TestMixedDripAndStallDoesNotClassifyAsInterrupt
+// in package collections exercises the real producer end to end.
+//
+// The got != ExitInterrupt checks below are documentary, not independent
+// pins: they are implied by the preceding got == ExitNetwork/ExitInstall
+// checks on the same value, the same redundancy TestArtifactDownloadDeadlineClassification
+// already carries. They are kept anyway because they name the security
+// property this test exists to cover.
+func TestReadStalledClassification(t *testing.T) {
+	bare := helpers.ErrReadStalled
+	if got := FromError(bare); got != ExitNetwork {
+		t.Errorf("FromError(bare sentinel) = %d, want ExitNetwork (%d)", got, ExitNetwork)
+	}
+	if got := FromError(bare); got == ExitInterrupt {
+		t.Errorf("FromError(bare sentinel) = ExitInterrupt, want anything else")
+	}
+
+	//nolint:errorlint // pinning the real, deliberately non-wrapping shape watchdogBody.Read builds.
+	production := fmt.Errorf("%w: no data for %s: %v", helpers.ErrReadStalled, 30*time.Second, context.Canceled)
+	if got := FromError(production); got != ExitNetwork {
+		t.Errorf("FromError(production shape) = %d, want ExitNetwork (%d)", got, ExitNetwork)
+	}
+	if got := FromError(production); got == ExitInterrupt {
+		t.Errorf("FromError(production shape) = ExitInterrupt, want anything else")
+	}
+
+	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
+	joined := errors.Join(headline, production)
+	if got := FromError(joined); got != ExitInstall {
+		t.Errorf("FromError(joined) = %d, want ExitInstall (%d)", got, ExitInstall)
+	}
+	if got := FromError(joined); got == ExitInterrupt {
+		t.Errorf("FromError(joined) = ExitInterrupt, want anything else")
+	}
+}
+
+// TestMixedDeadlineAndStallShapeIsNotInterrupt is a deliberately synthetic
+// shape contract: it joins one collection's real deadline-cause rendering
+// with a second collection's real stall-cause rendering behind a single
+// installation headline - the shape a mixed byte-dripped/stalled run
+// produces - and asserts the combination still classifies as ExitInstall,
+// never ExitInterrupt, even though both causes carry a rendered
+// context.Canceled/context.DeadlineExceeded that is unreachable through
+// errors.Is.
+func TestMixedDeadlineAndStallShapeIsNotInterrupt(t *testing.T) {
+	headline := fmt.Errorf("%w for 2 collections", helpers.ErrInstallationFailed)
+	//nolint:errorlint // pinning the real, deliberately non-wrapping shape; see ErrArtifactDownloadDeadline's doc comment.
+	deadlineCause := fmt.Errorf("%w after 3s: %v", helpers.ErrArtifactDownloadDeadline, context.DeadlineExceeded)
+	//nolint:errorlint // pinning the real, deliberately non-wrapping shape watchdogBody.Read builds.
+	stallCause := fmt.Errorf("%w: no data for %s: %v", helpers.ErrReadStalled, 30*time.Second, context.Canceled)
+
+	joined := errors.Join(headline, deadlineCause, stallCause)
+	if got := FromError(joined); got != ExitInstall {
+		t.Errorf("FromError(joined) = %d, want ExitInstall (%d)", got, ExitInstall)
+	}
+	if got := FromError(joined); got == ExitInterrupt {
+		t.Errorf("FromError(joined) = ExitInterrupt, want anything else")
+	}
+}
+
+// TestFromErrorInterruptSurvivesStallSentinel is what makes the rejected
+// alternative fix (checking helpers.ErrReadStalled ahead of the
+// context.Canceled case in FromError) enforceable: joining the production
+// stall shape with a genuine, separate context.Canceled - the shape a real
+// Ctrl-C produces alongside an in-flight stall - must still classify as
+// ExitInterrupt. Any stall case placed above the cancellation case in
+// FromError's switch would make this test fail.
+func TestFromErrorInterruptSurvivesStallSentinel(t *testing.T) {
+	//nolint:errorlint // pinning the real, deliberately non-wrapping shape watchdogBody.Read builds.
+	stallCause := fmt.Errorf("%w: no data for %s: %v", helpers.ErrReadStalled, 30*time.Second, context.Canceled)
+
+	joined := errors.Join(stallCause, context.Canceled)
+	if got := FromError(joined); got != ExitInterrupt {
+		t.Errorf("FromError(joined) = %d, want ExitInterrupt (%d)", got, ExitInterrupt)
 	}
 }
 

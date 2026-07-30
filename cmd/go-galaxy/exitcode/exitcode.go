@@ -61,6 +61,14 @@ func FromError(err error) int {
 	switch {
 	case err == nil:
 		return ExitOK
+	// This case is correct only because no sentinel this program raises to
+	// describe why work ended leaves a context sentinel reachable through
+	// errors.Is - see helpers.ErrReadStalled's and
+	// helpers.ErrArtifactDownloadDeadline's doc comments. A future sentinel
+	// that wraps a context.Canceled/context.DeadlineExceeded cause with %w
+	// would silently steal this case instead of being caught by it, since
+	// this case is checked first and cannot distinguish "the sentinel's cause
+	// happens to be a context error" from "the caller genuinely canceled".
 	case errors.Is(err, context.Canceled):
 		return ExitInterrupt
 	// isIntegrityError must be checked before isInstallError: after
@@ -158,9 +166,20 @@ func isSymlinkError(err error) bool {
 // never classifies as ExitInterrupt: the sentinel deliberately does not wrap
 // its context.DeadlineExceeded/context.Canceled cause with %w (see its own
 // doc comment), so that raw signal never reaches errors.Is(err,
-// context.Canceled) above. Split into two sub-checks purely to stay under
-// the cyclomatic-complexity budget; the two together still cover the exact
-// same sentinel set.
+// context.Canceled) above.
+//
+// helpers.ErrReadStalled follows the identical shape: unaggregated, it
+// classifies here as ExitNetwork; once collections.Start joins it behind
+// helpers.ErrInstallationFailed for a per-collection stall, isInstallError
+// claims it first, as ExitInstall, the same as every other per-collection
+// failure. It never classifies as ExitInterrupt either: the watchdog aborts a
+// stall by canceling its own derived context, so the cause is
+// context.Canceled, but the producer renders that cause with %v rather than
+// wrapping it with %w (see helpers.ErrReadStalled's own doc comment), so it
+// never reaches errors.Is(err, context.Canceled) above.
+//
+// Split into two sub-checks purely to stay under the cyclomatic-complexity
+// budget; the two together still cover the exact same sentinel set.
 func isNetworkError(err error) bool {
 	return isTransportError(err) || isMetadataFetchError(err)
 }
@@ -172,6 +191,7 @@ func isNetworkError(err error) bool {
 func isTransportError(err error) bool {
 	return errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, helpers.ErrArtifactDownloadDeadline) ||
+		errors.Is(err, helpers.ErrReadStalled) ||
 		errors.Is(err, helpers.ErrOfflineMode) ||
 		errors.Is(err, helpers.ErrDownloadFailed) ||
 		errors.Is(err, helpers.ErrGalaxyAuthFailed) ||

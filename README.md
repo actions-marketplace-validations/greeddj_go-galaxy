@@ -217,7 +217,10 @@ Clean unreachable collections:
   38 Mbit/s sustained to finish inside the budget, while a real collection needs well under 1 Mbit/s.
   This ceiling is not configurable, unlike `--timeout` above: a knob on a safety ceiling is a knob an
   operator would raise in direct response to a truncation, which is exactly how the slow-drip attack
-  this closes would succeed.
+  this closes would succeed. A collection whose download stalls or drips fails that collection and the
+  run exits with the install-failure code (`5`); a stall outside the per-collection install path - a
+  metadata fetch during resolution, an S3 state-object read - exits with the network code (`4`)
+  instead. It is never reported as an interrupt.
 - `--download-path, -p` (`$GO_GALAXY_COLLECTIONS_PATH`, `$ANSIBLE_COLLECTIONS_PATH`)
 - `--requirements-file, -r` (`$GO_GALAXY_REQUIREMENTS_FILE`, `$ANSIBLE_GALAXY_REQUIREMENTS_FILE`)
 - `--ansible-config` (`$GO_GALAXY_ANSIBLE_CONFIG`, `$ANSIBLE_CONFIG`)
@@ -570,11 +573,11 @@ pipelines can branch on failure type without parsing log output:
 |    1 | Generic failure (does not match any class below)                                                                                                     |
 |    2 | Usage or configuration error (invalid flags, requirements, `ansible.cfg`, or a flag a command does not implement, e.g. `--dry-run` on `lock`)        |
 |    3 | Dependency resolution failure (conflicts, missing candidates, cycle)                                                                                 |
-|    4 | Network or Galaxy API failure (timeouts, offline-mode violations)                                                                                    |
+|    4 | Network or Galaxy API failure (timeouts, stalled transfers, offline-mode violations)                                                                 |
 |    5 | Install-time failure (unsafe archive/symlink content, empty file, missing artifact cache)                                                            |
 |    6 | Lockfile error (missing, invalid, or mismatched with requirements)                                                                                   |
 |    7 | Artifact-integrity failure (content does not authenticate against its naming sha256, or the digest is malformed)                                     |
-|  130 | Interrupted (SIGINT)                                                                                                                                 |
+|  130 | Interrupted (a caught SIGINT, or the caller's own context canceled)                                                                                  |
 
 Exit `7` covers content that failed to authenticate against the sha256 that
 named it - a lockfile pin, a Galaxy server's declared digest, a cache sidecar,
@@ -584,6 +587,11 @@ automatically. A retry cannot repair it, because the bytes or the digest are
 wrong at the source, not transiently unavailable. It also outranks the network
 class: a run that hits both an integrity failure and a network failure exits
 `7`, not `4`.
+
+A stalled or byte-dripped transfer is never reported as an interrupt, even
+though the underlying mechanism that unblocks it is a context cancellation:
+the tool distinguishes its own no-progress cancellation from a genuine SIGINT
+or caller cancellation, and only the latter exits `130`.
 
 ## Metrics
 

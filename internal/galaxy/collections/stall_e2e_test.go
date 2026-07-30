@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/greeddj/go-galaxy/cmd/go-galaxy/exitcode"
 	"github.com/greeddj/go-galaxy/internal/galaxy/collections"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/fetch"
@@ -28,6 +29,12 @@ import (
 // race against it; only a deliberately stalled artifact body read is meant
 // to trip it.
 const stallTimeout = 100 * time.Millisecond
+
+// waitBoundStall is the generous upper bound TestParentCancelDuringStallExitsInterrupt
+// gives itself to observe the first artifact request and, separately, Start's
+// return after cancellation, so a genuine deadlock fails the test instead of
+// hanging the suite.
+const waitBoundStall = 5 * time.Second
 
 // newStallFixture registers a single acme.solo collection (version "*", no
 // dependencies, so exactly one artifact download ever runs) on a fresh fake
@@ -92,6 +99,15 @@ func TestArtifactStallRecoversOnRetry(t *testing.T) {
 // per-collection stall is logged and counted inside installLevels, then
 // finalizeInstall reports it as helpers.ErrInstallationFailed rather than
 // propagating helpers.ErrReadStalled itself.
+//
+// The context.Canceled and exitcode.FromError assertions below are
+// genuinely falsifiable here, unlike their counterparts in
+// deadline_e2e_test.go: this fixture's error tree has exactly one cause -
+// the persistent stall - so there is no second, mutually exclusive cause
+// tree for the fixture itself to rule out; reverting watchdog.go's %v back
+// to %w makes both fire directly, with no fixture change needed to make
+// that possible (see mixed_fault_e2e_test.go for the shape where a second
+// failing collection is what makes the same pair of assertions meaningful).
 func TestArtifactPersistentStallFailsBounded(t *testing.T) {
 	t.Parallel()
 	cfg, runtime, s := newStallFixture(t)
@@ -114,6 +130,12 @@ func TestArtifactPersistentStallFailsBounded(t *testing.T) {
 	// fires.
 	if errors.Is(err, helpers.ErrArtifactDownloadDeadline) {
 		t.Fatalf("expected the watchdog, not the artifact download deadline, to end this run: %v", err)
+	}
+	if errors.Is(err, context.Canceled) {
+		t.Fatalf("must not match context.Canceled: %v", err)
+	}
+	if got := exitcode.FromError(err); got != exitcode.ExitInstall {
+		t.Errorf("exitcode.FromError(err) = %d, want ExitInstall (%d)", got, exitcode.ExitInstall)
 	}
 	assertPathAbsent(t, installPathFor(cfg.DownloadPath, "solo"))
 	// The test reaching this assertion at all already proves the watchdog
@@ -157,5 +179,95 @@ func TestArtifactStallBytesCountedPerAttemptWithNoMissOnFailure(t *testing.T) {
 	if totals.CacheMisses != 0 {
 		t.Errorf("CacheMisses = %d, want 0 (the acquisition never completed successfully, so it never reaches AddCacheMiss)",
 			totals.CacheMisses)
+	}
+}
+
+// TestParentCancelDuringStallExitsInterrupt is the positive control paired
+// with TestArtifactPersistentStallFailsBounded above (named there too): the
+// same persistent mid-body stall, but this time it is the CALLER's own
+// context that ends the run, not the watchdog exhausting its retry budget.
+// The result must be a genuine context.Canceled, classifying as
+// exitcode.ExitInterrupt - the one case a stalled read must still produce
+// that classification, exactly because it was a real cancellation and not
+// the watchdog's.
+//
+// This is not flaky despite racing cancel() against the fake server's own
+// goroutine: every interleaving between the poll below observing the first
+// artifact request and cancel() actually running agrees on the outcome.
+//   - cancel() lands while the artifact body read is already blocked inside
+//     serveArtifactStall: this poll fires within ~1-2ms of the request
+//     landing, well inside the fixture's 100ms idle window, so the watchdog
+//     timer has not fired yet and b.fired is still false. wctx is a child of
+//     parentCtx, so canceling parentCtx cancels wctx too, unblocking the
+//     read with a raw context.Canceled; Read's error branch short-circuits
+//     at `b.fired.Load()` before it ever reaches the
+//     `b.parentCtx.Err() == nil` guard, so the raw error passes through
+//     unchanged regardless of the guard's presence. (The cell where the
+//     guard itself is load-bearing - the watchdog has already fired AND the
+//     parent is already canceled - is not reachable from this timing and is
+//     pinned separately; see below.)
+//   - cancel() lands during a backoff sleep between retry attempts:
+//     helpers.Retry's own ctx.Done() select case returns the bare ctx.Err()
+//     (context.Canceled) immediately, without ever calling attempt() again.
+//   - cancel() lands before the next request is even issued: the collection
+//     fails immediately against an already-dead context, which surfaces the
+//     same way.
+//
+// All three converge on the same observable error class, so which one this
+// run happens to hit on a given machine does not matter to the assertions
+// below. What this test pins is the run-level property: a genuine
+// cancellation survives helpers.Retry, the per-collection failure
+// aggregation, and exitcode.FromError's ordering, all the way out to
+// ExitInterrupt. The `b.parentCtx.Err() == nil` guard itself - the one
+// interleaving where the watchdog has already fired before the parent is
+// canceled - is pinned by
+// TestWatchdogBody_FiredWatchdogYieldsToParentCancel in
+// internal/galaxy/fetch/watchdog_test.go, deterministically, with no timing
+// race at all.
+func TestParentCancelDuringStallExitsInterrupt(t *testing.T) {
+	t.Parallel()
+	cfg, runtime, s := newStallFixture(t)
+	s.Fail(fakegalaxy.EndpointArtifact, "acme", "solo", fakegalaxy.Fault{StallAfterBytes: 8, Count: -1})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Deliberately in addition to the explicit cancel() call below, not
+	// instead of it: without this defer, a t.Fatal above the explicit cancel()
+	// would exit this test via runtime.Goexit with the stall-faulted request
+	// still parked and nothing left to ever cancel it, so fakegalaxy's own
+	// t.Cleanup (httptest.Server.Close) would then block forever waiting for
+	// that request to finish.
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- collections.Start(ctx, cfg, runtime)
+	}()
+
+	// dispatchArtifact increments the endpoint counter before
+	// serveArtifactStall ever blocks, so polling Count is a reliable signal
+	// that a request has actually reached the fake server - unlike, say,
+	// polling for a fixed elapsed duration.
+	deadline := time.Now().Add(waitBoundStall)
+	for s.Count(fakegalaxy.EndpointArtifact) < 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if s.Count(fakegalaxy.EndpointArtifact) < 1 {
+		t.Fatal("artifact endpoint never received a request before the poll deadline")
+	}
+	cancel()
+
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(waitBoundStall):
+		t.Fatal("Start did not return after the parent context was canceled")
+	}
+	if err == nil {
+		t.Fatal("expected an error from a canceled stalled artifact download, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected errors.Is context.Canceled, got %v", err)
+	}
+	if got := exitcode.FromError(err); got != exitcode.ExitInterrupt {
+		t.Errorf("exitcode.FromError(err) = %d, want ExitInterrupt (%d)", got, exitcode.ExitInterrupt)
 	}
 }

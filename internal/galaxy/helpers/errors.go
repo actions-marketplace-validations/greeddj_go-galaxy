@@ -184,6 +184,17 @@ var (
 	// the configured timeout window while the request's own context was
 	// still live. A parent-context cancellation is reported as
 	// context.Canceled instead, never as ErrReadStalled.
+	//
+	// It deliberately does NOT wrap its cause with %w, and this is a rule, not
+	// a note about one call site: a sentinel this program raises to describe
+	// why work ended must never leave a context sentinel reachable through
+	// errors.Is. The watchdog aborts a stall by canceling its own derived
+	// context to unblock the stuck read, so the cause is context.Canceled; left
+	// wrapped with %w it would steal this failure's exit-code classification,
+	// because exitcode.FromError checks context.Canceled ahead of every other
+	// class and would report a hostile or degraded server as a caught Ctrl-C.
+	// The cause is rendered with %v instead, so it stays diagnosable without
+	// being matchable.
 	ErrReadStalled = errors.New("network read stalled")
 	// ErrArtifactDownloadDeadline indicates one artifact's acquisition exceeded
 	// ArtifactDownloadDeadline: the whole-transfer ceiling the read-inactivity

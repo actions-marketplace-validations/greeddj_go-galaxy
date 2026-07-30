@@ -73,19 +73,24 @@ package collections_test
 //     single cause carries one signature or the other, never both -
 //     artifactDeadlineError renders its cause with %v, so the sentinel's tree
 //     holds only the sentinel, while a watchdog-terminated acquisition
-//     returns ErrReadStalled (wrapping context.Canceled) with no sentinel in
-//     it at all. Every mutation that makes the watchdog win therefore fails
-//     at (b) first, confirmed by running exactly that (StallAfterBytes: 8,
-//     watchdog 100ms, deadline 10s; deterministic across 8 runs):
+//     returns ErrReadStalled (rendering context.Canceled with %v) with no
+//     sentinel in it at all. Every mutation that makes the watchdog win
+//     therefore fails at (b) first, confirmed by running exactly that
+//     (StallAfterBytes: 8, watchdog 100ms, deadline 10s; deterministic across
+//     8 runs):
 //     "expected errors.Is ErrArtifactDownloadDeadline, got installation
 //     failed for 1 collections"
 //     What (c) and (d) do buy is a tripwire on the FIXTURE rather than on
 //     production: they fire if a future edit here lowers dripWatchdogTimeout,
 //     changes the fault, or adds a second failing collection - that last one
 //     would join two cause trees and break the mutual exclusion above,
-//     turning both assertions falsifiable. The reciprocal proof that the two
-//     mechanisms really are distinct lives in the PAIR, not in (c): this file
-//     proves a drip ends on the deadline and not the watchdog, and
+//     turning both assertions falsifiable. mixed_fault_e2e_test.go is exactly
+//     that fixture: it adds a second, stalled collection alongside a dripped
+//     one, and its own errors.Is(err, helpers.ErrReadStalled)/errors.Is(err,
+//     context.Canceled) assertions are the falsifiable versions of (c)/(d)
+//     that this fixture cannot produce on its own. The reciprocal proof that
+//     the two mechanisms really are distinct lives in the PAIR, not in (c):
+//     this file proves a drip ends on the deadline and not the watchdog, and
 //     stall_e2e_test.go:111 proves a stall ends on the watchdog and not the
 //     deadline. Each half is falsifiable only through its own sentinel check,
 //     never through (c).

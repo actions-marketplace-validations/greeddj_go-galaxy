@@ -76,11 +76,13 @@ func s3Retryable(err error) bool {
 	if errors.Is(err, helpers.ErrOfflineMode) {
 		return false
 	}
-	// Classify a stalled read before the context checks: the watchdog aborts a
-	// stall by canceling its own derived context, so the error also matches
-	// context.Canceled even though it is genuinely retryable. ErrReadStalled is
-	// only produced while the caller's context is still live, so this never
-	// masks a real caller cancellation (which arrives as a raw context.Canceled).
+	// Classify a stalled read before the context checks. The production stall
+	// error no longer carries context.Canceled through errors.Is (see
+	// helpers.ErrReadStalled's doc comment: the watchdog renders its
+	// cancellation cause with %v, not %w), so this check and the context check
+	// below no longer overlap in practice. It is kept ahead of the context
+	// check anyway as defense in depth, so this classifier stays correct
+	// regardless of how the producer renders its cause.
 	if errors.Is(err, helpers.ErrReadStalled) {
 		return true
 	}

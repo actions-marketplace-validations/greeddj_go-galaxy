@@ -45,7 +45,11 @@ func (t watchdogTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 // making progress. It distinguishes a watchdog-triggered stall from a
 // cancellation of the caller's own (parent) context: only the former is
 // reported as helpers.ErrReadStalled, since a caller cancellation must
-// surface as context.Canceled for callers that branch on it.
+// surface as context.Canceled for callers that branch on it. This is
+// stronger than it sounds: the stall error renders its cause with %v rather
+// than wrapping it with %w, so context.Canceled is reachable through
+// errors.Is on the returned error only when the caller genuinely canceled
+// its own context - never as a side effect of describing a watchdog stall.
 //
 // watchdogBody is not safe for concurrent use. Like a bare io.Reader, Read
 // must not be called concurrently with itself; and unlike a raw
@@ -86,10 +90,14 @@ func newWatchdogBody(parentCtx context.Context, body io.ReadCloser, cancel conte
 // - which may block until data arrives, the timer fires, or the request
 // context ends - and then stops the timer before returning. A read that
 // fails while the watchdog has fired and the caller's own context is still
-// live is reported as helpers.ErrReadStalled; any other error, including
-// one caused by the caller canceling its own context, propagates
-// unchanged. Read must not be called concurrently with itself or with Close
-// (see the watchdogBody type doc for the concurrency contract).
+// live is reported as helpers.ErrReadStalled, with the underlying error
+// (context.Canceled, raised by the watchdog canceling its own derived
+// context to unblock the stuck read) rendered into the message rather than
+// wrapped, so it stays diagnosable without being reachable through
+// errors.Is - see helpers.ErrReadStalled's doc comment for why. Any other
+// error, including one caused by the caller canceling its own context,
+// propagates unchanged. Read must not be called concurrently with itself or
+// with Close (see the watchdogBody type doc for the concurrency contract).
 func (b *watchdogBody) Read(p []byte) (int, error) {
 	if b.timer == nil {
 		b.timer = time.AfterFunc(b.idle, b.onStall)
@@ -99,7 +107,8 @@ func (b *watchdogBody) Read(p []byte) (int, error) {
 	n, err := b.body.Read(p)
 	b.timer.Stop()
 	if err != nil && b.fired.Load() && b.parentCtx.Err() == nil {
-		return n, fmt.Errorf("%w: no data for %s: %w", helpers.ErrReadStalled, b.idle, err)
+		//nolint:errorlint // deliberately %v, not %w: see helpers.ErrReadStalled's doc comment.
+		return n, fmt.Errorf("%w: no data for %s: %v", helpers.ErrReadStalled, b.idle, err)
 	}
 	return n, err
 }
