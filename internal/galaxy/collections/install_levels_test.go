@@ -37,6 +37,7 @@ func TestInstallLevelsMissingCollectionSurfaces(t *testing.T) {
 	cfg := &config.Config{Offline: true, DownloadPath: t.TempDir(), Workers: 1}
 	runtime := infra.New(noopPrinter{}, http.DefaultClient)
 	st := store.New()
+	root := newTestCollectionsRoot(t, cfg.DownloadPath)
 	// Wait(missingKey) is never reached (the guard trips before any dispatch),
 	// so a bare prefetcher with only its done map allocated is enough.
 	prefetch := &prefetcher{done: make(map[string]chan struct{})}
@@ -53,6 +54,7 @@ func TestInstallLevelsMissingCollectionSurfaces(t *testing.T) {
 		map[string][]string{},
 		levels,
 		prefetch,
+		root,
 	)
 	if !errors.Is(err, helpers.ErrMissingCollection) {
 		t.Fatalf("err = %v, want errors.Is helpers.ErrMissingCollection", err)
@@ -76,6 +78,20 @@ func TestInstallLevelsMissingCollectionSurfaces(t *testing.T) {
 // asserts exactly that: on fixed code it must time out (installLevels is
 // still blocked inside the deferred wg.Wait()); on the pre-fix code it would
 // instead receive from done and fail the test immediately.
+// newBlockedPrefetcher builds a prefetcher by hand with key registered and its
+// done channel left open, so prefetch.Wait(key) blocks until the caller calls
+// finish(key, ...) to close it. Built directly rather than through
+// startPrefetcher because the point is to hold a worker mid-flight, which a
+// real prefetcher would not do on demand.
+func newBlockedPrefetcher(key string) *prefetcher {
+	return &prefetcher{
+		meta:       make(map[string]*types.GalaxyCollectionVersionInfo),
+		errs:       make(map[string]error),
+		prefetched: make(map[string]downloadResult),
+		done:       map[string]chan struct{}{key: make(chan struct{})},
+	}
+}
+
 func TestInstallLevelsJoinsInFlightWorkerOnMissingCollection(t *testing.T) {
 	t.Parallel()
 
@@ -87,18 +103,12 @@ func TestInstallLevelsJoinsInFlightWorkerOnMissingCollection(t *testing.T) {
 	graph := map[string][]string{key1: {}}
 	levels := [][]string{{key1, missingKey}}
 
-	// p is built by hand with key1 registered and its done channel left open:
-	// prefetch.Wait(key1) blocks until p.finish(key1, ...) closes it below.
-	p := &prefetcher{
-		meta:       make(map[string]*types.GalaxyCollectionVersionInfo),
-		errs:       make(map[string]error),
-		prefetched: make(map[string]downloadResult),
-		done:       map[string]chan struct{}{key1: make(chan struct{})},
-	}
+	p := newBlockedPrefetcher(key1)
 
 	cfg := &config.Config{Offline: true, DownloadPath: t.TempDir(), Workers: 2}
 	runtime := infra.New(noopPrinter{}, http.DefaultClient)
 	st := store.New()
+	root := newTestCollectionsRoot(t, cfg.DownloadPath)
 
 	done := make(chan error, 1)
 	go func() {
@@ -113,6 +123,7 @@ func TestInstallLevelsJoinsInFlightWorkerOnMissingCollection(t *testing.T) {
 			graph,
 			levels,
 			p,
+			root,
 		)
 		done <- err
 	}()

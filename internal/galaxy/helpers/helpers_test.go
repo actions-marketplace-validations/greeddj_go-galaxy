@@ -2,6 +2,28 @@ package helpers
 
 import "testing"
 
+// TestSplitFQDNDoesNotValidatePathSafety pins that SplitFQDN is a pure
+// exactly-one-dot string split with no path-safety opinion at all: a
+// namespace containing a path separator still parses successfully as long as
+// the whole value contains exactly one ".", exactly as a clean "ns.name"
+// value would. This is why every caller that later uses the parsed
+// namespace/name as a filesystem path element (buildCollectionsMap,
+// newInstallTarget, cleanup.removeInstalled) must run its own IsPathElement
+// check - SplitFQDN itself is not, and was never meant to be, that guard.
+func TestSplitFQDNDoesNotValidatePathSafety(t *testing.T) {
+	t.Parallel()
+	ns, name, ok := SplitFQDN("foo/bar.baz")
+	if !ok {
+		t.Fatalf(`SplitFQDN("foo/bar.baz") ok = false, want true (SplitFQDN performs no path-safety validation)`)
+	}
+	if ns != "foo/bar" || name != "baz" {
+		t.Fatalf(`SplitFQDN("foo/bar.baz") = (%q, %q), want ("foo/bar", "baz")`, ns, name)
+	}
+	if IsPathElement(ns) {
+		t.Fatalf("test setup bug: %q must itself be unsafe (contain a path separator) for this pinning to matter", ns)
+	}
+}
+
 // TestNormalizeConstraint pins NormalizeConstraint's pure-string contract:
 // trim/match-all handling, byte-identical passthrough for any constraint that
 // never uses "==", the clause-level "==" -> "=" rewrite (including when the

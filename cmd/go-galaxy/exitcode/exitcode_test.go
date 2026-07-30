@@ -50,6 +50,16 @@ var fromErrorCases = []exitCase{
 		wantCode: ExitInstall,
 	},
 	{
+		// ErrCollectionsPathEscape is grouped with the archive/symlink sentinels
+		// in isSymlinkError, since a symlinked ansible_collections (or a
+		// namespace/name component beneath it) is the same class of unsafe
+		// filesystem write as an unsafe symlink found inside an extracted
+		// archive - both must exit ExitInstall, not the generic fallback.
+		name:     "collections path escape",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrCollectionsPathEscape),
+		wantCode: ExitInstall,
+	},
+	{
 		name:     "context deadline exceeded",
 		err:      fmt.Errorf("%w: ctx", context.DeadlineExceeded),
 		wantCode: ExitNetwork,
@@ -87,6 +97,20 @@ var fromErrorCases = []exitCase{
 	{
 		name:     "invalid collection key",
 		err:      fmt.Errorf("%w: ctx", helpers.ErrInvalidCollectionKey),
+		wantCode: ExitUsage,
+	},
+	{
+		// buildCollectionsMap raises this over a malformed resolved identity
+		// (ns/name/version) before any install work starts, the same
+		// plan-build-time class as ErrDuplicateCollectionKey right below it in
+		// isCollectionListUsageError - not an install-time or a network failure.
+		name:     "unsafe collection identifier",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrUnsafeCollectionIdentifier),
+		wantCode: ExitUsage,
+	},
+	{
+		name:     "duplicate collection key",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrDuplicateCollectionKey),
 		wantCode: ExitUsage,
 	},
 	{

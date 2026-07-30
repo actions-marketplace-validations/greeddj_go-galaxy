@@ -259,6 +259,10 @@ type prefetchHandoffFixture struct {
 	st           *store.Store
 	artifacts    *s3StyleArtifacts
 	extractStore *extracted.Store
+	// root is the real collections root opened for cfg.DownloadPath, threaded
+	// into every newPrefetchDeps/installLevels call this fixture drives - both
+	// now build an installTarget from it on every collection.
+	root *os.Root
 }
 
 // newPrefetchHandoffFixture builds a fixture wired to srv with workers
@@ -283,6 +287,7 @@ func newPrefetchHandoffFixture(t *testing.T, srv *fakegalaxy.Server, workers int
 		st:           store.New(),
 		artifacts:    newS3StyleArtifacts(t),
 		extractStore: extracted.NewStore(cacheDir),
+		root:         newTestCollectionsRoot(t, downloadPath),
 	}
 }
 
@@ -301,7 +306,7 @@ func (f *prefetchHandoffFixture) runLevels(
 	graph map[string][]string,
 	levels [][]string,
 ) (*prefetcher, int32, error) {
-	prefetch := startPrefetcher(context.Background(), newPrefetchDeps(f.cfg, f.runtime, f.st, f.artifacts), collections, levels)
+	prefetch := startPrefetcher(context.Background(), newPrefetchDeps(f.cfg, f.runtime, f.st, f.artifacts, f.root), collections, levels)
 	failures, err := installLevels(
 		context.Background(),
 		f.cfg,
@@ -313,6 +318,7 @@ func (f *prefetchHandoffFixture) runLevels(
 		graph,
 		levels,
 		prefetch,
+		f.root,
 	)
 	return prefetch, failures, err
 }
@@ -507,13 +513,14 @@ func TestInstallCollectionSkipReleasesPrefetchedTempExactlyOnce(t *testing.T) {
 	downloadPath := filepath.Join(root, "install")
 
 	col := collection{Namespace: "acme", Name: "widgets", Version: "1.0.0"}
-	installPath := filepath.Join(downloadPath, "ansible_collections", col.Namespace, col.Name)
+	cfg := &config.Config{DownloadPath: downloadPath}
+	target := newTestInstallTarget(t, cfg, col)
 	const installedSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
-	if err := os.MkdirAll(installPath, helpers.DirMod); err != nil {
+	if err := os.MkdirAll(target.path, helpers.DirMod); err != nil {
 		t.Fatalf("mkdir installPath: %v", err)
 	}
-	seedValidExtractMarker(t, installPath, installedSHA)
+	seedValidExtractMarker(t, target, installedSHA)
 	infoDir := filepath.Join(downloadPath, "ansible_collections", col.Namespace+"."+col.Name+"-"+col.Version+".info")
 	if err := os.MkdirAll(infoDir, helpers.DirMod); err != nil {
 		t.Fatalf("mkdir infoDir: %v", err)
@@ -522,10 +529,9 @@ func TestInstallCollectionSkipReleasesPrefetchedTempExactlyOnce(t *testing.T) {
 		t.Fatalf("write GALAXY.yml: %v", err)
 	}
 
-	cfg := &config.Config{DownloadPath: downloadPath}
 	st := store.New()
 	st.SetInstalled(col.key(), store.InstalledEntry{
-		InstallPath:    installPath,
+		InstallPath:    target.path,
 		ArtifactSHA256: installedSHA,
 		InstalledAt:    time.Now().UTC(),
 	})
@@ -533,7 +539,7 @@ func TestInstallCollectionSkipReleasesPrefetchedTempExactlyOnce(t *testing.T) {
 		cfg:     cfg,
 		runtime: infra.New(noopPrinter{}, http.DefaultClient),
 		st:      st,
-	}}
+	}, root: target.root}
 
 	tempPath := filepath.Join(t.TempDir(), "prefetched.tar.gz")
 	if err := os.WriteFile(tempPath, []byte("prefetched tarball bytes"), helpers.FileMod); err != nil {

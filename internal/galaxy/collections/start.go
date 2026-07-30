@@ -3,6 +3,7 @@ package collections
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -185,7 +186,12 @@ func warmCollections(
 	collections map[string]collection,
 ) int32 {
 	var failures atomic.Int32
-	depsCtx := newInstallDeps(cfg, runtime, state.store, state.backend.Artifacts(), state.extractStore)
+	// warm never touches the collections tree at all - it only downloads and
+	// extracts into the content-addressable extracted store - so its
+	// installDeps carries a nil root; newInstallTarget's own nil-root guard
+	// then makes any accidental collections-tree call from this path fail
+	// closed rather than by convention.
+	depsCtx := newInstallDeps(cfg, runtime, state.store, state.backend.Artifacts(), state.extractStore, nil)
 	var wg sync.WaitGroup
 	// max(cfg.Workers, 1): a zero Workers would make sem unbuffered, and the
 	// first send would block forever since no worker has started to drain it
@@ -413,7 +419,26 @@ func runInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) e
 // backend is already open and locked - runInstall holds that lifecycle - so
 // it never touches state.release or state.backend.Close.
 func installWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra, state *installState, start time.Time) error {
-	plan, err := prepareInstallPlan(ctx, cfg, runtime, state)
+	// Opened once, here, before requirements are even loaded, so every
+	// downstream consumer - the prefetcher and every install worker across
+	// every level - shares the same os.Root instead of each racing to open its
+	// own. create is tied to !cfg.DryRun: a dry run must never create the
+	// directory it is only describing (see openCollectionsRoot's own doc
+	// comment). Opening it here, once, rather than once per collection, is
+	// also what turns a symlinked ansible_collections into exactly one
+	// operator-facing failure for the whole run instead of one per collection
+	// in the level - see openCollectionsRoot's own doc comment for why.
+	root, err := openCollectionsRoot(cfg.DownloadPath, !cfg.DryRun)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if root != nil {
+			_ = root.Close()
+		}
+	}()
+
+	plan, err := prepareInstallPlan(ctx, cfg, runtime, state, root)
 	if err != nil {
 		return err
 	}
@@ -433,7 +458,7 @@ func installWithState(ctx context.Context, cfg *config.Config, runtime *infra.In
 	defer plan.prefetch.Close()
 
 	if cfg.DryRun {
-		return installDryRun(ctx, cfg, runtime, state, plan, start)
+		return installDryRun(ctx, cfg, runtime, state, plan, start, root)
 	}
 
 	failures, err := installLevels(
@@ -447,6 +472,7 @@ func installWithState(ctx context.Context, cfg *config.Config, runtime *infra.In
 		plan.graph,
 		plan.levels,
 		plan.prefetch,
+		root,
 	)
 	if err != nil {
 		return err
@@ -487,9 +513,10 @@ func installDryRun(
 	state *installState,
 	plan *installPlan,
 	start time.Time,
+	root *os.Root,
 ) error {
 	wouldFail := classifyDryRun(
-		ctx, runtime, cfg, plan.collections, installDryRunVerbs, installDryRunProbe(cfg, state.store, state.backend.Artifacts()),
+		ctx, runtime, cfg, plan.collections, installDryRunVerbs, installDryRunProbe(cfg, state.store, state.backend.Artifacts(), root),
 	)
 	saveErr := saveDryRunSnapshotIfPersisted(ctx, runtime, state)
 	writeRunMetrics(cfg, runtime, "install", start, len(plan.collections), wouldFail, cfg.Frozen)
@@ -517,7 +544,9 @@ func saveDryRunSnapshotIfPersisted(ctx context.Context, runtime *infra.Infra, st
 	return state.backend.SaveStore(ctx, state.store)
 }
 
-func prepareInstallPlan(ctx context.Context, cfg *config.Config, runtime *infra.Infra, state *installState) (*installPlan, error) {
+func prepareInstallPlan(
+	ctx context.Context, cfg *config.Config, runtime *infra.Infra, state *installState, root *os.Root,
+) (*installPlan, error) {
 	prep, err := loadRoots(cfg, runtime)
 	if err != nil {
 		return nil, err
@@ -551,7 +580,7 @@ func prepareInstallPlan(ctx context.Context, cfg *config.Config, runtime *infra.
 	prefetchStart := time.Now()
 	prefetch := startPrefetcher(
 		ctx,
-		newPrefetchDeps(cfg, runtime, state.store, state.backend.Artifacts()),
+		newPrefetchDeps(cfg, runtime, state.store, state.backend.Artifacts(), root),
 		collections,
 		levels,
 	)
@@ -839,9 +868,25 @@ func loadRoots(cfg *config.Config, runtime *infra.Infra) (*rootPreparation, erro
 	return prep, nil
 }
 
+// buildCollectionsMap folds the resolved requirements into a key-addressed
+// map, rejecting two failure shapes before any install work starts: a
+// duplicate key (ErrDuplicateCollectionKey, pre-existing) and, now, an unsafe
+// identifier (ErrUnsafeCollectionIdentifier). The latter guard exists because
+// helpers.SplitFQDN performs no path-safety validation of its own - see
+// TestSplitFQDNDoesNotValidatePathSafety in helpers - so a namespace or name
+// like "foo/../.." reaches here unvalidated from every caller that only
+// checked it parses as a two-part FQDN. newInstallTarget validates the same
+// three components again, later, per collection - keeping this guard here as
+// well is deliberate, matching the pattern writeExtractMarker's own doc
+// comment already documents for this file: a caller's check does not make a
+// callee's own guard redundant.
 func buildCollectionsMap(resolved map[string]collection) (map[string]collection, error) {
 	collections := make(map[string]collection, len(resolved))
 	for _, col := range resolved {
+		if !helpers.IsPathElement(col.Namespace) || !helpers.IsPathElement(col.Name) || !helpers.IsPathElement(col.Version) {
+			return nil, fmt.Errorf("%w: ns=%q name=%q version=%q",
+				helpers.ErrUnsafeCollectionIdentifier, col.Namespace, col.Name, col.Version)
+		}
 		key := col.key()
 		if _, ok := collections[key]; ok {
 			return nil, fmt.Errorf("%w: %s", helpers.ErrDuplicateCollectionKey, key)
@@ -883,8 +928,9 @@ func installLevels(
 	graph map[string][]string,
 	levels [][]string,
 	prefetch *prefetcher,
+	root *os.Root,
 ) (int32, error) {
-	depsCtx := newInstallDeps(cfg, runtime, st, artifacts, extractStore)
+	depsCtx := newInstallDeps(cfg, runtime, st, artifacts, extractStore, root)
 	var failures int32
 	for _, level := range levels {
 		if err := runInstallLevel(ctx, depsCtx, collections, graph, level, prefetch, &failures); err != nil {

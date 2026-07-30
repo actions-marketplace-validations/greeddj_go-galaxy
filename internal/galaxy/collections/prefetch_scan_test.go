@@ -112,7 +112,8 @@ func TestBuildPrefetchTasksProbesConcurrentlyBoundedByWorkers(t *testing.T) {
 	const target = 2
 	art := &concurrentProbeArtifacts{gate: make(chan struct{}), target: target}
 	cfg := &config.Config{Workers: 2, DownloadPath: t.TempDir()}
-	deps := newPrefetchDeps(cfg, infra.New(noopPrinter{}, http.DefaultClient), store.New(), art)
+	root := newTestCollectionsRoot(t, cfg.DownloadPath)
+	deps := newPrefetchDeps(cfg, infra.New(noopPrinter{}, http.DefaultClient), store.New(), art, root)
 
 	const n = 6
 	collections := make(map[string]collection, n)
@@ -177,11 +178,11 @@ func (a *presenceArtifacts) Delete(context.Context, string) error {
 func seedAlreadyInstalled(t *testing.T, cfg *config.Config, st *store.Store, col collection) {
 	t.Helper()
 	const installedSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	installPath := filepath.Join(cfg.DownloadPath, "ansible_collections", col.Namespace, col.Name)
-	if err := os.MkdirAll(installPath, helpers.DirMod); err != nil {
+	target := newTestInstallTarget(t, cfg, col)
+	if err := os.MkdirAll(target.path, helpers.DirMod); err != nil {
 		t.Fatalf("mkdir installPath: %v", err)
 	}
-	seedValidExtractMarker(t, installPath, installedSHA)
+	seedValidExtractMarker(t, target, installedSHA)
 	infoDir := filepath.Join(cfg.DownloadPath, "ansible_collections", col.Namespace+"."+col.Name+"-"+col.Version+".info")
 	if err := os.MkdirAll(infoDir, helpers.DirMod); err != nil {
 		t.Fatalf("mkdir infoDir: %v", err)
@@ -190,7 +191,7 @@ func seedAlreadyInstalled(t *testing.T, cfg *config.Config, st *store.Store, col
 		t.Fatalf("write GALAXY.yml: %v", err)
 	}
 	st.SetInstalled(col.key(), store.InstalledEntry{
-		InstallPath:    installPath,
+		InstallPath:    target.path,
 		ArtifactSHA256: installedSHA,
 		InstalledAt:    time.Now().UTC(),
 	})
@@ -218,7 +219,8 @@ func TestBuildPrefetchTasksSchedulesExactlyTheRightSet(t *testing.T) {
 	cfg := &config.Config{Workers: 2, DownloadPath: t.TempDir()}
 	st := store.New()
 	seedAlreadyInstalled(t, cfg, st, c5)
-	deps := newPrefetchDeps(cfg, infra.New(noopPrinter{}, http.DefaultClient), st, art)
+	root := newTestCollectionsRoot(t, cfg.DownloadPath)
+	deps := newPrefetchDeps(cfg, infra.New(noopPrinter{}, http.DefaultClient), st, art, root)
 
 	collections := map[string]collection{
 		c1.key(): c1,

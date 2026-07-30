@@ -45,7 +45,7 @@ func TestPrefetchMetadataErrorSurfacedByWait(t *testing.T) {
 		t.Fatalf("buildInstallLevels: %v", err)
 	}
 
-	prefetch := startPrefetcher(context.Background(), newPrefetchDeps(fx.cfg, fx.runtime, fx.st, fx.artifacts), collections, levels)
+	prefetch := startPrefetcher(context.Background(), newPrefetchDeps(fx.cfg, fx.runtime, fx.st, fx.artifacts, fx.root), collections, levels)
 
 	meta, dl, ok, waitErr := prefetch.Wait(col.key())
 	if !ok {

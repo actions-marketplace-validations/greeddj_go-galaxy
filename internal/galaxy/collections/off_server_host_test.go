@@ -170,6 +170,7 @@ func runOffHostInstall(t *testing.T, cfgServer string, server *httptest.Server, 
 	deps := installDeps{
 		collectionDeps: newCollectionDeps(cfg, runtime, store.New()),
 		artifacts:      local.NewArtifacts(cfg.CacheDir),
+		root:           newTestCollectionsRoot(t, downloadPath),
 	}
 
 	if err := installCollection(context.Background(), col, deps, nil, meta, downloadResult{}); err != nil {

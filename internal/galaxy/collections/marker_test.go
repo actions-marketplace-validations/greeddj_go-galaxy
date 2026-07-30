@@ -10,6 +10,13 @@ package collections
 // the prefetch scan still uses the cheap installRecordMatches check rather
 // than the strict tally, and ships the benchmark that puts a real number on
 // the cost this unit adds.
+//
+// Most tests here drive marker.go's functions directly against a "flat"
+// installTarget (newFlatInstallTarget: rel = ".", the tree's own root) rather
+// than the ansible_collections/<ns>/<name> layout a real install produces -
+// these are marker-level unit tests, not install-pipeline tests, and a flat
+// target keeps every filepath.Join in this file's own assertions
+// byte-identical to what target.path already is.
 
 import (
 	"bytes"
@@ -17,6 +24,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -34,15 +42,15 @@ import (
 const validMarkerSHA = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 // seedValidExtractMarker writes a syntactically and semantically valid
-// extract-done marker for installPath by calling writeExtractMarker itself,
-// so every test that seeds an "already installed" tree gets a tally that
+// extract-done marker for target by calling writeExtractMarker itself, so
+// every test that seeds an "already installed" tree gets a tally that
 // actually matches the tree on disk (entries=0 dirs=0 bytes=0 for an empty
 // tree) - the shared helper the architect asked for, so canSkipInstall's now
 // tally-checking gate does not reject a seed that used to pass under the bare
 // os.Stat check the legacy "ok" sentinel satisfied.
-func seedValidExtractMarker(t *testing.T, installPath, sha string) {
+func seedValidExtractMarker(t *testing.T, target installTarget, sha string) {
 	t.Helper()
-	if err := writeExtractMarker(installPath, sha); err != nil {
+	if err := writeExtractMarker(target, sha); err != nil {
 		t.Fatalf("seed extract marker: %v", err)
 	}
 }
@@ -57,10 +65,10 @@ func mustMkdirAll(t *testing.T, path string) {
 
 // buildFixedMarkerTree creates a small, deterministic file tree - one root
 // file, two files under one subdirectory, one file under a nested
-// subdirectory - and returns its root plus the exact treeTally it must
-// produce, so marker tests can assert against known numbers instead of just
-// round-tripping scanTree's own output back on itself.
-func buildFixedMarkerTree(t *testing.T) (string, treeTally) {
+// subdirectory - and returns a flat installTarget rooted at it plus the exact
+// treeTally it must produce, so marker tests can assert against known numbers
+// instead of just round-tripping scanTree's own output back on itself.
+func buildFixedMarkerTree(t *testing.T) (installTarget, treeTally) {
 	t.Helper()
 	root := t.TempDir()
 	mustWriteFile(t, filepath.Join(root, "file0.txt"), []byte("root-file")) // 9 bytes
@@ -71,7 +79,7 @@ func buildFixedMarkerTree(t *testing.T) (string, treeTally) {
 	mustWriteFile(t, filepath.Join(root, "dirB", "nested", "file3.txt"), []byte("abc")) // 3 bytes
 	// entries: file0, file1, file2, file3 = 4; dirs: dirA, dirB, dirB/nested = 3;
 	// bytes: 9 + 5 + 6 + 3 = 23.
-	return root, treeTally{Entries: 4, Dirs: 3, Bytes: 23}
+	return newFlatInstallTarget(t, root), treeTally{Entries: 4, Dirs: 3, Bytes: 23}
 }
 
 // TestExtractMarkerRoundTrip pins the exact on-disk marker format, not just
@@ -80,14 +88,14 @@ func buildFixedMarkerTree(t *testing.T) (string, treeTally) {
 // round-trip-only test.
 func TestExtractMarkerRoundTrip(t *testing.T) {
 	t.Parallel()
-	root, want := buildFixedMarkerTree(t)
+	target, want := buildFixedMarkerTree(t)
 	const sha = "1111111111111111111111111111111111111111111111111111111111111111"
 
-	if err := writeExtractMarker(root, sha); err != nil {
+	if err := writeExtractMarker(target, sha); err != nil {
 		t.Fatalf("writeExtractMarker: %v", err)
 	}
 
-	marker := filepath.Join(root, helpers.ExtractMarkerPrefix+sha)
+	marker := filepath.Join(target.path, helpers.ExtractMarkerPrefix+sha)
 	got, err := os.ReadFile(marker) //nolint:gosec // marker path is test-controlled
 	if err != nil {
 		t.Fatalf("read marker: %v", err)
@@ -98,7 +106,7 @@ func TestExtractMarkerRoundTrip(t *testing.T) {
 	}
 
 	printer := &capturingPrinter{}
-	if !verifyExtractMarker(printer, root, sha) {
+	if !verifyExtractMarker(printer, target, sha) {
 		t.Fatalf("expected verifyExtractMarker to accept a freshly written marker")
 	}
 }
@@ -110,19 +118,19 @@ func TestExtractMarkerRoundTrip(t *testing.T) {
 // check.
 func TestExtractMarkerDetectsDeletedFile(t *testing.T) {
 	t.Parallel()
-	root, _ := buildFixedMarkerTree(t)
+	target, _ := buildFixedMarkerTree(t)
 	const sha = "2222222222222222222222222222222222222222222222222222222222222222"
-	seedValidExtractMarker(t, root, sha)
+	seedValidExtractMarker(t, target, sha)
 
-	if err := os.Remove(filepath.Join(root, "dirA", "file1.txt")); err != nil {
+	if err := os.Remove(filepath.Join(target.path, "dirA", "file1.txt")); err != nil {
 		t.Fatalf("remove file: %v", err)
 	}
 
 	printer := &capturingPrinter{}
-	if verifyExtractMarker(printer, root, sha) {
+	if verifyExtractMarker(printer, target, sha) {
 		t.Fatalf("expected verifyExtractMarker to reject a tree missing a file")
 	}
-	assertPathAbsent(t, filepath.Join(root, helpers.ExtractMarkerPrefix+sha))
+	assertPathAbsent(t, filepath.Join(target.path, helpers.ExtractMarkerPrefix+sha))
 	if len(printer.warns) == 0 {
 		t.Fatalf("expected a Warnf line for a current-format tally mismatch, got none")
 	}
@@ -133,14 +141,14 @@ func TestExtractMarkerDetectsDeletedFile(t *testing.T) {
 // caught the same way a deletion is.
 func TestExtractMarkerDetectsAddedFile(t *testing.T) {
 	t.Parallel()
-	root, _ := buildFixedMarkerTree(t)
+	target, _ := buildFixedMarkerTree(t)
 	const sha = "3333333333333333333333333333333333333333333333333333333333333333"
-	seedValidExtractMarker(t, root, sha)
+	seedValidExtractMarker(t, target, sha)
 
-	mustWriteFile(t, filepath.Join(root, "dirA", "extra.txt"), []byte("new"))
+	mustWriteFile(t, filepath.Join(target.path, "dirA", "extra.txt"), []byte("new"))
 
 	printer := &capturingPrinter{}
-	if verifyExtractMarker(printer, root, sha) {
+	if verifyExtractMarker(printer, target, sha) {
 		t.Fatalf("expected verifyExtractMarker to reject a tree with an added file")
 	}
 }
@@ -151,14 +159,14 @@ func TestExtractMarkerDetectsAddedFile(t *testing.T) {
 // comparison.
 func TestExtractMarkerDetectsSizeChange(t *testing.T) {
 	t.Parallel()
-	root, _ := buildFixedMarkerTree(t)
+	target, _ := buildFixedMarkerTree(t)
 	const sha = "4444444444444444444444444444444444444444444444444444444444444444"
-	seedValidExtractMarker(t, root, sha)
+	seedValidExtractMarker(t, target, sha)
 
-	mustWriteFile(t, filepath.Join(root, "dirA", "file1.txt"), []byte("this content is longer than the original"))
+	mustWriteFile(t, filepath.Join(target.path, "dirA", "file1.txt"), []byte("this content is longer than the original"))
 
 	printer := &capturingPrinter{}
-	if verifyExtractMarker(printer, root, sha) {
+	if verifyExtractMarker(printer, target, sha) {
 		t.Fatalf("expected verifyExtractMarker to reject a tree with a resized file")
 	}
 }
@@ -173,15 +181,15 @@ func TestExtractMarkerDetectsSizeChange(t *testing.T) {
 // than it actually is.
 func TestExtractMarkerMissesEqualSizeEdit(t *testing.T) {
 	t.Parallel()
-	root, _ := buildFixedMarkerTree(t)
+	target, _ := buildFixedMarkerTree(t)
 	const sha = "5555555555555555555555555555555555555555555555555555555555555555"
-	seedValidExtractMarker(t, root, sha)
+	seedValidExtractMarker(t, target, sha)
 
 	// "hello" -> "HELLO": identical length (5 bytes), different content.
-	mustWriteFile(t, filepath.Join(root, "dirA", "file1.txt"), []byte("HELLO"))
+	mustWriteFile(t, filepath.Join(target.path, "dirA", "file1.txt"), []byte("HELLO"))
 
 	printer := &capturingPrinter{}
-	if !verifyExtractMarker(printer, root, sha) {
+	if !verifyExtractMarker(printer, target, sha) {
 		t.Fatalf("expected verifyExtractMarker to MISS a same-length in-place edit (documented limit, not a bug)")
 	}
 }
@@ -195,13 +203,13 @@ func TestExtractMarkerMissesEqualSizeEdit(t *testing.T) {
 // change.
 func TestExtractMarkerLegacyFormatInvalidates(t *testing.T) {
 	t.Parallel()
-	root, _ := buildFixedMarkerTree(t)
+	target, _ := buildFixedMarkerTree(t)
 	const sha = "6666666666666666666666666666666666666666666666666666666666666666"
-	marker := filepath.Join(root, helpers.ExtractMarkerPrefix+sha)
+	marker := filepath.Join(target.path, helpers.ExtractMarkerPrefix+sha)
 	mustWriteFile(t, marker, []byte("ok"))
 
 	printer := &capturingPrinter{}
-	if verifyExtractMarker(printer, root, sha) {
+	if verifyExtractMarker(printer, target, sha) {
 		t.Fatalf("expected verifyExtractMarker to reject the legacy \"ok\" marker")
 	}
 	if len(printer.warns) != 0 {
@@ -232,13 +240,13 @@ func TestExtractMarkerOversizedAndGarbageInvalidate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			root, _ := buildFixedMarkerTree(t)
+			target, _ := buildFixedMarkerTree(t)
 			const sha = "7777777777777777777777777777777777777777777777777777777777777777"
-			marker := filepath.Join(root, helpers.ExtractMarkerPrefix+sha)
+			marker := filepath.Join(target.path, helpers.ExtractMarkerPrefix+sha)
 			mustWriteFile(t, marker, tt.content)
 
 			printer := &capturingPrinter{}
-			if verifyExtractMarker(printer, root, sha) {
+			if verifyExtractMarker(printer, target, sha) {
 				t.Fatalf("expected verifyExtractMarker to reject %s", tt.name)
 			}
 			if len(printer.warns) != 0 {
@@ -256,9 +264,9 @@ func TestExtractMarkerOversizedAndGarbageInvalidate(t *testing.T) {
 // identical result whether or not that sibling is present.
 func TestExtractMarkerIgnoresSiblingMarkers(t *testing.T) {
 	t.Parallel()
-	root, want := buildFixedMarkerTree(t)
+	target, want := buildFixedMarkerTree(t)
 
-	before, err := scanTree(root)
+	before, err := scanTree(target)
 	if err != nil {
 		t.Fatalf("scanTree before: %v", err)
 	}
@@ -266,9 +274,9 @@ func TestExtractMarkerIgnoresSiblingMarkers(t *testing.T) {
 		t.Fatalf("scanTree before sibling = %+v, want %+v", before, want)
 	}
 
-	mustWriteFile(t, filepath.Join(root, helpers.ExtractMarkerPrefix+"deadbeef"), bytes.Repeat([]byte("x"), 128))
+	mustWriteFile(t, filepath.Join(target.path, helpers.ExtractMarkerPrefix+"deadbeef"), bytes.Repeat([]byte("x"), 128))
 
-	after, err := scanTree(root)
+	after, err := scanTree(target)
 	if err != nil {
 		t.Fatalf("scanTree after: %v", err)
 	}
@@ -297,7 +305,8 @@ func TestScanTreeDoesNotFollowSymlinks(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	got, err := scanTree(root)
+	target := newFlatInstallTarget(t, root)
+	got, err := scanTree(target)
 	if err != nil {
 		t.Fatalf("scanTree: %v", err)
 	}
@@ -342,25 +351,26 @@ func TestCheckExtractMarkerScanFailedAndMissing(t *testing.T) {
 }
 
 // testCheckExtractMarkerScanFailed makes the installed tree itself
-// unreadable after seeding a valid marker, so scanTree's own
-// filepath.WalkDir fails, and proves checkExtractMarker reports that
-// failure faithfully (status, scanErr, no removal) while verifyExtractMarker
-// logs it at Debugf (never Warnf - a scan failure is not a confirmed tally
-// mismatch) and still performs its best-effort removal.
+// unreadable after seeding a valid marker, so scanTree's own fs.WalkDir
+// fails, and proves checkExtractMarker reports that failure faithfully
+// (status, scanErr, no removal) while verifyExtractMarker logs it at Debugf
+// (never Warnf - a scan failure is not a confirmed tally mismatch) and still
+// performs its best-effort removal.
 func testCheckExtractMarkerScanFailed(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root; permission-based read guard cannot be tested")
 	}
 	installPath := t.TempDir()
+	target := newFlatInstallTarget(t, installPath)
 	const sha = "deadbeefcafedeadbeefcafedeadbeefcafedeadbeefcafedeadbeefcafedead"
-	seedValidExtractMarker(t, installPath, sha)
+	seedValidExtractMarker(t, target, sha)
 	markerPath := filepath.Join(installPath, helpers.ExtractMarkerPrefix+sha)
 
 	// 0o311 (write+execute, no read): a directory missing the read bit still
-	// fails os.ReadDir - so scanTree's filepath.WalkDir fails, as required -
+	// fails a directory listing - so scanTree's fs.WalkDir fails, as required -
 	// but keeping the write bit lets the directory entry for the marker
 	// actually be unlinked afterward (verified empirically: a bare
-	// execute-only 0o111 blocks os.Remove outright on this filesystem, which
+	// execute-only 0o111 blocks Remove outright on this filesystem, which
 	// would make the removal assertion below untestable rather than
 	// genuinely exercised). Deliberately more permissive than 0600 for that
 	// reason, not an oversight.
@@ -376,8 +386,8 @@ func testCheckExtractMarkerScanFailed(t *testing.T) {
 		}
 	})
 
-	assertScanFailedOutcome(t, checkExtractMarker(installPath, sha), markerPath)
-	assertVerifyExtractMarkerScanFailed(t, installPath, sha, markerPath)
+	assertScanFailedOutcome(t, checkExtractMarker(target, sha), markerPath)
+	assertVerifyExtractMarkerScanFailed(t, target, sha, markerPath)
 }
 
 // assertScanFailedOutcome checks checkExtractMarker's own return value for
@@ -403,13 +413,13 @@ func assertScanFailedOutcome(t *testing.T, outcome extractMarkerOutcome, markerP
 // scan-failed scenario and checks its return value, its Debugf-tier message
 // (and the absence of a Warnf line - a scan failure is not a confirmed tally
 // mismatch), and that its best-effort removal actually removed the marker.
-func assertVerifyExtractMarkerScanFailed(t *testing.T, installPath, sha, markerPath string) {
+func assertVerifyExtractMarkerScanFailed(t *testing.T, target installTarget, sha, markerPath string) {
 	t.Helper()
 	printer := &capturingPrinter{}
-	if verifyExtractMarker(printer, installPath, sha) {
+	if verifyExtractMarker(printer, target, sha) {
 		t.Fatal("expected verifyExtractMarker to return false")
 	}
-	wantMsg := "failed to scan " + installPath + " to verify its extract marker"
+	wantMsg := "failed to scan " + target.path + " to verify its extract marker"
 	if !printer.hasDebugContaining(wantMsg) {
 		t.Errorf("expected a Debugf line containing %q, got %v", wantMsg, printer.debugs)
 	}
@@ -428,10 +438,11 @@ func assertVerifyExtractMarkerScanFailed(t *testing.T, installPath, sha, markerP
 // remove), logged at Debugf by the latter.
 func testCheckExtractMarkerMissing(t *testing.T) {
 	installPath := t.TempDir()
+	target := newFlatInstallTarget(t, installPath)
 	const sha = "deadbeefcafedeadbeefcafedeadbeefcafedeadbeefcafedeadbeefcafedead"
 	markerPath := filepath.Join(installPath, helpers.ExtractMarkerPrefix+sha)
 
-	outcome := checkExtractMarker(installPath, sha)
+	outcome := checkExtractMarker(target, sha)
 	if outcome.status != extractMarkerMissing {
 		t.Fatalf("outcome.status = %v, want extractMarkerMissing", outcome.status)
 	}
@@ -443,7 +454,7 @@ func testCheckExtractMarkerMissing(t *testing.T) {
 	}
 
 	printer := &capturingPrinter{}
-	if verifyExtractMarker(printer, installPath, sha) {
+	if verifyExtractMarker(printer, target, sha) {
 		t.Fatal("expected verifyExtractMarker to return false")
 	}
 	wantMsg := "extract marker missing or unreadable at " + markerPath
@@ -483,7 +494,8 @@ func TestPrefetchScanUsesCheapCheck(t *testing.T) {
 		ArtifactSHA256: installedSHA,
 		InstalledAt:    time.Now().UTC(),
 	})
-	deps := newPrefetchDeps(cfg, infra.New(noopPrinter{}, http.DefaultClient), st, &presenceArtifacts{})
+	testRoot := newTestCollectionsRoot(t, root)
+	deps := newPrefetchDeps(cfg, infra.New(noopPrinter{}, http.DefaultClient), st, &presenceArtifacts{}, testRoot)
 
 	if shouldSchedulePrefetch(t.Context(), deps, col) {
 		t.Fatalf("expected shouldSchedulePrefetch to report already-installed via the cheap check, even with a legacy marker")
@@ -492,10 +504,10 @@ func TestPrefetchScanUsesCheapCheck(t *testing.T) {
 
 // buildTraversalFixture builds an installPath four real path elements deep
 // under a "containment" directory (collections/ansible_collections/ns/name -
-// the exact shape collectionInstallPath produces), itself nested one level
-// inside a t.TempDir() sandbox. This mirrors the architect's own verified
-// proof of concept (an installPath of this same four-element depth under a
-// root) while keeping every path this fixture's tests can possibly reach -
+// the exact shape a real install produces), itself nested one level inside a
+// t.TempDir() sandbox. This mirrors the architect's own verified proof of
+// concept (an installPath of this same four-element depth under a root)
+// while keeping every path this fixture's tests can possibly reach -
 // including an unbounded escape - inside the sandbox this test owns and
 // t.TempDir() cleans up, never a real host path. The traversal counts below
 // are load-bearing: six ".." segments (no leading dot) exactly cancel the
@@ -508,6 +520,13 @@ func TestPrefetchScanUsesCheapCheck(t *testing.T) {
 // itself - the unbounded property: capping ".." tokens at installPath's own
 // component count would not have stopped this, since the leading "./"
 // buys an extra pop for free.
+//
+// These tests drive markerRel/verifyExtractMarker/writeExtractMarker/
+// checkExtractMarker directly against a flat installTarget (rel = "."), not
+// through newInstallTarget/cfg.DownloadPath - the guard under test here is
+// markerRel's own sha validation, unconditional and independent of the root
+// boundary, which is why a traversal sha is refused before any path is ever
+// joined regardless of what target.rel is.
 //
 // Returns sandbox, containment, installPath, in that order (unnamed, per
 // nonamedreturns).
@@ -531,6 +550,7 @@ func buildTraversalFixture(t *testing.T) (string, string, string) {
 func TestVerifyExtractMarkerRefusesTraversalSHA(t *testing.T) {
 	t.Parallel()
 	_, containment, installPath := buildTraversalFixture(t)
+	target := newFlatInstallTarget(t, installPath)
 
 	victim := filepath.Join(containment, "home", "ci", ".ssh", "authorized_keys")
 	const victimContent = "ssh-ed25519 AAAA... ci@legit\n"
@@ -539,7 +559,7 @@ func TestVerifyExtractMarkerRefusesTraversalSHA(t *testing.T) {
 
 	const traversalSHA = "../../../../../../home/ci/.ssh/authorized_keys"
 	printer := &capturingPrinter{}
-	if verifyExtractMarker(printer, installPath, traversalSHA) {
+	if verifyExtractMarker(printer, target, traversalSHA) {
 		t.Fatal("expected verifyExtractMarker to reject a traversal sha")
 	}
 	assertFileContent(t, victim, victimContent)
@@ -561,6 +581,7 @@ func TestVerifyExtractMarkerRefusesTraversalSHA(t *testing.T) {
 func TestVerifyExtractMarkerRefusesUnboundedTraversalSHA(t *testing.T) {
 	t.Parallel()
 	sandbox, _, installPath := buildTraversalFixture(t)
+	target := newFlatInstallTarget(t, installPath)
 
 	victim := filepath.Join(sandbox, "etc", "passwd")
 	const victimContent = "root:x:0:0:root:/root:/bin/sh\n"
@@ -569,7 +590,7 @@ func TestVerifyExtractMarkerRefusesUnboundedTraversalSHA(t *testing.T) {
 
 	const traversalSHA = "./../../../../../../etc/passwd"
 	printer := &capturingPrinter{}
-	if verifyExtractMarker(printer, installPath, traversalSHA) {
+	if verifyExtractMarker(printer, target, traversalSHA) {
 		t.Fatal("expected verifyExtractMarker to reject an unbounded traversal sha")
 	}
 	assertFileContent(t, victim, victimContent)
@@ -580,13 +601,14 @@ func TestVerifyExtractMarkerRefusesUnboundedTraversalSHA(t *testing.T) {
 
 // TestWriteExtractMarkerRefusesTraversalSHA proves writeExtractMarker - the
 // hard-error side of this guard, since it runs only after a real extraction
-// - refuses the same traversal sha before scanTree, os.Remove, or
-// os.WriteFile ever run: the victim survives untouched, no marker is created
-// anywhere under installPath, and the returned error wraps
+// - refuses the same traversal sha before scanTree, Remove, or WriteFile
+// ever run: the victim survives untouched, no marker is created anywhere
+// under installPath, and the returned error wraps
 // helpers.ErrMalformedArtifactSHA256.
 func TestWriteExtractMarkerRefusesTraversalSHA(t *testing.T) {
 	t.Parallel()
 	_, containment, installPath := buildTraversalFixture(t)
+	target := newFlatInstallTarget(t, installPath)
 
 	victim := filepath.Join(containment, "home", "ci", ".ssh", "authorized_keys")
 	const victimContent = "ssh-ed25519 AAAA... ci@legit\n"
@@ -594,7 +616,7 @@ func TestWriteExtractMarkerRefusesTraversalSHA(t *testing.T) {
 	mustWriteFile(t, victim, []byte(victimContent))
 
 	const traversalSHA = "../../../../../../home/ci/.ssh/authorized_keys"
-	err := writeExtractMarker(installPath, traversalSHA)
+	err := writeExtractMarker(target, traversalSHA)
 	// t.Errorf, not t.Fatalf: the victim-survival and empty-installPath
 	// assertions below must still run even if this one fails, so a mutation
 	// that returns the wrong error class but still touches the filesystem is
@@ -620,6 +642,7 @@ func TestWriteExtractMarkerRefusesTraversalSHA(t *testing.T) {
 func TestCheckExtractMarkerReportsUnsafeSHA(t *testing.T) {
 	t.Parallel()
 	_, _, installPath := buildTraversalFixture(t)
+	target := newFlatInstallTarget(t, installPath)
 
 	before, err := os.ReadDir(installPath)
 	if err != nil {
@@ -627,7 +650,7 @@ func TestCheckExtractMarkerReportsUnsafeSHA(t *testing.T) {
 	}
 
 	const traversalSHA = "../../../../../../home/ci/.ssh/authorized_keys"
-	outcome := checkExtractMarker(installPath, traversalSHA)
+	outcome := checkExtractMarker(target, traversalSHA)
 	if outcome.status != extractMarkerUnsafeSHA {
 		t.Fatalf("outcome.status = %v, want extractMarkerUnsafeSHA", outcome.status)
 	}
@@ -644,14 +667,15 @@ func TestCheckExtractMarkerReportsUnsafeSHA(t *testing.T) {
 	}
 }
 
-// TestExtractMarkerPathRejectsNonDigest is extractMarkerPath's own table: it
-// must return ok=false for anything that is not exactly 64 lowercase hex
-// characters - including short-but-hex, uppercase, a multi-element path, and
-// both dot forms - and ok=true with the exact expected join for one real
-// digest.
-func TestExtractMarkerPathRejectsNonDigest(t *testing.T) {
+// TestMarkerRelRejectsNonDigest is markerRel's own table: it must return
+// ok=false for anything that is not exactly 64 lowercase hex characters -
+// including short-but-hex, uppercase, a multi-element path, and both dot
+// forms - and ok=true with the exact expected join for one real digest.
+func TestMarkerRelRejectsNonDigest(t *testing.T) {
 	t.Parallel()
 	installPath := filepath.Join(t.TempDir(), "ansible_collections", "ns", "name")
+	mustMkdirAll(t, installPath)
+	target := newFlatInstallTarget(t, installPath)
 
 	badCases := []struct {
 		name string
@@ -667,19 +691,19 @@ func TestExtractMarkerPathRejectsNonDigest(t *testing.T) {
 	for _, tc := range badCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if _, ok := extractMarkerPath(installPath, tc.sha); ok {
-				t.Fatalf("extractMarkerPath(%q, %q) ok = true, want false", installPath, tc.sha)
+			if _, ok := markerRel(target, tc.sha); ok {
+				t.Fatalf("markerRel(%q, %q) ok = true, want false", installPath, tc.sha)
 			}
 		})
 	}
 
-	got, ok := extractMarkerPath(installPath, validMarkerSHA)
+	got, ok := markerRel(target, validMarkerSHA)
 	if !ok {
-		t.Fatalf("extractMarkerPath with a valid 64-hex sha: ok = false, want true")
+		t.Fatalf("markerRel with a valid 64-hex sha: ok = false, want true")
 	}
-	want := filepath.Join(installPath, helpers.ExtractMarkerPrefix+validMarkerSHA)
+	want := path.Join(target.rel, helpers.ExtractMarkerPrefix+validMarkerSHA)
 	if got != want {
-		t.Fatalf("extractMarkerPath = %q, want %q", got, want)
+		t.Fatalf("markerRel = %q, want %q", got, want)
 	}
 }
 
@@ -702,16 +726,25 @@ func BenchmarkScanTree(b *testing.B) {
 			b.Fatalf("mkdir %s: %v", dir, err)
 		}
 		for j := range filesPerSubdir {
-			path := filepath.Join(dir, fmt.Sprintf("file%d.dat", j))
-			if err := os.WriteFile(path, content, helpers.FileMod); err != nil {
-				b.Fatalf("write %s: %v", path, err)
+			p := filepath.Join(dir, fmt.Sprintf("file%d.dat", j))
+			if err := os.WriteFile(p, content, helpers.FileMod); err != nil {
+				b.Fatalf("write %s: %v", p, err)
 			}
 		}
 	}
 
+	osRoot, err := os.OpenRoot(root)
+	if err != nil {
+		b.Fatalf("os.OpenRoot(%s): %v", root, err)
+	}
+	b.Cleanup(func() {
+		_ = osRoot.Close()
+	})
+	target := installTarget{root: osRoot, rel: ".", path: root}
+
 	b.ResetTimer()
 	for range b.N {
-		if _, err := scanTree(root); err != nil {
+		if _, err := scanTree(target); err != nil {
 			b.Fatalf("scanTree: %v", err)
 		}
 	}

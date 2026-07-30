@@ -71,8 +71,11 @@ func TestClassifyDryRunSortedOrder(t *testing.T) {
 
 		// artifacts is nil throughout: dryRunArtifactCached treats a nil store as
 		// "not cached", which is the only classification this test needs and
-		// avoids depending on any real cache state.
-		classifyDryRun(context.Background(), runtime, cfg, cols, installDryRunVerbs, installDryRunProbe(cfg, nil, nil))
+		// avoids depending on any real cache state. root is nil too - cfg has no
+		// DownloadPath, and a nil store already makes installRecordMatches
+		// unreachable through newInstallTarget's own nil-root guard, so there is
+		// nothing for a real root to add here.
+		classifyDryRun(context.Background(), runtime, cfg, cols, installDryRunVerbs, installDryRunProbe(cfg, nil, nil, nil))
 
 		got := printer.okLines()
 		if len(got) != len(want) {
@@ -134,7 +137,8 @@ func TestClassifyDryRunReportsCacheHitVsMiss(t *testing.T) {
 	// installed record - so the probe's install-record arm can never match
 	// either collection, isolating the cache-hit classification this test is
 	// about from acme.app's genuine install record.
-	probe := installDryRunProbe(cfg, store.New(), state.backend.Artifacts())
+	installRoot := newTestCollectionsRoot(t, cfg.DownloadPath)
+	probe := installDryRunProbe(cfg, store.New(), state.backend.Artifacts(), installRoot)
 	classifyDryRun(context.Background(), reportRuntime, cfg, cols, installDryRunVerbs, probe)
 
 	if !printer.hasOkContaining("acme.app@1.0.0 (artifact cached)") {
@@ -183,7 +187,8 @@ func TestInstallDryRunProbeMarksUpToDate(t *testing.T) {
 	}
 	printer := &capturingPrinter{}
 	reportRuntime := infra.New(printer, srv.Client())
-	probe := installDryRunProbe(cfg, state.store, state.backend.Artifacts())
+	installRoot := newTestCollectionsRoot(t, cfg.DownloadPath)
+	probe := installDryRunProbe(cfg, state.store, state.backend.Artifacts(), installRoot)
 	classifyDryRun(context.Background(), reportRuntime, cfg, cols, installDryRunVerbs, probe)
 
 	if !printer.hasPersistentPrintContaining("Up to date: acme.app@1.0.0") {
@@ -239,7 +244,8 @@ func TestClassifyDryRunMirrorsIsCacheHitUnderNoCache(t *testing.T) {
 	// installed record - so the probe's install-record arm can never match,
 	// isolating the --no-cache classification this test is about from
 	// acme.app's genuine install record.
-	probe := installDryRunProbe(cfg, store.New(), state.backend.Artifacts())
+	installRoot := newTestCollectionsRoot(t, cfg.DownloadPath)
+	probe := installDryRunProbe(cfg, store.New(), state.backend.Artifacts(), installRoot)
 	classifyDryRun(context.Background(), reportRuntime, cfg, cols, installDryRunVerbs, probe)
 
 	if !printer.hasOkContaining("acme.app@1.0.0 (would download)") {
@@ -305,7 +311,8 @@ func TestClassifyDryRunNeverDeletesDriftedExtractMarker(t *testing.T) {
 	}
 	printer := &capturingPrinter{}
 	reportRuntime := infra.New(printer, srv.Client())
-	probe := installDryRunProbe(cfg, state.store, state.backend.Artifacts())
+	installRoot := newTestCollectionsRoot(t, cfg.DownloadPath)
+	probe := installDryRunProbe(cfg, state.store, state.backend.Artifacts(), installRoot)
 	classifyDryRun(context.Background(), reportRuntime, cfg, cols, installDryRunVerbs, probe)
 
 	if printer.hasPersistentPrintContaining("Up to date") {
@@ -415,14 +422,15 @@ func TestInstallDryRunDriftedOfflineEvictedReportsWouldFailAndFails(t *testing.T
 
 	printer := &capturingPrinter{}
 	reportRuntime := infra.New(printer, http.DefaultClient)
-	probe := installDryRunProbe(cfg, state.store, state.backend.Artifacts())
+	installRoot := newTestCollectionsRoot(t, cfg.DownloadPath)
+	probe := installDryRunProbe(cfg, state.store, state.backend.Artifacts(), installRoot)
 	wouldFail := classifyDryRun(context.Background(), reportRuntime, cfg, cols, installDryRunVerbs, probe)
 	assertReportsSingleWouldFail(t, printer, wouldFail, "acme.app@1.0.0")
 
 	// installDryRun's own error-wrap must classify identically to a real
 	// failed install.
 	plan := &installPlan{collections: cols}
-	err := installDryRun(context.Background(), cfg, reportRuntime, state, plan, time.Now())
+	err := installDryRun(context.Background(), cfg, reportRuntime, state, plan, time.Now(), installRoot)
 	assertFailsOfflineClosed(t, err)
 }
 

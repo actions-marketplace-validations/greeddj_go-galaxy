@@ -3,7 +3,7 @@ package collections
 // This file is the end-to-end proof that a poisoned artifact sha256 - a
 // traversal string arriving via either of the two reachable sources
 // resolveArtifactSHA and canSkipInstall read - never reaches the filesystem
-// operations marker.go's extractMarkerPath guards, and, for the
+// operations marker.go's markerRel guards, and, for the
 // resolveArtifactSHA route, never gets persisted into the snapshot either.
 // Every victim file below lives inside this test's own t.TempDir() sandbox,
 // standing in for a real path outside the install root the way the
@@ -115,9 +115,11 @@ func TestInstallRejectsPoisonedMetadataSHAOnCacheHit(t *testing.T) {
 	runtime := infra.New(noopPrinter{}, http.DefaultClient)
 	st := store.New()
 	artifacts := local.NewArtifacts(cacheDir)
+	root := newTestCollectionsRoot(t, downloadPath)
 	deps := installDeps{
 		collectionDeps: newCollectionDeps(cfg, runtime, st),
 		artifacts:      artifacts,
+		root:           root,
 	}
 
 	// A real, working DownloadURL is deliberately wired in (not left empty):
@@ -163,7 +165,7 @@ func TestInstallRejectsPoisonedMetadataSHAOnCacheHit(t *testing.T) {
 // The GALAXY.yml sidecar installRecordMatches also checks is seeded here,
 // deliberately: without it, installRecordMatches would already return false
 // for that unrelated reason, letting a regression in its own
-// extractMarkerPath guard hide behind the missing sidecar instead of being
+// markerRel guard hide behind the missing sidecar instead of being
 // caught by this test.
 func TestCanSkipInstallRefusesPoisonedSnapshotSHA(t *testing.T) {
 	t.Parallel()
@@ -171,8 +173,9 @@ func TestCanSkipInstallRefusesPoisonedSnapshotSHA(t *testing.T) {
 	downloadPath := filepath.Join(sandbox, "install")
 
 	col := collection{Namespace: "acme", Name: "widgets", Version: "1.0.0"}
-	installPath := collectionInstallPath(&config.Config{DownloadPath: downloadPath}, col)
-	mustMkdirAll(t, installPath)
+	cfg := &config.Config{DownloadPath: downloadPath}
+	target := newTestInstallTarget(t, cfg, col)
+	mustMkdirAll(t, target.path)
 
 	infoDir := filepath.Join(downloadPath, "ansible_collections", col.Namespace+"."+col.Name+"-"+col.Version+".info")
 	mustMkdirAll(t, infoDir)
@@ -188,22 +191,21 @@ func TestCanSkipInstallRefusesPoisonedSnapshotSHA(t *testing.T) {
 	mustMkdirAll(t, filepath.Dir(victim))
 	mustWriteFile(t, victim, []byte(victimContent))
 
-	cfg := &config.Config{DownloadPath: downloadPath}
 	st := store.New()
 	st.SetInstalled(col.key(), store.InstalledEntry{
-		InstallPath:    installPath,
+		InstallPath:    target.path,
 		ArtifactSHA256: traversalSHA,
 		InstalledAt:    time.Now().UTC(),
 	})
 
-	if canSkipInstall(cfg, col, installPath, st, noopPrinter{}) {
+	if canSkipInstall(target, col, st, noopPrinter{}) {
 		t.Fatal("expected canSkipInstall to refuse a poisoned snapshot sha, not report it as already installed")
 	}
 	assertFileContent(t, victim, victimContent)
 }
 
 // TestInstallRecordMatchesRefusesUnsafeMarkerSHA proves installRecordMatches's
-// own extractMarkerPath call specifically, independent of canSkipInstall's
+// own markerRel call specifically, independent of canSkipInstall's
 // separate verifyExtractMarker backstop: a file is seeded at exactly the
 // location the pre-fix inline filepath.Join(installPath,
 // helpers.ExtractMarkerPrefix+entry.ArtifactSHA256) would have found present
@@ -216,8 +218,9 @@ func TestInstallRecordMatchesRefusesUnsafeMarkerSHA(t *testing.T) {
 	downloadPath := filepath.Join(sandbox, "install")
 
 	col := collection{Namespace: "acme", Name: "widgets", Version: "1.0.0"}
-	installPath := collectionInstallPath(&config.Config{DownloadPath: downloadPath}, col)
-	mustMkdirAll(t, installPath)
+	cfg := &config.Config{DownloadPath: downloadPath}
+	target := newTestInstallTarget(t, cfg, col)
+	mustMkdirAll(t, target.path)
 
 	infoDir := filepath.Join(downloadPath, "ansible_collections", col.Namespace+"."+col.Name+"-"+col.Version+".info")
 	mustMkdirAll(t, infoDir)
@@ -232,15 +235,14 @@ func TestInstallRecordMatchesRefusesUnsafeMarkerSHA(t *testing.T) {
 	mustMkdirAll(t, filepath.Dir(coincidental))
 	mustWriteFile(t, coincidental, []byte("not actually an extract marker"))
 
-	cfg := &config.Config{DownloadPath: downloadPath}
 	st := store.New()
 	st.SetInstalled(col.key(), store.InstalledEntry{
-		InstallPath:    installPath,
+		InstallPath:    target.path,
 		ArtifactSHA256: traversalSHA,
 		InstalledAt:    time.Now().UTC(),
 	})
 
-	if installRecordMatches(cfg, col, installPath, st) {
+	if installRecordMatches(target, col, st) {
 		t.Fatal("expected installRecordMatches to refuse an unsafe marker sha rather than coincidentally match an unrelated file")
 	}
 }

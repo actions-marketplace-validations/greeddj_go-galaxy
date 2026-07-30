@@ -40,9 +40,10 @@ func TestExtractCollectionRefusesNonCanonicalSHABeforeDestroyingTree(t *testing.
 
 	col := collection{Namespace: "acme", Name: "widgets", Version: "1.0.0"}
 	runtime := infra.New(noopPrinter{}, http.DefaultClient)
+	target := newFlatInstallTarget(t, installPath)
 
 	const traversalSHA = "../../../../../../home/ci/.ssh/authorized_keys"
-	err := extractCollection(col, tarPath, installPath, runtime, nil, traversalSHA)
+	err := extractCollection(col, tarPath, target, runtime, nil, traversalSHA)
 	if !errors.Is(err, helpers.ErrMalformedArtifactSHA256) {
 		t.Errorf("extractCollection error = %v, want errors.Is helpers.ErrMalformedArtifactSHA256", err)
 	}

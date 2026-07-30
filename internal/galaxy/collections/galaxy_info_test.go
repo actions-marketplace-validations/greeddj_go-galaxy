@@ -1,7 +1,6 @@
 package collections
 
 import (
-	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -112,8 +111,9 @@ func TestWriteGalaxyInfoPersistsNoSignature(t *testing.T) {
 	cfg := &config.Config{Server: "https://hub.example.com/api/automation-hub", DownloadPath: root}
 	col := collection{Namespace: "acme", Name: "widgets", Version: testVersion100}
 	meta := newVersionInfo("https://objects.example.com/artifacts/acme-widgets-1.0.0.tar.gz"+presignedQuery, "")
+	target := newTestInstallTarget(t, cfg, col)
 
-	if err := writeGalaxyInfo(cfg, col, meta); err != nil {
+	if err := writeGalaxyInfo(target, cfg, col, meta); err != nil {
 		t.Fatalf("writeGalaxyInfo: %v", err)
 	}
 
@@ -137,43 +137,44 @@ func TestWriteGalaxyInfoPersistsNoSignature(t *testing.T) {
 	}
 }
 
-// TestWriteGalaxyInfoRefusesTraversingVersion proves the collectionInfoDir
-// chokepoint closes the path-traversal primitive: a version identifier with
-// enough ".." segments to escape DownloadPath must be refused before
-// anything is written, not merely produce a directory somewhere unexpected.
+// TestNewInstallTargetRefusesTraversingVersionBeforeWriteGalaxyInfo proves
+// the identity guard writeGalaxyInfo used to run itself (via the former
+// collectionInfoDir) now lives one call earlier, in newInstallTarget: a
+// version identifier with enough ".." segments to escape DownloadPath must be
+// refused there, before a target (and so before any write) ever exists, not
+// merely produce a directory somewhere unexpected. writeGalaxyInfo itself is
+// deliberately not called here - it now trusts target's already-validated
+// identity (see its own doc comment) - the discriminating proof for this
+// guard is newInstallTarget's own ok=false return plus the untouched victim
+// directory.
 //
-// Five ".." segments, not three: filepath.Join fuses the version's first
-// ".." into the synthetic "acme.widgets-.." element, consuming it for free,
-// so climbing three real directories (DownloadPath's own depth here) takes
-// one extra ".." beyond that. With only three, the write would stay inside
-// DownloadPath and this test would pass for the wrong reason.
-func TestWriteGalaxyInfoRefusesTraversingVersion(t *testing.T) {
+// Five ".." segments, not three: path.Join fuses the version's first ".."
+// into the synthetic "acme.widgets-.." element, consuming it for free, so
+// climbing three real directories (DownloadPath's own depth here) takes one
+// extra ".." beyond that. With only three, the (never computed) join would
+// stay inside DownloadPath and this test would pass for the wrong reason.
+func TestNewInstallTargetRefusesTraversingVersionBeforeWriteGalaxyInfo(t *testing.T) {
 	t.Parallel()
 
 	sandbox := t.TempDir()
 	downloadPath := filepath.Join(sandbox, "project", "collections")
 	victim := filepath.Join(sandbox, "victim")
 	mustMkdirAll(t, victim)
+	mustMkdirAll(t, downloadPath)
 
 	cfg := &config.Config{DownloadPath: downloadPath}
 	col := collection{Namespace: "acme", Name: "widgets", Version: "../../../../../victim/pwned"}
+	root := newTestCollectionsRoot(t, downloadPath)
 
-	err := writeGalaxyInfo(cfg, col, nil)
-	// (a) is what actually kills a deleted guard: with no chokepoint call,
-	// writeGalaxyInfo returns nil (or some unrelated filesystem error), never
-	// this sentinel.
-	if !errors.Is(err, helpers.ErrUnsafeCollectionIdentifier) {
-		t.Fatalf("writeGalaxyInfo error = %v, want errors.Is helpers.ErrUnsafeCollectionIdentifier", err)
+	if _, ok := newInstallTarget(root, cfg, col); ok {
+		t.Fatal("expected newInstallTarget to reject a traversing version, got ok=true")
 	}
-	// (b) pins the ordering: against a mutation that defers the guard past
-	// os.MkdirAll (but still returns the sentinel afterward), this is the
-	// assertion that fires first, since the escape target would already exist.
+	// (b) pins that nothing was ever created under the escape target: with no
+	// chokepoint call, the join would land inside victim and this assertion is
+	// what actually discriminates a deleted guard from a working one.
 	if _, statErr := os.Stat(filepath.Join(victim, "pwned.info")); !os.IsNotExist(statErr) {
 		t.Fatalf("expected %s/pwned.info to not exist, stat error: %v", victim, statErr)
 	}
-	// (c) broadens (b) from the one expected escape name to the whole
-	// directory: nothing at all was created under the escape target, not just
-	// the specific "pwned.info" name a narrower mutation might have avoided.
 	entries, err := os.ReadDir(victim)
 	if err != nil {
 		t.Fatalf("read dir %s: %v", victim, err)
@@ -200,8 +201,9 @@ func TestWriteGalaxyInfoIgnoresMetaIdentity(t *testing.T) {
 	meta.Name = "other"
 	meta.Namespace.Name = "evil"
 	meta.Version = "9.9.9"
+	target := newTestInstallTarget(t, cfg, col)
 
-	if err := writeGalaxyInfo(cfg, col, meta); err != nil {
+	if err := writeGalaxyInfo(target, cfg, col, meta); err != nil {
 		t.Fatalf("writeGalaxyInfo: %v", err)
 	}
 
@@ -240,13 +242,13 @@ func TestInstallRecordMatchesAgreesWithWriteGalaxyInfo(t *testing.T) {
 	downloadPath := filepath.Join(sandbox, "install")
 	cfg := &config.Config{DownloadPath: downloadPath}
 	col := collection{Namespace: "acme", Name: "widgets", Version: testVersion100, Source: "https://galaxy.example.com"}
-	installPath := collectionInstallPath(cfg, col)
-	mustMkdirAll(t, installPath)
-	seedValidExtractMarker(t, installPath, validMarkerSHA)
+	target := newTestInstallTarget(t, cfg, col)
+	mustMkdirAll(t, target.path)
+	seedValidExtractMarker(t, target, validMarkerSHA)
 
 	st := store.New()
 	st.SetInstalled(col.key(), store.InstalledEntry{
-		InstallPath:    installPath,
+		InstallPath:    target.path,
 		Source:         col.Source,
 		ArtifactSHA256: validMarkerSHA,
 		InstalledAt:    time.Now().UTC(),
@@ -257,84 +259,50 @@ func TestInstallRecordMatchesAgreesWithWriteGalaxyInfo(t *testing.T) {
 	meta := newVersionInfo("https://galaxy.example.com/download/acme-widgets-1.0.0.tar.gz", "")
 	meta.Version = "9.9.9"
 
-	if err := writeGalaxyInfo(cfg, col, meta); err != nil {
+	if err := writeGalaxyInfo(target, cfg, col, meta); err != nil {
 		t.Fatalf("writeGalaxyInfo: %v", err)
 	}
 
-	if !installRecordMatches(cfg, col, installPath, st) {
+	if !installRecordMatches(target, col, st) {
 		t.Fatal("expected installRecordMatches to agree with the GALAXY.yml writeGalaxyInfo actually wrote")
 	}
 }
 
-// TestInstallRecordMatchesRefusesUnsafeIdentifier proves the checker half of
-// the chokepoint: an unsafe col.Version must make installRecordMatches
-// report false even though the store entry lookup and the extract marker
-// stat both succeed, so neither of those can shadow the collectionInfoDir
-// guard's own contribution to the result.
-//
-// A decoy is seeded at exactly the location the pre-fix inline
-// filepath.Join(cfg.DownloadPath, "ansible_collections",
-// fmt.Sprintf("%s.%s-%s.info", col.Namespace, col.Name, col.Version)) would
-// have found present, so a bare os.Stat-based check would have coincidentally
-// succeeded and falsely reported a match - the same shape as
-// TestInstallRecordMatchesRefusesUnsafeMarkerSHA uses for the marker sha.
-// With DownloadPath = <sandbox>/install and col.Version =
-// "../../../../victim/pwned", the inline join's third path element,
-// "acme.widgets-../../../../victim/pwned.info", is not a single literal
-// element at all: it contains "/" and gets split by filepath.Join like any
-// other path segment. Its first ".." fuses into the synthetic
-// "acme.widgets-.." element (absorbed for free, same as elsewhere in this
-// file), and the remaining three ".." pop back up through
-// ansible_collections, install, and DownloadPath's own parent, landing at
-// <sandbox>. From there "victim" and "pwned.info" resolve literally, so the
-// decoy sits at <sandbox>/victim/pwned.info - the ".info" suffix lands on the
-// final path component ("pwned"), not on a synthetic "<ns>.<name>-<version>"
-// element the way it does for a safe identifier.
-func TestInstallRecordMatchesRefusesUnsafeIdentifier(t *testing.T) {
-	t.Parallel()
+// An unsafe col.Version (e.g. "../../../../victim/pwned") no longer reaches
+// installRecordMatches at all: newInstallTarget - the single chokepoint both
+// the install path and the .info sidecar path now go through - refuses to
+// build a target for such an identity in the first place, so there is no
+// coincidentally-matching decoy for installRecordMatches to be tricked by.
+// See TestNewInstallTargetRejectsUnsafeIdentifiers (installroot_test.go) for
+// that guard's own coverage, independent per component.
 
-	sandbox := t.TempDir()
-	downloadPath := filepath.Join(sandbox, "install")
-	cfg := &config.Config{DownloadPath: downloadPath}
-	col := collection{
-		Namespace: "acme", Name: "widgets", Version: "../../../../victim/pwned",
-		Source: "https://galaxy.example.com",
-	}
-	installPath := collectionInstallPath(cfg, col)
-	mustMkdirAll(t, installPath)
-	seedValidExtractMarker(t, installPath, validMarkerSHA)
-
-	decoyDir := filepath.Join(sandbox, "victim", "pwned.info")
-	mustMkdirAll(t, decoyDir)
-	mustWriteFile(t, filepath.Join(decoyDir, galaxyYAMLFileName), []byte("format_version: 1.0.0\n"))
-
-	st := store.New()
-	st.SetInstalled(col.key(), store.InstalledEntry{
-		InstallPath:    installPath,
-		Source:         col.Source,
-		ArtifactSHA256: validMarkerSHA,
-		InstalledAt:    time.Now().UTC(),
-	})
-
-	if installRecordMatches(cfg, col, installPath, st) {
-		t.Fatal("expected installRecordMatches to refuse an unsafe col.Version rather than coincidentally match the decoy")
-	}
-}
-
-// TestWriteGalaxyInfoIfPresentWarnsOnUnsafeIdentifier proves the log-tier
-// split: an unsafe identifier is a security-relevant signal that must reach
-// Warnf (which survives --quiet), never the best-effort Printf tier ordinary
-// I/O failures use, and the function still returns normally either way.
-func TestWriteGalaxyInfoIfPresentWarnsOnUnsafeIdentifier(t *testing.T) {
+// TestWriteGalaxyInfoIfPresentWarnsOnCollectionsPathEscape proves the
+// log-tier split for the reachable escape arm: after target was built
+// validly, ansible_collections is swapped for a symlink pointing entirely
+// outside DownloadPath, so writeGalaxyInfo's own rooted MkdirAll refuses it.
+// This is a security-relevant signal and must reach Warnf (which survives
+// --quiet), never the best-effort Printf tier ordinary I/O failures use, and
+// the function still returns normally either way.
+func TestWriteGalaxyInfoIfPresentWarnsOnCollectionsPathEscape(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
 	cfg := &config.Config{DownloadPath: root}
-	col := collection{Namespace: "acme", Name: "widgets", Version: "../etc"}
+	col := collection{Namespace: "acme", Name: "widgets", Version: testVersion100}
+	target := newTestInstallTarget(t, cfg, col)
+
+	outside := t.TempDir()
+	if err := os.RemoveAll(filepath.Join(root, "ansible_collections")); err != nil {
+		t.Fatalf("remove ansible_collections: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "ansible_collections")); err != nil {
+		t.Fatalf("symlink ansible_collections: %v", err)
+	}
+
 	printer := &capturingPrinter{}
 	runtime := infra.New(printer, http.DefaultClient)
 
-	writeGalaxyInfoIfPresent(runtime, cfg, col, nil)
+	writeGalaxyInfoIfPresent(runtime, target, cfg, col, nil)
 
 	if len(printer.warns) != 1 {
 		t.Fatalf("warns = %v, want exactly one warning", printer.warns)
@@ -343,35 +311,56 @@ func TestWriteGalaxyInfoIfPresentWarnsOnUnsafeIdentifier(t *testing.T) {
 		t.Errorf("warns[0] = %q, want it to mention refusing to write GALAXY.yml", printer.warns[0])
 	}
 	if len(printer.prints) != 0 {
-		t.Errorf("prints = %v, want none: an unsafe identifier must not also hit the ordinary-failure tier", printer.prints)
+		t.Errorf("prints = %v, want none: a path escape must not also hit the ordinary-failure tier", printer.prints)
+	}
+	if entries, err := os.ReadDir(outside); err != nil || len(entries) != 0 {
+		t.Errorf("expected nothing written outside DownloadPath, entries=%v err=%v", entries, err)
 	}
 }
 
 // TestWriteGalaxyInfoIfPresentPrintsOnOrdinaryFailure is the mirror of
-// TestWriteGalaxyInfoIfPresentWarnsOnUnsafeIdentifier: an ordinary I/O
-// failure - col's identity is safe, so writeGalaxyInfo never returns
-// helpers.ErrUnsafeCollectionIdentifier - must land on the best-effort Printf
-// tier, never Warnf. Neither test alone pins the split; a mutation that
-// collapses both arms onto one tier passes one of the two and fails the
-// other.
+// TestWriteGalaxyInfoIfPresentWarnsOnCollectionsPathEscape: an ordinary I/O
+// failure - col's identity is safe and target.root sees no symlink - must
+// land on the best-effort Printf tier, never Warnf. Neither test alone pins
+// the split; a mutation that collapses both arms onto one tier passes one of
+// the two and fails the other.
+//
+// The failure is manufactured by stripping write permission from
+// "ansible_collections" itself, rather than by pre-seeding target.info with a
+// regular file the way this test used to: writeGalaxyInfo now resets
+// target.info (RemoveAll then MkdirAll) before writing, and RemoveAll
+// happily unlinks a lone regular file sitting at that name, so that older
+// fixture no longer fails at all - it would make MkdirAll succeed instead of
+// failing. A permission-denied MkdirAll survives the reset unaffected: there
+// is nothing at target.info to remove, and creating it is what fails.
 func TestWriteGalaxyInfoIfPresentPrintsOnOrdinaryFailure(t *testing.T) {
 	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; permission-based write guard cannot be tested")
+	}
 
 	root := t.TempDir()
 	cfg := &config.Config{DownloadPath: root}
 	col := collection{Namespace: "acme", Name: "widgets", Version: testVersion100}
+	target := newTestInstallTarget(t, cfg, col)
 
-	// A regular file where infoDir's parent directory ("ansible_collections")
-	// needs to be makes os.MkdirAll fail with ENOTDIR - a *fs.PathError that
-	// is definitively not helpers.ErrUnsafeCollectionIdentifier. Chosen over a
-	// permission-bit mutation because it needs no chmod and no privileged
-	// state to set up or tear down.
-	mustWriteFile(t, filepath.Join(root, "ansible_collections"), []byte("not a directory"))
+	collectionsDir := filepath.Join(root, "ansible_collections")
+	//nolint:gosec // G302: 0o555 is this test's own fixture permission, restored in t.Cleanup below.
+	if err := os.Chmod(collectionsDir, 0o555); err != nil {
+		t.Fatalf("chmod ansible_collections: %v", err)
+	}
+	// Restored before t.TempDir's own cleanup runs, which needs to remove
+	// ansible_collections itself.
+	t.Cleanup(func() {
+		if err := os.Chmod(collectionsDir, helpers.DirMod); err != nil {
+			t.Errorf("restore ansible_collections perms: %v", err)
+		}
+	})
 
 	printer := &capturingPrinter{}
 	runtime := infra.New(printer, http.DefaultClient)
 
-	writeGalaxyInfoIfPresent(runtime, cfg, col, nil)
+	writeGalaxyInfoIfPresent(runtime, target, cfg, col, nil)
 
 	if len(printer.prints) != 1 {
 		t.Fatalf("prints = %v, want exactly one", printer.prints)

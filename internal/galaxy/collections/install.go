@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
+	"path"
 	"strings"
 	"time"
 
@@ -51,10 +51,19 @@ func installCollection(
 		runtime.Output.DebugSincef(installStart, "%s", col.key())
 	}()
 
-	filename := fmt.Sprintf("%s-%s-%s.tar.gz", col.Namespace, col.Name, col.Version)
-	installPath := collectionInstallPath(cfg, col)
+	// Built once, here, and threaded through every write below (extraction,
+	// the extract marker, the GALAXY.yml sidecar, the skip check): one target,
+	// one os.Root, rather than each call site rederiving its own path and
+	// risking one of them skipping the validation the others perform.
+	target, ok := newInstallTarget(deps.root, cfg, col)
+	if !ok {
+		return fmt.Errorf("%w: ns=%q name=%q version=%q",
+			helpers.ErrUnsafeCollectionIdentifier, col.Namespace, col.Name, col.Version)
+	}
 
-	if canSkipInstall(cfg, col, installPath, st, runtime.Output) {
+	filename := fmt.Sprintf("%s-%s-%s.tar.gz", col.Namespace, col.Name, col.Version)
+
+	if canSkipInstall(target, col, st, runtime.Output) {
 		runtime.Output.Printf("⏭️ Skipping install, already installed: %s/%s/%s", col.Namespace, col.Name, col.Version)
 		// installCollection may be handed a prefetched temp on a path that skips the install; release it here rather than
 		// leave it unclaimed until Close. In today's dispatch this branch is not live: a schedulable prefetch task is never
@@ -67,7 +76,7 @@ func installCollection(
 		return nil
 	}
 
-	payload, err := prepareAndExtract(ctx, deps, col, metaOverride, prefetched, filename, installPath)
+	payload, err := prepareAndExtract(ctx, deps, col, metaOverride, prefetched, filename, target)
 	if err != nil {
 		return err
 	}
@@ -79,8 +88,8 @@ func installCollection(
 		defer payload.artifact.Cleanup()
 	}
 
-	writeGalaxyInfoIfPresent(runtime, cfg, col, payload.meta)
-	recordInstall(st, col, installPath, payload.artifactSHA, resolvedDeps)
+	writeGalaxyInfoIfPresent(runtime, target, cfg, col, payload.meta)
+	recordInstall(st, col, target.path, payload.artifactSHA, resolvedDeps)
 	return nil
 }
 
@@ -197,16 +206,23 @@ func prepareInstall(
 
 // verifyAndExtract enforces col's lockfile SHA256 pin (if any) against
 // payload's resolved artifact hash and then extracts the artifact into
-// installPath. This is the verify+extract step installCollection always ran
-// inline; it is factored out so prepareAndExtract can run it a second time
-// against a freshly downloaded replacement after evicting a corrupt cache
-// hit.
-func verifyAndExtract(_ context.Context, deps installDeps, col collection, payload installPayload, installPath, filename string) error {
+// target's install directory. This is the verify+extract step
+// installCollection always ran inline; it is factored out so
+// prepareAndExtract can run it a second time against a freshly downloaded
+// replacement after evicting a corrupt cache hit.
+func verifyAndExtract(
+	_ context.Context,
+	deps installDeps,
+	col collection,
+	payload installPayload,
+	target installTarget,
+	filename string,
+) error {
 	if err := verifyPinnedSHA(col, payload.artifactSHA); err != nil {
 		return err
 	}
 	extractStart := time.Now()
-	err := extractCollection(col, payload.artifact.Path, installPath, deps.runtime, deps.extractStore, payload.artifactSHA)
+	err := extractCollection(col, payload.artifact.Path, target, deps.runtime, deps.extractStore, payload.artifactSHA)
 	if err != nil {
 		return fmt.Errorf("failed to extract %s: %w", filename, err)
 	}
@@ -250,16 +266,27 @@ func verifyAndExtract(_ context.Context, deps installDeps, col collection, paylo
 // offline, where deleting the only local copy with no way to refetch it
 // would be pure data loss for no benefit.
 //
-// Accepted tradeoff: every cache-hit action failure - regardless of cause -
-// spends exactly one evict-and-refetch attempt with no classification of
-// *why* it failed. A rare transient failure therefore costs one wasted
-// refetch of otherwise-good bytes; that cost is bounded to a single retry and
-// the end result is still correct. The one exception is the prepareInstall
-// failure arm below, which does classify: only helpers.ErrSHA256Mismatch (the
-// S3 backend's read-time integrity check) is worth retrying there, since
-// every other prepareInstall failure (a metadata error, a download error, an
-// offline miss) would just reproduce identically against the same cache
-// entry or the same origin.
+// Accepted tradeoff: every cache-hit action failure whose cause is
+// artifact-side spends exactly one evict-and-refetch attempt with no further
+// classification of *why* it failed. A rare transient failure therefore costs
+// one wasted refetch of otherwise-good bytes; that cost is bounded to a
+// single retry and the end result is still correct. The action arm does carry
+// one classification, though: isDestinationSideFailure carves out
+// helpers.ErrCollectionsPathEscape and helpers.ErrUnsafeCollectionIdentifier,
+// because unlike every artifact-side action failure, neither one is repaired
+// by substituting a different artifact - the artifact was never the problem,
+// the destination path was - so evicting would only spend a destructive
+// write against shared state (an S3 deleteObject) for no chance of success,
+// and an attacker-controlled requirements.yml can trigger it deterministically,
+// once per affected collection per run, with no race required. The precedent
+// is helpers.ErrMalformedArtifactSHA256 sitting outside the retry class in the
+// prepareInstall arm below for the identical reason: eviction cannot repair a
+// value, or here a location, that was never valid to begin with. The
+// prepareInstall failure arm itself classifies for a different reason: only
+// helpers.ErrSHA256Mismatch (the S3 backend's read-time integrity check) is
+// worth retrying there, since every other prepareInstall failure (a metadata
+// error, a download error, an offline miss) would just reproduce identically
+// against the same cache entry or the same origin.
 //
 // canRetryCacheHit and evictCorruptCachedArtifact are factored out so both
 // recovery arms below share one guard and one log line - kept out of this
@@ -296,12 +323,29 @@ func prepareWithRecovery(
 		if payload.artifact.Cleanup != nil {
 			payload.artifact.Cleanup()
 		}
-		if !canRetryCacheHit(deps, fromCache, forceDownload) {
+		if !canRetryCacheHit(deps, fromCache, forceDownload) || isDestinationSideFailure(actionErr) {
 			return installPayload{}, actionErr
 		}
 		evictCorruptCachedArtifact(ctx, deps, col, filename, actionErr)
 		forceDownload = true
 	}
+}
+
+// isDestinationSideFailure reports whether err's cause is the write
+// destination rather than the artifact: an os.Root refusal to traverse a
+// symlinked path component under cfg.DownloadPath
+// (helpers.ErrCollectionsPathEscape) or an unsafe namespace/name/version
+// identifier (helpers.ErrUnsafeCollectionIdentifier). prepareWithRecovery's
+// action arm otherwise evicts and refetches unclassified, on the premise
+// that a fresh artifact might fix whatever failed - a premise that does not
+// hold here, since neither cause has anything to do with the bytes just
+// verified and extracted. Evicting anyway would still spend a real,
+// destructive write against shared state (an S3 deleteObject) with no chance
+// of the retry succeeding, and both causes are reachable from an attacker's
+// own requirements.yml with no race required, so the eviction would be
+// deterministic on every affected run rather than a rare accident.
+func isDestinationSideFailure(err error) bool {
+	return errors.Is(err, helpers.ErrCollectionsPathEscape) || errors.Is(err, helpers.ErrUnsafeCollectionIdentifier)
 }
 
 // canRetryCacheHit reports whether prepareWithRecovery may spend its one
@@ -326,18 +370,19 @@ func evictCorruptCachedArtifact(ctx context.Context, deps installDeps, col colle
 }
 
 // prepareAndExtract prepares an installable artifact for col and verifies +
-// extracts it into installPath, delegating the bounded eviction-and-refetch
-// retry to prepareWithRecovery.
+// extracts it into target's install directory, delegating the bounded
+// eviction-and-refetch retry to prepareWithRecovery.
 func prepareAndExtract(
 	ctx context.Context,
 	deps installDeps,
 	col collection,
 	metaOverride *types.GalaxyCollectionVersionInfo,
 	prefetched downloadResult,
-	filename, installPath string,
+	filename string,
+	target installTarget,
 ) (installPayload, error) {
 	return prepareWithRecovery(ctx, deps, col, metaOverride, prefetched, filename, func(payload installPayload) error {
-		return verifyAndExtract(ctx, deps, col, payload, installPath, filename)
+		return verifyAndExtract(ctx, deps, col, payload, target, filename)
 	})
 }
 
@@ -386,30 +431,44 @@ func prepareFromCache(ctx context.Context, deps installDeps, col collection) (in
 }
 
 // writeGalaxyInfoIfPresent writes col's GALAXY.yml sidecar and reports any
-// failure on the tier matching its severity. An unsafe identifier is an
-// integrity signal - the same class verifyExtractMarker's unsafe-sha arm
-// warns on - so it must survive --quiet; an ordinary I/O failure is not.
-// Neither tier fails the run: the collection has already been extracted by
-// the time this runs, and this call has never failed an install.
+// failure on the tier matching its severity. An unsafe identifier or a
+// collections-path escape are both integrity signals - the same class
+// verifyExtractMarker's unsafe-sha arm warns on - so they must survive
+// --quiet; an ordinary I/O failure is not. Neither tier fails the run: the
+// collection has already been extracted by the time this runs, and this call
+// has never failed an install.
 //
-// The unsafe-identifier warning does not also name the collection: err
-// already renders namespace, name, and version with %q (collectionInfoDir's
-// caller wraps them that way), and interpolating the raw identifier a second
-// time with %s would put an attacker-controlled string - one that could
-// carry newlines or ANSI escapes - onto CI stderr verbatim for no added
-// information. Same reason verifyExtractMarker uses %q and never %s for a
-// sha.
+// helpers.ErrUnsafeCollectionIdentifier is defensive-only here: by the time
+// this runs, installCollection has already built target via a successful
+// newInstallTarget call, so writeGalaxyInfo itself has nothing left to
+// validate and cannot produce this sentinel through today's only call path.
+// The arm is kept anyway - matching writeExtractMarker's own guard, which
+// stays independent of any caller - rather than assuming that invariant
+// holds forever.
+//
+// helpers.ErrCollectionsPathEscape IS reachable: target.root refuses to
+// traverse a symlink planted between newInstallTarget's validation and this
+// call (a TOCTOU window, however narrow), and classifyCollectionsRootError
+// surfaces that refusal through writeGalaxyInfo's two rooted calls.
+//
+// Neither warning also names the collection: err already renders namespace,
+// name, and version (or the offending path component) with %q, and
+// interpolating the raw identifier a second time with %s would put an
+// attacker-controlled string - one that could carry newlines or ANSI escapes
+// - onto CI stderr verbatim for no added information. Same reason
+// verifyExtractMarker uses %q and never %s for a sha.
 func writeGalaxyInfoIfPresent(
 	runtime *infra.Infra,
+	target installTarget,
 	cfg *config.Config,
 	col collection,
 	meta *types.GalaxyCollectionVersionInfo,
 ) {
-	err := writeGalaxyInfo(cfg, col, meta)
+	err := writeGalaxyInfo(target, cfg, col, meta)
 	if err == nil {
 		return
 	}
-	if errors.Is(err, helpers.ErrUnsafeCollectionIdentifier) {
+	if errors.Is(err, helpers.ErrUnsafeCollectionIdentifier) || errors.Is(err, helpers.ErrCollectionsPathEscape) {
 		runtime.Output.Warnf("Refusing to write GALAXY.yml: %v", err)
 		return
 	}
@@ -579,76 +638,39 @@ func installEntryMatches(col collection, entry store.InstalledEntry, installPath
 	return true
 }
 
-// collectionInstallPath returns the fixed ansible_collections path col would
-// land at (or already occupies) under cfg.DownloadPath. This is the single
-// definition of that layout; installCollection, shouldSchedulePrefetch, and
-// classifyDryRun all call it rather than each computing the join inline, so
-// the three call sites can never drift out of sync with each other.
-func collectionInstallPath(cfg *config.Config, col collection) string {
-	return filepath.Join(cfg.DownloadPath, "ansible_collections", col.Namespace, col.Name)
-}
-
-// collectionInfoDir returns the on-disk path of col's GALAXY.yml sidecar
-// directory under cfg.DownloadPath, and whether col's identity was safe to
-// use at all - the single validating chokepoint every construction of this
-// path must go through, so it cannot be computed two different ways, one of
-// them unguarded.
-//
-// col.Namespace, col.Name, and col.Version must each be helpers.IsPathElement
-// before they are ever joined: filepath.Join fuses a leading ".." in Version
-// into the synthetic "<ns>.<name>-.." element, turning it into a real "up one
-// directory" element, so the join absorbs Version's first ".." for free and
-// every later ".." in Version pops a real path component off DownloadPath.
-// Validating the joined result after the fact cannot close this - by the
-// time a path exists to inspect, the escape has already happened - so the
-// three components are what is validated, before any join is computed, and
-// never the composed "<ns>.<name>-<version>.info" element: cleanup.go's
-// removeInstalled validates the same three components with the same
-// predicate, so the deleter never refuses a sidecar directory this function
-// created as an unsafe identifier. That symmetry is specific to the
-// sidecar path: collectionInstallPath performs no such validation on the
-// identifiers it joins.
-func collectionInfoDir(cfg *config.Config, col collection) (string, bool) {
-	if !helpers.IsPathElement(col.Namespace) || !helpers.IsPathElement(col.Name) || !helpers.IsPathElement(col.Version) {
-		return "", false
-	}
-	return filepath.Join(
-		cfg.DownloadPath,
-		"ansible_collections",
-		fmt.Sprintf("%s.%s-%s.info", col.Namespace, col.Name, col.Version),
-	), true
-}
-
 // installRecordMatches reports whether a collection's store entry, extract
-// marker, and GALAXY.yml sidecar are all present and consistent for
-// installPath, using only cheap os.Stat calls - no tree walk. This is the
-// check shouldSchedulePrefetch uses to decide whether to spend a background
+// marker, and GALAXY.yml sidecar are all present and consistent for target,
+// using only cheap target.root.Stat calls - no tree walk. This is the check
+// shouldSchedulePrefetch uses to decide whether to spend a background
 // download ahead of time: a wrong "skip" there only costs a lost prefetch
 // head start, since installCollection's canSkipInstall below always
 // re-checks strictly (including the tally) before actually skipping the
 // install itself, so correctness never depends on this cheap version.
-func installRecordMatches(cfg *config.Config, col collection, installPath string, st *store.Store) bool {
-	if cfg == nil || st == nil {
+//
+// Both stats go through target.root rather than a plain os.Stat, which is
+// what makes this check itself symlink-swap safe: an install directory or
+// .info sidecar that exists only by following a symlink past
+// cfg.DownloadPath is not found by root.Stat (it refuses to traverse the
+// escaping component), so this correctly reports false rather than mistaking
+// a symlink-only fake for a real install.
+func installRecordMatches(target installTarget, col collection, st *store.Store) bool {
+	if st == nil {
 		return false
 	}
 	entry, ok := st.GetInstalled(col.key())
-	if !ok || !installEntryMatches(col, entry, installPath) {
+	if !ok || !installEntryMatches(col, entry, target.path) {
 		return false
 	}
 
-	marker, ok := extractMarkerPath(installPath, entry.ArtifactSHA256)
+	markerRelPath, ok := markerRel(target, entry.ArtifactSHA256)
 	if !ok {
 		return false
 	}
-	if _, err := os.Stat(marker); err != nil {
+	if _, err := target.root.Stat(markerRelPath); err != nil {
 		return false
 	}
 
-	infoDir, ok := collectionInfoDir(cfg, col)
-	if !ok {
-		return false
-	}
-	if _, err := os.Stat(filepath.Join(infoDir, galaxyYAMLFileName)); err != nil {
+	if _, err := target.root.Stat(path.Join(target.info, galaxyYAMLFileName)); err != nil {
 		return false
 	}
 
@@ -657,22 +679,22 @@ func installRecordMatches(cfg *config.Config, col collection, installPath string
 
 // canSkipInstall reports whether a collection is already installed and its
 // extracted tree still matches the tally recorded at extraction time. It
-// layers verifyExtractMarker's filepath.WalkDir pass on top of
+// layers verifyExtractMarker's fs.WalkDir pass on top of
 // installRecordMatches's cheap checks, and is called only from
 // installCollection: this is the gate that actually decides whether real
 // work is skipped, so unlike the prefetch scan's use of installRecordMatches,
 // a false "skip" here would silently keep serving a corrupted shared
 // extracted-store cache to every future install. See verifyExtractMarker for
 // exactly what the tally catches and does not catch.
-func canSkipInstall(cfg *config.Config, col collection, installPath string, st *store.Store, out output.Printer) bool {
-	if !installRecordMatches(cfg, col, installPath, st) {
+func canSkipInstall(target installTarget, col collection, st *store.Store, out output.Printer) bool {
+	if !installRecordMatches(target, col, st) {
 		return false
 	}
 	entry, ok := st.GetInstalled(col.key())
 	if !ok {
 		return false
 	}
-	return verifyExtractMarker(out, installPath, entry.ArtifactSHA256)
+	return verifyExtractMarker(out, target, entry.ArtifactSHA256)
 }
 
 // downloadCollection performs a single attempt at fetching an artifact and

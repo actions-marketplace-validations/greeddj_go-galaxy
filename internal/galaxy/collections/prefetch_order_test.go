@@ -122,7 +122,7 @@ func TestPrefetchQueueOrderedByLevel(t *testing.T) {
 	fx := newPrefetchHandoffFixture(t, srv, 1)
 	prefetch := startPrefetcher(
 		context.Background(),
-		newPrefetchDeps(fx.cfg, fx.runtime, fx.st, fx.artifacts),
+		newPrefetchDeps(fx.cfg, fx.runtime, fx.st, fx.artifacts, fx.root),
 		collections,
 		levels,
 	)

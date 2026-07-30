@@ -107,6 +107,7 @@ func TestInstallCollectionS3CacheFetchMismatchEvictsAndRefetches(t *testing.T) {
 	deps := installDeps{
 		collectionDeps: newCollectionDeps(cfg, runtime, st),
 		artifacts:      artifacts,
+		root:           newTestCollectionsRoot(t, downloadPath),
 	}
 
 	if err := installCollection(context.Background(), col, deps, nil, nil, downloadResult{}); err != nil {

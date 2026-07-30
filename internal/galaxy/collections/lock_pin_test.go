@@ -77,18 +77,24 @@ func TestVerifyPinnedSHA(t *testing.T) {
 }
 
 // newTestInstallDeps builds installDeps rooted at t.TempDir subdirectories,
-// wired with a no-op printer and the default HTTP client. It constructs the
-// struct directly (rather than via newInstallDeps) so this test does not add
-// another always-nil call site for the db parameter, which unparam would
-// otherwise flag.
+// wired with a no-op printer and the default HTTP client, and a real
+// collections root opened (and created) for cfg.DownloadPath - installCollection
+// now builds its installTarget from deps.root on every call, so a nil root
+// here would make every install in this file fail closed with
+// helpers.ErrUnsafeCollectionIdentifier before ever reaching the behavior
+// under test. It constructs the struct directly (rather than via
+// newInstallDeps) so this test does not add another always-nil call site for
+// the db parameter, which unparam would otherwise flag.
 func newTestInstallDeps(t *testing.T, cfg *config.Config) installDeps {
 	t.Helper()
 	runtime := infra.New(noopPrinter{}, http.DefaultClient)
 	st := store.New()
 	artifacts := local.NewArtifacts(cfg.CacheDir)
+	root := newTestCollectionsRoot(t, cfg.DownloadPath)
 	return installDeps{
 		collectionDeps: newCollectionDeps(cfg, runtime, st),
 		artifacts:      artifacts,
+		root:           root,
 	}
 }
 
@@ -329,13 +335,14 @@ func TestCanSkipInstallPinGate(t *testing.T) {
 	downloadPath := filepath.Join(root, "install")
 
 	col := collection{Namespace: "acme", Name: "widgets", Version: "1.0.0"}
-	installPath := filepath.Join(downloadPath, "ansible_collections", col.Namespace, col.Name)
 	const installedSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
-	if err := os.MkdirAll(installPath, helpers.DirMod); err != nil {
+	cfg := &config.Config{DownloadPath: downloadPath}
+	target := newTestInstallTarget(t, cfg, col)
+	if err := os.MkdirAll(target.path, helpers.DirMod); err != nil {
 		t.Fatalf("mkdir installPath: %v", err)
 	}
-	seedValidExtractMarker(t, installPath, installedSHA)
+	seedValidExtractMarker(t, target, installedSHA)
 	infoDir := filepath.Join(downloadPath, "ansible_collections", col.Namespace+"."+col.Name+"-"+col.Version+".info")
 	if err := os.MkdirAll(infoDir, helpers.DirMod); err != nil {
 		t.Fatalf("mkdir infoDir: %v", err)
@@ -344,23 +351,22 @@ func TestCanSkipInstallPinGate(t *testing.T) {
 		t.Fatalf("write GALAXY.yml: %v", err)
 	}
 
-	cfg := &config.Config{DownloadPath: downloadPath}
 	st := store.New()
 	st.SetInstalled(col.key(), store.InstalledEntry{
-		InstallPath:    installPath,
+		InstallPath:    target.path,
 		ArtifactSHA256: installedSHA,
 		InstalledAt:    time.Now().UTC(),
 	})
 
 	matching := col
 	matching.SHA256 = installedSHA
-	if !canSkipInstall(cfg, matching, installPath, st, noopPrinter{}) {
+	if !canSkipInstall(target, matching, st, noopPrinter{}) {
 		t.Fatalf("expected canSkipInstall to return true when the pin matches the installed SHA")
 	}
 
 	mismatched := col
 	mismatched.SHA256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	if canSkipInstall(cfg, mismatched, installPath, st, noopPrinter{}) {
+	if canSkipInstall(target, mismatched, st, noopPrinter{}) {
 		t.Fatalf("expected canSkipInstall to return false when the pin does not match the installed SHA")
 	}
 }
@@ -376,13 +382,14 @@ func TestCanSkipInstallSourceGate(t *testing.T) {
 	downloadPath := filepath.Join(root, "install")
 
 	col := collection{Namespace: "acme", Name: "widgets", Version: "1.0.0", Source: "https://a.example.com"}
-	installPath := filepath.Join(downloadPath, "ansible_collections", col.Namespace, col.Name)
 	const installedSHA = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 
-	if err := os.MkdirAll(installPath, helpers.DirMod); err != nil {
+	cfg := &config.Config{DownloadPath: downloadPath}
+	target := newTestInstallTarget(t, cfg, col)
+	if err := os.MkdirAll(target.path, helpers.DirMod); err != nil {
 		t.Fatalf("mkdir installPath: %v", err)
 	}
-	seedValidExtractMarker(t, installPath, installedSHA)
+	seedValidExtractMarker(t, target, installedSHA)
 	infoDir := filepath.Join(downloadPath, "ansible_collections", col.Namespace+"."+col.Name+"-"+col.Version+".info")
 	if err := os.MkdirAll(infoDir, helpers.DirMod); err != nil {
 		t.Fatalf("mkdir infoDir: %v", err)
@@ -391,22 +398,21 @@ func TestCanSkipInstallSourceGate(t *testing.T) {
 		t.Fatalf("write GALAXY.yml: %v", err)
 	}
 
-	cfg := &config.Config{DownloadPath: downloadPath}
 	st := store.New()
 	st.SetInstalled(col.key(), store.InstalledEntry{
-		InstallPath:    installPath,
+		InstallPath:    target.path,
 		Source:         col.Source,
 		ArtifactSHA256: installedSHA,
 		InstalledAt:    time.Now().UTC(),
 	})
 
-	if !canSkipInstall(cfg, col, installPath, st, noopPrinter{}) {
+	if !canSkipInstall(target, col, st, noopPrinter{}) {
 		t.Fatalf("expected canSkipInstall to return true when the source is unchanged")
 	}
 
 	switched := col
 	switched.Source = "https://b.example.com"
-	if canSkipInstall(cfg, switched, installPath, st, noopPrinter{}) {
+	if canSkipInstall(target, switched, st, noopPrinter{}) {
 		t.Fatalf("expected canSkipInstall to return false when the collection now resolves from a different server")
 	}
 }

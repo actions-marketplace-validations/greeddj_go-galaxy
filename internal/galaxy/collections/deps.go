@@ -1,6 +1,8 @@
 package collections
 
 import (
+	"os"
+
 	cacheManager "github.com/greeddj/go-galaxy/internal/galaxy/cache"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/extracted"
@@ -25,12 +27,25 @@ type installDeps struct {
 
 	artifacts    cacheManager.ArtifactStore
 	extractStore *extracted.Store
+	// root is the single os.Root every install-side write in this run
+	// funnels through (see installroot.go), so a symlinked ansible_collections
+	// or namespace/name component under cfg.DownloadPath cannot redirect a
+	// write outside it. It is nil for warm, which never touches the
+	// collections tree at all - newInstallTarget's own nil-root guard then
+	// makes any accidental collections-tree call from that path fail closed
+	// rather than by convention.
+	root *os.Root
 }
 
 type prefetchDeps struct {
 	collectionDeps
 
 	artifacts cacheManager.ArtifactStore
+	// root is threaded through so shouldSchedulePrefetch's cheap
+	// already-installed check (installRecordMatches) can be evaluated through
+	// the same rooted target the real install uses - see installDeps.root's
+	// own doc comment for what this closes.
+	root *os.Root
 }
 
 func newCollectionDeps(cfg *config.Config, runtime *infra.Infra, st *store.Store) collectionDeps {
@@ -43,11 +58,13 @@ func newInstallDeps(
 	st *store.Store,
 	artifacts cacheManager.ArtifactStore,
 	extractStore *extracted.Store,
+	root *os.Root,
 ) installDeps {
 	return installDeps{
 		collectionDeps: newCollectionDeps(cfg, runtime, st),
 		artifacts:      artifacts,
 		extractStore:   extractStore,
+		root:           root,
 	}
 }
 
@@ -56,9 +73,11 @@ func newPrefetchDeps(
 	runtime *infra.Infra,
 	st *store.Store,
 	artifacts cacheManager.ArtifactStore,
+	root *os.Root,
 ) prefetchDeps {
 	return prefetchDeps{
 		collectionDeps: newCollectionDeps(cfg, runtime, st),
 		artifacts:      artifacts,
+		root:           root,
 	}
 }

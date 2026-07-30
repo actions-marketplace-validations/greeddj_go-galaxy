@@ -318,6 +318,17 @@ var (
 	// would risk installing from the wrong server once the outage clears.
 	ErrGalaxyServerUnavailable = errors.New("galaxy server unavailable")
 
+	// ErrCollectionsPathEscape indicates an install-side write refused to
+	// follow a path component under cfg.DownloadPath (most dangerously
+	// ansible_collections itself, or a namespace/name component beneath it)
+	// because it resolved to a symlink, or because a filesystem error other
+	// than "does not exist" was found while diagnosing an os.Root refusal.
+	// os.Root itself is what actually blocks the escape, atomically, inside
+	// the kernel; this sentinel only names which component classifyCollectionsRootError
+	// found responsible, for an operator-facing message - it is never the
+	// mechanism that prevents the write.
+	ErrCollectionsPathEscape = errors.New("path escapes the collections directory")
+
 	// ErrMalformedArtifactSHA256 indicates a value that was supposed to be an
 	// artifact's sha256 digest is not a 64-character lowercase hex string.
 	// This is deliberately distinct from ErrSHA256Mismatch: a mismatch means
@@ -329,10 +340,12 @@ var (
 	// classifies on ErrSHA256Mismatch and this sentinel is deliberately not
 	// in that class, since retrying cannot repair the metadata cache entry
 	// that produced a malformed value in the first place. Its separate
-	// action-error arm evicts on any failure at all, unclassified, per the
-	// tradeoff documented on prepareWithRecovery itself ("every cache-hit
-	// action failure - regardless of cause - spends exactly one
-	// evict-and-refetch attempt with no classification") - a deliberate
-	// decision this sentinel does not reopen or except itself from.
+	// action-error arm evicts on every artifact-side failure, unclassified
+	// among those, per the tradeoff documented on prepareWithRecovery itself
+	// - and this sentinel sits outside that class for the identical reason:
+	// eviction cannot repair a value that was never a valid digest to begin
+	// with. That action arm also carries one further, destination-side
+	// exclusion of its own (isDestinationSideFailure) that has nothing to do
+	// with this sentinel; see prepareWithRecovery's doc comment for that one.
 	ErrMalformedArtifactSHA256 = errors.New("artifact sha256 is not a 64-character lowercase hex digest")
 )

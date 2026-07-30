@@ -105,14 +105,20 @@ func isArchiveError(err error) bool {
 		errors.Is(err, helpers.ErrArchiveEntryHasEmptyName)
 }
 
-// isSymlinkError reports whether err is an unsafe-symlink sentinel.
+// isSymlinkError reports whether err is an unsafe-symlink sentinel. This
+// group covers both an unsafe symlink found inside an extracted archive
+// (the original set below) and an unsafe symlink found in the destination
+// tree itself - a component of cfg.DownloadPath, most dangerously
+// ansible_collections or a namespace/name directory beneath it, that
+// resolves outside the collections root os.Root enforces.
 func isSymlinkError(err error) bool {
 	return errors.Is(err, helpers.ErrSymlinkTargetResolvesToSelf) ||
 		errors.Is(err, helpers.ErrSymlinkTargetEscapesDestination) ||
 		errors.Is(err, helpers.ErrSymlinkTarget) ||
 		errors.Is(err, helpers.ErrSymlinkTargetResolvesToRoot) ||
 		errors.Is(err, helpers.ErrSymlinkTargetIsAbsolute) ||
-		errors.Is(err, helpers.ErrSymlinkTargetIsEmpty)
+		errors.Is(err, helpers.ErrSymlinkTargetIsEmpty) ||
+		errors.Is(err, helpers.ErrCollectionsPathEscape)
 }
 
 // isNetworkError reports whether err is a network or Galaxy API sentinel,
@@ -217,13 +223,21 @@ func isCollectionNameUsageError(err error) bool {
 		errors.Is(err, helpers.ErrUnsupportedCollectionFormat)
 }
 
-// isCollectionListUsageError reports whether err is an invalid-collections-list sentinel.
+// isCollectionListUsageError reports whether err is an invalid-collections-list
+// sentinel. helpers.ErrUnsafeCollectionIdentifier sits here alongside
+// ErrDuplicateCollectionKey: buildCollectionsMap raises both while building
+// the collections map from resolved requirements, before any install work
+// starts, over malformed resolution input rather than anything the network or
+// the install pipeline did - the same reasoning that makes an empty
+// col.Version (never rejected by lockfile.validate) a usage error too, not a
+// crash or a silent install-time surprise.
 func isCollectionListUsageError(err error) bool {
 	return errors.Is(err, helpers.ErrInvalidCollectionsList) ||
 		errors.Is(err, helpers.ErrInvalidCollectionEntry) ||
 		errors.Is(err, helpers.ErrMissingCollection) ||
 		errors.Is(err, helpers.ErrDuplicateCollectionRequirement) ||
-		errors.Is(err, helpers.ErrDuplicateCollectionKey)
+		errors.Is(err, helpers.ErrDuplicateCollectionKey) ||
+		errors.Is(err, helpers.ErrUnsafeCollectionIdentifier)
 }
 
 // FromSignal converts an OS signal into a shell-convention exit code

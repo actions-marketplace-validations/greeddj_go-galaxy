@@ -11,8 +11,8 @@ const validSHA256Hex = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ac
 
 // TestIsSHA256Hex pins the exact shape IsSHA256Hex accepts - and rejects,
 // including the traversal-adjacent shapes ("..", ".") that make it the
-// chokepoint extractMarkerPath relies on to close the path-traversal defect
-// this predicate exists for.
+// chokepoint markerRel relies on to close the path-traversal defect this
+// predicate exists for.
 func TestIsSHA256Hex(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

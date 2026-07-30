@@ -1,9 +1,7 @@
 package collections
 
 import (
-	"fmt"
-	"os"
-	"path/filepath"
+	"path"
 	"strings"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
@@ -14,8 +12,8 @@ import (
 
 // galaxyYAMLFileName is the sidecar file name inside a collection's .info
 // directory. Both writeGalaxyInfo and installRecordMatches join it onto the
-// same collectionInfoDir; a single constant keeps a typo in either literal
-// from silently reproducing the disagreement this file's chokepoint closes.
+// same target.info; a single constant keeps a typo in either literal from
+// silently reproducing the disagreement this file's chokepoint closes.
 const galaxyYAMLFileName = "GALAXY.yml"
 
 // GalaxyYAML represents the GALAXY.yml metadata file.
@@ -34,34 +32,57 @@ type GalaxyYAML struct {
 // is nil (artifact-cache-hit fast path), a minimal GALAXY.yml is written
 // using fields available from the collection identity.
 //
-// The chokepoint call is the first statement, before buildGalaxyYAML and
-// before any filesystem call: a guard whose refusal is deferred past a
-// destructive operation is not a guard. Nothing on disk is touched, and no
-// GALAXY.yml content is even computed, until col's identity is known safe to
-// use as a path.
-func writeGalaxyInfo(cfg *config.Config, col collection, meta *types.GalaxyCollectionVersionInfo) error {
-	infoDir, ok := collectionInfoDir(cfg, col)
-	if !ok {
-		return fmt.Errorf("%w: ns=%q name=%q version=%q",
-			helpers.ErrUnsafeCollectionIdentifier, col.Namespace, col.Name, col.Version)
+// target's identity was already validated once, by newInstallTarget at the
+// point installCollection built it - this function trusts that and does not
+// re-derive it. The chokepoint call is still the first statement, before
+// buildGalaxyYAML and before any other filesystem call: a guard whose
+// refusal is deferred past a destructive operation is not a guard, even
+// though here the "guard" is target.root itself refusing to traverse a
+// symlink planted between newInstallTarget's validation and this call,
+// rather than a fresh identity check.
+//
+// target.info is reset - RemoveAll then MkdirAll, both rooted and classified
+// - before the write, exactly like extractCollection resets target.rel: an
+// os.Root boundary only stops traversal, it says nothing about what already
+// sits at the leaf name inside it. A bare MkdirAll (a no-op when the
+// directory already exists) would leave a pre-planted GALAXY.yml at that
+// leaf untouched, and the write that follows would go straight through it -
+// including through a relative in-root symlink, which os.Root happily
+// resolves as long as its target stays inside the root, and including a
+// dangling in-root symlink, which the write would silently create the file
+// at. Worse, a hardlink at that leaf is written through even when the linked
+// inode lives outside the root entirely: os.Root is path-based, so it
+// constrains which paths a method may traverse, but a hardlink is not a
+// path, it is a second name for an inode the kernel already resolved before
+// os.Root was ever involved - there is nothing for Root to see. The reset,
+// not the root, is what closes all three: it guarantees the write always
+// lands on a name this run just created, the same invariant
+// extractCollection already relies on for target.rel, so both sinks now
+// share one argument instead of one argument with an unstated exception.
+func writeGalaxyInfo(target installTarget, cfg *config.Config, col collection, meta *types.GalaxyCollectionVersionInfo) error {
+	if err := target.root.RemoveAll(target.info); err != nil {
+		return classifyCollectionsRootError(target.root, target.info, err)
+	}
+	if err := target.root.MkdirAll(target.info, helpers.DirMod); err != nil {
+		return classifyCollectionsRootError(target.root, target.info, err)
 	}
 	g := buildGalaxyYAML(cfg, col, meta)
-	if err := os.MkdirAll(infoDir, helpers.DirMod); err != nil {
-		return err
-	}
 	data, err := yaml.Marshal(&g)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(infoDir, galaxyYAMLFileName), data, helpers.FileMod)
+	if err := target.root.WriteFile(path.Join(target.info, galaxyYAMLFileName), data, helpers.FileMod); err != nil {
+		return classifyCollectionsRootError(target.root, target.info, err)
+	}
+	return nil
 }
 
 // buildGalaxyYAML builds the GALAXY.yml document for col. The identity
 // fields (namespace, name, version) always come from col, never from meta:
 // col is the resolved identity - the same one the store key, the install
 // path, the lockfile, and the artifact key already use - so the file name
-// (collectionInfoDir, derived from col) and the file body agree by
-// construction rather than by coincidence. meta, when present, contributes
+// (target.info, derived from col by newInstallTarget) and the file body agree
+// by construction rather than by coincidence. meta, when present, contributes
 // only the informational fields col has no equivalent for: the download and
 // version URLs (with any capability-bearing query string stripped, see
 // withoutQuery) and the signatures Galaxy attached to this version.

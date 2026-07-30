@@ -148,12 +148,16 @@ func buildPrefetchTasks(
 // correctness. Spending a full tree-tally walk per candidate here, on top of
 // the one installCollection already pays for the same collection, would
 // double the cost this unit adds for no benefit.
+//
+// A nil deps.root or an identity that fails newInstallTarget's own guard both
+// mean "not installed" here: fail-open for this scan, matching the Has()
+// error handling below - a wrong "needs prefetch" only costs a redundant
+// background download, never correctness.
 func shouldSchedulePrefetch(ctx context.Context, deps prefetchDeps, col collection) bool {
 	if !isGalaxyType(col.Type) {
 		return false
 	}
-	installPath := collectionInstallPath(deps.cfg, col)
-	if installRecordMatches(deps.cfg, col, installPath, deps.st) {
+	if target, ok := newInstallTarget(deps.root, deps.cfg, col); ok && installRecordMatches(target, col, deps.st) {
 		return false
 	}
 	ok, err := deps.artifacts.Has(ctx, artifactKey(col))
@@ -213,7 +217,10 @@ func prefetchOne(
 	// useCache stays true: the artifact must still be committed to the shared
 	// cache for every other consumer (a different project, a later run), on
 	// top of handing its temp off to this run's own install worker.
-	downloadDeps := newInstallDeps(deps.cfg, deps.runtime, deps.st, deps.artifacts, nil)
+	// extractStore and root are both nil: this downloadDeps feeds only
+	// downloadCollectionToCache, which never touches the collections tree or
+	// the extracted store, so neither is needed here.
+	downloadDeps := newInstallDeps(deps.cfg, deps.runtime, deps.st, deps.artifacts, nil, nil)
 	result, err := downloadCollectionToCache(ctx, downloadDeps, artifactKey(col), col.Source, meta, true)
 	if err != nil {
 		return meta, downloadResult{}, err

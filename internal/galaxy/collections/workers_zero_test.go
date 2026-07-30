@@ -73,7 +73,11 @@ func TestRunInstallLevelZeroWorkersDoesNotDeadlock(t *testing.T) {
 	t.Parallel()
 	cfg := &config.Config{Workers: 0, Offline: true}
 	runtime := infra.New(noopPrinter{}, http.DefaultClient)
-	deps := newInstallDeps(cfg, runtime, store.New(), nil, nil)
+	// root is nil: this test only proves the semaphore does not deadlock, not
+	// that the (uncreated) collections tree is written to - a nil root makes
+	// installCollection fail fast via newInstallTarget's own guard instead,
+	// which is still a prompt return, not a deadlock.
+	deps := newInstallDeps(cfg, runtime, store.New(), nil, nil, nil)
 	collections := map[string]collection{
 		"acme.widgets@1.0.0": {Namespace: "acme", Name: "widgets", Version: "1.0.0"},
 	}

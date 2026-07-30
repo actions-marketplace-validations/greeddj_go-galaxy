@@ -2,6 +2,7 @@ package collections
 
 import (
 	"context"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -234,26 +235,32 @@ func warnIfFrozenOffline(runtime *infra.Infra, cfg *config.Config) {
 //     from any host, on- or off-server, so there is nothing for the warning
 //     to have caught in the first place.
 //
-// installRecordMatches (a handful of os.Stat calls) runs first and gates the
-// tree walk: checkExtractMarker's scanTree pass - the same cost a real
-// install's canSkipInstall pays for the same collection - is only paid for a
-// collection that already looks installed by the cheap check, exactly as
-// canSkipInstall itself only calls verifyExtractMarker after its own
+// installRecordMatches (a handful of target.root.Stat calls) runs first and
+// gates the tree walk: checkExtractMarker's scanTree pass - the same cost a
+// real install's canSkipInstall pays for the same collection - is only paid
+// for a collection that already looks installed by the cheap check, exactly
+// as canSkipInstall itself only calls verifyExtractMarker after its own
 // installRecordMatches call passes. This still does not call canSkipInstall
 // directly: canSkipInstall's own verifyExtractMarker wraps that same tally
-// comparison with logging and a best-effort os.Remove of a drifted marker,
-// and a preview must never delete state as a side effect of describing it.
+// comparison with logging and a best-effort removal of a drifted marker, and
+// a preview must never delete state as a side effect of describing it.
 // checkExtractMarker is the pure, read-only half of that wrapper - no
 // logging, no deletion - built for exactly this caller.
-func installDryRunProbe(cfg *config.Config, st *store.Store, artifacts cacheManager.ArtifactStore) dryRunProbe {
+//
+// root is nil whenever cfg.DownloadPath does not exist yet (openCollectionsRoot's
+// own dry-run contract: a dry run never creates the directory it is only
+// describing), or when it was never opened at all. newInstallTarget's own
+// nil-root guard then makes every collection report ok=false here, which
+// this probe treats as "not settled" - pessimistic, matching warmDryRunSHA's
+// own stated convention, never optimistic - rather than as an error.
+func installDryRunProbe(cfg *config.Config, st *store.Store, artifacts cacheManager.ArtifactStore, root *os.Root) dryRunProbe {
 	return func(ctx context.Context, col collection) dryRunClassification {
-		installPath := collectionInstallPath(cfg, col)
-		if installRecordMatches(cfg, col, installPath, st) {
+		if target, ok := newInstallTarget(root, cfg, col); ok && installRecordMatches(target, col, st) {
 			// installRecordMatches already established a well-formed
 			// InstalledEntry exists for this key, so GetInstalled succeeding
 			// here is not itself in question - only its extract marker still
 			// matching is.
-			if entry, ok := st.GetInstalled(col.key()); ok && checkExtractMarker(installPath, entry.ArtifactSHA256).matches() {
+			if entry, ok := st.GetInstalled(col.key()); ok && checkExtractMarker(target, entry.ArtifactSHA256).matches() {
 				return dryRunClassification{settled: true}
 			}
 		}

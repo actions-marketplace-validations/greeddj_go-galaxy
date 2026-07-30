@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -19,7 +19,7 @@ import (
 // or anything unusual a tarball might contain), and the sum of their lstat
 // sizes. It is not a hash - two different trees can share a tally - but it is
 // strong enough to catch the failure mode this guards against (a file added,
-// removed, or resized after extraction) at the cost of one filepath.WalkDir
+// removed, or resized after extraction) at the cost of one fs.WalkDir pass
 // instead of a full re-hash of every byte. See verifyExtractMarker for
 // exactly what it does and does not detect.
 type treeTally struct {
@@ -47,31 +47,37 @@ const extractMarkerFieldCount = 4
 // needing to learn the file's real length.
 const extractMarkerMaxReadSize = 256
 
-// scanTree computes a treeTally over root with exactly one filepath.WalkDir
-// pass. WalkDir uses Lstat semantics and never follows symlinks, so a
-// symlink - including one that would otherwise form a loop or point outside
-// root - counts as a single non-directory entry carrying its own lstat size
-// and is never descended into; this makes the walk immune to a symlink-loop
-// hang and to a symlink being used to inflate the tally by aliasing a large
-// subtree it does not actually contain.
+// scanTree computes a treeTally over target's install directory with exactly
+// one fs.WalkDir pass against target.root.FS(), rooted at target.rel. This
+// walks through target.root the same way every other read in this file does,
+// so a symlink swap of an ancestor component (ansible_collections, or the
+// namespace/name pair) cannot redirect the scan outside target.rel itself
+// (see checkExtractMarker's callers for what enforces that at the boundary).
 //
-// root itself is excluded from the tally, and so is any top-level entry
-// (a direct child of root) whose name starts with helpers.ExtractMarkerPrefix
-// - this is what stops the marker file from counting itself, and what stops
-// a tarball that happens to ship a same-prefixed file from skewing the tally
-// it is itself compared against.
-func scanTree(root string) (treeTally, error) {
+// fs.WalkDir uses Lstat semantics and never follows symlinks, so a symlink -
+// including one that would otherwise form a loop or point outside
+// target.rel - counts as a single non-directory entry carrying its own lstat
+// size and is never descended into; this makes the walk immune to a
+// symlink-loop hang and to a symlink being used to inflate the tally by
+// aliasing a large subtree it does not actually contain.
+//
+// target.rel itself is excluded from the tally, and so is any top-level entry
+// (a direct child of target.rel) whose name starts with
+// helpers.ExtractMarkerPrefix - this is what stops the marker file from
+// counting itself, and what stops a tarball that happens to ship a
+// same-prefixed file from skewing the tally it is itself compared against.
+func scanTree(target installTarget) (treeTally, error) {
 	var tally treeTally
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(target.root.FS(), target.rel, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if path == root {
+		if p == target.rel {
 			return nil
 		}
-		if filepath.Dir(path) == root && strings.HasPrefix(d.Name(), helpers.ExtractMarkerPrefix) {
+		if path.Dir(p) == target.rel && strings.HasPrefix(d.Name(), helpers.ExtractMarkerPrefix) {
 			if d.IsDir() {
-				return filepath.SkipDir
+				return fs.SkipDir
 			}
 			return nil
 		}
@@ -148,13 +154,17 @@ func parseExtractMarkerField(field, key string) (int64, bool) {
 	return n, true
 }
 
-// readExtractMarker reads path with a hard cap of extractMarkerMaxReadSize
-// bytes. It reports ok=false for a missing/unreadable file and for a file
-// longer than the cap - in the latter case, the read stops at the cap and
-// the true length is never learned, since anything past a well-formed
-// marker's size is already invalid regardless of what it contains.
-func readExtractMarker(path string) (string, bool) {
-	f, err := os.Open(path) //nolint:gosec // path is this package's own marker path, not attacker-controlled input
+// readExtractMarker reads target's marker at rel (root-relative, already
+// computed by the caller via markerRel) with a hard cap of
+// extractMarkerMaxReadSize bytes, through target.root rather than a plain
+// os.Open - the same symlink-swap containment scanTree and every other read
+// in this file gets. It reports ok=false for a missing/unreadable file and
+// for a file longer than the cap - in the latter case, the read stops at the
+// cap and the true length is never learned, since anything past a
+// well-formed marker's size is already invalid regardless of what it
+// contains.
+func readExtractMarker(target installTarget, rel string) (string, bool) {
+	f, err := target.root.Open(rel)
 	if err != nil {
 		return "", false
 	}
@@ -176,19 +186,19 @@ func readExtractMarker(path string) (string, bool) {
 	}
 }
 
-// writeExtractMarker computes installPath's current tree tally via scanTree
-// and persists it as sha's extract-done marker, so a later verifyExtractMarker
+// writeExtractMarker computes target's current tree tally via scanTree and
+// persists it as sha's extract-done marker, so a later verifyExtractMarker
 // call has something authoritative to compare against. The write always
 // removes any existing marker under sha's name first (ignoring
-// fs.ErrNotExist): extractCollection always wipes installPath with
-// os.RemoveAll before a real extraction, so a leftover marker here would only
-// happen if this were ever called a second time against the same sha without
-// that wipe in between - remove-then-write keeps that case correct too rather
-// than relying on os.WriteFile's own truncate-on-write, which is already what
-// happens but is worth making an explicit step rather than an implicit
-// side effect.
-func writeExtractMarker(installPath, sha string) error {
-	marker, ok := extractMarkerPath(installPath, sha)
+// fs.ErrNotExist): extractCollection always wipes target.path with
+// target.root.RemoveAll before a real extraction, so a leftover marker here
+// would only happen if this were ever called a second time against the same
+// sha without that wipe in between - remove-then-write keeps that case
+// correct too rather than relying on target.root.WriteFile's own
+// truncate-on-write, which is already what happens but is worth making an
+// explicit step rather than an implicit side effect.
+func writeExtractMarker(target installTarget, sha string) error {
+	rel, ok := markerRel(target, sha)
 	if !ok {
 		// Hard error here, unlike checkExtractMarker/verifyExtractMarker: this
 		// runs only after a successful extraction, so sha has already passed
@@ -199,18 +209,18 @@ func writeExtractMarker(installPath, sha string) error {
 		// than just this one; failing loudly is strictly better than that.
 		return fmt.Errorf("%w: %q", helpers.ErrMalformedArtifactSHA256, sha)
 	}
-	tally, err := scanTree(installPath)
+	tally, err := scanTree(target)
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(marker); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := target.root.Remove(rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	return os.WriteFile(marker, []byte(formatExtractMarker(tally)), helpers.FileMod)
+	return target.root.WriteFile(rel, []byte(formatExtractMarker(tally)), helpers.FileMod)
 }
 
 // extractMarkerStatus discriminates why checkExtractMarker did or did not
-// find installPath's extract-done marker still valid.
+// find target's extract-done marker still valid.
 type extractMarkerStatus int
 
 const (
@@ -237,8 +247,8 @@ const (
 	// but the two tallies disagree.
 	extractMarkerDrifted
 	// extractMarkerUnsafeSHA means sha itself is not helpers.IsSHA256Hex, so
-	// no marker path was even computed - see extractMarkerPath's doc comment
-	// for why the sha, not the joined path, is what gets rejected.
+	// no marker path was even computed - see markerRel's doc comment for why
+	// the sha, not the joined path, is what gets rejected.
 	extractMarkerUnsafeSHA
 )
 
@@ -260,47 +270,57 @@ func (o extractMarkerOutcome) matches() bool {
 	return o.status == extractMarkerMatches
 }
 
-// extractMarkerPath returns the on-disk path of installPath's extract-done
-// marker for sha, and whether sha was safe to use at all - the single
-// validating chokepoint every construction of this path must go through, so
-// it cannot be computed two different ways, one of them unguarded.
+// markerRel returns the root-relative path (slash-separated, suitable for
+// target.root and target.root.FS()) of target's extract-done marker for sha,
+// and whether sha was safe to use at all - the single validating chokepoint
+// every construction of this path must go through, so it cannot be computed
+// two different ways, one of them unguarded.
 //
-// sha must be helpers.IsSHA256Hex before it is ever joined: filepath.Join
-// fuses a leading ".." in sha into the constant helpers.ExtractMarkerPrefix
-// element (".extract-done."), turning it into ".extract-done.." - a real "up
-// one directory" element - so the join absorbs sha's first ".." for free and
-// every later ".." in sha pops a real path component off installPath. A
-// leading "./" makes this unbounded rather than capped at installPath's own
-// depth: "./../../../../../../etc/passwd" walks all the way past the
-// filesystem root before the extra ".." components run out, rather than
-// stopping once installPath's components are exhausted. Validating the
-// joined result after the fact cannot close this - by the time a path
-// exists to inspect, the escape has already happened - so sha itself is what
-// is validated, before any join is computed.
-func extractMarkerPath(installPath, sha string) (string, bool) {
+// sha must be helpers.IsSHA256Hex before it is ever joined: path.Join fuses a
+// leading ".." in sha into the constant helpers.ExtractMarkerPrefix element
+// (".extract-done."), turning it into ".extract-done.." - a real "up one
+// directory" element - so the join absorbs sha's first ".." for free and
+// every later ".." in sha pops a real path component off target.rel. A
+// leading "./" makes this unbounded rather than capped at target.rel's own
+// depth: "./../../../../../../etc/passwd" walks all the way past target.rel's
+// components before the extra ".." tokens run out, rather than stopping once
+// they are exhausted. Validating the joined result after the fact cannot
+// close this - by the time a path exists to inspect, the escape has already
+// happened - so sha itself is what is validated, before any join is
+// computed.
+//
+// target.root is a real backstop against the same class of value now, not
+// the only defense the way installPath-based joins once were: even a
+// (hypothetical, guard-bypassing) traversal sha that survived this check
+// would still have to pass through target.root, which refuses to resolve a
+// path component escaping cfg.DownloadPath. This guard is kept anyway,
+// unconditionally, for the same reason writeExtractMarker's own guard is not
+// made redundant by any caller's check - defense in depth, not a single
+// point of failure.
+func markerRel(target installTarget, sha string) (string, bool) {
 	if !helpers.IsSHA256Hex(sha) {
 		return "", false
 	}
-	return filepath.Join(installPath, helpers.ExtractMarkerPrefix+sha), true
+	return path.Join(target.rel, helpers.ExtractMarkerPrefix+sha), true
 }
 
-// checkExtractMarker reports whether installPath's on-disk extract-done
-// marker for sha is present, well-formed, and its recorded tally still
-// matches what scanTree observes for installPath right now. It is a pure
-// read: no logging, no marker deletion, no side effects at all - a caller
-// that only wants a read-only answer can use this directly, currently
-// installDryRunProbe (for the dry-run preview), though nothing about this
-// predicate ties it to that one caller. verifyExtractMarker below is the
-// install-path wrapper that adds logging and the best-effort cleanup on a
-// negative outcome; see its own doc comment for what this predicate does and
-// does not catch, and why cleanup lives in the wrapper rather than here.
-func checkExtractMarker(installPath, sha string) extractMarkerOutcome {
-	marker, ok := extractMarkerPath(installPath, sha)
+// checkExtractMarker reports whether target's on-disk extract-done marker
+// for sha is present, well-formed, and its recorded tally still matches what
+// scanTree observes for target right now. It is a pure read: no logging, no
+// marker deletion, no side effects at all - a caller that only wants a
+// read-only answer can use this directly, currently installDryRunProbe (for
+// the dry-run preview), though nothing about this predicate ties it to that
+// one caller. verifyExtractMarker below is the install-path wrapper that adds
+// logging and the best-effort cleanup on a negative outcome; see its own doc
+// comment for what this predicate does and does not catch, and why cleanup
+// lives in the wrapper rather than here.
+func checkExtractMarker(target installTarget, sha string) extractMarkerOutcome {
+	rel, ok := markerRel(target, sha)
 	if !ok {
 		return extractMarkerOutcome{status: extractMarkerUnsafeSHA}
 	}
 
-	content, ok := readExtractMarker(marker)
+	content, ok := readExtractMarker(target, rel)
 	if !ok {
 		return extractMarkerOutcome{status: extractMarkerMissing}
 	}
@@ -308,7 +328,7 @@ func checkExtractMarker(installPath, sha string) extractMarkerOutcome {
 	if !ok {
 		return extractMarkerOutcome{status: extractMarkerMalformed}
 	}
-	got, err := scanTree(installPath)
+	got, err := scanTree(target)
 	if err != nil {
 		return extractMarkerOutcome{status: extractMarkerScanFailed, scanErr: err}
 	}
@@ -318,19 +338,20 @@ func checkExtractMarker(installPath, sha string) extractMarkerOutcome {
 	return extractMarkerOutcome{status: extractMarkerMatches}
 }
 
-// verifyExtractMarker reports whether installPath's on-disk extract-done
-// marker for sha is present, well-formed, and its recorded tally still
-// matches what scanTree observes for installPath right now - checkExtractMarker
-// answers that question; this wrapper adds the install path's own logging and
+// verifyExtractMarker reports whether target's on-disk extract-done marker
+// for sha is present, well-formed, and its recorded tally still matches what
+// scanTree observes for target right now - checkExtractMarker answers that
+// question; this wrapper adds the install path's own logging and
 // best-effort cleanup around it, so those two concerns (the pure comparison,
 // and what an install does in reaction to it) cannot drift apart from a
 // caller that only wants the former.
 //
-// What this catches: any file or directory added or removed under installPath
-// since extraction, and any file whose size changed - which is the dominant
-// real-world shape of an in-place edit, since installed files are hard links
-// into the shared extracted-store cache, so an edit corrupts that cache for
-// every future install sharing the same content, not just this one.
+// What this catches: any file or directory added or removed under target's
+// install directory since extraction, and any file whose size changed -
+// which is the dominant real-world shape of an in-place edit, since installed
+// files are hard links into the shared extracted-store cache, so an edit
+// corrupts that cache for every future install sharing the same content, not
+// just this one.
 //
 // What this deliberately does NOT catch: an in-place edit that preserves the
 // edited file's exact byte length. Closing that hole needs a full re-hash (or
@@ -349,12 +370,6 @@ func checkExtractMarker(installPath, sha string) extractMarkerOutcome {
 // survives the run that rejected it, so the next run starts clean instead of
 // re-detecting the same drift forever.
 //
-// sha failing helpers.IsSHA256Hex is the one outcome that does NOT reach a
-// real marker path at all: extractMarkerPath refuses to construct one (see
-// its own doc comment for the path-traversal mechanic this closes), so there
-// is nothing to remove and this returns false immediately, before
-// checkExtractMarker is even called.
-//
 // Severity is deliberately asymmetric. A marker that is absent, in the
 // legacy format, or otherwise unparseable is logged at Debugf only: every
 // user upgrading past the marker-format change would otherwise see a
@@ -368,8 +383,8 @@ func checkExtractMarker(installPath, sha string) extractMarkerOutcome {
 // This never fails the run: a detected drift, and an unsafe sha, are both
 // recovered by re-extraction, so turning either signal into a hard error
 // would convert a recoverable event into a CI outage for no benefit.
-func verifyExtractMarker(out output.Printer, installPath, sha string) bool {
-	marker, ok := extractMarkerPath(installPath, sha)
+func verifyExtractMarker(out output.Printer, target installTarget, sha string) bool {
+	rel, ok := markerRel(target, sha)
 	if !ok {
 		// An unsafe sha is never expected the way a missing or legacy-format
 		// marker is - it means either a corrupt snapshot or a lying server -
@@ -377,12 +392,17 @@ func verifyExtractMarker(out output.Printer, installPath, sha string) bool {
 		// extractMarkerDrifted and warnIfOffServerDownloadHost: it must reach
 		// stderr and survive --quiet. %q (never %s) guards against a
 		// newline or control byte in sha forging a log line. There is no
-		// marker path to log or remove - extractMarkerPath refused to
-		// construct one - and no os.Remove is reachable on this arm at all.
-		out.Warnf("refusing to use unsafe artifact sha256 %q as an extract marker for %s, will re-extract", sha, installPath)
+		// marker path to log or remove - markerRel refused to construct one -
+		// and no Remove is reachable on this arm at all.
+		out.Warnf("refusing to use unsafe artifact sha256 %q as an extract marker for %s, will re-extract", sha, target.path)
 		return false
 	}
-	outcome := checkExtractMarker(installPath, sha)
+	// markerDisplay renders the same location rel refers to as a plain,
+	// OS-native absolute path, purely for these log lines: every actual
+	// filesystem operation below still goes through target.root and rel, this
+	// is display-only.
+	markerDisplay := filepath.Join(target.path, helpers.ExtractMarkerPrefix+sha)
+	outcome := checkExtractMarker(target, sha)
 
 	switch outcome.status {
 	case extractMarkerUnknown:
@@ -398,18 +418,18 @@ func verifyExtractMarker(out output.Printer, installPath, sha string) bool {
 	case extractMarkerMatches:
 		return true
 	case extractMarkerMissing:
-		out.Debugf("extract marker missing or unreadable at %s, will re-extract", marker)
+		out.Debugf("extract marker missing or unreadable at %s, will re-extract", markerDisplay)
 	case extractMarkerMalformed:
-		out.Debugf("extract marker at %s is not in the current format (legacy or corrupt), will re-extract", marker)
+		out.Debugf("extract marker at %s is not in the current format (legacy or corrupt), will re-extract", markerDisplay)
 	case extractMarkerScanFailed:
-		out.Debugf("failed to scan %s to verify its extract marker: %v, will re-extract", installPath, outcome.scanErr)
+		out.Debugf("failed to scan %s to verify its extract marker: %v, will re-extract", target.path, outcome.scanErr)
 	case extractMarkerDrifted:
 		out.Warnf(
 			"installed tree %s no longer matches its extract marker (recorded entries=%d dirs=%d bytes=%d, "+
 				"found entries=%d dirs=%d bytes=%d): the cache may have been modified after extraction; re-extracting",
-			installPath, outcome.want.Entries, outcome.want.Dirs, outcome.want.Bytes, outcome.got.Entries, outcome.got.Dirs, outcome.got.Bytes,
+			target.path, outcome.want.Entries, outcome.want.Dirs, outcome.want.Bytes, outcome.got.Entries, outcome.got.Dirs, outcome.got.Bytes,
 		)
 	}
-	_ = os.Remove(marker)
+	_ = target.root.Remove(rel)
 	return false
 }
