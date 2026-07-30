@@ -215,6 +215,51 @@ var (
 	// It is never retried: the budget is spent, so every remaining attempt
 	// would fail instantly against the same dead context.
 	ErrArtifactDownloadDeadline = errors.New("artifact download deadline exceeded")
+	// ErrMetadataFetchDeadline indicates one Galaxy metadata request exceeded
+	// MetadataFetchDeadline: the whole-request ceiling that catches a
+	// byte-drip response, which the read-inactivity watchdog cannot enforce
+	// since it always makes real progress within every idle window.
+	//
+	// It deliberately does NOT wrap its cause with %w - the rule
+	// ErrReadStalled's own doc comment states and this sentinel follows in
+	// its own words: a sentinel raised to describe why work ended must never
+	// leave a context sentinel reachable through errors.Is, because
+	// exitcode.FromError checks context.Canceled ahead of every other class
+	// and would report a hostile or degraded Galaxy server as a caught
+	// Ctrl-C. The cause is rendered into the message with %v instead, so it
+	// stays diagnosable without being matchable.
+	//
+	// It is never retried: the budget is spent, so every remaining attempt
+	// would fail instantly against the same dead context.
+	//
+	// It is also never raised for an error that does not itself carry a
+	// context signal (a %v-rendered context.DeadlineExceeded or
+	// context.Canceled): a *cacheManager.HTTPStatusError - a 404, a 401/403,
+	// or a retryable status - keeps its own identity even when this
+	// request's budget expires in the same instant, so the root-metadata
+	// server walk keeps routing on status instead of misreading a race
+	// between "the response arrived" and "the budget expired" as a deadline.
+	ErrMetadataFetchDeadline = errors.New("galaxy metadata fetch deadline exceeded")
+	// ErrStateObjectDeadline indicates one persisted cache-state operation
+	// (LoadStore, SaveStore, LoadProjectRegistry, or RecordProject) exceeded
+	// StateObjectDeadline. Unlike ErrMetadataFetchDeadline, the operator
+	// remediation this names is not "your Galaxy server is dripping" but
+	// "your object store is dripping, and while it was, it held the
+	// distributed lock and blocked every runner sharing this bucket" - hence
+	// a separate sentinel rather than reusing ErrMetadataFetchDeadline for
+	// both surfaces.
+	//
+	// It deliberately does NOT wrap its cause with %w, for the identical rule
+	// ErrReadStalled's own doc comment states: a sentinel raised to describe
+	// why work ended must never leave a context sentinel reachable through
+	// errors.Is, since exitcode.FromError checks context.Canceled ahead of
+	// every other class and would report a hostile or degraded object store
+	// as a caught Ctrl-C. The cause is rendered into the message with %v
+	// instead, so it stays diagnosable without being matchable.
+	//
+	// It is never retried: the budget is spent, so every remaining attempt
+	// would fail instantly against the same dead context.
+	ErrStateObjectDeadline = errors.New("cache state object deadline exceeded")
 	// ErrLockfileMismatch indicates the lockfile content does not match the resolution.
 	ErrLockfileMismatch = errors.New("lockfile does not match resolved requirements")
 	// ErrLockfileMissing indicates a lockfile was required but not found.

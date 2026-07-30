@@ -75,3 +75,37 @@ func TestFetchRetryable(t *testing.T) {
 		})
 	}
 }
+
+// TestFetchRetryableTreatsTheMetadataDeadlineAsTerminal pins that
+// isEarlyTerminalFetchError's helpers.ErrMetadataFetchDeadline check runs
+// ahead of the ErrReadStalled check: an error carrying both - a watchdog
+// stall that raced the deadline - must resolve deterministically toward
+// terminal, mirroring isEarlyTerminalDownloadError's identical placement and
+// reasoning for the artifact download path. The bare helpers.ErrReadStalled
+// row is the control proving the table can produce true at all, so the
+// combined row's false is a real refusal, not a fixture that can never
+// accept.
+//
+// A row carrying only the sentinel would not be killable on its own: moving
+// isEarlyTerminalFetchError below the ErrReadStalled check would still leave
+// a bare-sentinel-only error unclassified by ErrReadStalled (it does not
+// match) and unclassified by every check below it, falling through to the
+// same "return false" default-deny outcome fetchRetryable already reaches
+// today - so a bare-sentinel row is default-deny-covered and cannot
+// distinguish the two orderings. The combined-error row is what makes this
+// killable: only when both signatures are present does the ordering actually
+// decide the answer.
+func TestFetchRetryableTreatsTheMetadataDeadlineAsTerminal(t *testing.T) {
+	t.Parallel()
+
+	combined := fmt.Errorf("%w: %w", helpers.ErrMetadataFetchDeadline, helpers.ErrReadStalled)
+	if got := fetchRetryable(combined); got {
+		t.Errorf("fetchRetryable(%v) = %v, want false (the deadline must resolve deterministically toward terminal)", combined, got)
+	}
+
+	// Control: a bare ErrReadStalled, with no deadline sentinel in the tree,
+	// is retryable - proving this table can produce true at all.
+	if got := fetchRetryable(helpers.ErrReadStalled); !got {
+		t.Errorf("fetchRetryable(%v) = %v, want true (control: proves the table can produce true)", helpers.ErrReadStalled, got)
+	}
+}

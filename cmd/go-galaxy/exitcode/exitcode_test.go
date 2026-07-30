@@ -478,6 +478,110 @@ func TestFromErrorInterruptSurvivesStallSentinel(t *testing.T) {
 	}
 }
 
+// TestMetadataFetchDeadlineClassification pins helpers.ErrMetadataFetchDeadline's
+// full classification story, mirroring TestArtifactDownloadDeadlineClassification:
+// the bare sentinel is ExitNetwork; joined behind collections.Start's
+// helpers.ErrInstallationFailed headline it is ExitInstall, identical to
+// every other per-collection failure; and the real rendered shape (%v, not
+// %w) is ExitNetwork, never ExitInterrupt. Killing mutation: removing the
+// errors.Is(err, helpers.ErrMetadataFetchDeadline) check from
+// isMetadataFetchError makes the bare-sentinel assertion fail with
+// "FromError(bare sentinel) = 1, want ExitNetwork (4)".
+//
+// FALSIFIABILITY CONTROL: the "not ExitInterrupt" assertion on the
+// %v-rendered shape is unfalsifiable on its own - a %v-rendered cause can
+// never match context.Canceled through errors.Is, so that check would pass
+// even against a classifier that always returns something other than
+// ExitInterrupt. TestReadStalledClassification and
+// TestArtifactDownloadDeadlineClassification carry the identical trap; this
+// sibling row closes it the same way they do: the identical message shape,
+// but %w-wrapping context.Canceled instead of %v-rendering it, DOES
+// classify as ExitInterrupt, proving the %v row's assertion actually
+// discriminates rather than passing vacuously.
+func TestMetadataFetchDeadlineClassification(t *testing.T) {
+	bare := helpers.ErrMetadataFetchDeadline
+	if got := FromError(bare); got != ExitNetwork {
+		t.Errorf("FromError(bare sentinel) = %d, want ExitNetwork (%d)", got, ExitNetwork)
+	}
+
+	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
+	//nolint:errorlint // pinning the real, deliberately non-wrapping shape; see ErrMetadataFetchDeadline's own doc comment.
+	renderedCause := fmt.Errorf("%w after 2m0s: %v", helpers.ErrMetadataFetchDeadline, context.DeadlineExceeded)
+	joined := errors.Join(headline, renderedCause)
+	if got := FromError(joined); got != ExitInstall {
+		t.Errorf("FromError(joined) = %d, want ExitInstall (%d)", got, ExitInstall)
+	}
+
+	if got := FromError(renderedCause); got != ExitNetwork {
+		t.Errorf("FromError(rendered cause) = %d, want ExitNetwork (%d), not ExitInterrupt", got, ExitNetwork)
+	}
+
+	// Control: the identical shape, %w-wrapping context.Canceled instead of
+	// %v-rendering context.DeadlineExceeded, DOES classify as ExitInterrupt.
+	wrappedCause := fmt.Errorf("%w after 2m0s: %w", helpers.ErrMetadataFetchDeadline, context.Canceled)
+	if got := FromError(wrappedCause); got != ExitInterrupt {
+		t.Errorf("control: FromError(%%w-wrapped cause) = %d, want ExitInterrupt (%d)", got, ExitInterrupt)
+	}
+}
+
+// TestStateObjectDeadlineClassification pins helpers.ErrStateObjectDeadline's
+// full classification story, mirroring
+// TestMetadataFetchDeadlineClassification: the bare sentinel is ExitNetwork;
+// the real rendered shape (%v, not %w) is ExitNetwork, never ExitInterrupt,
+// with the identical %v/%w falsifiability control; and it CAN be aggregated,
+// since WithStateDeadline bounds SaveStore as well as the init-time reads,
+// and SaveStore is called well past init too: finalizeInstall and
+// warmWithState fold a save failure in through annotateSaveFailure
+// ("%w; snapshot save failed: %w"), so a tail save failure joined behind
+// helpers.ErrInstallationFailed classifies ExitInstall, identical to every
+// other per-collection failure and to how helpers.ErrMetadataFetchDeadline
+// classifies once joined the same way.
+//
+// Killing mutations, both verified: removing the
+// errors.Is(err, helpers.ErrStateObjectDeadline) check from isTransportError
+// makes the bare-sentinel assertion fail with "FromError(bare sentinel) = 1,
+// want ExitNetwork (4)"; removing isFileIntegrityError from isInstallError's
+// checks (the sub-check that matches helpers.ErrInstallationFailed itself)
+// makes the tail-save-failure assertion fail with
+// "FromError(tail save failure) = 4, want ExitInstall (5)" - the joined tree
+// falls through to isNetworkError instead, since nothing left in
+// isInstallError still matches the headline.
+func TestStateObjectDeadlineClassification(t *testing.T) {
+	bare := helpers.ErrStateObjectDeadline
+	if got := FromError(bare); got != ExitNetwork {
+		t.Errorf("FromError(bare sentinel) = %d, want ExitNetwork (%d)", got, ExitNetwork)
+	}
+
+	// This bare shape is not only "the sentinel hit at init": it is the exact
+	// tree finalizeInstall/warmWithState return for a byte-dripped SaveStore
+	// on a run that recorded zero collection failures (summary.count == 0,
+	// so annotateSaveFailure is never reached) - the common case, since most
+	// runs have no collection failures. No separate row is needed for that
+	// case; this one already covers it.
+	//nolint:errorlint // pinning the real, deliberately non-wrapping shape; see ErrStateObjectDeadline's own doc comment.
+	renderedCause := fmt.Errorf("%w after 1m0s: %v", helpers.ErrStateObjectDeadline, context.DeadlineExceeded)
+	if got := FromError(renderedCause); got != ExitNetwork {
+		t.Errorf("FromError(rendered cause) = %d, want ExitNetwork (%d), not ExitInterrupt", got, ExitNetwork)
+	}
+
+	// Control: the identical shape, %w-wrapping context.Canceled instead of
+	// %v-rendering context.DeadlineExceeded, DOES classify as ExitInterrupt.
+	wrappedCause := fmt.Errorf("%w after 1m0s: %w", helpers.ErrStateObjectDeadline, context.Canceled)
+	if got := FromError(wrappedCause); got != ExitInterrupt {
+		t.Errorf("control: FromError(%%w-wrapped cause) = %d, want ExitInterrupt (%d)", got, ExitInterrupt)
+	}
+
+	// A tail SaveStore failure (finalizeInstall/warmWithState, well past
+	// init) joins the same way a per-collection failure does:
+	// annotateSaveFailure's exact wrap shape, "%w; snapshot save failed: %w",
+	// around a headline that already carries helpers.ErrInstallationFailed.
+	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
+	tailSaveFailure := fmt.Errorf("%w; snapshot save failed: %w", headline, renderedCause)
+	if got := FromError(tailSaveFailure); got != ExitInstall {
+		t.Errorf("FromError(tail save failure) = %d, want ExitInstall (%d)", got, ExitInstall)
+	}
+}
+
 // fakeSignal is a non-syscall.Signal os.Signal implementation used to verify
 // FromSignal's fallback path.
 type fakeSignal struct{}

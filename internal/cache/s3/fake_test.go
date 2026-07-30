@@ -48,8 +48,11 @@ type fakeS3 struct {
 	// rules for two different methods against the very same key at once -
 	// e.g. a PUT that always reports precondition-failed together with a
 	// HEAD that always reports not-found on the same lock object key.
-	fails                 map[string]*forcedFailure
-	requests              map[string]int
+	fails    map[string]*forcedFailure
+	requests map[string]int
+	// drips is keyed by object key, armed via dripGet: a matching GET never
+	// finishes its body on its own (see driveDripGet).
+	drips                 map[string]time.Duration
 	failDeleteObjects     *deleteObjectsFailure
 	lastDeleteHeaders     http.Header
 	bucket                string
@@ -386,7 +389,7 @@ func (f *fakeS3) handleObject(w http.ResponseWriter, r *http.Request, key string
 	case http.MethodHead:
 		f.handleHead(w, key)
 	case http.MethodGet:
-		f.handleGet(w, key)
+		f.handleGet(w, r, key)
 	case http.MethodPut:
 		f.handlePut(w, r, key)
 	case http.MethodDelete:
@@ -423,8 +426,9 @@ func (f *fakeS3) handleHead(w http.ResponseWriter, key string) {
 
 // handleGet returns the stored object's metadata headers and body verbatim,
 // or 404 if absent. A forced failure armed via failNext/failNextWithBody
-// takes precedence over the normal response.
-func (f *fakeS3) handleGet(w http.ResponseWriter, key string) {
+// takes precedence over the normal response, and a drip armed via dripGet
+// takes precedence over the normal body (see driveDripGet).
+func (f *fakeS3) handleGet(w http.ResponseWriter, r *http.Request, key string) {
 	f.countRequest(key, http.MethodGet)
 	if status, body, fail := f.shouldFail(key, http.MethodGet); fail {
 		w.WriteHeader(status)
@@ -435,6 +439,7 @@ func (f *fakeS3) handleGet(w http.ResponseWriter, key string) {
 	}
 	f.mu.Lock()
 	obj, ok := f.objects[key]
+	interval, dripping := f.drips[key]
 	f.mu.Unlock()
 	if !ok {
 		w.WriteHeader(http.StatusNotFound)
@@ -442,7 +447,52 @@ func (f *fakeS3) handleGet(w http.ResponseWriter, key string) {
 	}
 	writeObjectHeaders(w.Header(), obj)
 	w.WriteHeader(http.StatusOK)
+	if dripping {
+		driveDripGet(w, r, interval)
+		return
+	}
 	_, _ = w.Write(obj.data)
+}
+
+// dripGet arms a per-key drip on key's next GET (and every one after, since
+// this fake has no notion of a fault Count): once the object's real headers
+// and 200 status are written, the response body never actually arrives -
+// driveDripGet writes one filler byte per interval instead, flushed onto the
+// wire, forever, until the request's context ends. This models a degraded or
+// hostile object-store endpoint whose GET keeps making genuine (if glacial)
+// progress and so never trips a read-inactivity watchdog, the same shape
+// fakegalaxy.Fault.DripInterval models for a Galaxy server.
+func (f *fakeS3) dripGet(key string, interval time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.drips == nil {
+		f.drips = make(map[string]time.Duration)
+	}
+	f.drips[key] = interval
+}
+
+// driveDripGet writes a single filler byte per interval, flushed onto the
+// wire, until r's context is done - enactFault's DripInterval arm in
+// internal/testing/fakegalaxy mirrors this exact shape for a JSON Galaxy
+// endpoint. The object's real Content-Length is never set here (handleGet's
+// caller wrote only the headers and status before calling this), so the
+// connection is served chunked and a client can never infer completion from
+// a declared length.
+func driveDripGet(w http.ResponseWriter, r *http.Request, interval time.Duration) {
+	flusher, _ := w.(http.Flusher)
+	for {
+		if _, err := w.Write([]byte{' '}); err != nil {
+			return
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(interval):
+		}
+	}
 }
 
 // handlePut stores the request body and its X-Amz-Meta-* headers under key,

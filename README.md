@@ -221,6 +221,22 @@ Clean unreachable collections:
   run exits with the install-failure code (`5`); a stall outside the per-collection install path - a
   metadata fetch during resolution, an S3 state-object read - exits with the network code (`4`)
   instead. It is never reported as an interrupt.
+
+  Two more ceilings complete this family, both fixed and non-configurable for the identical reason: a
+  knob on a safety ceiling is one an operator raises in response to a truncation, which is how the
+  attack succeeds. A single Galaxy metadata request - the response, the size-limited body read, and
+  every retry attempt and backoff sleep, as one shared budget - carries a fixed 2-minute ceiling: a
+  maximum-size (16 MiB) response needs roughly 1.12 Mbit/s sustained to finish inside it, while the
+  largest realistic response (a 10,000-version list, about 1.5 MB) needs only about 0.1 Mbit/s. The
+  versions-list paging loop shares a single one of these budgets across every page it fetches, rather
+  than spending a fresh one per page, since the server itself controls how many pages a resolve issues.
+  A single persisted cache-state operation (loading or saving the snapshot, loading or recording the
+  project registry) carries a fixed 60-second ceiling: a maximum-size (256 MiB compressed) state object
+  needs roughly 35.8 Mbit/s sustained to finish inside it, while a large real snapshot (16 MiB
+  compressed) needs only about 2.2 Mbit/s. This ceiling also protects every other runner sharing an
+  S3-backed cache, not just the one that is stalling: these operations run while the backend's
+  distributed lock is held, so an unbounded one blocks every other runner against that bucket until it
+  gives up waiting for the lock - which is why its budget is tighter than the artifact ceiling above.
 - `--download-path, -p` (`$GO_GALAXY_COLLECTIONS_PATH`, `$ANSIBLE_COLLECTIONS_PATH`)
 - `--requirements-file, -r` (`$GO_GALAXY_REQUIREMENTS_FILE`, `$ANSIBLE_GALAXY_REQUIREMENTS_FILE`)
 - `--ansible-config` (`$GO_GALAXY_ANSIBLE_CONFIG`, `$ANSIBLE_CONFIG`)
@@ -573,7 +589,7 @@ pipelines can branch on failure type without parsing log output:
 |    1 | Generic failure (does not match any class below)                                                                                                     |
 |    2 | Usage or configuration error (invalid flags, requirements, `ansible.cfg`, or a flag a command does not implement, e.g. `--dry-run` on `lock`)        |
 |    3 | Dependency resolution failure (conflicts, missing candidates, cycle)                                                                                 |
-|    4 | Network or Galaxy API failure (timeouts, stalled transfers, offline-mode violations)                                                                 |
+|    4 | Network or Galaxy API failure (timeouts, stalled transfers, metadata and cache-state deadlines, offline-mode violations)                             |
 |    5 | Install-time failure (unsafe archive/symlink content, empty file, missing artifact cache)                                                            |
 |    6 | Lockfile error (missing, invalid, or mismatched with requirements)                                                                                   |
 |    7 | Artifact-integrity failure (content does not authenticate against its naming sha256, or the digest is malformed)                                     |
@@ -591,7 +607,11 @@ class: a run that hits both an integrity failure and a network failure exits
 A stalled or byte-dripped transfer is never reported as an interrupt, even
 though the underlying mechanism that unblocks it is a context cancellation:
 the tool distinguishes its own no-progress cancellation from a genuine SIGINT
-or caller cancellation, and only the latter exits `130`.
+or caller cancellation, and only the latter exits `130`. The same holds for
+the metadata and cache-state ceilings above: grep the run's output for
+`galaxy metadata fetch deadline exceeded` or `cache state object deadline
+exceeded` to tell one of these deadlines apart from a genuine interrupt or
+from any other network failure sharing exit code `4`.
 
 ## Metrics
 

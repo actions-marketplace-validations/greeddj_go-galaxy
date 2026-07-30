@@ -50,7 +50,7 @@ func TestMetadataFetchRejectsOversizedResponse(t *testing.T) {
 	var out map[string]any
 	policy := Policy{Read: true, Write: true}
 
-	err := FetchJSONWithCachePolicy(context.Background(), srv.Client(), srv.URL, st, &out, policy)
+	err := FetchJSONWithCachePolicy(context.Background(), srv.Client(), srv.URL, st, &out, policy, 0)
 	if !errors.Is(err, helpers.ErrArtifactTooLarge) {
 		t.Fatalf("FetchJSONWithCachePolicy() error = %v, want ErrArtifactTooLarge", err)
 	}

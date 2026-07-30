@@ -20,10 +20,21 @@ func apiCacheKey(url string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// FetchJSONWithCachePolicy fetches JSON with cache policy and unmarshals into out.
-func FetchJSONWithCachePolicy(ctx context.Context, client *http.Client, url string, st *store.Store, out any, policy Policy) error {
+// FetchJSONWithCachePolicy fetches JSON with cache policy and unmarshals into
+// out. budget bounds the underlying fetchJSONBody call end to end (see its
+// own doc comment); non-positive means helpers.MetadataFetchDeadline, so a
+// bad value degrades structurally rather than by caller convention.
+func FetchJSONWithCachePolicy(
+	ctx context.Context,
+	client *http.Client,
+	url string,
+	st *store.Store,
+	out any,
+	policy Policy,
+	budget time.Duration,
+) error {
 	if st == nil || (!policy.Read && !policy.Write) {
-		body, _, _, _, err := fetchJSONBody(ctx, client, url, nil)
+		body, _, _, _, err := fetchJSONBody(ctx, client, url, nil, budget)
 		if err != nil {
 			return err
 		}
@@ -32,11 +43,11 @@ func FetchJSONWithCachePolicy(ctx context.Context, client *http.Client, url stri
 
 	key := apiCacheKey(url)
 	if policy.Read {
-		if ok, err := tryServeFromCache(ctx, client, url, st, key, out, policy); ok || err != nil {
+		if ok, err := tryServeFromCache(ctx, client, url, st, key, out, policy, budget); ok || err != nil {
 			return err
 		}
 	}
-	return fetchAndStore(ctx, client, url, st, key, out, policy)
+	return fetchAndStore(ctx, client, url, st, key, out, policy, budget)
 }
 
 // tryServeFromCache attempts to serve from cache and reports if handled.
@@ -57,6 +68,7 @@ func tryServeFromCache(
 	key string,
 	out any,
 	policy Policy,
+	budget time.Duration,
 ) (bool, error) {
 	entry, ok := st.GetAPICache(key)
 	if !isValidCacheEntry(ok, entry, url) {
@@ -77,7 +89,7 @@ func tryServeFromCache(
 		// stale (but valid) body decoded above into out is simply overwritten
 		// by revalidateCache's fresh decode below. This second decode is
 		// bounded by a network round trip, so it is negligible next to it.
-		return revalidateCache(ctx, client, url, st, key, entry, out, policy)
+		return revalidateCache(ctx, client, url, st, key, entry, out, policy, budget)
 	}
 	return true, nil
 }
@@ -102,8 +114,9 @@ func revalidateCache(
 	entry store.APICacheEntry,
 	out any,
 	policy Policy,
+	budget time.Duration,
 ) (bool, error) {
-	body, etag, lastModified, notModified, err := fetchJSONBody(ctx, client, url, &entry)
+	body, etag, lastModified, notModified, err := fetchJSONBody(ctx, client, url, &entry, budget)
 	if err != nil {
 		return false, err
 	}
@@ -120,8 +133,17 @@ func revalidateCache(
 }
 
 // fetchAndStore downloads JSON and optionally stores it in the cache.
-func fetchAndStore(ctx context.Context, client *http.Client, url string, st *store.Store, key string, out any, policy Policy) error {
-	body, etag, lastModified, _, err := fetchJSONBody(ctx, client, url, nil)
+func fetchAndStore(
+	ctx context.Context,
+	client *http.Client,
+	url string,
+	st *store.Store,
+	key string,
+	out any,
+	policy Policy,
+	budget time.Duration,
+) error {
+	body, etag, lastModified, _, err := fetchJSONBody(ctx, client, url, nil, budget)
 	if err != nil {
 		return err
 	}
@@ -161,21 +183,83 @@ func refreshAPICacheEntry(entry store.APICacheEntry, etag, lastModified string) 
 // attempt builds a fresh request and resends any conditional headers, so a
 // retry is never served a stale If-None-Match/If-Modified-Since pair. A 304
 // is treated as success and returned immediately, never retried.
-func fetchJSONBody(ctx context.Context, client *http.Client, url string, entry *store.APICacheEntry) ([]byte, string, string, bool, error) {
+//
+// budget bounds the whole call - build+Do+status-classify+io.ReadAll, and
+// every retry attempt and backoff sleep in the helpers.Retry loop below - as
+// one shared budget established ONCE here, around the outer loop, rather
+// than re-derived per attempt: a non-positive value (in particular the zero
+// value every existing caller in this package's own test suite passes)
+// structurally falls back to helpers.MetadataFetchDeadline via
+// metadataBudget. This is deliberately not established one layer up, in
+// internal/galaxy/collections/compat.go's thin wrapper: the precedent this
+// follows (helpers.ArtifactDownloadDeadline, established in
+// downloadCollectionToCache) is "the budget is established by the code that
+// owns the unit of work, and never behind the Backend seam". This function
+// owns one metadata request - build, Do, status-classify, ReadAll, retry -
+// exactly the unit the budget bounds; internal/galaxy/cache is on the
+// business-logic side of the Backend seam (it is not internal/cache/*), so
+// establishing the budget here does not cross it. Establishing it one layer
+// up in collections/compat.go instead would put the budget in a pass-through
+// wrapper that owns nothing, would leave fetchRetryable unable to see the
+// sentinel it must classify terminal (see fetchRetryable's own doc comment),
+// and would let a future direct caller of the exported
+// FetchJSONWithCachePolicy escape the budget entirely.
+//
+// A pure cache hit (tryServeFromCache returning true without revalidating)
+// never reaches this function at all, so it never pays for a timer. The
+// budget also deliberately does not cover the caller's json.Unmarshal: that
+// is local CPU work on bytes already fully read, not a network operation a
+// hostile or degraded endpoint can stall.
+//
+// One benign race worth naming here, since it is easy to mistake for a bug
+// later: a retryable 5xx whose backoff sleep is cut short by this budget
+// surfaces to the caller as helpers.ErrMetadataFetchDeadline, not as the
+// *HTTPStatusError that triggered the retry in the first place. This is a
+// property of helpers.Retry itself - its backoff wait races ctx.Done()
+// against the jittered timer and, on losing, returns a bare ctx.Err()
+// straight from that select, discarding the status error the closure last
+// produced - not of anything specific to this call site. On the root-metadata
+// path this means a retryable-status server that keeps failing until the
+// budget runs out aborts with helpers.ErrMetadataFetchDeadline instead of
+// tryServerRootMetadata's usual helpers.ErrGalaxyServerUnavailable wrap; both
+// still abort the whole server-list walk, and both still classify
+// ExitNetwork, so only the operator-facing message differs.
+func fetchJSONBody(
+	ctx context.Context,
+	client *http.Client,
+	url string,
+	entry *store.APICacheEntry,
+	budget time.Duration,
+) ([]byte, string, string, bool, error) {
+	budget = metadataBudget(budget)
+	dlCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+
 	var (
 		body               []byte
 		etag, lastModified string
 		notModified        bool
 	)
-	err := helpers.Retry(ctx, helpers.FetchRetryPolicy(), func() error {
+	err := helpers.Retry(dlCtx, helpers.FetchRetryPolicy(), func() error {
 		var attemptErr error
-		body, etag, lastModified, notModified, attemptErr = fetchJSONBodyOnce(ctx, client, url, entry)
-		return attemptErr
+		body, etag, lastModified, notModified, attemptErr = fetchJSONBodyOnce(dlCtx, client, url, entry)
+		return deadlineError(ctx, dlCtx, budget, helpers.ErrMetadataFetchDeadline, attemptErr)
 	}, fetchRetryable)
 	if err != nil {
-		return nil, "", "", false, err
+		return nil, "", "", false, deadlineError(ctx, dlCtx, budget, helpers.ErrMetadataFetchDeadline, err)
 	}
 	return body, etag, lastModified, notModified, nil
+}
+
+// metadataBudget returns budget when it is a positive duration, or
+// helpers.MetadataFetchDeadline otherwise, so a non-positive value (the zero
+// value included) degrades structurally to the real constant rather than by
+// caller convention.
+func metadataBudget(budget time.Duration) time.Duration {
+	if budget <= 0 {
+		return helpers.MetadataFetchDeadline
+	}
+	return budget
 }
 
 // fetchJSONBodyOnce performs a single build+Do+status-classify+io.ReadAll

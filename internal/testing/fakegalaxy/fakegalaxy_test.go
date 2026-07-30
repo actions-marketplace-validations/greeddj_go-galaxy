@@ -437,6 +437,68 @@ func TestArtifactDripFaultKeepsWritingUntilTheContextEnds(t *testing.T) {
 	}
 }
 
+// TestJSONEndpointDripFaultWritesBytesAndBlocksUntilCanceled asserts a
+// DripInterval fault armed against a JSON endpoint (root metadata here, but
+// applyFault/enactFault is shared by all three) writes real bytes onto the
+// wire - proving it is not a silent no-op the way it was before this fault
+// arm existed - and never completes the response body on its own: the caller
+// must abort it. The read deadline used here is far shorter than the drip
+// interval, so a successful read of the opening byte plus a subsequent
+// timeout is only possible if the fake actually flushed data before blocking.
+//
+// Verified against a real revert of the production change it pins: deleting
+// enactFault's DripInterval arm makes the fault fall through to the
+// endpoint's normal (complete, immediate) response, so the "expected a read
+// error once the context ended" read succeeds instead of erroring, observed
+// as:
+// "expected a read error once the context ended, got nil (the drip must
+// never complete the body)".
+func TestJSONEndpointDripFaultWritesBytesAndBlocksUntilCanceled(t *testing.T) {
+	t.Parallel()
+	s := New(t)
+	s.AddVersion("ns", "name", "1.0.0", nil)
+	s.Fail(EndpointRootMetadata, "ns", "name", Fault{DripInterval: 50 * time.Millisecond, Count: 1})
+
+	url := s.URL() + "/api/v3/collections/ns/name"
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	resp, err := s.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	opening := make([]byte, 1)
+	if n, err := io.ReadFull(resp.Body, opening); err != nil || opening[0] != '{' {
+		t.Fatalf("read opening byte: n=%d, err=%v, byte=%q, want 1 byte '{' and no error", n, err, opening)
+	}
+
+	if _, err := io.ReadAll(resp.Body); err == nil {
+		t.Fatal("expected a read error once the context ended, got nil (the drip must never complete the body)")
+	}
+
+	// The fault's Count was consumed by the one request above, so a second
+	// request serves the server's normal, complete root metadata response -
+	// proving this fixture is capable of a normal response and the drip above
+	// was the only thing standing in its way.
+	var root types.GalaxyCollection
+	status := getJSON(t, s.Client(), url, &root)
+	if status != http.StatusOK {
+		t.Fatalf("second request status = %d, want %d", status, http.StatusOK)
+	}
+	if root.HighestVersion.Version != "1.0.0" {
+		t.Errorf("highest_version.version = %q, want %q", root.HighestVersion.Version, "1.0.0")
+	}
+}
+
 // TestCounters asserts per-endpoint and total request counts, and ResetCounts
 // zeroing them.
 func TestCounters(t *testing.T) {

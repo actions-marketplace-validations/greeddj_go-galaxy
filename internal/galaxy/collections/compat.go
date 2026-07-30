@@ -2,10 +2,10 @@ package collections
 
 import (
 	"context"
-	"net/http"
 
 	cacheManager "github.com/greeddj/go-galaxy/internal/galaxy/cache"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
+	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
 )
 
@@ -27,16 +27,20 @@ func setResolvedAll(st *store.Store, resolved map[string]collection) {
 	st.SetResolvedAll(entries)
 }
 
-// fetchJSONWithCachePolicy fetches JSON using cache policy and context.
+// fetchJSONWithCachePolicy fetches JSON using cache policy and context,
+// binding the request to runtime.MetadataDeadline() so no collections call
+// site can pass a wrong (or missing) metadata fetch budget - the budget is
+// derived from runtime here rather than accepted as a caller-supplied
+// parameter.
 func fetchJSONWithCachePolicy(
 	ctx context.Context,
-	client *http.Client,
+	runtime *infra.Infra,
 	url string,
 	st *store.Store,
 	out any,
 	policy cacheManager.Policy,
 ) error {
-	return cacheManager.FetchJSONWithCachePolicy(ctx, client, url, st, out, policy)
+	return cacheManager.FetchJSONWithCachePolicy(ctx, runtime.HTTP, url, st, out, policy, runtime.MetadataDeadline())
 }
 
 // cachePolicyForConstraint builds a cache policy from config options.

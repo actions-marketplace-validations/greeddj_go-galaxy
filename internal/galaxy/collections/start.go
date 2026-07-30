@@ -611,6 +611,15 @@ func initInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) 
 	if err != nil {
 		return nil, err
 	}
+	// Every persisted cache-state operation this run makes (LoadStore and
+	// SaveStore below, plus RecordProject inside recordProjectUnlessDryRun)
+	// runs under its own bounded budget from here on: both happen after the
+	// exclusive lock below is acquired, and a stalled read or write there
+	// would otherwise hold that lock - and block every other runner sharing
+	// this backend - for as long as the caller's own context allows. See
+	// cacheManager.WithStateDeadline's own doc comment for why this wraps the
+	// backend once here rather than at each of its several call sites.
+	backend = cacheManager.WithStateDeadline(backend, runtime.StateDeadline())
 	if err := backend.Open(ctx); err != nil {
 		return nil, err
 	}

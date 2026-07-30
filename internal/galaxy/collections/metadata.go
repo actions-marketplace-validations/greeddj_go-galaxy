@@ -46,7 +46,7 @@ func loadCollectionMetadata(
 
 	versionURL = normalizeVersionsURL(base, versionURL)
 	var versionMetadataInfo types.GalaxyCollectionVersionInfo
-	if err := fetchJSONWithCachePolicy(ctx, runtime.HTTP, versionURL, st, &versionMetadataInfo, policy); err != nil {
+	if err := fetchJSONWithCachePolicy(ctx, runtime, versionURL, st, &versionMetadataInfo, policy); err != nil {
 		return nil, err
 	}
 
@@ -131,7 +131,7 @@ func tryServerRootMetadata(
 	for _, cand := range candidates {
 		runtime.Output.Debugf("root metadata GET %s", cand.url)
 		var root types.GalaxyCollection
-		if err := fetchJSONWithCachePolicy(ctx, runtime.HTTP, cand.url, st, &root, policy); err != nil {
+		if err := fetchJSONWithCachePolicy(ctx, runtime, cand.url, st, &root, policy); err != nil {
 			var statusErr *cacheManager.HTTPStatusError
 			if errors.As(err, &statusErr) {
 				switch {
@@ -180,7 +180,7 @@ func fetchVersionMetadataCached(
 	}
 	url := fmt.Sprintf("%s%s/", base, version)
 	var info types.GalaxyCollectionVersionInfo
-	if err := fetchJSONWithCachePolicy(ctx, runtime.HTTP, url, st, &info, policy); err != nil {
+	if err := fetchJSONWithCachePolicy(ctx, runtime, url, st, &info, policy); err != nil {
 		return nil, err
 	}
 	return &info, nil

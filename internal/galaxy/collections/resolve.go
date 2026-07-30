@@ -214,6 +214,48 @@ func parseDependencies(deps map[string]string) (map[string]string, error) {
 // growing total forever (or lies about it) makes the loop fail hard via
 // helpers.ErrVersionsPagingExceeded instead of looping unboundedly or
 // silently truncating the list a caller then resolves constraints against.
+//
+// The whole loop - every page, not one budget per page - runs under one
+// shared deps.runtime.MetadataDeadline() budget, established once here
+// around the `for page := 0; ; page++` loop. This is the one metadata call
+// site outside a single fetchJSONBody call where a per-request budget alone
+// is not enough, and the reason is not that the request count elsewhere is
+// operator- or program-chosen - it usually is not. MetadataProvider's own
+// Universe/Dependencies/resolveRoot (internal/galaxy/collections/provider.go)
+// issue one root-metadata fetch plus one version-detail fetch per
+// (package, version) the solver explores, and that package set comes from
+// extractDependencies(info) - server-declared metadata - with no step,
+// package, or version cap anywhere in internal/galaxy/solver, so that
+// multiplier is server-chosen and unbounded too. What actually distinguishes
+// this loop is that it is the one place a SINGLE LOGICAL metadata operation
+// (fetch the whole versions list) is split into a server-chosen NUMBER of
+// requests against ONE URL - a shared budget is coherent there, because it
+// is still bounding one operation. The resolver's request count is also
+// server-chosen, but it is a sequence of DISTINCT operations (a different
+// package or version each time), for which a shared budget is not
+// defensible and is deliberately not applied - each of those requests pays
+// its own separate helpers.MetadataFetchDeadline instead, and the walk
+// aborts on the very first one that expires.
+//
+// Here, the multiplier is bounded at least: maxVersionPages (100) requests
+// at up to helpers.MetadataFetchDeadline (2 minutes) each would be 200
+// minutes of drip tolerated for a single collection's version list if each
+// page paid for its own budget. One shared budget collapses that to 1x at no
+// realistic cost: a legitimate server completing all maxVersionPages pages
+// inside this one budget needs each page to average well under a second,
+// and this test suite's own margin (versions_paging_test.go) demonstrates
+// over 3x headroom at a fraction of this budget.
+//
+// Nesting is safe: fetchJSONBody (via fetchVersionsPage) establishes its own
+// per-request context.WithTimeout derived from the dlCtx built here, so its
+// effective deadline becomes min(helpers.MetadataFetchDeadline, whatever is
+// left of this loop's budget) - the per-request ceiling still holds, and is
+// only ever tightened, never loosened, by the outer budget. If this loop's
+// budget expires while a page is in flight, that inner fetchJSONBody's own
+// deadlineError sees a parent (this loop's dlCtx) whose Err() is already
+// non-nil and passes its error through unchanged (idempotence rule 2); the
+// single cacheManager.MetadataDeadlineError call below then normalizes it
+// into exactly one sentinel, never two.
 func loadVersionsListCached(
 	ctx context.Context,
 	deps collectionDeps,
@@ -224,12 +266,16 @@ func loadVersionsListCached(
 		return versions, nil
 	}
 
+	budget := deps.runtime.MetadataDeadline()
+	dlCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+
 	var all []string
 	offset := 0
 	for page := 0; ; page++ {
-		versions, total, err := fetchVersionsPage(ctx, deps, policy, versionsURL, versionLimit, offset)
+		versions, total, err := fetchVersionsPage(dlCtx, deps, policy, versionsURL, versionLimit, offset)
 		if err != nil {
-			return nil, err
+			return nil, cacheManager.MetadataDeadlineError(ctx, dlCtx, budget, err)
 		}
 		if page == 0 {
 			// Pre-size once, right after the first page is in: use the
@@ -288,7 +334,7 @@ func fetchVersionsPage(
 ) ([]string, int, error) {
 	url := fmt.Sprintf("%s?limit=%d&offset=%d", versionsURL, limit, offset)
 	var payload map[string]any
-	if err := fetchJSONWithCachePolicy(ctx, deps.runtime.HTTP, url, deps.st, &payload, policy); err != nil {
+	if err := fetchJSONWithCachePolicy(ctx, deps.runtime, url, deps.st, &payload, policy); err != nil {
 		return nil, 0, err
 	}
 	return parseVersionsPayload(payload)

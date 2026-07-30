@@ -114,6 +114,15 @@ func initCleanup(ctx context.Context, cfg *config.Config, runtime *infra.Infra) 
 	if err != nil {
 		return nil, err
 	}
+	// Every persisted cache-state operation this run makes (LoadStore and
+	// LoadProjectRegistry below) runs under its own bounded budget from here
+	// on: both happen after the exclusive lock below is acquired, and a
+	// stalled read there would otherwise hold that lock - and block every
+	// other runner sharing this backend - for as long as the caller's own
+	// context allows. See cacheManager.WithStateDeadline's own doc comment
+	// for why this wraps the backend once here rather than at each of its
+	// several call sites (this file's own finalizeCleanup among them).
+	backend = cacheManager.WithStateDeadline(backend, runtime.StateDeadline())
 	if err := backend.Open(ctx); err != nil {
 		return nil, err
 	}

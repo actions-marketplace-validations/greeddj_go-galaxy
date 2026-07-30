@@ -186,31 +186,51 @@ type Version struct {
 // StallAfterBytes is a no-op: the fault still consumes one Count, but
 // enactFault then falls through to that endpoint's normal response.
 //
-// DripInterval also only applies to the artifact endpoint: on a request
-// there, a matching Fault with DripInterval > 0 writes the artifact one byte
-// at a time, flushing each byte onto the wire and sleeping DripInterval
-// between them, cycling back to the start of the artifact's bytes when it
-// runs out, until the request's context is done. Unlike StallAfterBytes - a
-// real prefix of progress followed by blocking forever, exactly the shape a
-// read-inactivity watchdog exists to catch - a drip never stops making
-// progress, so it defeats an inactivity watchdog outright: it is caught only
-// by a whole-transfer deadline, never by a per-read idle timeout. The
-// cycling back to the start is deliberate: the body can never legitimately
-// complete, so the only way a client ever ends the request is by aborting
-// it, and a test's parameters do not depend on the length of the generated
-// artifact. On the artifact endpoint, StallAfterBytes is checked first (see
-// handleArtifact for the exact ordering), then DripInterval, then
-// Status/Hang, so DripInterval takes precedence over Status/Hang but not
-// over StallAfterBytes if more than one is set on the same Fault. It is the
-// one fault in this package that uses a wall clock rather than only the
-// request's own context - inherent to
-// the drip-then-sleep behavior being modeled - but no test assertion in this
-// package depends on precise timing, only on the request eventually being
-// aborted by its caller. A caller arming DripInterval must eventually abort
-// the request itself - by canceling its context, closing the response body,
-// or letting a client-side deadline fire - since a faulted response left
-// neither read, closed, nor canceled will block httptest.Server.Close; this
-// obligation is shared with StallAfterBytes above.
+// DripInterval applies to the artifact endpoint and to every JSON endpoint
+// (root metadata, versions list, version detail). Both shapes model the
+// identical hostile behavior (a response that keeps making genuine, if
+// glacial, progress and so defeats a read-inactivity watchdog outright), but
+// the two shapes differ because the two response bodies differ.
+//
+// On the artifact endpoint, a matching Fault with DripInterval > 0 writes
+// the artifact one byte at a time, flushing each byte onto the wire and
+// sleeping DripInterval between them, cycling back to the start of the
+// artifact's bytes when it runs out, until the request's context is done.
+// Unlike StallAfterBytes - a real prefix of progress followed by blocking
+// forever, exactly the shape a read-inactivity watchdog exists to catch - a
+// drip never stops making progress, so it is caught only by a whole-transfer
+// deadline, never by a per-read idle timeout. The cycling back to the start
+// is deliberate: the body can never legitimately complete, so the only way a
+// client ever ends the request is by aborting it, and a test's parameters do
+// not depend on the length of the generated artifact. On the artifact
+// endpoint, StallAfterBytes is checked first (see handleArtifact for the
+// exact ordering), then DripInterval, then Status/Hang, so DripInterval
+// takes precedence over Status/Hang but not over StallAfterBytes if more
+// than one is set on the same Fault; handleArtifact's own StallAfterBytes
+// and DripInterval handling means the artifact endpoint never reaches
+// enactFault's own DripInterval arm below.
+//
+// On any of the three JSON endpoints, reached through the shared
+// applyFault/enactFault path, a matching Fault with DripInterval > 0 writes
+// a 200 OK response with a JSON content type, an opening "{" byte, then one
+// ASCII space per DripInterval, each flushed onto the wire, forever, until
+// the request's context is done: a JSON document that stays syntactically
+// in-progress forever and never completes, the realistic shape a hostile or
+// badly degraded Galaxy endpoint would actually produce. This is what lets a
+// caller exercise a metadata fetch deadline through this fake: without it,
+// DripInterval would be a no-op on a JSON endpoint - the fault would still
+// consume one Count, but enactFault would fall through to the endpoint's
+// normal response.
+//
+// Both shapes are the one fault in this package that use a wall clock rather
+// than only the request's own context - inherent to the drip-then-sleep
+// behavior being modeled - but no test assertion in this package depends on
+// precise timing, only on the request eventually being aborted by its
+// caller. A caller arming DripInterval must eventually abort the request
+// itself - by canceling its context, closing the response body, or letting a
+// client-side deadline fire - since a faulted response left neither read,
+// closed, nor canceled will block httptest.Server.Close; this obligation is
+// shared with StallAfterBytes above.
 //
 // A well-formed Fault sets exactly one of Status, Hang, StallAfterBytes, or
 // DripInterval. StallAfterBytes and DripInterval compose with Count exactly
@@ -832,10 +852,14 @@ func ruleMatches(rule *faultRule, ep Endpoint, namespace, name string) bool {
 }
 
 // enactFault carries out a matched Fault against w/r: a nonzero Status
-// writes that status with an empty body; otherwise Hang blocks until r's
-// context is done and writes nothing. It reports whether it wrote (or
-// waited for) a response; a Fault with neither set is a no-op that returns
-// false, letting the caller fall through to its normal response.
+// writes that status with an empty body; Hang blocks until r's context is
+// done and writes nothing; DripInterval > 0 serves a syntactically
+// never-completing JSON document via dripJSONResponse (see the DripInterval
+// doc comment on Fault for why this is reachable only from a JSON endpoint -
+// handleArtifact's own StallAfterBytes/DripInterval handling means the
+// artifact endpoint never reaches this arm). It reports whether it wrote (or
+// waited for) a response; a Fault with none of these set is a no-op that
+// returns false, letting the caller fall through to its normal response.
 func enactFault(w http.ResponseWriter, r *http.Request, fault Fault) bool {
 	if fault.Status != 0 {
 		w.WriteHeader(fault.Status)
@@ -845,7 +869,44 @@ func enactFault(w http.ResponseWriter, r *http.Request, fault Fault) bool {
 		<-r.Context().Done()
 		return true
 	}
+	if fault.DripInterval > 0 {
+		dripJSONResponse(w, r, fault.DripInterval)
+		return true
+	}
 	return false
+}
+
+// dripJSONResponse writes a 200 OK response with a JSON content type, an
+// opening "{" byte, then one ASCII space per interval - each flushed onto the
+// wire - forever, until r's context is done: a JSON document that stays
+// syntactically in-progress forever and can never be parsed, the realistic
+// shape a hostile or badly degraded Galaxy endpoint would produce against a
+// caller that keeps reading. This is enactFault's DripInterval arm; see the
+// DripInterval doc comment on Fault for why the artifact endpoint never
+// reaches it.
+func dripJSONResponse(w http.ResponseWriter, r *http.Request, interval time.Duration) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	if _, err := w.Write([]byte("{")); err != nil {
+		return
+	}
+	if flusher != nil {
+		flusher.Flush()
+	}
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(interval):
+		}
+		if _, err := w.Write([]byte(" ")); err != nil {
+			return
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
 }
 
 // writeJSONWithETag serves body as a JSON response, honoring conditional

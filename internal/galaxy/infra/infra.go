@@ -29,6 +29,17 @@ type Infra struct {
 	// it only through ArtifactDeadline, never directly, so an unset or
 	// nonsensical value structurally falls back to the real constant.
 	ArtifactDownloadDeadline time.Duration
+	// MetadataFetchDeadline overrides helpers.MetadataFetchDeadline for this
+	// run. It is test-only, for the identical reason
+	// ArtifactDownloadDeadline is: nothing wires it to a CLI flag, an
+	// environment variable, or an ansible.cfg key. Read it only through
+	// MetadataDeadline, never directly.
+	MetadataFetchDeadline time.Duration
+	// StateObjectDeadline overrides helpers.StateObjectDeadline for this run.
+	// It is test-only, for the identical reason ArtifactDownloadDeadline is:
+	// nothing wires it to a CLI flag, an environment variable, or an
+	// ansible.cfg key. Read it only through StateDeadline, never directly.
+	StateObjectDeadline time.Duration
 }
 
 // New builds Infra with default helpers for time and temp paths.
@@ -40,6 +51,8 @@ func New(out output.Printer, httpClient *http.Client) *Infra {
 		TempDir:                  os.TempDir,
 		Metrics:                  &metrics.Counters{},
 		ArtifactDownloadDeadline: helpers.ArtifactDownloadDeadline,
+		MetadataFetchDeadline:    helpers.MetadataFetchDeadline,
+		StateObjectDeadline:      helpers.StateObjectDeadline,
 	}
 }
 
@@ -54,6 +67,30 @@ func (i *Infra) ArtifactDeadline() time.Duration {
 		return helpers.ArtifactDownloadDeadline
 	}
 	return i.ArtifactDownloadDeadline
+}
+
+// MetadataDeadline returns the per-request Galaxy metadata fetch budget this
+// run uses: i.MetadataFetchDeadline when it is set to a positive duration, or
+// helpers.MetadataFetchDeadline otherwise. Every call site reads the budget
+// through this method rather than the field directly, mirroring
+// ArtifactDeadline's own structural fallback.
+func (i *Infra) MetadataDeadline() time.Duration {
+	if i == nil || i.MetadataFetchDeadline <= 0 {
+		return helpers.MetadataFetchDeadline
+	}
+	return i.MetadataFetchDeadline
+}
+
+// StateDeadline returns the per-operation cache-state budget this run uses:
+// i.StateObjectDeadline when it is set to a positive duration, or
+// helpers.StateObjectDeadline otherwise. Every call site reads the budget
+// through this method rather than the field directly, mirroring
+// ArtifactDeadline's own structural fallback.
+func (i *Infra) StateDeadline() time.Duration {
+	if i == nil || i.StateObjectDeadline <= 0 {
+		return helpers.StateObjectDeadline
+	}
+	return i.StateObjectDeadline
 }
 
 // DebugAnsibleConfig logs which settings were sourced from ansible.cfg, then

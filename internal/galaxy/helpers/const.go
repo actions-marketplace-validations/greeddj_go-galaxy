@@ -146,6 +146,92 @@ const (
 	// compressed ceiling cannot expand without bound.
 	StateObjectMaxDecompressedSize = int64(1 << 30) // 1 GiB
 
+	// StateObjectDeadline bounds one persisted cache-state operation on the
+	// Backend seam - LoadStore, SaveStore, LoadProjectRegistry, or
+	// RecordProject - end to end: the lazy Open an S3 backend performs inside
+	// them, the object GET or PUT, readAllCapped's inflate, MarshalSnapshot's
+	// copy+encode and the gzip on the save path, and every S3-verb retry
+	// inside s3RetryPolicy, all as one shared budget.
+	//
+	// Its radius is larger than a single request for a reason specific to
+	// this seam: LoadStore and LoadProjectRegistry both run AFTER
+	// initInstall/initCleanup take the exclusive distributed lock, and the
+	// lock's own heartbeat keeps renewing its TTL in the background, so a
+	// stalled read here is not "one run hangs" - it is "every runner sharing
+	// the bucket is locked out", each of them eventually failing only once
+	// its own lockWaitCeiling wait expires. SaveStore carries the identical
+	// property, since it also runs before the lock is released.
+	//
+	// The realistic threat this bounds is as much a degraded endpoint as a
+	// hostile one: unlike the bucket-write trust boundary documented
+	// elsewhere (a writer who can plant a poisoned snapshot), a byte-drip on
+	// a state-object read needs only control of - or a fault on - the
+	// network path or the object-store endpoint, not of the object's
+	// content.
+	//
+	// The value, 1 minute, is sized against StateObjectMaxCompressedSize
+	// (256 MiB): a maximum-size compressed object must sustain
+	// 256 MiB / 60 s = 4,473,924 B/s (4.27 MiB/s, about 35.8 Mbit/s) to
+	// finish inside the budget - deliberately the same class of link
+	// ArtifactDownloadDeadline already demands of a maximum-size artifact
+	// (4 GiB / 900 s = 4,772,186 B/s, 38.2 Mbit/s), so this ceiling is never
+	// the first a slow-but-legitimate link trips. That is also why it is 60
+	// seconds and not 30: at 30 seconds the same object would demand
+	// 8,947,849 B/s (71.6 Mbit/s), a stricter link than the artifact
+	// ceiling asks for. A full 1 GiB inflate (StateObjectMaxDecompressedSize)
+	// inside 60 seconds needs 17.1 MiB/s, an order of magnitude below what
+	// pgzip decompresses at, so decompression is never the binding
+	// constraint. A large real snapshot (16 MiB compressed) needs only
+	// 279,620 B/s (273 KiB/s, 2.2 Mbit/s) to finish inside the budget, and a
+	// typical one (512 KiB) needs only 8,738 B/s (8.5 KiB/s, 0.07 Mbit/s).
+	//
+	// The largest legitimate operation this bounds is SaveStore, not
+	// LoadStore: SaveStore's own MarshalSnapshot copy+encode and gzip run
+	// inside the same budget as its PUT, while LoadStore only inflates and
+	// decodes what SaveStore already produced.
+	//
+	// Disclosed, not hidden: the arithmetic above does not mean a
+	// maximum-size snapshot fits comfortably at the minimum reference link.
+	// At StateObjectMaxCompressedSize (256 MiB), the 4.27 MiB/s reference
+	// link this budget is sized against consumes the entire 60 seconds on
+	// the PUT alone, leaving nothing for MarshalSnapshot's deep copy, its
+	// JSON encode, and the gzip - all of which run inside this same budget
+	// on the save path. On any real CI link (100 Mbit/s or better) that CPU
+	// work finishes in a few seconds and the upload itself takes roughly 20
+	// seconds, so a maximum-size snapshot fits comfortably; on the minimum
+	// reference link it does not. This asymmetry is inherent to putting CPU
+	// work and a network transfer in one shared budget, and is the accepted
+	// trade: a maximum-size snapshot is already a pathological outlier (see
+	// StateObjectMaxCompressedSize's own doc comment), and the realistic
+	// sizes above it - a large real snapshot at 279,620 B/s, a typical one at
+	// 8,738 B/s - carry no such tension between CPU time and transfer time.
+	// If the budget does expire on a save this size at the minimum link,
+	// SaveStore returns helpers.ErrStateObjectDeadline and the run fails
+	// closed with nothing torn: the install's on-disk result is already
+	// complete and untouched, the S3 PUT either fully replaces the snapshot
+	// object or leaves it exactly as it was (an interrupted PUT never
+	// partially overwrites the previous object), and the backend lock is
+	// still released normally - release runs on its own context.Background()
+	// with the lock's own releaseTimeout, independent of this budget having
+	// already expired. The cost of hitting this ceiling is one cold cache
+	// rebuild on the next run, not corruption or a stuck lock.
+	//
+	// The invariant this budget must respect - pinned by a test in
+	// internal/cache/s3 - is StateObjectDeadline (60s) < the S3 backend's
+	// heartbeatInterval (3 min) < its lockTTL (10 min), and
+	// 3*StateObjectDeadline (3 min) < its lockWaitCeiling (5 min), where 3 is
+	// the number of state operations one run performs while holding the
+	// lock. A stalled state read was never the only way to hold the lock for
+	// a long time - a legitimate, large install already can - so this
+	// converts an unbounded hold into a bounded one; it does not make a long
+	// hold short.
+	//
+	// It is not configurable, for the same reason MetadataFetchDeadline and
+	// ArtifactDownloadDeadline are not. Infra's StateObjectDeadline field
+	// exists solely so a test can shrink this value; it must never be wired
+	// to a CLI flag, an environment variable, or an ansible.cfg key.
+	StateObjectDeadline = 1 * time.Minute
+
 	// MetadataMaxSize caps the raw bytes read for a single Galaxy API
 	// metadata response before it is rejected. Realistic Galaxy metadata JSON
 	// is KB to low MB - a root document is ~1-2 KB, a versions page is
@@ -154,6 +240,59 @@ const (
 	// io.ReadAll allocation and rejects a hostile giant or endless body
 	// without ever false-positiving on a legitimate response.
 	MetadataMaxSize = int64(16 << 20) // 16 MiB
+
+	// MetadataFetchDeadline bounds one Galaxy metadata request end to end -
+	// the response-header phase, the size-limited io.ReadAll of the body, and
+	// every retry attempt and backoff sleep inside fetchJSONBody's
+	// helpers.Retry loop - as one shared budget, not one spent per attempt.
+	//
+	// It exists for the same reason ArtifactDownloadDeadline does: the
+	// read-inactivity watchdog bounds the gap between two reads, not total
+	// transfer time, so a byte-drip that keeps making genuine progress never
+	// trips it, and MetadataMaxSize bounds memory, not time, so it does not
+	// catch a slow-but-technically-progressing drip either. Metadata fetches
+	// are also the FIRST network contact this program makes in every command,
+	// including every --dry-run, running on the resolver ahead of any
+	// artifact acquisition - so leaving only the artifact deadline in place
+	// would still leave the cheaper, earlier door open to the identical
+	// attack.
+	//
+	// It is deliberately NOT --timeout and never derived from it, for the
+	// identical reason ArtifactDownloadDeadline is not: --timeout is a
+	// no-progress budget (ResponseHeaderTimeout plus the watchdog's idle
+	// window), while this is a whole-transfer budget that fires even while
+	// progress is being made.
+	//
+	// The value, 2 minutes, is sized against MetadataMaxSize (16 MiB): a
+	// maximum-size response must sustain 16 MiB / 120 s = 139,810 B/s
+	// (136.5 KiB/s, about 1.12 Mbit/s) to finish inside the budget. The
+	// largest realistic response - a 10,000-version list, ~1.5 MB - needs
+	// only 12,500 B/s (12.2 KiB/s, about 0.1 Mbit/s), and a root document
+	// (1-2 KB) needs on the order of 17 B/s. Both are trivial for any real
+	// network; the headroom above is deliberate.
+	//
+	// It is 2 minutes rather than 5 or 15: a single resolve issues many
+	// metadata requests (root metadata, version detail, and every page of a
+	// versions list), each spending its own copy of this budget, so a large
+	// per-request value multiplies across a run instead of bounding it. 15
+	// minutes would be formally protective and practically toothless against
+	// a 1.5 MB response - a link that slow is already pathological long
+	// before the ceiling would ever fire.
+	//
+	// The versions-list paging loop (loadVersionsListCached) is the one
+	// exception to "one request, one budget": it establishes a single shared
+	// budget for the whole page loop rather than one per page, since the
+	// server itself controls how many pages a resolve issues (it declares
+	// meta.count) - see that function's own doc comment for why a per-request
+	// budget alone is not enough there.
+	//
+	// It is not configurable, for the same reason ArtifactDownloadDeadline is
+	// not: a knob for a safety ceiling is a knob an operator raises in direct
+	// response to a truncation, which is exactly how the attack this ceiling
+	// defends against succeeds. Infra's MetadataFetchDeadline field exists
+	// solely so a test can shrink this value; it must never be wired to a CLI
+	// flag, an environment variable, or an ansible.cfg key.
+	MetadataFetchDeadline = 2 * time.Minute
 
 	// S3ListMaxSize caps the raw bytes read for a single ListObjectsV2 XML
 	// page response. A page is bounded by max-keys (1000 by default, which

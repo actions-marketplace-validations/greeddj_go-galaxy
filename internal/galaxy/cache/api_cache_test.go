@@ -66,10 +66,10 @@ func TestFetchJSONWithCachePolicyCacheHit(t *testing.T) {
 	var out map[string]any
 	url := testAPIURL
 
-	if err := FetchJSONWithCachePolicy(context.Background(), client, url, st, &out, policy); err != nil {
+	if err := FetchJSONWithCachePolicy(context.Background(), client, url, st, &out, policy, 0); err != nil {
 		t.Fatalf("FetchJSONWithCachePolicy error: %v", err)
 	}
-	if err := FetchJSONWithCachePolicy(context.Background(), client, url, st, &out, policy); err != nil {
+	if err := FetchJSONWithCachePolicy(context.Background(), client, url, st, &out, policy, 0); err != nil {
 		t.Fatalf("FetchJSONWithCachePolicy error: %v", err)
 	}
 	if got := hits.Load(); got != 1 {
@@ -113,7 +113,7 @@ func TestFetchJSONWithCachePolicyRevalidate(t *testing.T) {
 	var out map[string]any
 	url := testAPIURL
 
-	if err := FetchJSONWithCachePolicy(context.Background(), client, url, st, &out, policy); err != nil {
+	if err := FetchJSONWithCachePolicy(context.Background(), client, url, st, &out, policy, 0); err != nil {
 		t.Fatalf("FetchJSONWithCachePolicy error: %v", err)
 	}
 	key := apiCacheKey(url)
@@ -124,7 +124,7 @@ func TestFetchJSONWithCachePolicyRevalidate(t *testing.T) {
 	entry.FetchedAt = time.Now().Add(-time.Hour)
 	st.SetAPICache(key, entry)
 
-	if err := FetchJSONWithCachePolicy(context.Background(), client, url, st, &out, policy); err != nil {
+	if err := FetchJSONWithCachePolicy(context.Background(), client, url, st, &out, policy, 0); err != nil {
 		t.Fatalf("FetchJSONWithCachePolicy error: %v", err)
 	}
 	if got := hits.Load(); got != 2 {
@@ -178,7 +178,7 @@ func TestFetchJSONWithCachePolicyFutureStampIsRevalidated(t *testing.T) {
 	var out map[string]any
 	url := testAPIURL
 
-	if err := FetchJSONWithCachePolicy(context.Background(), client, url, st, &out, policy); err != nil {
+	if err := FetchJSONWithCachePolicy(context.Background(), client, url, st, &out, policy, 0); err != nil {
 		t.Fatalf("FetchJSONWithCachePolicy error: %v", err)
 	}
 	key := apiCacheKey(url)
@@ -189,7 +189,7 @@ func TestFetchJSONWithCachePolicyFutureStampIsRevalidated(t *testing.T) {
 	entry.FetchedAt = time.Now().Add(time.Hour)
 	st.SetAPICache(key, entry)
 
-	if err := FetchJSONWithCachePolicy(context.Background(), client, url, st, &out, policy); err != nil {
+	if err := FetchJSONWithCachePolicy(context.Background(), client, url, st, &out, policy, 0); err != nil {
 		t.Fatalf("FetchJSONWithCachePolicy error: %v", err)
 	}
 	if got := hits.Load(); got != 2 {
@@ -241,7 +241,7 @@ func TestFetchJSONWithCachePolicyCorruptBodyRefetchesUnconditional(t *testing.T)
 
 	policy := Policy{Read: true, Write: true, TTL: time.Minute}
 	var out map[string]any
-	if err := FetchJSONWithCachePolicy(context.Background(), client, url, st, &out, policy); err != nil {
+	if err := FetchJSONWithCachePolicy(context.Background(), client, url, st, &out, policy, 0); err != nil {
 		t.Fatalf("FetchJSONWithCachePolicy error: %v", err)
 	}
 	if ok, _ := out["ok"].(bool); !ok {
@@ -255,7 +255,7 @@ func TestFetchJSONWithCachePolicyCorruptBodyRefetchesUnconditional(t *testing.T)
 	}
 	assertAPICacheHealed(t, st, key, "v2")
 
-	if err := FetchJSONWithCachePolicy(context.Background(), client, url, st, &out, policy); err != nil {
+	if err := FetchJSONWithCachePolicy(context.Background(), client, url, st, &out, policy, 0); err != nil {
 		t.Fatalf("FetchJSONWithCachePolicy error on second call: %v", err)
 	}
 	if got := hits.Load(); got != 1 {
@@ -314,7 +314,7 @@ func TestFetchJSONWithCachePolicyCorruptExpiredBodyDoesNotRide304(t *testing.T) 
 
 	policy := Policy{Read: true, Write: true, TTL: time.Minute}
 	var out map[string]any
-	if err := FetchJSONWithCachePolicy(context.Background(), client, url, st, &out, policy); err != nil {
+	if err := FetchJSONWithCachePolicy(context.Background(), client, url, st, &out, policy, 0); err != nil {
 		t.Fatalf("FetchJSONWithCachePolicy error: %v", err)
 	}
 	if saw304.Load() {

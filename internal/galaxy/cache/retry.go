@@ -8,24 +8,29 @@ import (
 )
 
 // fetchRetryable classifies whether a Galaxy API GET's failure is worth
-// retrying. Offline mode and a context that is already canceled or expired
-// are never retried - repeating the same call against a dead context or a
-// transport that rejects every request outright would only spend the
-// backoff budget for nothing. Every other error is terminal by default
-// (this covers a 404 and any other non-retryable HTTPStatusError) except
-// the two transient shapes fetchJSONBody marks explicitly: a retryable HTTP
-// status carried by *HTTPStatusError, or a stalled body read
-// (helpers.ErrReadStalled). A raw transport-level failure (client.Do
-// returning an error before any response is received, e.g. a dial or TLS
-// failure) is deliberately NOT retried here: unlike the artifact download's
-// predicate, a small metadata GET is cheap enough to fail fast and let its
-// caller (candidate fallback, resolution) react, rather than spend the
-// retry budget on a connection that may never come up.
+// retrying. Offline mode, this request's own metadata fetch deadline, and a
+// context that is already canceled or expired are never retried - repeating
+// the same call against a dead context or a transport that rejects every
+// request outright would only spend the backoff budget for nothing. Every
+// other error is terminal by default (this covers a 404 and any other
+// non-retryable HTTPStatusError) except the two transient shapes
+// fetchJSONBody marks explicitly: a retryable HTTP status carried by
+// *HTTPStatusError, or a stalled body read (helpers.ErrReadStalled). A raw
+// transport-level failure (client.Do returning an error before any response
+// is received, e.g. a dial or TLS failure) is deliberately NOT retried here:
+// unlike the artifact download's predicate, a small metadata GET is cheap
+// enough to fail fast and let its caller (candidate fallback, resolution)
+// react, rather than spend the retry budget on a connection that may never
+// come up.
+//
+// Split into isEarlyTerminalFetchError and the body below purely to stay
+// under the cyclomatic-complexity budget; the two together still cover the
+// exact same classification.
 func fetchRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, helpers.ErrOfflineMode) {
+	if isEarlyTerminalFetchError(err) {
 		return false
 	}
 	// Classify a stalled read before the context checks. The production stall
@@ -51,4 +56,18 @@ func fetchRetryable(err error) bool {
 		return helpers.IsRetryableHTTPStatus(statusErr.Code)
 	}
 	return false
+}
+
+// isEarlyTerminalFetchError reports whether err is one of the two sentinels
+// checked ahead of ErrReadStalled: offline mode, and this request's own
+// metadata fetch deadline. The deadline specifically must be checked here,
+// ahead of ErrReadStalled, so a watchdog stall that raced the deadline
+// resolves deterministically toward terminal rather than burning a backoff on
+// a context that is already gone - mirroring
+// isEarlyTerminalDownloadError's identical placement and reasoning in
+// internal/galaxy/collections/retry.go. The default-deny fallthrough in
+// fetchRetryable would already cover both of these; the check is explicit so
+// a future reordering cannot start retrying either one.
+func isEarlyTerminalFetchError(err error) bool {
+	return errors.Is(err, helpers.ErrOfflineMode) || errors.Is(err, helpers.ErrMetadataFetchDeadline)
 }

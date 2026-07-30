@@ -178,6 +178,35 @@ func isSymlinkError(err error) bool {
 // wrapping it with %w (see helpers.ErrReadStalled's own doc comment), so it
 // never reaches errors.Is(err, context.Canceled) above.
 //
+// helpers.ErrMetadataFetchDeadline follows the same shape as
+// helpers.ErrArtifactDownloadDeadline: unaggregated (hit resolving, before
+// any collection-level work starts) it classifies here as ExitNetwork - which
+// also outranks isResolutionError below, and is the right answer, since the
+// cause is the wire, not an unsatisfiable constraint; hit inside an install
+// worker (metadata re-resolution during install.go's per-collection path) it
+// is instead joined behind helpers.ErrInstallationFailed and isInstallError
+// claims it first, as ExitInstall, identical to every other per-collection
+// failure. It never classifies as ExitInterrupt, for the identical %v-not-%w
+// reason.
+//
+// helpers.ErrStateObjectDeadline follows the identical shape too, and CAN be
+// aggregated - but the rule is WHEN, not WHERE it was hit: it classifies
+// ExitInstall only when it reaches FromError already joined behind
+// helpers.ErrInstallationFailed, and it is joined there in exactly one
+// circumstance - finalizeInstall/warmWithState fold a SaveStore failure in
+// through annotateSaveFailure ("%w; snapshot save failed: %w") only when that
+// run also recorded at least one per-collection failure (summary.count > 0);
+// isInstallError then claims the joined tree, as ExitInstall, the same as
+// every other per-collection failure. Every other path returns it bare, and
+// therefore unaggregated, classifying ExitNetwork here: every init-time
+// operation (LoadStore, LoadProjectRegistry, RecordProject), lockWithState
+// and saveDryRunSnapshotIfPersisted (neither of which ever joins a SaveStore
+// failure behind anything), and - the case an enumeration of "where" would
+// miss - a tail SaveStore failure from finalizeInstall/warmWithState on a run
+// that recorded zero collection failures, which is the common case: most
+// runs have none. It never classifies as ExitInterrupt, for the identical
+// %v-not-%w reason.
+//
 // Split into two sub-checks purely to stay under the cyclomatic-complexity
 // budget; the two together still cover the exact same sentinel set.
 func isNetworkError(err error) bool {
@@ -186,11 +215,13 @@ func isNetworkError(err error) bool {
 
 // isTransportError reports whether err is a request-level network sentinel:
 // a timeout, an offline-mode violation, this acquisition's own artifact
-// download deadline, a bare download failure, or a server-list walk aborting
-// on a credential failure or an exhausted retry budget.
+// download deadline, a persisted cache-state operation's own deadline, a bare
+// download failure, or a server-list walk aborting on a credential failure or
+// an exhausted retry budget.
 func isTransportError(err error) bool {
 	return errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, helpers.ErrArtifactDownloadDeadline) ||
+		errors.Is(err, helpers.ErrStateObjectDeadline) ||
 		errors.Is(err, helpers.ErrReadStalled) ||
 		errors.Is(err, helpers.ErrOfflineMode) ||
 		errors.Is(err, helpers.ErrDownloadFailed) ||
@@ -199,14 +230,15 @@ func isTransportError(err error) bool {
 }
 
 // isMetadataFetchError reports whether err is a Galaxy metadata-response
-// sentinel: metadata that could not be fetched or parsed into the shape this
-// tool expects.
+// sentinel: metadata that could not be fetched (including one whose fetch
+// exceeded its own deadline) or parsed into the shape this tool expects.
 func isMetadataFetchError(err error) bool {
 	return errors.Is(err, helpers.ErrMetadataUnavailable) ||
 		errors.Is(err, helpers.ErrMetadataIsNil) ||
 		errors.Is(err, helpers.ErrMissingDownloadURL) ||
 		errors.Is(err, helpers.ErrVersionsPayloadEmpty) ||
-		errors.Is(err, helpers.ErrVersionsPayloadUnsupported)
+		errors.Is(err, helpers.ErrVersionsPayloadUnsupported) ||
+		errors.Is(err, helpers.ErrMetadataFetchDeadline)
 }
 
 // isResolutionError reports whether err is a dependency-resolution sentinel
