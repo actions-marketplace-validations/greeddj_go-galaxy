@@ -3,7 +3,6 @@ package s3
 import (
 	"context"
 	"errors"
-	"net/http"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 )
@@ -29,25 +28,19 @@ func (e *retryableStatusError) Unwrap() error {
 	return e.err
 }
 
-// isRetryableStatus reports whether status is one of the small set of
-// transient HTTP statuses (rate limiting and server-side failures) that are
-// safe to retry on an idempotent S3 verb.
-func isRetryableStatus(status int) bool {
-	switch status {
-	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway,
-		http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-		return true
-	default:
-		return false
-	}
-}
-
 // wrapRetryableStatus wraps err in a *retryableStatusError when status is
 // one of the retryable HTTP statuses, so s3Retryable knows to retry it; any
 // other status (including a nil err) is returned unchanged, since it is
 // never retried.
+//
+// The retryable set comes from helpers.IsRetryableHTTPStatus, the single
+// definition shared with the Galaxy API and artifact-download paths. This
+// package deliberately keeps no set of its own: the two are the same class
+// of transient server-side failure, and two independent copies could drift
+// into disagreeing about which statuses a run retries depending only on
+// which subsystem issued the request.
 func wrapRetryableStatus(status int, err error) error {
-	if err == nil || !isRetryableStatus(status) {
+	if err == nil || !helpers.IsRetryableHTTPStatus(status) {
 		return err
 	}
 	return &retryableStatusError{status: status, err: err}

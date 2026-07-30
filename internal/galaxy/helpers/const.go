@@ -262,7 +262,11 @@ func ReadOnlyPerm(perm fs.FileMode) fs.FileMode {
 
 // IsRetryableHTTPStatus reports whether status is one of the small set of
 // transient HTTP statuses (rate limiting and server-side failures) that are
-// safe to retry on an idempotent Galaxy API GET or artifact download.
+// safe to retry on an idempotent request: a Galaxy API GET, an artifact
+// download, or an idempotent S3 verb. It is the single definition of that
+// set for the whole program - a subsystem must not keep a private copy,
+// since two copies could drift into retrying different statuses depending
+// only on which one issued the request.
 func IsRetryableHTTPStatus(status int) bool {
 	switch status {
 	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway,
