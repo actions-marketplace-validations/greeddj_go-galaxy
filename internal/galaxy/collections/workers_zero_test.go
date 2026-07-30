@@ -51,7 +51,7 @@ func TestWarmCollectionsZeroWorkersDoesNotDeadlock(t *testing.T) {
 		"acme.widgets@1.0.0": {Namespace: "acme", Name: "widgets", Version: "1.0.0"},
 	}
 
-	done := make(chan int32, 1)
+	done := make(chan failureSummary, 1)
 	go func() {
 		done <- warmCollections(context.Background(), cfg, runtime, state, collections)
 	}()
@@ -83,7 +83,7 @@ func TestRunInstallLevelZeroWorkersDoesNotDeadlock(t *testing.T) {
 	}
 	graph := map[string][]string{}
 	level := []string{"acme.widgets@1.0.0"}
-	var failures int32
+	var failures failureRecorder
 
 	done := make(chan error, 1)
 	go func() {

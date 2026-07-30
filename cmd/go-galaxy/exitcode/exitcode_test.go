@@ -17,6 +17,12 @@ import (
 // ExitError fallback in TestFromError.
 var errTestGeneric = errors.New("some unclassified error")
 
+// errTestSaveFailure stands in for a snapshot-save failure in
+// TestSaveFailureDoesNotMaskIntegrity. Declared as a static package-level
+// sentinel, rather than an inline errors.New call, purely to satisfy err113 -
+// production code never compares against it.
+var errTestSaveFailure = errors.New("simulated save failure")
+
 // exitCase is one FromError classification expectation.
 type exitCase struct {
 	err      error
@@ -48,6 +54,11 @@ var fromErrorCases = []exitCase{
 		name:     "installation failed",
 		err:      fmt.Errorf("%w: ctx", helpers.ErrInstallationFailed),
 		wantCode: ExitInstall,
+	},
+	{
+		name:     "artifact sha256 mismatch",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrSHA256Mismatch),
+		wantCode: ExitIntegrity,
 	},
 	{
 		// ErrCollectionsPathEscape is grouped with the archive/symlink sentinels
@@ -190,6 +201,123 @@ func TestGalaxyServerConfigErrorsMapToUsage(t *testing.T) {
 				t.Errorf("FromError(%v) = %d, want %d", wrapped, got, ExitUsage)
 			}
 		})
+	}
+}
+
+// integritySentinels is every artifact-digest-authentication sentinel this
+// package must classify as ExitIntegrity. Listed exhaustively, not sampled,
+// mirroring galaxyServerConfigSentinels's own convention: a missed entry
+// would silently fall back to a different exit class, indistinguishable to a
+// CI pipeline from a class where retrying the same run might actually help.
+//
+//nolint:gochecknoglobals // a fixed table consumed by one test, not mutable shared state
+var integritySentinels = []struct {
+	err  error
+	name string
+}{
+	{name: "sha256 mismatch", err: helpers.ErrSHA256Mismatch},
+	{name: "malformed artifact sha256", err: helpers.ErrMalformedArtifactSHA256},
+}
+
+// TestIntegritySentinelsMapToExitIntegrity pins every artifact-digest
+// sentinel to ExitIntegrity, wrapped so the check goes through errors.Is
+// rather than requiring exact identity.
+func TestIntegritySentinelsMapToExitIntegrity(t *testing.T) {
+	for _, tt := range integritySentinels {
+		t.Run(tt.name, func(t *testing.T) {
+			wrapped := fmt.Errorf("%w: ctx", tt.err)
+			if got := FromError(wrapped); got != ExitIntegrity {
+				t.Errorf("FromError(%v) = %d, want %d", wrapped, got, ExitIntegrity)
+			}
+		})
+	}
+}
+
+// TestIntegrityOutranksInstallFailureHeadline proves that once
+// collections.Start starts joining a per-collection integrity cause behind
+// the helpers.ErrInstallationFailed headline, FromError still classifies the
+// combined tree as ExitIntegrity rather than stopping at the headline it
+// finds first in the tree. The positive control in the same test - the
+// identical headline joined with helpers.ErrDownloadFailed instead - proves
+// this is not just "any joined error becomes ExitIntegrity": only the
+// presence of an actual integrity sentinel does. The killing mutation is
+// moving the isIntegrityError case below isLockError/isInstallError in
+// FromError, which makes isInstallError claim the headline first; verified,
+// that mutation makes this test fail with:
+// "exitcode_test.go:246: FromError(integrity join) = 5, want 7".
+func TestIntegrityOutranksInstallFailureHeadline(t *testing.T) {
+	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
+
+	integrity := errors.Join(headline, fmt.Errorf("%w: acme.app@1.0.0", helpers.ErrSHA256Mismatch))
+	if got := FromError(integrity); got != ExitIntegrity {
+		t.Errorf("FromError(integrity join) = %d, want %d", got, ExitIntegrity)
+	}
+
+	notIntegrity := errors.Join(headline, helpers.ErrDownloadFailed)
+	if got := FromError(notIntegrity); got != ExitInstall {
+		t.Errorf("FromError(non-integrity join) = %d, want %d", got, ExitInstall)
+	}
+}
+
+// TestIntegrityOutranksNetworkCause proves the same precedence holds when the
+// joined tree also contains a network-class sentinel: the integrity cause
+// still wins.
+func TestIntegrityOutranksNetworkCause(t *testing.T) {
+	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
+	joined := errors.Join(headline, helpers.ErrDownloadFailed, helpers.ErrSHA256Mismatch)
+	if got := FromError(joined); got != ExitIntegrity {
+		t.Errorf("FromError(joined) = %d, want %d", got, ExitIntegrity)
+	}
+}
+
+// TestIntegrityPrecedenceIndependentOfCauseOrder proves the ExitIntegrity
+// classification does not depend on where, in the joined tree, the integrity
+// sentinel sits - both orderings of the same three causes, and a nested join
+// of them, all classify identically.
+func TestIntegrityPrecedenceIndependentOfCauseOrder(t *testing.T) {
+	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
+
+	forward := errors.Join(headline, helpers.ErrDownloadFailed, helpers.ErrSHA256Mismatch)
+	if got := FromError(forward); got != ExitIntegrity {
+		t.Errorf("FromError(forward order) = %d, want %d", got, ExitIntegrity)
+	}
+
+	reversed := errors.Join(headline, helpers.ErrSHA256Mismatch, helpers.ErrDownloadFailed)
+	if got := FromError(reversed); got != ExitIntegrity {
+		t.Errorf("FromError(reversed order) = %d, want %d", got, ExitIntegrity)
+	}
+
+	nested := errors.Join(headline, errors.Join(helpers.ErrDownloadFailed, helpers.ErrSHA256Mismatch))
+	if got := FromError(nested); got != ExitIntegrity {
+		t.Errorf("FromError(nested) = %d, want %d", got, ExitIntegrity)
+	}
+}
+
+// TestSaveFailureDoesNotMaskIntegrity proves the annotateSaveFailure-shaped
+// wrap collections.Start builds ("%w; snapshot save failed: %w") still
+// classifies as ExitIntegrity when its primary side already carries an
+// integrity cause, matching the real shape a frozen install with a corrupted
+// pin and a failing snapshot save would produce.
+func TestSaveFailureDoesNotMaskIntegrity(t *testing.T) {
+	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
+	joinedInstall := errors.Join(headline, helpers.ErrSHA256Mismatch)
+
+	err := fmt.Errorf("%w; snapshot save failed: %w", joinedInstall, errTestSaveFailure)
+	if got := FromError(err); got != ExitIntegrity {
+		t.Errorf("FromError(err) = %d, want %d", got, ExitIntegrity)
+	}
+}
+
+// TestCanceledOutranksIntegrity proves context.Canceled still outranks
+// ExitIntegrity, matching FromError's documented priority order: cancellation
+// first, integrity second.
+func TestCanceledOutranksIntegrity(t *testing.T) {
+	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
+	integrity := errors.Join(headline, helpers.ErrSHA256Mismatch)
+
+	err := errors.Join(integrity, context.Canceled)
+	if got := FromError(err); got != ExitInterrupt {
+		t.Errorf("FromError(err) = %d, want %d", got, ExitInterrupt)
 	}
 }
 

@@ -19,6 +19,7 @@ package collections
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -305,7 +306,7 @@ func (f *prefetchHandoffFixture) runLevels(
 	collections map[string]collection,
 	graph map[string][]string,
 	levels [][]string,
-) (*prefetcher, int32, error) {
+) (*prefetcher, failureSummary, error) {
 	prefetch := startPrefetcher(context.Background(), newPrefetchDeps(f.cfg, f.runtime, f.st, f.artifacts, f.root), collections, levels)
 	failures, err := installLevels(
 		context.Background(),
@@ -355,12 +356,18 @@ func TestPrefetchedArtifactReusedNotRefetched(t *testing.T) {
 		t.Fatalf("buildInstallLevels: %v", err)
 	}
 
-	prefetch, failures, err := fx.runLevels(collections, graph, levels)
+	prefetch, summary, err := fx.runLevels(collections, graph, levels)
 	if err != nil {
 		t.Fatalf("installLevels: %v", err)
 	}
-	if failures != 0 {
-		t.Fatalf("failures = %d, want 0", failures)
+	if summary.count != 0 {
+		t.Fatalf("failures = %d, want 0", summary.count)
+	}
+	// Positive control for TestPrefetchedArtifactFailsClosedOnPinMismatch's
+	// cause assertion below: a successful install records no cause at all, not
+	// just a zero count.
+	if summary.cause != nil {
+		t.Fatalf("summary.cause = %v, want nil on a successful install", summary.cause)
 	}
 	assertFileContent(t, filepath.Join(fx.installPath(col), "README.md"), "# acme.app\n")
 
@@ -409,11 +416,11 @@ func TestUnconsumedPrefetchTempReclaimedOnLevelFailure(t *testing.T) {
 		t.Fatalf("unexpected levels, want [[lib],[app]]: %#v", levels)
 	}
 
-	prefetch, failures, err := fx.runLevels(collections, graph, levels)
+	prefetch, summary, err := fx.runLevels(collections, graph, levels)
 	if err != nil {
 		t.Fatalf("installLevels: %v", err)
 	}
-	if failures == 0 {
+	if summary.count == 0 {
 		t.Fatalf("expected failures > 0 from acme.lib's persistently failing artifact download")
 	}
 
@@ -468,12 +475,15 @@ func TestPrefetchedArtifactFailsClosedOnPinMismatch(t *testing.T) {
 		t.Fatalf("buildInstallLevels: %v", err)
 	}
 
-	prefetch, failures, err := fx.runLevels(collections, graph, levels)
+	prefetch, summary, err := fx.runLevels(collections, graph, levels)
 	if err != nil {
 		t.Fatalf("installLevels: %v", err)
 	}
-	if failures == 0 {
+	if summary.count == 0 {
 		t.Fatalf("expected failures > 0 from the pin mismatch")
+	}
+	if !errors.Is(summary.cause, helpers.ErrSHA256Mismatch) {
+		t.Fatalf("expected errors.Is(summary.cause, helpers.ErrSHA256Mismatch), got %v", summary.cause)
 	}
 	assertPathAbsent(t, fx.installPath(col))
 

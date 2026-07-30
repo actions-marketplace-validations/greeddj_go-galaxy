@@ -27,12 +27,21 @@ const (
 	// ExitNetwork indicates a network or Galaxy API failure, including
 	// timeouts and offline-mode violations.
 	ExitNetwork = 4
-	// ExitInstall indicates an install-time or artifact-integrity failure
-	// (checksum mismatch, unsafe archive/symlink content, empty file).
+	// ExitInstall indicates an install-time failure (unsafe archive/symlink
+	// content, empty file). A checksum mismatch or malformed digest is
+	// ExitIntegrity below instead.
 	ExitInstall = 5
 	// ExitLock indicates a lockfile is missing, invalid, or does not match
 	// the resolved requirements.
 	ExitLock = 6
+	// ExitIntegrity indicates artifact content failed to authenticate against
+	// the sha256 that named it - a lockfile pin, a Galaxy server's declared
+	// digest, a cache sidecar, or the extracted store's content-address key -
+	// or that such a digest was structurally malformed. This is a stop-and-alert
+	// class, deliberately separate from ExitInstall and ExitNetwork: retrying
+	// the same run cannot repair it, because the bytes or the digest are wrong
+	// at the source.
+	ExitIntegrity = 7
 	// ExitInterrupt indicates the run was canceled, either by a caught
 	// signal falling back to this default or by context cancellation.
 	ExitInterrupt = 130
@@ -44,7 +53,7 @@ const signalExitBase = 128
 
 // FromError classifies err into an exit code by matching it against the
 // known sentinel errors declared in internal/galaxy/helpers, in priority
-// order: cancellation, lock, install/integrity, network, resolution, then
+// order: cancellation, integrity, lock, install, network, resolution, then
 // usage/config. The first matching class wins; unrecognized errors fall
 // back to ExitError. The per-class checks are split into helpers below to
 // keep this function short; each still short-circuits on the first match.
@@ -54,6 +63,14 @@ func FromError(err error) int {
 		return ExitOK
 	case errors.Is(err, context.Canceled):
 		return ExitInterrupt
+	// isIntegrityError must be checked before isInstallError: after
+	// collections.Start started joining per-collection causes behind
+	// helpers.ErrInstallationFailed, every integrity failure's error tree
+	// also contains that sentinel, so placing this case any lower would make
+	// it unreachable - isInstallError would already have claimed the error.
+	// Cancellation still outranks it.
+	case isIntegrityError(err):
+		return ExitIntegrity
 	case isLockError(err):
 		return ExitLock
 	case isInstallError(err):
@@ -69,6 +86,14 @@ func FromError(err error) int {
 	}
 }
 
+// isIntegrityError reports whether err is an artifact-digest authentication
+// failure: content that did not hash to the digest that named it, or a value
+// that was supposed to be such a digest and was not.
+func isIntegrityError(err error) bool {
+	return errors.Is(err, helpers.ErrSHA256Mismatch) ||
+		errors.Is(err, helpers.ErrMalformedArtifactSHA256)
+}
+
 // isLockError reports whether err is a lockfile-related sentinel.
 func isLockError(err error) bool {
 	return errors.Is(err, helpers.ErrLockfileMismatch) ||
@@ -76,19 +101,20 @@ func isLockError(err error) bool {
 		errors.Is(err, helpers.ErrLockfileInvalid)
 }
 
-// isInstallError reports whether err is an install-time or
-// artifact-integrity sentinel (checksum mismatch, unsafe archive/symlink
-// content, empty file, or a missing artifact cache). Split into three
-// sub-checks purely to stay under the cyclomatic-complexity budget; the
-// three together still cover the exact same sentinel set.
+// isInstallError reports whether err is an install-time sentinel (unsafe
+// archive/symlink content, an empty file, or a missing artifact cache).
+// Split into three sub-checks purely to stay under the cyclomatic-complexity
+// budget; the three together still cover the exact same sentinel set.
 func isInstallError(err error) bool {
 	return isFileIntegrityError(err) || isArchiveError(err) || isSymlinkError(err)
 }
 
-// isFileIntegrityError reports whether err is a checksum/empty-file/missing-cache sentinel.
+// isFileIntegrityError reports whether err is an empty-file/missing-cache
+// sentinel. helpers.ErrSHA256Mismatch is deliberately not here: it is
+// isIntegrityError's alone, checked ahead of this function in FromError, so
+// leaving it in both classes would be shadowed dead code.
 func isFileIntegrityError(err error) bool {
 	return errors.Is(err, helpers.ErrInstallationFailed) ||
-		errors.Is(err, helpers.ErrSHA256Mismatch) ||
 		errors.Is(err, helpers.ErrFileIsEmpty) ||
 		errors.Is(err, helpers.ErrHardlinkTargetIsEmpty) ||
 		errors.Is(err, helpers.ErrArtifactCacheNotConfigured)

@@ -327,12 +327,21 @@ func assertFrozenCorruptedPinFailsClosed(t *testing.T, f *e2eFixture, lockPath s
 		t.Fatal("expected an error from a corrupted lockfile pin, got nil")
 	}
 	// Start aggregates per-collection install failures behind
-	// helpers.ErrInstallationFailed rather than propagating the triggering
-	// cause (installLevels only logs the underlying helpers.ErrSHA256Mismatch
-	// through the printer); this is the sentinel that actually reaches this
-	// call site.
+	// helpers.ErrInstallationFailed, but the triggering cause is no longer
+	// swallowed: it is joined into the same error tree (see failureSummary),
+	// so both the aggregate classification and the actual
+	// helpers.ErrSHA256Mismatch cause are reachable through errors.Is at this
+	// call site, one level above cmd/go-galaxy/exitcode where the latter maps
+	// to the dedicated integrity exit code rather than the generic install one.
+	// Verified against a real revert of failureSummary.wrap (dropping the
+	// per-collection cause, returning headline unchanged): that mutation makes
+	// the errors.Is(err, helpers.ErrSHA256Mismatch) assertion below fail with:
+	// "expected errors.Is ErrSHA256Mismatch, got installation failed for 1 collections"
 	if !errors.Is(err, helpers.ErrInstallationFailed) {
 		t.Fatalf("expected errors.Is ErrInstallationFailed, got %v", err)
+	}
+	if !errors.Is(err, helpers.ErrSHA256Mismatch) {
+		t.Fatalf("expected errors.Is ErrSHA256Mismatch, got %v", err)
 	}
 	assertPathAbsent(t, installPathFor(f.downloadPath, "app"))
 }

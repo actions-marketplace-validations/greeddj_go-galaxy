@@ -263,6 +263,17 @@ func assertWarmFrozenCorruptedPinFailsClosed(t *testing.T, f *e2eFixture, lockPa
 	if !errors.Is(err, helpers.ErrInstallationFailed) {
 		t.Fatalf("expected errors.Is ErrInstallationFailed for the corrupted pin, got %v", err)
 	}
+	// warmCollections now joins each worker's own cause behind the headline
+	// (see failureSummary), so the actual triggering sentinel is reachable
+	// here too, not just the aggregate classification - the same tree shape
+	// install's own corrupted-pin case pins in e2e_test.go. Verified against a
+	// real revert of failureSummary.wrap (dropping the per-collection cause):
+	// that mutation makes the assertion below fail with:
+	// "expected errors.Is ErrSHA256Mismatch for the corrupted pin, got
+	// installation failed: warm failed for 1 collections"
+	if !errors.Is(err, helpers.ErrSHA256Mismatch) {
+		t.Fatalf("expected errors.Is ErrSHA256Mismatch for the corrupted pin, got %v", err)
+	}
 
 	setAppPin(lf, f.appV1.SHA256)
 	if err := lockfile.Save(lockPath, lf); err != nil {

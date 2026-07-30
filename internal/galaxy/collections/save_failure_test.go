@@ -58,6 +58,18 @@ package collections
 //     regression net for lockWithState - there was zero prior test coverage of
 //     any lock run, so this passes on both HEAD and the fix and exists purely
 //     so the split does not silently move untested code.
+//   - TestInstallWithStateSaveFailureKeepsInstallFailureClass and
+//     TestWarmWithStateSaveFailureKeepsWarmFailureClass's added
+//     helpers.ErrDownloadFailed assertion: reverting failureSummary.wrap to
+//     always return headline unchanged (dropping the per-collection cause)
+//     makes both fail with:
+//     "expected errors.Is helpers.ErrDownloadFailed, got installation failed:
+//     warm failed for 1 collections; snapshot save failed: simulated
+//     SaveStore failure"
+//     and
+//     "expected errors.Is helpers.ErrDownloadFailed, got installation failed
+//     for 1 collections; snapshot save failed: simulated SaveStore failure"
+//     respectively.
 
 import (
 	"context"
@@ -206,6 +218,14 @@ func TestWarmWithStateSaveFailureKeepsWarmFailureClass(t *testing.T) {
 	if !errors.Is(err, errSaveFailSentinel) {
 		t.Fatalf("expected errors.Is errSaveFailSentinel, got %v", err)
 	}
+	// The 503 artifact endpoint is the per-collection cause warmCollections
+	// records: proving errors.Is also reaches helpers.ErrDownloadFailed here
+	// confirms the headline, the real cause, and the save error all coexist
+	// in the same error tree through the real pipeline, not just in the
+	// unit-level failureSummary tests.
+	if !errors.Is(err, helpers.ErrDownloadFailed) {
+		t.Fatalf("expected errors.Is helpers.ErrDownloadFailed, got %v", err)
+	}
 }
 
 // TestInstallWithStateSaveFailureWritesMetrics is a regression pin on an
@@ -284,6 +304,14 @@ func TestInstallWithStateSaveFailureKeepsInstallFailureClass(t *testing.T) {
 	}
 	if !errors.Is(err, errSaveFailSentinel) {
 		t.Fatalf("expected errors.Is errSaveFailSentinel, got %v", err)
+	}
+	// The 503 artifact endpoint is the per-collection cause installLevels
+	// records: proving errors.Is also reaches helpers.ErrDownloadFailed here
+	// confirms the headline, the real cause, and the save error all coexist
+	// in the same error tree through the real pipeline, not just in the
+	// unit-level failureSummary tests.
+	if !errors.Is(err, helpers.ErrDownloadFailed) {
+		t.Fatalf("expected errors.Is helpers.ErrDownloadFailed, got %v", err)
 	}
 }
 

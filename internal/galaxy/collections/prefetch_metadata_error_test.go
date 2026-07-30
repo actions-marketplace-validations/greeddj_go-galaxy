@@ -91,12 +91,12 @@ func TestPrefetchMetadataErrorAbsorbedInstallRecovers(t *testing.T) {
 		t.Fatalf("buildInstallLevels: %v", err)
 	}
 
-	prefetch, failures, err := fx.runLevels(collections, graph, levels)
+	prefetch, summary, err := fx.runLevels(collections, graph, levels)
 	if err != nil {
 		t.Fatalf("installLevels: %v", err)
 	}
-	if failures != 0 {
-		t.Fatalf("failures = %d, want 0 (the install worker's own metadata reload must recover)", failures)
+	if summary.count != 0 {
+		t.Fatalf("failures = %d, want 0 (the install worker's own metadata reload must recover)", summary.count)
 	}
 	assertFileContent(t, filepath.Join(fx.installPath(col), "README.md"), "# acme.app\n")
 

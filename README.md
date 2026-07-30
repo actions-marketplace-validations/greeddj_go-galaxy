@@ -554,9 +554,19 @@ pipelines can branch on failure type without parsing log output:
 |    2 | Usage or configuration error (invalid flags, requirements, `ansible.cfg`, or a flag a command does not implement, e.g. `--dry-run` on `lock`)        |
 |    3 | Dependency resolution failure (conflicts, missing candidates, cycle)                                                                                 |
 |    4 | Network or Galaxy API failure (timeouts, offline-mode violations)                                                                                    |
-|    5 | Install or artifact-integrity failure (checksum mismatch, unsafe archive/symlink)                                                                    |
+|    5 | Install-time failure (unsafe archive/symlink content, empty file, missing artifact cache)                                                            |
 |    6 | Lockfile error (missing, invalid, or mismatched with requirements)                                                                                   |
+|    7 | Artifact-integrity failure (content does not authenticate against its naming sha256, or the digest is malformed)                                     |
 |  130 | Interrupted (SIGINT)                                                                                                                                 |
+
+Exit `7` covers content that failed to authenticate against the sha256 that
+named it - a lockfile pin, a Galaxy server's declared digest, a cache sidecar,
+or the extracted store's content-address key - or a digest that was
+structurally malformed. It is a stop-and-alert class: do not retry it
+automatically. A retry cannot repair it, because the bytes or the digest are
+wrong at the source, not transiently unavailable. It also outranks the network
+class: a run that hits both an integrity failure and a network failure exits
+`7`, not `4`.
 
 ## Metrics
 

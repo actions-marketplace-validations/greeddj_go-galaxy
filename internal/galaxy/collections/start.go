@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	cacheBackend "github.com/greeddj/go-galaxy/internal/cache"
@@ -113,7 +112,7 @@ func warmWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra
 		return warmDryRun(ctx, cfg, runtime, state, collections, start)
 	}
 
-	failures := warmCollections(ctx, cfg, runtime, state, collections)
+	summary := warmCollections(ctx, cfg, runtime, state, collections)
 	// Same tail contract as finalizeInstall (see its doc comment): the save is
 	// attempted first but does not short-circuit, writeRunMetrics always runs
 	// regardless of whether it succeeded, and a nonzero collection-failure
@@ -121,9 +120,9 @@ func warmWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra
 	// together via annotateSaveFailure so errors.Is still matches
 	// ErrInstallationFailed instead of degrading to the save error's own class.
 	saveErr := state.backend.SaveStore(ctx, state.store)
-	writeRunMetrics(cfg, runtime, "warm", start, len(collections), int(failures), cfg.Frozen)
-	if failures > 0 {
-		return annotateSaveFailure(fmt.Errorf("%w: warm failed for %d collections", helpers.ErrInstallationFailed, failures), saveErr)
+	writeRunMetrics(cfg, runtime, "warm", start, len(collections), int(summary.count), cfg.Frozen)
+	if summary.count > 0 {
+		return annotateSaveFailure(summary.warmError(), saveErr)
 	}
 	if saveErr != nil {
 		return saveErr
@@ -184,8 +183,8 @@ func warmCollections(
 	runtime *infra.Infra,
 	state *installState,
 	collections map[string]collection,
-) int32 {
-	var failures atomic.Int32
+) failureSummary {
+	var failures failureRecorder
 	// warm never touches the collections tree at all - it only downloads and
 	// extracts into the content-addressable extracted store - so its
 	// installDeps carries a nil root; newInstallTarget's own nil-root guard
@@ -204,27 +203,31 @@ func warmCollections(
 			defer func() { <-sem }()
 			if err := warmOne(ctx, depsCtx, col); err != nil {
 				runtime.Output.Errorf("Failed: %s.%s error: %s", col.Namespace, col.Name, err)
-				failures.Add(1)
+				failures.record(err)
 			} else {
 				runtime.Output.Okf("Cached: %s.%s@%s", col.Namespace, col.Name, col.Version)
 			}
 		})
 	}
-	// wg.Wait is inline, not deferred: this function returns failures.Load(),
+	// wg.Wait is inline, not deferred: this function returns failures.summary(),
 	// and a deferred wait would evaluate that return value before the workers
 	// finish, silently under-reporting failures. runInstallLevel can defer its
 	// wait only because it returns an error and reports failures through a
-	// caller-owned *int32 instead of a return value - do not "fix" this to
-	// match that shape.
+	// caller-owned *failureRecorder instead of a return value - do not "fix"
+	// this to match that shape.
 	//
 	// A per-collection failure's cause is reported to the operator on the
-	// error-tier "Failed:" line above and is deliberately not propagated into
-	// the error the caller builds: this function returns a count, the caller
-	// classifies the whole run through helpers.ErrInstallationFailed once that
-	// count is nonzero, and joining N causes into one message would only grow
-	// it without moving a single exit code.
+	// error-tier "Failed:" line above, and is now also recorded into the
+	// summary this function returns - not because the operator needs to see
+	// it twice (summaryError's own doc comment explains why the returned
+	// error's message stays one line), but because the causes are what let
+	// the run's final error carry a more specific classification than
+	// helpers.ErrInstallationFailed alone, such as exiting with the dedicated
+	// integrity exit code when the recorded cause is a checksum mismatch.
+	// Joining N causes behind the count is what makes that possible; it does
+	// not, by itself, change the message length the operator sees.
 	wg.Wait()
-	return failures.Load()
+	return failures.summary()
 }
 
 func warmOne(ctx context.Context, deps installDeps, col collection) error {
@@ -461,7 +464,7 @@ func installWithState(ctx context.Context, cfg *config.Config, runtime *infra.In
 		return installDryRun(ctx, cfg, runtime, state, plan, start, root)
 	}
 
-	failures, err := installLevels(
+	summary, err := installLevels(
 		ctx,
 		cfg,
 		runtime,
@@ -478,8 +481,8 @@ func installWithState(ctx context.Context, cfg *config.Config, runtime *infra.In
 		return err
 	}
 
-	finalErr := finalizeInstall(ctx, runtime, state.backend, state.store, failures, start)
-	writeRunMetrics(cfg, runtime, "install", start, len(plan.collections), int(failures), cfg.Frozen)
+	finalErr := finalizeInstall(ctx, runtime, state.backend, state.store, summary, start)
+	writeRunMetrics(cfg, runtime, "install", start, len(plan.collections), int(summary.count), cfg.Frozen)
 	return finalErr
 }
 
@@ -929,18 +932,26 @@ func installLevels(
 	levels [][]string,
 	prefetch *prefetcher,
 	root *os.Root,
-) (int32, error) {
+) (failureSummary, error) {
 	depsCtx := newInstallDeps(cfg, runtime, st, artifacts, extractStore, root)
-	var failures int32
+	var failures failureRecorder
 	for _, level := range levels {
 		if err := runInstallLevel(ctx, depsCtx, collections, graph, level, prefetch, &failures); err != nil {
-			return atomic.LoadInt32(&failures), err
+			// err here is helpers.ErrMissingCollection, a usage-class plan bug in
+			// the level/collections map built before any level ran - not an
+			// install failure. installWithState returns this err directly,
+			// never reaching finalizeInstall, so the summary's causes (if any
+			// were already recorded by workers dispatched earlier in this same
+			// level) are deliberately discarded rather than joined into it:
+			// doing so would let a plan bug misclassify as an install/integrity
+			// failure instead of the usage error it is.
+			return failures.summary(), err
 		}
-		if atomic.LoadInt32(&failures) > 0 {
+		if failures.count() > 0 {
 			break
 		}
 	}
-	return atomic.LoadInt32(&failures), nil
+	return failures.summary(), nil
 }
 
 // runInstallLevel dispatches installs for one level's keys onto a
@@ -948,8 +959,9 @@ func installLevels(
 // ahead of the loop so every exit - including the ErrMissingCollection guard,
 // which can trip after earlier keys in this level were already dispatched -
 // waits the in-flight workers rather than leaking them past installLevels (and
-// past runInstall's backend-lock release). failures is shared across levels and
-// updated atomically by the workers.
+// past runInstall's backend-lock release). failures is shared across levels
+// and is safe for concurrent use by every worker, recording each one's own
+// cause alongside its count.
 func runInstallLevel(
 	ctx context.Context,
 	depsCtx installDeps,
@@ -957,7 +969,7 @@ func runInstallLevel(
 	graph map[string][]string,
 	level []string,
 	prefetch *prefetcher,
-	failures *int32,
+	failures *failureRecorder,
 ) error {
 	var wg sync.WaitGroup
 	// max(depsCtx.cfg.Workers, 1): see warmCollections's identical guard - a
@@ -983,7 +995,7 @@ func runInstallLevel(
 			}
 			if err := installCollection(ctx, col, depsCtx, depKeys, meta, prefetched); err != nil {
 				depsCtx.runtime.Output.Errorf("Failed: %s.%s error: %s", col.Namespace, col.Name, err)
-				atomic.AddInt32(failures, 1)
+				failures.record(err)
 			} else {
 				depsCtx.runtime.Output.Okf("Installed: %s.%s", col.Namespace, col.Name)
 			}
@@ -1006,7 +1018,7 @@ func finalizeInstall(
 	runtime *infra.Infra,
 	backend cacheManager.Backend,
 	st *store.Store,
-	failures int32,
+	summary failureSummary,
 	start time.Time,
 ) error {
 	saveStart := time.Now()
@@ -1014,9 +1026,9 @@ func finalizeInstall(
 	if saveErr == nil {
 		runtime.Output.DebugSincef(saveStart, "%s", "save snapshot")
 	}
-	if failures > 0 {
-		runtime.Output.PersistentPrintf("⚠️ Completed with errors: %d failed. Took %s", failures, time.Since(start).Round(time.Second))
-		return annotateSaveFailure(fmt.Errorf("%w for %d collections", helpers.ErrInstallationFailed, failures), saveErr)
+	if summary.count > 0 {
+		runtime.Output.PersistentPrintf("⚠️ Completed with errors: %d failed. Took %s", summary.count, time.Since(start).Round(time.Second))
+		return annotateSaveFailure(summary.installError(), saveErr)
 	}
 	if saveErr != nil {
 		return saveErr
@@ -1031,6 +1043,12 @@ func finalizeInstall(
 // exit class instead of degrading it to the generic one just because the disk
 // also filled up at the tail - while the save failure stays in the message and
 // matchable via errors.Is. Returns primary unchanged when the save succeeded.
+//
+// primary may itself already be a *summaryError joining a headline with N
+// per-collection causes (see failureSummary.wrap); fmt.Errorf's "%w; ...: %w"
+// still folds that in losslessly, since errors.Is walks Unwrap() []error trees
+// depth-first with no first-match-wins shortcut - primary's own headline, its
+// causes, and saveErr all remain independently matchable afterward.
 func annotateSaveFailure(primary, saveErr error) error {
 	if saveErr == nil {
 		return primary
