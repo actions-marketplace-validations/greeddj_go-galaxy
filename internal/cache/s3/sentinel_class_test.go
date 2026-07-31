@@ -33,6 +33,7 @@ var sentinelClassCases = []struct {
 	name  string
 	class cacheBackendClass
 }{
+	{name: "errS3TransportFailed", err: errS3TransportFailed, class: classUnavailable},
 	{name: "errS3BucketNotFound", err: errS3BucketNotFound, class: classUnavailable},
 	{name: "errS3BucketHeadFailed", err: errS3BucketHeadFailed, class: classUnavailable},
 	{name: "errS3CreateBucketFailed", err: errS3CreateBucketFailed, class: classUnavailable},

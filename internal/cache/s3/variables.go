@@ -16,12 +16,13 @@ import (
 //   - helpers.ErrCacheBackendUnavailable: a status the remote itself answered
 //     (a non-2xx from an idempotent verb - GET/HEAD/PUT/DELETE/list - against
 //     an object or the bucket, excepting the two statuses consumed as control
-//     flow below: 404 -> errS3NotFound, 412 -> errS3PreconditionFailed), or a
-//     transport-level failure surfaced through Client.do while the caller's
-//     own context is still live - a connect refusal, a DNS failure, a TLS
-//     failure, a dial timeout, or a response-header timeout, none of which
-//     ever produced a response to answer with. A status-level failure lands
-//     here even when it looks permanent, e.g. a 403 answered to createBucket:
+//     flow below: 404 -> errS3NotFound, 412 -> errS3PreconditionFailed), or
+//     errS3TransportFailed, which Client.do wraps around a transport-level
+//     failure while the caller's own context is still live - a connect
+//     refusal, a DNS failure, a TLS failure, a dial timeout, or a
+//     response-header timeout, none of which ever produced a response to
+//     answer with. A status-level failure lands here even when it looks
+//     permanent, e.g. a 403 answered to createBucket:
 //     this class means "the remote was reached and is the one saying no or
 //     staying silent", not "retrying is expected to help". errS3BucketNotFound
 //     carries it too: ensureBucket already resolves a bucket-absent HEAD by
@@ -105,6 +106,7 @@ var (
 	errS3PreconditionFailed        = errors.New("s3 precondition failed")
 	errS3HTTPClientNil             = errors.New("s3 http client is nil")
 	errS3InvalidEndpoint           = fmt.Errorf("%w: s3 invalid endpoint", helpers.ErrCacheBackendUnusable)
+	errS3TransportFailed           = fmt.Errorf("%w: s3 request failed", helpers.ErrCacheBackendUnavailable)
 	errS3GetFailed                 = fmt.Errorf("%w: s3 get object failed", helpers.ErrCacheBackendUnavailable)
 	errS3HeadFailed                = fmt.Errorf("%w: s3 head object failed", helpers.ErrCacheBackendUnavailable)
 	errS3PutFailed                 = fmt.Errorf("%w: s3 put object failed", helpers.ErrCacheBackendUnavailable)
@@ -178,7 +180,18 @@ const (
 
 	// s3RetryMaxAttempts bounds how many times an idempotent S3 verb (GET,
 	// HEAD, DELETE, list, and an unconditional PUT) is attempted before its
-	// last failure is returned as final.
+	// last failure is returned as final. A verb reached through a surface with
+	// no wall-clock budget of its own (Open's headBucket, an Artifacts.Has/HEAD
+	// probe, ClearFiles's listing and deletes) waits up to roughly
+	// s3RetryMaxAttempts times its own per-attempt cost, plus the jittered
+	// backoff between attempts bounded by s3RetryBackoffBase and
+	// s3RetryBackoffCap, before giving up on a transport failure. Which of the
+	// two terms dominates depends on the failure: the backoff does when an
+	// attempt is near-instant (a connect refusal), the per-attempt cost does
+	// when an attempt runs to a response-header timeout. A verb reached under
+	// an existing budget (the state-object deadline, the artifact download
+	// deadline, the lock wait ceiling) is unaffected, since that budget's own
+	// context cuts the retry loop short regardless of this count.
 	s3RetryMaxAttempts = 4
 	// s3RetryBackoffBase and s3RetryBackoffCap bound the full-jitter
 	// exponential backoff between retried attempts of an idempotent S3 verb.

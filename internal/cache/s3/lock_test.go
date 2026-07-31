@@ -315,7 +315,7 @@ func TestLockWaitsThenTimesOutOnLiveLock(t *testing.T) {
 // this helper's entire point.
 func newSilentEndpointBackend(t *testing.T, waitCeiling time.Duration) *Backend {
 	t.Helper()
-	ln := newAcceptingNeverRespondingListener(t)
+	ln, _ := newAcceptingNeverRespondingListener(t)
 	cfg := config.S3CacheConfig{
 		Endpoint:  "http://" + ln.Addr().String(),
 		Bucket:    "test",

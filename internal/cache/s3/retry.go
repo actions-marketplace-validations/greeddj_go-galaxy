@@ -60,34 +60,63 @@ func s3RetryPolicy() helpers.RetryPolicy {
 	}
 }
 
+// s3RetryableFor binds ctx to s3Retryable, producing the func(error) bool
+// helpers.Retry itself expects. Every call site in this file passes the same
+// ctx it also threads into newRequest for the attempt being judged, so the
+// classifier and the request it is classifying always share one context.
+func s3RetryableFor(ctx context.Context) func(error) bool {
+	return func(err error) bool { return s3Retryable(ctx, err) }
+}
+
 // s3Retryable classifies whether an idempotent S3 verb's failure is worth
-// retrying. Offline mode and a context that is already canceled or expired
-// are never retried - repeating the same call against a dead context or a
-// transport that rejects every request outright would only spend the
+// retrying. Offline mode is never retried - repeating the same call against
+// a transport that rejects every request outright would only spend the
 // backoff budget for nothing. Every other error is terminal by default
 // (this covers errS3NotFound, errS3PreconditionFailed, and the artifact
-// sha256-mismatch sentinel) except the two transient shapes a verb marks
-// explicitly: a retryable HTTP status carried by *retryableStatusError, or a
-// stalled body read (helpers.ErrReadStalled).
-func s3Retryable(err error) bool {
+// sha256-mismatch sentinel) except three transient shapes a verb or
+// Client.do marks explicitly: a stalled body read (helpers.ErrReadStalled),
+// a transport-level failure that never produced a response
+// (errS3TransportFailed, the sentinel Client.do alone produces), or a
+// retryable HTTP status carried by *retryableStatusError.
+//
+// errS3TransportFailed is retried only while ctx.Err() == nil. Measured on
+// go1.26.5 with this project's transport settings, both a net.Dialer timeout
+// (helpers.FetchDialContextTimeout) and http.Transport's own
+// ResponseHeaderTimeout satisfy errors.Is(err, context.DeadlineExceeded)
+// while the caller's own context is still live, so classifying by the
+// caller's context - not by the error's shape - is what keeps the two
+// commonest outage shapes (a black-holed endpoint, and one that accepts a
+// connection and then never answers) retryable at all; Client.do's own doc
+// comment carries the full measurement this classifier relies on.
+//
+// That ctx check is not what stops a retry after the caller's own
+// cancellation. Two backstops already do that, and neither is here:
+// Client.do declines to label a transport failure the caller's cancellation
+// raced (see its "one race is resolved deliberately" paragraph), and
+// helpers.Retry re-checks the context before every backoff sleep and returns
+// ctx.Err() from there. What this check decides is narrower and is only
+// about which error surfaces: when a cancellation lands after Client.do has
+// labeled a genuine transport failure but before this classification reads
+// it, the run reports that transport failure rather than ctx.Err().
+//
+// The check sits on the transport arm alone, never as an early blanket gate
+// on the whole function, because the two arms describe different events. A
+// transport failure is terminal in its own right - nothing answered - so
+// reporting it reports what actually happened. A retryable status is an
+// answer this loop was about to act on, so turning it terminal would
+// attribute to the backend a failure that never ended the run: for a status
+// arriving in the same instant the caller cancels, a blanket gate would turn
+// "return ctx.Err()" into "return the status error", the inversion
+// Client.do's own doctrine forbids.
+func s3Retryable(ctx context.Context, err error) bool {
 	if err == nil {
 		return false
 	}
 	if errors.Is(err, helpers.ErrOfflineMode) {
 		return false
 	}
-	// Classify a stalled read before the context checks. The production stall
-	// error no longer carries context.Canceled through errors.Is (see
-	// helpers.ErrReadStalled's doc comment: the watchdog renders its
-	// cancellation cause with %v, not %w), so this check and the context check
-	// below no longer overlap in practice. It is kept ahead of the context
-	// check anyway as defense in depth, so this classifier stays correct
-	// regardless of how the producer renders its cause.
 	if errors.Is(err, helpers.ErrReadStalled) {
 		return true
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return false
 	}
 	// An oversized artifact download is terminal by the same reasoning as a
 	// sha256 mismatch, but the default-deny fallthrough below would already
@@ -96,6 +125,9 @@ func s3Retryable(err error) bool {
 	// oversized body.
 	if errors.Is(err, helpers.ErrArtifactTooLarge) {
 		return false
+	}
+	if errors.Is(err, errS3TransportFailed) {
+		return ctx.Err() == nil
 	}
 	var statusErr *retryableStatusError
 	return errors.As(err, &statusErr)

@@ -31,12 +31,14 @@ package s3
 // its numeric form instead. Also deliberately not tested: whether
 // s3Retryable needs a change for a budget expiry inside getObject's own
 // retry loop. It does not, and this was verified by reading rather than by
-// adding a duplicate test: a budget expiry there surfaces as
-// context.DeadlineExceeded (client.Do wraps a canceled-context dial/read in a
-// *url.Error carrying it), and s3Retryable already classifies
-// context.DeadlineExceeded as terminal ahead of its *retryableStatusError
-// check (see s3Retryable's own doc comment), so a state-object deadline
-// expiring mid-retry cannot cause getObject to spend a second attempt.
+// adding a duplicate test: a budget expiry there fires while req.Context()
+// already reports the expired budget, so Client.do returns the raw
+// context-carrying error unlabeled rather than wrapped as errS3TransportFailed
+// (see Client.do's own "one race is resolved deliberately" paragraph), and
+// s3Retryable's default-deny - it matches none of ErrReadStalled,
+// ErrArtifactTooLarge, errS3TransportFailed, or *retryableStatusError - treats
+// an unlabeled error as terminal, so a state-object deadline expiring
+// mid-retry cannot cause getObject to spend a second attempt.
 
 import (
 	"context"

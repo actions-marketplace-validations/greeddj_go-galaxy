@@ -171,7 +171,7 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 	if req.Context().Err() != nil {
 		return nil, err
 	}
-	return nil, fmt.Errorf("%w: %w", helpers.ErrCacheBackendUnavailable, err)
+	return nil, fmt.Errorf("%w: %w", errS3TransportFailed, err)
 }
 
 // s3ErrorResponse captures the fields S3 puts in the XML <Error> document
@@ -229,7 +229,7 @@ func (c *Client) getObject(ctx context.Context, key string) (*http.Response, err
 		}
 		success = resp
 		return nil
-	}, s3Retryable)
+	}, s3RetryableFor(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +262,7 @@ func (c *Client) headObject(ctx context.Context, key string) (http.Header, error
 		}
 		headers = resp.Header.Clone()
 		return nil
-	}, s3Retryable)
+	}, s3RetryableFor(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -270,14 +270,17 @@ func (c *Client) headObject(ctx context.Context, key string) (http.Header, error
 }
 
 // putObject uploads an object with optional metadata. A conditional
-// create-if-absent PUT (ifNoneMatch) is single-shot and never retried: a
-// lost-success retry would observe 412 (the object it just created now
-// exists) and misreport its own success as contention, which the
-// distributed lock's acquireLock loop cannot distinguish from a live
-// holder - see reclaimIfExpired/tryAcquireOnce, whose own loop is the sole
-// retrier of conditional PUTs. An unconditional overwrite is safe to retry:
-// each attempt reseeks body to its start and rebuilds the request (fresh
-// signature) before resending.
+// create-if-absent PUT (ifNoneMatch) is single-shot and never retried,
+// deliberately including a transport failure that never produced a
+// response: such a failure is indistinguishable from a lost success (the PUT
+// may already have landed on the remote before the response was lost), so
+// retrying it would observe 412 (the object it just created now exists) and
+// misreport its own success as contention, which the distributed lock's
+// acquireLock loop cannot distinguish from a live holder - see
+// reclaimIfExpired/tryAcquireOnce, whose own loop is the sole retrier of
+// conditional PUTs, transport failures included. An unconditional overwrite
+// is safe to retry: each attempt reseeks body to its start and rebuilds the
+// request (fresh signature) before resending.
 func (c *Client) putObject(
 	ctx context.Context,
 	key string,
@@ -316,7 +319,7 @@ func (c *Client) putObject(
 			return err
 		}
 		return attempt()
-	}, s3Retryable)
+	}, s3RetryableFor(ctx))
 }
 
 // deleteObject deletes an object by key, retrying a transient failure like
@@ -342,7 +345,7 @@ func (c *Client) deleteObject(ctx context.Context, key string) error {
 			return wrapRetryableStatus(resp.StatusCode, s3StatusError(errS3DeleteFailed, resp))
 		}
 		return nil
-	}, s3Retryable)
+	}, s3RetryableFor(ctx))
 }
 
 // deleteObjectsMaxKeys is the maximum number of keys S3's Multi-Object
@@ -480,7 +483,7 @@ func (c *Client) deleteObjectsBatch(ctx context.Context, keys []string) error {
 				errS3DeleteFailed, len(result.Errors), len(keys), e.Key, e.Code, e.Message)
 		}
 		return nil
-	}, s3Retryable)
+	}, s3RetryableFor(ctx))
 }
 
 // listObjects returns object keys under the given prefix.
@@ -570,7 +573,7 @@ func (c *Client) listObjectsPage(ctx context.Context, prefix, token string) (lis
 		}
 		result = parsed
 		return nil
-	}, s3Retryable)
+	}, s3RetryableFor(ctx))
 	if err != nil {
 		return listBucketResult{}, err
 	}
@@ -636,7 +639,7 @@ func (c *Client) headBucket(ctx context.Context) error {
 			return wrapRetryableStatus(resp.StatusCode, fmt.Errorf("%w: %s", errS3BucketHeadFailed, resp.Status))
 		}
 		return nil
-	}, s3Retryable)
+	}, s3RetryableFor(ctx))
 }
 
 // createBucket sends a CreateBucket request with region configuration.

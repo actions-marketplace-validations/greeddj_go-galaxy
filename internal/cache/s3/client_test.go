@@ -6,8 +6,14 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/greeddj/go-galaxy/internal/galaxy/config"
+	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 )
 
 // slowDownErrorBody is a representative S3 XML <Error> document: a 503
@@ -427,4 +433,129 @@ func getObjectError(ctx context.Context, t *testing.T, b *Backend, key string) e
 		}()
 	}
 	return err
+}
+
+// getObjectRetryResponseHeaderTimeout is the ResponseHeaderTimeout every row
+// below arms: short enough to keep the test fast, long enough that the local
+// loopback dial itself never races it.
+const getObjectRetryResponseHeaderTimeout = 150 * time.Millisecond
+
+// TestGetObjectRetriesAResponseHeaderTimeout is the headline case this
+// classifier exists for: an S3-compatible endpoint that accepts a connection
+// and then never answers, the exact shape a black-holed or overloaded object
+// store produces. This failure satisfies errors.Is(err, context.DeadlineExceeded)
+// while the caller's own context is still live, so a classifier keying on the
+// error's shape rather than on the caller's context would refuse it and
+// getObject would spend only the first of its s3RetryMaxAttempts attempts -
+// which is exactly what this test counts. It asserts that by counting accepted
+// TCP connections directly, rather than trusting a response, since the server
+// here never produces one.
+func TestGetObjectRetriesAResponseHeaderTimeout(t *testing.T) {
+	t.Parallel()
+
+	ln, accepted := newAcceptingNeverRespondingListener(t)
+	httpClient := &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: getObjectRetryResponseHeaderTimeout}}
+
+	cfg := config.S3CacheConfig{
+		Endpoint:  "http://" + ln.Addr().String(),
+		Bucket:    "test",
+		Region:    "us-east-1",
+		AccessKey: "x",
+		SecretKey: "y",
+		PathStyle: true,
+		Enabled:   true,
+	}
+	client, err := newClient(cfg, httpClient)
+	if err != nil {
+		t.Fatalf("newClient: %v", err)
+	}
+
+	resp, err := client.getObject(context.Background(), "some-key")
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("expected an error against an endpoint that never answers, got nil")
+	}
+	if !errors.Is(err, errS3TransportFailed) {
+		t.Fatalf("expected errors.Is(err, errS3TransportFailed), got %v", err)
+	}
+	if !errors.Is(err, helpers.ErrCacheBackendUnavailable) {
+		t.Fatalf("expected errors.Is(err, helpers.ErrCacheBackendUnavailable), got %v", err)
+	}
+	if got := accepted.Load(); got != s3RetryMaxAttempts {
+		t.Fatalf("expected exactly s3RetryMaxAttempts=%d accepted connections, got %d", s3RetryMaxAttempts, got)
+	}
+}
+
+// TestGetObjectRecoversFromATransientTransportFailure is
+// TestGetObjectRetriesAResponseHeaderTimeout's positive control: it proves
+// the errS3TransportFailed retry arm actually RECOVERS a request rather than
+// merely counting attempts before giving up. The server hijacks the raw
+// connection and closes it without writing a status line for the first two
+// requests - a genuine transport failure (the client observes a closed
+// connection, never a response) distinct from a slow response - and answers
+// normally on the third.
+func TestGetObjectRecoversFromATransientTransportFailure(t *testing.T) {
+	t.Parallel()
+
+	var requests atomic.Int32
+	const key = "transient-transport-object"
+	payload := []byte("recovered after a transport failure")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) <= 2 {
+			// t.Errorf, not t.Fatal: this runs on the server's own handler
+			// goroutine, where a Fatal would kill that goroutine and leave
+			// the client hanging on a request nobody answers, turning a
+			// named failure into a timeout.
+			hijacker, ok := w.(http.Hijacker)
+			if !ok {
+				t.Errorf("ResponseWriter does not support hijacking")
+				return
+			}
+			conn, _, hijackErr := hijacker.Hijack()
+			if hijackErr != nil {
+				t.Errorf("Hijack: %v", hijackErr)
+				return
+			}
+			_ = conn.Close() // close without writing anything: a genuine transport failure, not a status.
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(payload)
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg := config.S3CacheConfig{
+		Endpoint:  srv.URL,
+		Bucket:    "test",
+		Region:    "us-east-1",
+		AccessKey: "x",
+		SecretKey: "y",
+		PathStyle: true,
+		Enabled:   true,
+	}
+	client, err := newClient(cfg, srv.Client())
+	if err != nil {
+		t.Fatalf("newClient: %v", err)
+	}
+
+	resp, err := client.getObject(context.Background(), key)
+	if err != nil {
+		t.Fatalf("expected getObject to recover from a transient transport failure, got %v", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read recovered body: %v", err)
+	}
+	if !bytes.Equal(body, payload) {
+		t.Fatalf("expected the recovered body %q, got %q", payload, body)
+	}
+	if got := requests.Load(); got != 3 {
+		t.Fatalf("expected exactly 3 requests (2 transport failures + 1 success), got %d", got)
+	}
 }

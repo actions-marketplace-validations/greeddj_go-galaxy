@@ -216,7 +216,7 @@ func assertLiveTimeoutClassifiesAsCacheBackendUnavailable(
 ) {
 	t.Helper()
 
-	ln := newAcceptingNeverRespondingListener(t)
+	ln, _ := newAcceptingNeverRespondingListener(t)
 	transport := newTransport(t, ln.Addr().String())
 	httpClient := &http.Client{Transport: transport}
 
@@ -279,8 +279,8 @@ func assertLiveTimeoutClassifiesAsCacheBackendUnavailable(
 // "if req.Context().Err() != nil { return nil, err }" branch from Client.do
 // makes this test fail with:
 //
-//	cache_backend_classification_test.go:380: expected NOT errors.Is(err, helpers.ErrCacheBackendUnavailable),
-//	got cache backend unavailable: Get "http://127.0.0.1:<port>/test/some-key": context canceled
+//	cache_backend_classification_test.go:340: expected NOT errors.Is(err, helpers.ErrCacheBackendUnavailable),
+//	got cache backend unavailable: s3 request failed: Get "http://127.0.0.1:<port>/test/some-key": context canceled
 //
 // while TestClientDoClassifiesConnectionFailureAsCacheBackendUnavailable
 // still passes, confirming that test alone cannot catch this regression.
@@ -356,7 +356,7 @@ func TestClientDoExcludesCallerCancellationFromCacheBackendUnavailable(t *testin
 // helpers.ErrCacheBackendUnusable, helpers.ErrCacheBackendUnavailable)`)
 // makes this test fail with:
 //
-//	cache_backend_classification_test.go:416: expected NOT errors.Is(err, helpers.ErrCacheBackendUnavailable),
+//	cache_backend_classification_test.go:376: expected NOT errors.Is(err, helpers.ErrCacheBackendUnavailable),
 //	got cache backend cannot be used as configured: cache backend unavailable: s3 backend does not enforce
 //	conditional PUT (If-None-Match); distributed locking cannot guarantee mutual exclusion
 //

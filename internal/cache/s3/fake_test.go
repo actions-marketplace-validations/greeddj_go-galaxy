@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -697,10 +698,14 @@ func newTestBackendWithFake(t *testing.T, fake *fakeS3) *Backend {
 // files, each pointing it at a different consumer: Client.do's own
 // response-header-timeout row (cache_backend_classification_test.go, which
 // also uses it for a dial-timeout row that never actually reaches the accept
-// loop before its own deadline fires) and the distributed lock's
-// wait-ceiling classification (lock_test.go, simulating a live but
-// unresponsive S3 endpoint during acquisition).
-func newAcceptingNeverRespondingListener(t *testing.T) net.Listener {
+// loop before its own deadline fires), the distributed lock's wait-ceiling
+// classification (lock_test.go, simulating a live but unresponsive S3
+// endpoint during acquisition), and getObject's own retry-count assertion
+// against a repeated response-header timeout (client_test.go). The returned
+// counter increments once per accepted connection, so a caller can assert
+// exactly how many attempts a retrying request made against this listener
+// without needing its own separate bookkeeping.
+func newAcceptingNeverRespondingListener(t *testing.T) (net.Listener, *atomic.Int32) {
 	t.Helper()
 	var lc net.ListenConfig
 	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
@@ -717,12 +722,14 @@ func newAcceptingNeverRespondingListener(t *testing.T) net.Listener {
 		_ = ln.Close()
 	})
 
+	var accepted atomic.Int32
 	go func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
 				return
 			}
+			accepted.Add(1)
 			go func(c net.Conn) {
 				buf := make([]byte, 4096)
 				_, _ = c.Read(buf) // drain the request; a response is never written.
@@ -732,5 +739,5 @@ func newAcceptingNeverRespondingListener(t *testing.T) net.Listener {
 		}
 	}()
 
-	return ln
+	return ln, &accepted
 }
