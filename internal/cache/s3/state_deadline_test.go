@@ -36,7 +36,7 @@ package s3
 // context-carrying error unlabeled rather than wrapped as errS3TransportFailed
 // (see Client.do's own "one race is resolved deliberately" paragraph), and
 // s3Retryable's default-deny - it matches none of ErrReadStalled,
-// ErrArtifactTooLarge, errS3TransportFailed, or *retryableStatusError - treats
+// ErrResponseTooLarge, errS3TransportFailed, or *retryableStatusError - treats
 // an unlabeled error as terminal, so a state-object deadline expiring
 // mid-retry cannot cause getObject to spend a second attempt.
 

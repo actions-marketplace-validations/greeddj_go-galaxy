@@ -564,7 +564,12 @@ func (c *Client) deleteObjectsBatch(ctx context.Context, keys []string) error {
 		}
 		data, err := io.ReadAll(helpers.NewSizeLimitedReader(resp.Body, helpers.S3ListMaxSize))
 		if err != nil {
-			return err
+			// NewSizeLimitedReader's helpers.ErrResponseTooLarge is a bare size
+			// ceiling shared with the artifact-download and metadata-fetch
+			// surfaces, so it is wrapped here naming this one - an S3
+			// batch-delete response - to keep errors.Is matching intact while
+			// telling an operator which response actually overran.
+			return fmt.Errorf("s3 batch-delete response: %w", err)
 		}
 		var result deleteResult
 		if err := xml.Unmarshal(data, &result); err != nil {
@@ -658,7 +663,12 @@ func (c *Client) listObjectsPage(ctx context.Context, prefix, token string) (lis
 		data, err := io.ReadAll(helpers.NewSizeLimitedReader(resp.Body, helpers.S3ListMaxSize))
 		_ = resp.Body.Close()
 		if err != nil {
-			return err
+			// NewSizeLimitedReader's helpers.ErrResponseTooLarge is a bare size
+			// ceiling shared with the artifact-download and metadata-fetch
+			// surfaces, so it is wrapped here naming this one - an S3 listing
+			// response - to keep errors.Is matching intact while telling an
+			// operator which response actually overran.
+			return fmt.Errorf("s3 listing response: %w", err)
 		}
 		var parsed listBucketResult
 		if err := xml.Unmarshal(data, &parsed); err != nil {

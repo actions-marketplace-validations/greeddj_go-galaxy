@@ -64,10 +64,10 @@ func TestDownloadRetryable(t *testing.T) {
 		{name: "raw context.Canceled is not retryable", err: context.Canceled, want: false},
 		{name: "raw context.DeadlineExceeded is not retryable", err: context.DeadlineExceeded, want: false},
 		{name: "sha256 mismatch after a complete read is terminal", err: shaMismatch, want: false},
-		{name: "an oversized artifact download is never retried", err: helpers.ErrArtifactTooLarge, want: false},
+		{name: "an oversized artifact download is never retried", err: helpers.ErrResponseTooLarge, want: false},
 		{
 			// This case is DELIBERATELY a non-killing regression pin, exactly
-			// like the ErrArtifactTooLarge case above: helpers.ErrArtifactDownloadDeadline
+			// like the ErrResponseTooLarge case above: helpers.ErrArtifactDownloadDeadline
 			// never wraps its cause with %w (see its own doc comment), so
 			// this error does not match context.Canceled or
 			// context.DeadlineExceeded either, and the default-deny

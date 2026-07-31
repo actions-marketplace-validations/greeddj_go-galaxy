@@ -171,7 +171,15 @@ func TestDeleteObjectsBatchRetriesTransientFailureThenSucceeds(t *testing.T) {
 // TestDeleteObjectsResponseBounded proves deleteObjectsBatch's read of the
 // DeleteResult body is bounded by helpers.S3ListMaxSize like
 // listObjectsPage's own XML read, so a hostile or misbehaving endpoint
-// cannot force an unbounded buffer.
+// cannot force an unbounded buffer, and that the resulting error names this
+// surface - an S3 batch-delete response - rather than surfacing
+// helpers.ErrResponseTooLarge bare.
+//
+// TestDeleteObjectsBatchRetriesTransientFailureThenSucceeds above is this
+// refusal's positive control: it drives the same newTestBackendAndFake
+// fixture through the same deleteObjectsBatch path with a within-ceiling
+// response and reads it back successfully, so a refusal here is the cap
+// firing rather than the path never working.
 func TestDeleteObjectsResponseBounded(t *testing.T) {
 	t.Parallel()
 	b, fake := newTestBackendAndFake(t)
@@ -183,8 +191,11 @@ func TestDeleteObjectsResponseBounded(t *testing.T) {
 	fake.oversizedDeleteResult = true
 
 	err := b.client.deleteObjectsBatch(ctx, []string{b.key(artifactsPrefix, "whatever.tar.gz")})
-	if !errors.Is(err, helpers.ErrArtifactTooLarge) {
-		t.Fatalf("deleteObjectsBatch() error = %v, want ErrArtifactTooLarge", err)
+	if !errors.Is(err, helpers.ErrResponseTooLarge) {
+		t.Fatalf("deleteObjectsBatch() error = %v, want ErrResponseTooLarge", err)
+	}
+	if !strings.Contains(err.Error(), "s3 batch-delete response") {
+		t.Fatalf("deleteObjectsBatch() error = %q, want it to name the s3 batch-delete response surface", err.Error())
 	}
 }
 

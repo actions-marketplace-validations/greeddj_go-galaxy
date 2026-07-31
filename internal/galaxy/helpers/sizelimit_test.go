@@ -12,7 +12,7 @@ import (
 // internal buffer, to pin the three whole-stream outcomes: comfortably under
 // the cap, landing exactly on it, and overrunning it by a small or large
 // margin. In every overrun case the returned error must be
-// ErrArtifactTooLarge rather than a silent truncation (which is exactly what
+// ErrResponseTooLarge rather than a silent truncation (which is exactly what
 // a bare io.LimitReader would produce instead).
 func TestNewSizeLimitedReaderWholeStream(t *testing.T) {
 	t.Parallel()
@@ -35,8 +35,8 @@ func TestNewSizeLimitedReaderWholeStream(t *testing.T) {
 			r := NewSizeLimitedReader(bytes.NewReader(tc.data), tc.max)
 			got, err := io.ReadAll(r)
 			if tc.wantErr {
-				if !errors.Is(err, ErrArtifactTooLarge) {
-					t.Fatalf("io.ReadAll() error = %v, want ErrArtifactTooLarge", err)
+				if !errors.Is(err, ErrResponseTooLarge) {
+					t.Fatalf("io.ReadAll() error = %v, want ErrResponseTooLarge", err)
 				}
 			} else if err != nil {
 				t.Fatalf("io.ReadAll() unexpected error: %v", err)
@@ -60,7 +60,7 @@ func TestNewSizeLimitedReaderWholeStream(t *testing.T) {
 // TestSizeLimitedReaderCrossesBoundaryMidStream pins the per-call behavior
 // precisely: reads that stay under the cap must pass through untouched, and
 // the exact Read call whose cumulative total first exceeds the cap must
-// surface ErrArtifactTooLarge on that same call - not one call later, and not
+// surface ErrResponseTooLarge on that same call - not one call later, and not
 // silently swallowed into a clean EOF.
 func TestSizeLimitedReaderCrossesBoundaryMidStream(t *testing.T) {
 	t.Parallel()
@@ -90,8 +90,8 @@ func TestSizeLimitedReaderCrossesBoundaryMidStream(t *testing.T) {
 	if n != 3 {
 		t.Fatalf("crossing read returned %d bytes, want 3", n)
 	}
-	if !errors.Is(err, ErrArtifactTooLarge) {
-		t.Fatalf("crossing read error = %v, want ErrArtifactTooLarge", err)
+	if !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("crossing read error = %v, want ErrResponseTooLarge", err)
 	}
 }
 
@@ -106,7 +106,7 @@ func TestSizeLimitedReaderZeroMax(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("Read() n = %d, want 1", n)
 	}
-	if !errors.Is(err, ErrArtifactTooLarge) {
-		t.Fatalf("Read() error = %v, want ErrArtifactTooLarge", err)
+	if !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("Read() error = %v, want ErrResponseTooLarge", err)
 	}
 }

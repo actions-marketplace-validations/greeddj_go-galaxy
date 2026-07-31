@@ -217,7 +217,15 @@ func (s *Artifacts) downloadToFile(ctx context.Context, key string, file *os.Fil
 	writer := io.MultiWriter(file, hasher)
 	limited := helpers.NewSizeLimitedReader(resp.Body, helpers.ArtifactMaxDownloadSize)
 	if _, err := io.Copy(writer, limited); err != nil {
-		return nil, nil, err
+		// helpers.ErrResponseTooLarge is a bare size ceiling shared with three
+		// other capped surfaces, so it is wrapped here naming this one. Without
+		// the wrap this is the only capped body that does not identify itself,
+		// leaving an operator to infer it from the absence of the other labels -
+		// which fails exactly where it matters, since a metadata re-resolution
+		// inside an install worker prints under the same per-collection line.
+		// Deliberately uncovered: ArtifactMaxDownloadSize is 4 GiB, so tripping
+		// the ceiling end to end is impractical rather than merely inconvenient.
+		return nil, nil, fmt.Errorf("cached artifact object: %w", err)
 	}
 	return metaFromHeaders(resp.Header), hasher.Sum(nil), nil
 }

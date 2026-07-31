@@ -69,7 +69,7 @@ func newS3RetryableCases() []s3RetryableCase {
 		},
 		{name: "not found is not retryable", err: errS3NotFound, want: false},
 		{name: "precondition failed is not retryable", err: errS3PreconditionFailed, want: false},
-		{name: "an oversized artifact download is never retried", err: helpers.ErrArtifactTooLarge, want: false},
+		{name: "an oversized listing or batch-delete response is never retried", err: helpers.ErrResponseTooLarge, want: false},
 		// Positive control and refusal on one fixture: the identical
 		// errS3TransportFailed-wrapped error is retryable under a live ctx and
 		// refused under a canceled one, proving the gate discriminates on ctx

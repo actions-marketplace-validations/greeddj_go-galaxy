@@ -304,7 +304,7 @@ func (b *Backend) probeConditionalPut(ctx context.Context) error {
 // raw and inflated size so a planted oversized or high-ratio gzip object
 // cannot be buffered whole into memory. A size-ceiling failure is reported to
 // the caller as helpers.ErrStateObjectTooLarge, not readAllCapped's own
-// helpers.ErrArtifactTooLarge - see the reclassification below for why.
+// helpers.ErrResponseTooLarge - see the reclassification below for why.
 func (b *Backend) readObject(ctx context.Context, key string) ([]byte, error) {
 	resp, err := b.client.getObject(ctx, key)
 	if err != nil {
@@ -318,20 +318,22 @@ func (b *Backend) readObject(ctx context.Context, key string) ([]byte, error) {
 	if err != nil {
 		// Reclassify the size ceiling into its own state-object sentinel,
 		// deliberately breaking the errors.Is chain to
-		// helpers.ErrArtifactTooLarge: readAllCapped's cap failure carries
+		// helpers.ErrResponseTooLarge: readAllCapped's cap failure carries
 		// that sentinel only because it is built on the same sizeLimitedReader
-		// an artifact download uses, but a state object is not an artifact.
-		// Leaving both sentinels reachable here would let this error carry two
-		// exit classes at once - ExitCacheCorrupt from the state-object
-		// sentinel and ExitNetwork from the artifact one - leaving
-		// exitcode.FromError's own check order to decide which wins rather
-		// than what the error means. (Neither sentinel belongs to the three
-		// cache-backend classes variables.go's partition governs; this is
-		// FromError's rule, not that one.) The cause is rendered with %v, not
-		// %w, so only errors.Is matching against helpers.ErrArtifactTooLarge is
-		// dropped; the "read N bytes, limit is M" detail readAllCapped's own
-		// error carries still renders into the message.
-		if errors.Is(err, helpers.ErrArtifactTooLarge) {
+		// every capped response uses, but a state object is not a response
+		// body this program streams to a consumer - it is persisted state
+		// this program must be able to read back. Leaving both sentinels
+		// reachable here would let this error carry two exit classes at once
+		// - ExitCacheCorrupt from the state-object sentinel and ExitNetwork
+		// from the response one - leaving exitcode.FromError's own check
+		// order to decide which wins rather than what the error means.
+		// (Neither sentinel belongs to the three cache-backend classes
+		// variables.go's partition governs; this is FromError's rule, not
+		// that one.) The cause is rendered with %v, not %w, so only
+		// errors.Is matching against helpers.ErrResponseTooLarge is dropped;
+		// the "read N bytes, limit is M" detail readAllCapped's own error
+		// carries still renders into the message.
+		if errors.Is(err, helpers.ErrResponseTooLarge) {
 			//nolint:errorlint // deliberately %v, not %w: see the comment above.
 			return nil, fmt.Errorf("%w: state object %s: %v", helpers.ErrStateObjectTooLarge, key, err)
 		}
@@ -344,7 +346,7 @@ func (b *Backend) readObject(ctx context.Context, key string) ([]byte, error) {
 // gzip, while bounding both the compressed read (so an oversized object
 // cannot be buffered whole) and the decompressed size (so a gzip bomb cannot
 // inflate without bound). Either ceiling being crossed surfaces
-// helpers.ErrArtifactTooLarge. Gzip detection mirrors readObject's own
+// helpers.ErrResponseTooLarge. Gzip detection mirrors readObject's own
 // pre-cap logic (isGzip/isGzipStream), so the caps are layered on top of the
 // existing decision of whether to gunzip rather than changing it.
 func readAllCapped(body io.Reader, header http.Header, key string, compressedCap, decompressedCap int64) ([]byte, error) {

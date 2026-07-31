@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
@@ -12,10 +13,15 @@ import (
 
 // TestListObjectsRejectsOversizedResponse proves listObjectsPage's read of a
 // ListObjectsV2 XML page is bounded by helpers.S3ListMaxSize: a response that
-// streams well past the cap must fail with helpers.ErrArtifactTooLarge, and
-// the endpoint must receive exactly one request, proving the failure is
-// terminal (via s3Retryable's existing ErrArtifactTooLarge arm) rather than
-// retried.
+// streams well past the cap must fail with helpers.ErrResponseTooLarge naming
+// this surface - an S3 listing response - rather than surfacing that sentinel
+// bare, since the same sentinel is also raised for an artifact download and a
+// Galaxy metadata document. The endpoint must also receive exactly one
+// request, proving the failure is terminal (via s3Retryable's existing
+// ErrResponseTooLarge arm) rather than retried.
+// TestListObjectsAcceptsNormalResponse below is the positive control on the
+// same fixture: it proves the identical listObjects path, kept under the
+// cap, still returns every key correctly.
 func TestListObjectsRejectsOversizedResponse(t *testing.T) {
 	t.Parallel()
 	b, fake := newTestBackendAndFake(t)
@@ -27,8 +33,11 @@ func TestListObjectsRejectsOversizedResponse(t *testing.T) {
 	fake.oversizedList = true
 
 	_, err := b.client.listObjects(ctx, b.key(artifactsPrefix))
-	if !errors.Is(err, helpers.ErrArtifactTooLarge) {
-		t.Fatalf("listObjects() error = %v, want ErrArtifactTooLarge", err)
+	if !errors.Is(err, helpers.ErrResponseTooLarge) {
+		t.Fatalf("listObjects() error = %v, want ErrResponseTooLarge", err)
+	}
+	if !strings.Contains(err.Error(), "s3 listing response") {
+		t.Fatalf("listObjects() error = %q, want it to name the s3 listing response surface", err.Error())
 	}
 
 	if got := fake.requestCount(bucketListKey, http.MethodGet); got != 1 {

@@ -305,12 +305,20 @@ var (
 	// candidate.
 	ErrCorruptManifest = errors.New("corrupt manifest")
 
-	// ErrArtifactTooLarge indicates an artifact download exceeded
-	// ArtifactMaxDownloadSize before it finished streaming. It is never
-	// retried: a server that streams past the ceiling once will do so again,
-	// so retrying would only spend the retry budget re-downloading a
-	// hostile or broken response.
-	ErrArtifactTooLarge = errors.New("artifact download exceeds the maximum allowed size")
+	// ErrResponseTooLarge indicates a response body read through
+	// NewSizeLimitedReader exceeded its configured ceiling before it finished
+	// streaming - an artifact download over ArtifactMaxDownloadSize, a Galaxy
+	// metadata document over MetadataMaxSize, or an S3 list or batch-delete
+	// response over S3ListMaxSize. It is never retried: a server that streams
+	// past the ceiling once will do so again, so retrying would only spend
+	// the retry budget re-fetching a hostile or broken response.
+	//
+	// A persisted cache-state object is capped by the same reader but never
+	// surfaces as this sentinel: s3.readObject reclassifies it into
+	// ErrStateObjectTooLarge before it reaches a caller, since an unreadable
+	// state object is a corrupt-cache condition rather than a fetch that
+	// failed.
+	ErrResponseTooLarge = errors.New("response body exceeds the maximum allowed size")
 
 	// ErrUnsupportedGalaxyServerKey indicates a [galaxy_server.<id>] section
 	// used a key this tool deliberately refuses to interpret: username,

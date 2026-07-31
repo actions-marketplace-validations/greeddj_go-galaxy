@@ -372,7 +372,7 @@ func isNetworkError(err error) bool {
 // (helpers.ErrCacheBackendUnavailable), a server-list walk aborting on a
 // credential failure or an exhausted retry budget, or any capped response
 // body that overran its ceiling before it finished streaming
-// (helpers.ErrArtifactTooLarge - helpers.NewSizeLimitedReader raises it for
+// (helpers.ErrResponseTooLarge - helpers.NewSizeLimitedReader raises it for
 // an artifact download, a Galaxy metadata document over MetadataMaxSize, and
 // an S3 list or batch-delete response over S3ListMaxSize alike). The one
 // capped body that does not land here is a persisted cache-state object,
@@ -394,7 +394,7 @@ func isTransportError(err error) bool {
 		errors.Is(err, helpers.ErrCacheBackendUnavailable) ||
 		errors.Is(err, helpers.ErrGalaxyAuthFailed) ||
 		errors.Is(err, helpers.ErrGalaxyServerUnavailable) ||
-		errors.Is(err, helpers.ErrArtifactTooLarge)
+		errors.Is(err, helpers.ErrResponseTooLarge)
 }
 
 // isMetadataFetchError reports whether err is a Galaxy metadata-response

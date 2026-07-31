@@ -942,6 +942,15 @@ func streamDownloadAndExtract(
 	n, copyErr := io.Copy(io.MultiWriter(tmpFile, hasher, pw), limited)
 	deps.runtime.Metrics.AddBytesDownloaded(n)
 	if copyErr != nil {
+		// helpers.ErrResponseTooLarge is a bare size ceiling shared with three
+		// other capped surfaces, so it is wrapped here naming this one. Without
+		// the wrap this is the only capped body that does not identify itself,
+		// leaving an operator to infer it from the absence of the other labels -
+		// which fails exactly where it matters, since a metadata re-resolution
+		// inside an install worker prints under the same per-collection line.
+		// Deliberately uncovered: ArtifactMaxDownloadSize is 4 GiB, so tripping
+		// the ceiling end to end is impractical rather than merely inconvenient.
+		copyErr = fmt.Errorf("collection artifact download: %w", copyErr)
 		_ = pw.CloseWithError(copyErr)
 	} else {
 		_ = pw.Close()
@@ -1010,7 +1019,11 @@ func writeDownloadToTemp(ctx context.Context, deps installDeps, body io.Reader) 
 	deps.runtime.Metrics.AddBytesDownloaded(n)
 	if err != nil {
 		_ = tmpFile.Close()
-		return "", cleanup, "", err
+		// Wrapped for the same reason, and with the same coverage note, as the
+		// streaming-ingest copy above: this is the other fresh-origin download
+		// path, and an unwrapped size ceiling here would be the one capped body
+		// that never names its own surface.
+		return "", cleanup, "", fmt.Errorf("collection artifact download: %w", err)
 	}
 	if err := tmpFile.Close(); err != nil {
 		return "", cleanup, "", err

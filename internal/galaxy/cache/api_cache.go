@@ -301,7 +301,15 @@ func fetchJSONBodyOnce(
 	}
 
 	body, err := io.ReadAll(helpers.NewSizeLimitedReader(resp.Body, helpers.MetadataMaxSize))
-	return body, resp.Header.Get("ETag"), resp.Header.Get("Last-Modified"), false, err
+	if err != nil {
+		// NewSizeLimitedReader's helpers.ErrResponseTooLarge is a bare size
+		// ceiling shared with two other surfaces (an artifact download, an S3
+		// listing or batch-delete response), so it is wrapped here naming this
+		// one - a Galaxy metadata document - to keep errors.Is matching intact
+		// while telling an operator which response actually overran.
+		return nil, "", "", false, fmt.Errorf("galaxy metadata document: %w", err)
+	}
+	return body, resp.Header.Get("ETag"), resp.Header.Get("Last-Modified"), false, nil
 }
 
 // HTTPStatusError describes a non-200 HTTP response.

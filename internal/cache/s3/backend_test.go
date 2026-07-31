@@ -459,7 +459,7 @@ func TestBackendSweepTempNoOp(t *testing.T) {
 
 // TestReadAllCappedRejectsOversizedRaw confirms the compressed-size ceiling
 // applies on the non-gzip path: a plain body longer than compressedCap must
-// fail with helpers.ErrArtifactTooLarge before it is fully buffered.
+// fail with helpers.ErrResponseTooLarge before it is fully buffered.
 func TestReadAllCappedRejectsOversizedRaw(t *testing.T) {
 	t.Parallel()
 
@@ -467,15 +467,15 @@ func TestReadAllCappedRejectsOversizedRaw(t *testing.T) {
 	data := bytes.Repeat([]byte("x"), compressedCap*4)
 
 	_, err := readAllCapped(bytes.NewReader(data), http.Header{}, "state/store.json", compressedCap, helpers.StateObjectMaxDecompressedSize)
-	if !errors.Is(err, helpers.ErrArtifactTooLarge) {
-		t.Fatalf("readAllCapped() error = %v, want ErrArtifactTooLarge", err)
+	if !errors.Is(err, helpers.ErrResponseTooLarge) {
+		t.Fatalf("readAllCapped() error = %v, want ErrResponseTooLarge", err)
 	}
 }
 
 // TestReadAllCappedRejectsGzipBomb confirms the decompressed-size ceiling
 // applies on the gzip path independently of the compressed-size ceiling: a
 // gzip stream well under compressedCap that inflates past a tiny
-// decompressedCap must fail with helpers.ErrArtifactTooLarge.
+// decompressedCap must fail with helpers.ErrResponseTooLarge.
 func TestReadAllCappedRejectsGzipBomb(t *testing.T) {
 	t.Parallel()
 
@@ -491,8 +491,8 @@ func TestReadAllCappedRejectsGzipBomb(t *testing.T) {
 
 	header := http.Header{"Content-Encoding": []string{"gzip"}}
 	_, err := readAllCapped(bytes.NewReader(gz), header, "state/store.json.gz", helpers.StateObjectMaxCompressedSize, decompressedCap)
-	if !errors.Is(err, helpers.ErrArtifactTooLarge) {
-		t.Fatalf("readAllCapped() error = %v, want ErrArtifactTooLarge", err)
+	if !errors.Is(err, helpers.ErrResponseTooLarge) {
+		t.Fatalf("readAllCapped() error = %v, want ErrResponseTooLarge", err)
 	}
 }
 
@@ -534,7 +534,7 @@ func TestReadAllCappedAcceptsNormal(t *testing.T) {
 // TestReadObjectReclassifiesOversizedStateObject proves readObject's own
 // reclassification of a size-ceiling failure, not readAllCapped's: a state
 // object that overruns helpers.StateObjectMaxCompressedSize fails with
-// helpers.ErrStateObjectTooLarge and NOT helpers.ErrArtifactTooLarge, even
+// helpers.ErrStateObjectTooLarge and NOT helpers.ErrResponseTooLarge, even
 // though readAllCapped's own cap failure - the one readObject wraps - always
 // carries the latter (TestReadAllCappedRejectsOversizedRaw pins that shape
 // directly). This exercises readObject through a real HTTP round trip
@@ -567,12 +567,12 @@ func TestReadObjectReclassifiesOversizedStateObject(t *testing.T) {
 		t.Fatalf("readObject(oversized) error = %v, want errors.Is(err, ErrStateObjectTooLarge) = true", err)
 	}
 	// The load-bearing partition check: readAllCapped's own cap failure
-	// always carries helpers.ErrArtifactTooLarge, since it is built on the
-	// same sizeLimitedReader an artifact download uses. This must be false
+	// always carries helpers.ErrResponseTooLarge, since it is built on the
+	// same sizeLimitedReader every capped response uses. This must be false
 	// only because readObject deliberately breaks that errors.Is chain by
 	// rendering the cause with %v instead of %w.
-	if errors.Is(err, helpers.ErrArtifactTooLarge) {
-		t.Fatalf("readObject(oversized) error = %v, want errors.Is(err, ErrArtifactTooLarge) = false", err)
+	if errors.Is(err, helpers.ErrResponseTooLarge) {
+		t.Fatalf("readObject(oversized) error = %v, want errors.Is(err, ErrResponseTooLarge) = false", err)
 	}
 
 	withinCapKey := b.key(statePrefix, "within-cap-state-object.json")

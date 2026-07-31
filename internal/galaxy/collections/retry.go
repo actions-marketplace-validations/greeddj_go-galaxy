@@ -101,7 +101,7 @@ func isEarlyTerminalDownloadError(err error) bool {
 // fallthrough - so a future reordering of the classifier cannot accidentally
 // start retrying a corrupt, tampered, hostile, or broken oversized artifact.
 func isLateTerminalDownloadError(err error) bool {
-	return errors.Is(err, helpers.ErrSHA256Mismatch) || errors.Is(err, helpers.ErrArtifactTooLarge)
+	return errors.Is(err, helpers.ErrSHA256Mismatch) || errors.Is(err, helpers.ErrResponseTooLarge)
 }
 
 // isRetryableAttemptError reports whether err is a *downloadAttemptError

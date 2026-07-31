@@ -256,7 +256,7 @@ var fromErrorCases = []exitCase{
 		wantCode: ExitInstall,
 	},
 	{
-		// Paired with "artifact too large, aggregated" below: this row is the
+		// Paired with "response too large, aggregated" below: this row is the
 		// bare/unaggregated shape, reached wherever a capped body overruns
 		// its ceiling outside any per-collection worker - an oversized Galaxy
 		// metadata document at resolve time, or an oversized S3 listing or
@@ -264,22 +264,22 @@ var fromErrorCases = []exitCase{
 		// helpers.ErrInstallationFailed headline exists to fold it behind. It
 		// classifies ExitNetwork: a size ceiling, not a digest mismatch, so
 		// ExitIntegrity is deliberately not the answer.
-		name:     "artifact too large, bare",
-		err:      fmt.Errorf("%w: ctx", helpers.ErrArtifactTooLarge),
+		name:     "response too large, bare",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrResponseTooLarge),
 		wantCode: ExitNetwork,
 	},
 	{
-		// Paired with "artifact too large, bare" above: the identical
+		// Paired with "response too large, bare" above: the identical
 		// sentinel, joined behind collections.Start's own
 		// helpers.ErrInstallationFailed headline the way a per-collection
 		// worker's failure actually reaches FromError, classifies
 		// ExitInstall instead - proving the two rows exercise different
 		// classifiers (isTransportError bare vs. isFileIntegrityError's
 		// headline match once aggregated) rather than the same one twice.
-		name: "artifact too large, aggregated behind installation failure",
+		name: "response too large, aggregated behind installation failure",
 		err: errors.Join(
 			fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed),
-			helpers.ErrArtifactTooLarge,
+			helpers.ErrResponseTooLarge,
 		),
 		wantCode: ExitInstall,
 	},

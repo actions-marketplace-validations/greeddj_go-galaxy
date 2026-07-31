@@ -118,12 +118,13 @@ func s3Retryable(ctx context.Context, err error) bool {
 	if errors.Is(err, helpers.ErrReadStalled) {
 		return true
 	}
-	// An oversized artifact download is terminal by the same reasoning as a
-	// sha256 mismatch, but the default-deny fallthrough below would already
-	// cover it: this check is explicit so a future reordering of the
-	// classifier cannot accidentally start retrying a hostile or broken
-	// oversized body.
-	if errors.Is(err, helpers.ErrArtifactTooLarge) {
+	// An oversized S3 listing or batch-delete response - the two S3 verbs in
+	// this package whose body read is capped and reached through this
+	// classifier - is terminal by the same reasoning as a sha256 mismatch,
+	// but the default-deny fallthrough below would already cover it: this
+	// check is explicit so a future reordering of the classifier cannot
+	// accidentally start retrying a hostile or broken oversized response.
+	if errors.Is(err, helpers.ErrResponseTooLarge) {
 		return false
 	}
 	if errors.Is(err, errS3TransportFailed) {
