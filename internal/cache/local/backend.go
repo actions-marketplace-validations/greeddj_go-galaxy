@@ -70,7 +70,7 @@ func (b *Backend) SaveStore(_ context.Context, st *store.Store) error {
 // ClearFiles removes cached artifact files from disk.
 func (b *Backend) ClearFiles(_ context.Context) error {
 	if b.cacheDir == "" {
-		return errCacheDirEmpty
+		return helpers.ErrCacheDirEmpty
 	}
 	return store.ClearCacheFiles(b.cacheDir)
 }
@@ -78,7 +78,7 @@ func (b *Backend) ClearFiles(_ context.Context) error {
 // RecordProject records the project in the local registry.
 func (b *Backend) RecordProject(_ context.Context, requirementsFile, downloadPath string) error {
 	if b.cacheDir == "" {
-		return errCacheDirEmpty
+		return helpers.ErrCacheDirEmpty
 	}
 	return store.RecordProject(b.cacheDir, requirementsFile, downloadPath)
 }
@@ -86,7 +86,7 @@ func (b *Backend) RecordProject(_ context.Context, requirementsFile, downloadPat
 // LoadProjectRegistry loads the local project registry.
 func (b *Backend) LoadProjectRegistry(_ context.Context) (*store.ProjectRegistry, error) {
 	if b.cacheDir == "" {
-		return nil, errCacheDirEmpty
+		return nil, helpers.ErrCacheDirEmpty
 	}
 	return store.LoadProjectRegistry(b.cacheDir)
 }
@@ -102,7 +102,7 @@ func (b *Backend) Artifacts() cacheManager.ArtifactStore {
 // cleanup.
 func (b *Backend) SweepTemp(_ context.Context) error {
 	if b.cacheDir == "" {
-		return errCacheDirEmpty
+		return helpers.ErrCacheDirEmpty
 	}
 	return store.SweepDownloadTemps(b.cacheDir)
 }
@@ -130,7 +130,7 @@ func (b *Backend) ensureOpen() error {
 // missing, without touching any Bolt file.
 func (b *Backend) ensureDir() error {
 	if b.cacheDir == "" {
-		return errCacheDirEmpty
+		return helpers.ErrCacheDirEmpty
 	}
 	return os.MkdirAll(b.cacheDir, helpers.DirMod)
 }

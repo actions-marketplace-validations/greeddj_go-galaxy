@@ -76,9 +76,20 @@ var (
 	ErrCacheDirEmpty = errors.New("cache directory is empty")
 	// ErrAnotherInstanceIsRunning indicates another instance is already running.
 	ErrAnotherInstanceIsRunning = errors.New("another instance is running")
-	// ErrCacheBusy indicates the cache is held by another process and could
-	// not be opened within the allotted timeout.
+	// ErrCacheBusy indicates the cache is held by another holder and could
+	// not be acquired within this backend's own ceiling - true of a local
+	// Bolt open timeout and of the S3 distributed lock's wait-ceiling
+	// timeout alike; neither names the other's mechanism.
 	ErrCacheBusy = errors.New("another process holds the cache")
+	// ErrCacheBackendUnavailable indicates a remote cache backend could not
+	// be reached, or answered a request with a failure that is not this
+	// program's own doing.
+	ErrCacheBackendUnavailable = errors.New("cache backend unavailable")
+	// ErrCacheBackendUnusable indicates the configured backend cannot
+	// provide a guarantee this tool requires, or cannot be addressed at
+	// all; no retry can change that and the only remedy is a configuration
+	// change.
+	ErrCacheBackendUnusable = errors.New("cache backend cannot be used as configured")
 	// ErrNoSemverCandidates indicates no semver candidates are available.
 	ErrNoSemverCandidates = errors.New("no semver candidates available")
 	// ErrMissingResolvedParent indicates a resolved parent is missing.

@@ -75,6 +75,105 @@ func newClient(cfg config.S3CacheConfig, httpClient *http.Client) (*Client, erro
 	return &Client{cfg: cfg, client: httpClient, endpointHost: parsed.Host, endpointScheme: parsed.Scheme}, nil
 }
 
+// do delegates to c.client.Do and normalizes a transport-level failure into
+// helpers.ErrCacheBackendUnavailable, so a dead bucket is distinguishable
+// from the caller's own configuration mistakes and from a request that
+// merely returned a non-2xx status (each idempotent verb's own status
+// handling, e.g. s3StatusError, already carries the class that applies to
+// its status).
+//
+// The exclusion below asks exactly one question - did whoever asked for this
+// work stop wanting it - by checking req.Context().Err(), not the shape of
+// err. req.Context() is the caller's own context: newRequest builds req with
+// it (http.NewRequestWithContext below) and nothing between there and here
+// re-points it - watchdogTransport wraps every request in its own derived
+// context but calls its base RoundTripper with req.Clone(wctx), leaving the
+// req object held in this function untouched, and authTransport /
+// tlsDispatchTransport dispatch purely by request origin without touching
+// the context at all. This is the same discriminator
+// internal/galaxy/cache's deadlineError (its parent.Err() != nil check) and
+// internal/galaxy/collections' artifactDeadlineError already use for the
+// identical question on their own surfaces, not a new pattern introduced
+// here.
+//
+// It deliberately does not test the shape of err instead (e.g.
+// errors.Is(err, context.DeadlineExceeded)). Measured on go1.26.5 with this
+// project's transport settings, both a net.Dialer timeout
+// (helpers.FetchDialContextTimeout) and http.Transport's own
+// ResponseHeaderTimeout satisfy errors.Is(err, context.DeadlineExceeded)
+// while the caller's own context is still live, so an error-shape test would
+// silently exclude the two commonest outage shapes from ever reaching the
+// sentinel: a black-holed endpoint (the dial never completes) and one that
+// accepts a connection and then never answers (headers never arrive). A
+// future reader must be able to re-derive that defect from this comment
+// without re-measuring it, which is why both shapes are named here. Do not
+// reintroduce errors.Is(err, context.Canceled) or
+// errors.Is(err, context.DeadlineExceeded) as a second, "for symmetry" or
+// belt-and-suspenders check: such an error already classifies ExitInterrupt
+// in exitcode.FromError regardless of what this function returns, since that
+// check runs first, so the check buys nothing - and leaving any error-shape
+// test in place is exactly what would silently restore this exclusion.
+//
+// When a state-object or artifact budget is in force, the context that
+// budget's own context.WithTimeout built IS req.Context() by the time this
+// method runs - every call site in this file threads its ctx parameter
+// straight into newRequest, and callers higher up construct that ctx from
+// the relevant budget (see internal/galaxy/cache's stateDeadlineBackend and
+// internal/galaxy/collections' downloadCollectionToCache/fetchArtifact). So a
+// budget expiry still returns the raw context-carrying error here, unwrapped,
+// exactly as it did before this predicate existed, and
+// internal/galaxy/cache's deadlineError / internal/galaxy/collections'
+// artifactDeadlineError normalize it into their own sentinel by testing
+// errors.Is against that same raw error - true by construction now, not by
+// coincidence of how the standard library happens to shape a timeout error.
+//
+// helpers.ErrCacheBackendUnavailable means the backend did not answer for a
+// reason that is not this program's own doing; no consumer of that sentinel
+// has to reason about an error tree that also carries a context signal.
+//
+// This changes no exit code today: cmd/go-galaxy/exitcode's isTransportError
+// already matches both context.DeadlineExceeded and
+// helpers.ErrCacheBackendUnavailable into the same ExitNetwork class, so a
+// dial timeout or a ResponseHeaderTimeout classifies the same way on either
+// side of this predicate. What this buys is message accuracy - the sentinel
+// now means what it says for every transport failure with a live caller
+// context, not only a connect refusal - and defense in depth for a future
+// consumer that comes to distinguish the two classes without knowing this
+// history.
+//
+// The funnel's boundary: only a failure c.client.Do itself returns is
+// normalized here. A mid-stream body-read failure - Artifacts'
+// downloadToFile, or readObject's io.ReadAll after a 200 response - happens
+// after do has already returned successfully and is never labeled by this
+// method.
+//
+// One race is resolved deliberately, not by accident: if the caller cancels
+// in the same instant a genuine transport error arrives, req's own context
+// already carries that cancellation by the time this check runs, so the raw
+// error returns unlabeled rather than as helpers.ErrCacheBackendUnavailable -
+// the caller's own decision to stop wins over labeling the failure as the
+// backend's fault.
+func (c *Client) do(req *http.Request) (*http.Response, error) {
+	// #nosec G704 -- req's own Host header is always this Client's configured
+	// S3 endpoint: requestURL builds it from c.cfg.Endpoint/c.cfg.Bucket in
+	// path-style mode, or from c.endpointHost/c.endpointScheme in virtual-host
+	// mode - never from a remote value. Only the object key path segment
+	// varies, which is not an SSRF vector since req's own destination host is
+	// fixed by configuration; this does not speak to where an HTTP redirect
+	// might send a later hop (no CheckRedirect is configured anywhere in this
+	// client's transport chain, so Go's default up-to-10-redirect behavior
+	// applies), which is a pre-existing, out-of-scope property of this client,
+	// not something this guard claims to bound.
+	resp, err := c.client.Do(req)
+	if err == nil {
+		return resp, nil
+	}
+	if req.Context().Err() != nil {
+		return nil, err
+	}
+	return nil, fmt.Errorf("%w: %w", helpers.ErrCacheBackendUnavailable, err)
+}
+
 // s3ErrorResponse captures the fields S3 puts in the XML <Error> document
 // that many non-2xx responses carry in their body, alongside the HTTP status
 // line.
@@ -115,7 +214,7 @@ func (c *Client) getObject(ctx context.Context, key string) (*http.Response, err
 		if err != nil {
 			return err
 		}
-		resp, err := c.client.Do(req)
+		resp, err := c.do(req)
 		if err != nil {
 			return err
 		}
@@ -148,7 +247,7 @@ func (c *Client) headObject(ctx context.Context, key string) (http.Header, error
 		if err != nil {
 			return err
 		}
-		resp, err := c.client.Do(req)
+		resp, err := c.do(req)
 		if err != nil {
 			return err
 		}
@@ -200,7 +299,7 @@ func (c *Client) putObject(
 		}
 		req.ContentLength = size
 		applyContentHeaders(req, contentType, contentEncoding)
-		resp, err := c.client.Do(req)
+		resp, err := c.do(req)
 		if err != nil {
 			return err
 		}
@@ -229,7 +328,7 @@ func (c *Client) deleteObject(ctx context.Context, key string) error {
 		if err != nil {
 			return err
 		}
-		resp, err := c.client.Do(req)
+		resp, err := c.do(req)
 		if err != nil {
 			return err
 		}
@@ -357,7 +456,7 @@ func (c *Client) deleteObjectsBatch(ctx context.Context, keys []string) error {
 		req.ContentLength = int64(len(payload))
 		req.Header.Set("Content-Type", "application/xml")
 		req.Header.Set("Content-MD5", contentMD5)
-		resp, err := c.client.Do(req)
+		resp, err := c.do(req)
 		if err != nil {
 			return err
 		}
@@ -523,7 +622,7 @@ func (c *Client) headBucket(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		resp, err := c.client.Do(req)
+		resp, err := c.do(req)
 		if err != nil {
 			return err
 		}
@@ -569,7 +668,7 @@ func (c *Client) createBucket(ctx context.Context) error {
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
-	resp, err := c.client.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return err
 	}
@@ -596,7 +695,7 @@ func (c *Client) bucketRequest(ctx context.Context, method string, query url.Val
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.client.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, err
 	}

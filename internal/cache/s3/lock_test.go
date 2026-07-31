@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
+	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 )
 
 // foreignToken stands in for a lock token belonging to some other acquirer
@@ -280,6 +281,16 @@ func TestLockWaitsThenTimesOutOnLiveLock(t *testing.T) {
 	if elapsed < b.lock.backoffBase {
 		t.Fatalf("expected at least one backoff sleep before timing out, elapsed %v", elapsed)
 	}
+	// errS3LockWaitTimeout carries helpers.ErrCacheBusy (see variables.go's
+	// partition doc): a live foreign lock that outlasts the wait ceiling is
+	// exactly the contention shape cmd/go-galaxy/exitcode's ExitCacheBusy
+	// exists for. TestLockAcquirePropagatesCallerCancellation is this
+	// assertion's negative control on the same acquireLock loop: a caller
+	// cancellation racing the identical contention must NOT match
+	// helpers.ErrCacheBusy.
+	if !errors.Is(err, helpers.ErrCacheBusy) {
+		t.Fatalf("expected errors.Is(err, helpers.ErrCacheBusy), got %v", err)
+	}
 }
 
 // TestLockAcquirePropagatesCallerCancellation confirms that when the
@@ -320,6 +331,15 @@ func TestLockAcquirePropagatesCallerCancellation(t *testing.T) {
 	}
 	if errors.Is(err, errS3LockWaitTimeout) {
 		t.Fatalf("expected the caller cancellation, not errS3LockWaitTimeout, got %v", err)
+	}
+	// Negative control for TestLockWaitsThenTimesOutOnLiveLock, whose positive
+	// assertion this test mirrors: the identical live-foreign-lock contention,
+	// ended by the caller's own cancellation instead of the wait ceiling
+	// firing on its own, must NOT match helpers.ErrCacheBusy - waitCeilingErr
+	// propagates parent.Err() unchanged in that branch, never
+	// errS3LockWaitTimeout.
+	if errors.Is(err, helpers.ErrCacheBusy) {
+		t.Fatalf("expected the caller cancellation, not helpers.ErrCacheBusy, got %v", err)
 	}
 }
 

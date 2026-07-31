@@ -173,6 +173,26 @@ var fromErrorCases = []exitCase{
 		err:      fmt.Errorf("%w: ctx", helpers.ErrReadStalled),
 		wantCode: ExitNetwork,
 	},
+	{
+		name:     "cache backend unavailable",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrCacheBackendUnavailable),
+		wantCode: ExitNetwork,
+	},
+	{
+		name:     "cache backend unusable",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrCacheBackendUnusable),
+		wantCode: ExitUsage,
+	},
+	{
+		name:     "cache busy",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrCacheBusy),
+		wantCode: ExitCacheBusy,
+	},
+	{
+		name:     "another instance is running",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrAnotherInstanceIsRunning),
+		wantCode: ExitCacheBusy,
+	},
 }
 
 // TestFromError walks fromErrorCases, checking one representative error per
@@ -579,6 +599,67 @@ func TestStateObjectDeadlineClassification(t *testing.T) {
 	tailSaveFailure := fmt.Errorf("%w; snapshot save failed: %w", headline, renderedCause)
 	if got := FromError(tailSaveFailure); got != ExitInstall {
 		t.Errorf("FromError(tail save failure) = %d, want ExitInstall (%d)", got, ExitInstall)
+	}
+}
+
+// TestCacheBusyFoldedBehindInstallFailureClassifiesAsInstall pins that a
+// contention failure joined behind helpers.ErrInstallationFailed classifies
+// ExitInstall, the same as every other per-collection cause - identical to
+// how helpers.ErrStateObjectDeadline already classifies once joined the same
+// way (TestStateObjectDeadlineClassification's tail-save-failure assertion).
+//
+// This shape is SYNTHETIC: no production path in this repository aggregates
+// a helpers.ErrCacheBusy failure behind helpers.ErrInstallationFailed today
+// - the distributed lock is acquired once at init, before any per-collection
+// work starts, so a contention failure there is always returned bare, never
+// joined. This test pins the invariant the classifier must keep if that
+// ever changes: the per-collection aggregation rule outranks the cache-busy
+// class, exactly as it already outranks every other per-collection cause.
+//
+// KILLING MUTATION, run and reverted: moving the isCacheBusyError case in
+// fromErrorTail above isInstallError's case in FromError makes this test
+// fail with:
+//
+//	exitcode_test.go:628: FromError(joined) = 8, want 5
+func TestCacheBusyFoldedBehindInstallFailureClassifiesAsInstall(t *testing.T) {
+	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
+	joined := errors.Join(headline, helpers.ErrCacheBusy)
+	if got := FromError(joined); got != ExitInstall {
+		t.Errorf("FromError(joined) = %d, want %d", got, ExitInstall)
+	}
+}
+
+// TestNetworkOutranksCacheBusyWithoutAnInstallHeadline pins fromErrorTail's
+// own ordering: isNetworkError is checked before isCacheBusyError, so a tree
+// carrying both a network-class and a cache-busy sentinel - with no
+// helpers.ErrInstallationFailed headline to route it through FromError's
+// earlier cases instead - classifies as ExitNetwork, not ExitCacheBusy.
+func TestNetworkOutranksCacheBusyWithoutAnInstallHeadline(t *testing.T) {
+	joined := errors.Join(helpers.ErrCacheBusy, helpers.ErrCacheBackendUnavailable)
+	if got := FromError(joined); got != ExitNetwork {
+		t.Errorf("FromError(joined) = %d, want %d", got, ExitNetwork)
+	}
+}
+
+// TestCacheBusyOutranksUsage pins that isCacheBusyError is checked before
+// isUsageError in fromErrorTail: a helpers.ErrCacheBusy wrapped around
+// fs.ErrNotExist (isUsageError's own broad fs.ErrNotExist arm) still
+// classifies as ExitCacheBusy, not ExitUsage.
+func TestCacheBusyOutranksUsage(t *testing.T) {
+	err := fmt.Errorf("%w: %w", helpers.ErrCacheBusy, fs.ErrNotExist)
+	if got := FromError(err); got != ExitCacheBusy {
+		t.Errorf("FromError(err) = %d, want %d", got, ExitCacheBusy)
+	}
+}
+
+// TestCanceledOutranksCacheBusy pins FromError's top-level priority: a
+// context.Canceled sentinel still outranks a joined helpers.ErrCacheBusy,
+// since the cancellation case is checked before fromErrorTail is ever
+// reached.
+func TestCanceledOutranksCacheBusy(t *testing.T) {
+	joined := errors.Join(context.Canceled, helpers.ErrCacheBusy)
+	if got := FromError(joined); got != ExitInterrupt {
+		t.Errorf("FromError(joined) = %d, want %d", got, ExitInterrupt)
 	}
 }
 

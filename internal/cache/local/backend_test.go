@@ -34,6 +34,20 @@ func TestBackendOpenDoesNotOpenBolt(t *testing.T) {
 	}
 }
 
+// TestBackendOpenRejectsEmptyCacheDir confirms ensureDir's guard surfaces the
+// shared helpers.ErrCacheDirEmpty sentinel - not a package-private
+// duplicate - so cmd/go-galaxy/exitcode's isConfigUsageError check (which
+// matches on helpers.ErrCacheDirEmpty alone) still classifies an empty
+// cfg.CacheDir as a usage error for the local backend.
+func TestBackendOpenRejectsEmptyCacheDir(t *testing.T) {
+	t.Parallel()
+
+	b := New("")
+	if err := b.Open(context.Background()); !errors.Is(err, helpers.ErrCacheDirEmpty) {
+		t.Fatalf("expected errors.Is(err, helpers.ErrCacheDirEmpty), got %v", err)
+	}
+}
+
 func TestBackendLockFailsFastWhenHeld(t *testing.T) {
 	t.Parallel()
 

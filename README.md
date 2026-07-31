@@ -452,6 +452,15 @@ investigate, not a configuration mistake.
 When `--s3-bucket` (or `GO_GALAXY_S3_BUCKET`) is set, go-galaxy uses S3 as the cache backend.
 Artifacts and cache metadata are stored in S3; collections are still installed locally.
 
+A run against the S3 backend distinguishes three ways the cache can fail to serve it. A
+bucket that cannot be reached, or that answers a request with a failure of its own, exits
+`4` - retry once the outage clears. A bucket that parses but cannot back the distributed
+lock's mutual-exclusion guarantee (it does not enforce conditional PUT), or an
+`--s3-endpoint` that fails to parse, exits `2` - no retry helps; the configuration itself
+has to change. A bucket that is reachable and usable but whose lock this run does not
+acquire before its own wait ceiling elapses exits `8` - normally because another run holds
+it. See "Exit codes" below for the exact messages to grep for.
+
 ## Security / Trust model
 
 - The shared S3 snapshot object and the project registry object are a trust boundary:
@@ -600,17 +609,18 @@ RUN go-galaxy warm --frozen
 `go-galaxy` exits with a class-specific code instead of a flat `1`, so CI
 pipelines can branch on failure type without parsing log output:
 
-| Code | Meaning                                                                                                                                              |
-|-----:|------------------------------------------------------------------------------------------------------------------------------------------------------|
-|    0 | Success                                                                                                                                              |
-|    1 | Generic failure (does not match any class below)                                                                                                     |
-|    2 | Usage or configuration error (invalid flags, requirements, `ansible.cfg`, or a flag a command does not implement, e.g. `--dry-run` on `lock`)        |
-|    3 | Dependency resolution failure (conflicts, missing candidates, cycle)                                                                                 |
-|    4 | Network or Galaxy API failure (timeouts, stalled transfers, metadata and cache-state deadlines, offline-mode violations)                             |
-|    5 | Install-time failure (unsafe archive/symlink content, empty file, missing artifact cache)                                                            |
-|    6 | Lockfile error (missing, invalid, or mismatched with requirements)                                                                                   |
-|    7 | Artifact-integrity failure (content does not authenticate against its naming sha256, or the digest is malformed)                                     |
-|  130 | Interrupted (a caught SIGINT, or the caller's own context canceled)                                                                                  |
+| Code | Meaning                                                                                                                                                                           |
+|-----:|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+|    0 | Success                                                                                                                                                                           |
+|    1 | Generic failure (does not match any class below)                                                                                                                                  |
+|    2 | Usage or configuration error (invalid flags, requirements, `ansible.cfg`, an unimplemented flag e.g. `--dry-run` on `lock`, or a cache backend that cannot be used as configured) |
+|    3 | Dependency resolution failure (conflicts, missing candidates, cycle)                                                                                                              |
+|    4 | Network or Galaxy API failure (timeouts, stalled transfers, metadata and cache-state deadlines, offline-mode violations, or an unreachable cache backend)                         |
+|    5 | Install-time failure (unsafe archive/symlink content, empty file, missing artifact cache)                                                                                         |
+|    6 | Lockfile error (missing, invalid, or mismatched with requirements)                                                                                                                |
+|    7 | Artifact-integrity failure (content does not authenticate against its naming sha256, or the digest is malformed)                                                                  |
+|    8 | Cache contention (the cache lock is held elsewhere, or was not acquired before this run's wait ceiling elapsed)                                                                   |
+|  130 | Interrupted (a caught SIGINT, or the caller's own context canceled)                                                                                                               |
 
 Exit `7` covers content that failed to authenticate against the sha256 that
 named it - a lockfile pin, a Galaxy server's declared digest, a cache sidecar,
@@ -629,6 +639,24 @@ the metadata and cache-state ceilings above: grep the run's output for
 `galaxy metadata fetch deadline exceeded` or `cache state object deadline
 exceeded` to tell one of these deadlines apart from a genuine interrupt or
 from any other network failure sharing exit code `4`.
+
+Exit codes `2`, `4`, and `8` each fold in more than one cache-backend
+condition too, distinguishable the same way - grep the run's output for the
+message: `cache backend cannot be used as configured` (exit `2` - an
+`--s3-endpoint` that fails to parse, or a bucket that does not enforce
+conditional PUT, so the distributed lock cannot guarantee mutual exclusion),
+`cache backend unavailable` (exit `4` - the backend could not be reached, or
+answered with a failure that is not this program's own doing), `another
+process holds the cache` (exit `8` - a local Bolt file open timed out against
+another process's held lock, or the S3 lock's wait ceiling elapsed before this
+run acquired it), and `another instance is running` (exit `8` - a second local
+run found the lock already held and refused to start immediately).
+
+On the S3 backend, exit `8` says only that this run did not get the lock
+before its wait ceiling elapsed - normally another run holds it, though a
+bucket that accepts connections and then never answers can surface the same
+way. If exit `8` repeats with no other run in flight, check the endpoint
+rather than waiting.
 
 ## Metrics
 

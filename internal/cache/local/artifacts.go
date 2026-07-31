@@ -122,7 +122,7 @@ func (s *Artifacts) Delete(_ context.Context, key string) error {
 func (s *Artifacts) dir() (string, error) {
 	trimmed := strings.TrimSpace(s.cacheDir)
 	if trimmed == "" {
-		return "", errCacheDirEmpty
+		return "", helpers.ErrCacheDirEmpty
 	}
 	return trimmed, nil
 }
