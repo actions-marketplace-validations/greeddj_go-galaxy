@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -220,6 +221,20 @@ func assertLockIsFree(t *testing.T, cfg *config.Config, runtime *infra.Infra) {
 // tests for constructing an Infra without caring about rendered output.
 func newTestRuntime() *infra.Infra {
 	return infra.New(noopPrinter{}, http.DefaultClient)
+}
+
+// openTestWorkspace opens collectionsPath's os.Root the same way
+// openProjectWorkspace does once it finds a usable candidate, for tests that
+// call the rooted scan functions (scanInstalledCollections, scanNamespaceDir)
+// directly rather than only indirectly through Start. The caller owns the
+// returned workspace's root and must close it.
+func openTestWorkspace(t *testing.T, collectionsPath string) workspace {
+	t.Helper()
+	root, err := os.OpenRoot(collectionsPath)
+	if err != nil {
+		t.Fatalf("failed to open root at %s: %v", collectionsPath, err)
+	}
+	return workspace{root: root, fsys: root.FS(), path: collectionsPath}
 }
 
 // seedInstallTree creates a MANIFEST.json for ns.name@1.0.0 under
@@ -494,7 +509,7 @@ func TestBuildInstalledRecordRejectsSeparators(t *testing.T) {
 
 // TestStartFailsOnUnreadableRequirementsCorrupt proves that a recorded
 // project whose workspace is present on disk (its collections tree is
-// seeded and found by pickCollectionsPath), but whose requirements file
+// seeded and found by openProjectWorkspace), but whose requirements file
 // contains unparseable content, aborts the whole run with
 // helpers.ErrProjectRequirementsUnreadable instead of silently contributing
 // zero reachability roots and letting the seeded install become an
@@ -526,7 +541,7 @@ func TestStartFailsOnUnreadableRequirementsCorrupt(t *testing.T) {
 // does not exist at all, for a project whose workspace is otherwise present
 // on disk. A missing file for a present workspace is a load failure exactly
 // like corrupt content - it must abort the run rather than skip past it,
-// since pickCollectionsPath has already confirmed the workspace exists and
+// since openProjectWorkspace has already confirmed the workspace exists and
 // scanInstalledCollections has already populated deletion candidates for it.
 func TestStartFailsOnMissingRequirements(t *testing.T) {
 	t.Parallel()
@@ -740,7 +755,7 @@ func seedExtractedDir(t *testing.T, cacheDir, sha string) {
 
 // recordAbsentWorkspaceProject records a project pointing at downloadPath,
 // which deliberately has no ansible_collections subdirectory. This makes
-// pickCollectionsPath skip the project entirely, so its installed snapshot
+// scanProjectWorkspace skip the project entirely, so its installed snapshot
 // entries are never scanned, never pruned, and never contribute to
 // installedByKey - the normal ephemeral-CI state where a fresh runner has no
 // local ansible_collections workspace at all.
@@ -843,8 +858,8 @@ func seedSnapshotInstalledAndWarmed(
 // warm-only machine's snapshot - which has no Installed entries at all,
 // since warm never calls recordInstall, only a Warmed entry - still keeps
 // its extracted tree during a sweep. Its recorded project's workspace does
-// not exist (pickCollectionsPath returns "" and the project is skipped
-// entirely, exactly like TestSweepKeepsCacheWhenWorkspaceAbsent's
+// not exist (scanProjectWorkspace returns scanned=false and the project is
+// skipped entirely, exactly like TestSweepKeepsCacheWhenWorkspaceAbsent's
 // install-side scenario), so extractedKeepSet must also consult the
 // Warmed set's sha, not only InstalledArtifactSHAByKey, or Sweep would wipe
 // the extracted tree warm had just materialized.
@@ -1833,6 +1848,93 @@ func TestScanAbortsOnRealIOErrorReadingManifest(t *testing.T) {
 	assertManifestSurvives(t, installDir)
 }
 
+// TestScanAbortsOnUnreadableCollectionDir proves the IO-error abort branch
+// inside manifestIsRegularFile's own gate, the sibling of
+// TestScanAbortsOnRealIOErrorReadingManifest's abort past the gate: a
+// genuine Lstat failure on ansible_collections/<ns>/<name>/MANIFEST.json -
+// as opposed to the entry simply not existing - still aborts the whole run
+// rather than being silently skipped.
+//
+// chmod 0o000 on the collection's own <ns>/<name> directory (not the
+// manifest file, and not ansible_collections itself) is what forces this
+// specific failure and no other: the parent namespace listing
+// (scanNamespaceDir's fs.ReadDir on ansible_collections/ns) only needs
+// read+execute on ansible_collections/ns, which stays untouched, so it
+// still succeeds and reaches this collection's own directory entry - but
+// Lstat-ing MANIFEST.json inside that directory needs search permission on
+// the directory itself, which is exactly what is now missing.
+//
+// The error is asserted to contain "statat", not just the collections path:
+// that is what tells this abort apart from
+// TestScanAbortsOnRealIOErrorReadingManifest's. That test's mode-0 target
+// is the manifest FILE itself, which passes this gate cleanly (Lstat needs
+// only search permission on the parent, not any permission on the file
+// itself) and fails later, at readManifest's own ReadFile ("openat").
+// Without asserting on "statat" specifically, both tests would only prove
+// "Start aborted with the collections path in the message", which does not
+// tell the two branches inside scanCollectionDir apart.
+//
+// Skipped when running as root, since root bypasses the permission bits
+// this test relies on to force the failure.
+func TestScanAbortsOnUnreadableCollectionDir(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; permission-based read guard cannot be tested")
+	}
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+	installDir := seedInstallTree(t, downloadPath)
+
+	if err := os.Chmod(installDir, 0o000); err != nil {
+		t.Fatalf("failed to chmod collection dir unreadable: %v", err)
+	}
+	restored := false
+	restore := func() {
+		if restored {
+			return
+		}
+		if err := os.Chmod(installDir, helpers.DirMod); err != nil {
+			t.Errorf("failed to restore collection dir perms: %v", err)
+		}
+		restored = true
+	}
+	t.Cleanup(restore)
+
+	registerCleanupProject(t, cacheDir, downloadPath)
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	err := Start(t.Context(), cfg, runtime)
+	if err == nil {
+		t.Fatalf("expected Start to abort on an unreadable collection directory, got nil")
+	}
+	if !strings.Contains(err.Error(), downloadPath) {
+		t.Fatalf("expected the error to name the collections path %s, got %v", downloadPath, err)
+	}
+	if !strings.Contains(err.Error(), "statat") {
+		t.Fatalf("expected the error to name the failing statat call, distinguishing this abort from a ReadFile (openat) one, got %v", err)
+	}
+
+	// The abort happens before removeUnused ever runs, so nothing could
+	// have been deleted; the survival check runs only after restore(), not
+	// right here, since a mode-0 collection directory blocks traversal to
+	// the manifest for this test's own os.Stat call too.
+	restore()
+	assertManifestSurvives(t, installDir)
+
+	// Positive control: the identical fixture with the collection directory
+	// readable again must complete and remove the unreferenced install,
+	// proving the abort above pins the permission failure specifically and
+	// not some other property of this fixture.
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed once the collection directory is readable again, got %v", err)
+	}
+	manifestPath := filepath.Join(installDir, "MANIFEST.json")
+	if _, statErr := os.Stat(manifestPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the unreferenced install to be removed once the read succeeds, stat error: %v", statErr)
+	}
+}
+
 // TestDryRunReportsSweepPlanError proves reportExtractedSweepPlan's error
 // branch: when SweepPlan itself fails (e.g. a real IO error reading the
 // extracted store root), a dry run still completes successfully rather
@@ -1888,14 +1990,26 @@ func TestDryRunReportsSweepPlanError(t *testing.T) {
 // scanInstalledCollections treats a missing ansible_collections root as a
 // benign no-op (nil error, no entries added) rather than an error, called
 // directly rather than only indirectly through Start.
+//
+// This is not the ordinary absent-workspace path: openProjectWorkspace
+// handles that at its own probe, before a workspace ever reaches
+// scanInstalledCollections - an absent ansible_collections entry there just
+// moves to the next candidate, and when no candidate is usable at all,
+// produces the ordinary (workspace{}, nil) skip; only a non-fs.ErrNotExist
+// outcome is refused. What this test pins instead is narrower: a race guard
+// for ansible_collections disappearing between that probe and this read
+// (e.g. a concurrent cleanup or install run removing it in between), not the
+// everyday "this project has no workspace" case.
 func TestScanInstalledCollectionsMissingRootIsNotAnError(t *testing.T) {
 	t.Parallel()
 	collectionsPath := t.TempDir() // no ansible_collections subdirectory created
+	ws := openTestWorkspace(t, collectionsPath)
+	defer func() { _ = ws.root.Close() }()
 	index := make(map[string][]installedCollection)
 	byKey := make(map[string][]installedCollection)
 	deps := make(map[string]map[string]string)
 
-	if err := scanInstalledCollections(noopPrinter{}, collectionsPath, index, byKey, deps); err != nil {
+	if err := scanInstalledCollections(noopPrinter{}, ws, index, byKey, deps); err != nil {
 		t.Fatalf("expected nil error for a missing ansible_collections root, got %v", err)
 	}
 	if len(index) != 0 || len(byKey) != 0 || len(deps) != 0 {
@@ -1909,16 +2023,871 @@ func TestScanInstalledCollectionsMissingRootIsNotAnError(t *testing.T) {
 // only indirectly through Start.
 func TestScanNamespaceDirVanishedIsNotAnError(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir() // root exists; the "does-not-exist" ns subdir under it does not
+	collectionsPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(collectionsPath, "ansible_collections"), helpers.DirMod); err != nil {
+		t.Fatalf("failed to create ansible_collections root: %v", err)
+	}
+	ws := openTestWorkspace(t, collectionsPath) // root exists; the "does-not-exist" ns subdir under it does not
+	defer func() { _ = ws.root.Close() }()
 	index := make(map[string][]installedCollection)
 	byKey := make(map[string][]installedCollection)
 	deps := make(map[string]map[string]string)
 
-	if err := scanNamespaceDir(noopPrinter{}, "/collections", root, "does-not-exist", index, byKey, deps); err != nil {
+	if err := scanNamespaceDir(noopPrinter{}, ws, "does-not-exist", index, byKey, deps); err != nil {
 		t.Fatalf("expected nil error for a vanished namespace dir, got %v", err)
 	}
 	if len(index) != 0 || len(byKey) != 0 || len(deps) != 0 {
 		t.Fatalf("expected no entries to be added, got index=%v byKey=%v deps=%v", index, byKey, deps)
+	}
+}
+
+// seedEscapingWorkspaceFixture creates a fresh collections path whose
+// ansible_collections entry is an absolute symlink escaping that path,
+// pointing at a directory holding a real outside.coll@1.0.0 MANIFEST.json.
+// It returns a store.ProjectRecord for that collections path (sharing reqPath
+// as its requirements file) plus the outside manifest's on-disk path, so a
+// caller can assert on its survival. It skips the calling test outright when
+// os.Symlink is unavailable on this platform.
+func seedEscapingWorkspaceFixture(t *testing.T, reqPath string) (store.ProjectRecord, string) {
+	t.Helper()
+	escapingCollectionsPath := t.TempDir()
+	outsideDir := t.TempDir()
+	outsideManifestDir := filepath.Join(outsideDir, "outside", "coll")
+	if err := os.MkdirAll(outsideManifestDir, helpers.DirMod); err != nil {
+		t.Fatalf("failed to create outside manifest dir: %v", err)
+	}
+	outsideManifest := `{
+		"collection_info": {
+			"namespace": "outside",
+			"name": "coll",
+			"version": "1.0.0"
+		}
+	}`
+	outsideManifestPath := filepath.Join(outsideManifestDir, "MANIFEST.json")
+	if err := os.WriteFile(outsideManifestPath, []byte(outsideManifest), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write outside manifest: %v", err)
+	}
+
+	acLink := filepath.Join(escapingCollectionsPath, "ansible_collections")
+	if err := os.Symlink(outsideDir, acLink); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+
+	return store.ProjectRecord{
+		RequirementsFile: reqPath,
+		CollectionsPath:  escapingCollectionsPath,
+		LastRun:          time.Now().UTC(),
+	}, outsideManifestPath
+}
+
+// TestStartSkipsProjectWhoseWorkspaceEscapes is the regression test for the
+// defect this package's rooted scan closes: a project registered against a
+// collections path whose ansible_collections entry is an absolute symlink
+// escaping that path must be skipped with a warning, rather than making
+// Start abort the whole run - taking every other, legitimate project's
+// cleanup down with it - once the already-rooted removeWorkspaceFiles
+// refuses to delete what the old, unrooted scan had indexed from outside the
+// tree.
+func TestStartSkipsProjectWhoseWorkspaceEscapes(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+
+	reqPath := filepath.Join(t.TempDir(), "requirements.yml")
+	if err := os.WriteFile(reqPath, []byte("collections: []\n"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write shared requirements file: %v", err)
+	}
+	escapingProject, outsideManifestPath := seedEscapingWorkspaceFixture(t, reqPath)
+
+	healthyDownloadPath := t.TempDir()
+	installDir := seedInstallTree(t, healthyDownloadPath)
+
+	writeProjectRegistry(t, cacheDir, &store.ProjectRegistry{
+		Projects: map[string]store.ProjectRecord{
+			"escaping-project": escapingProject,
+			"healthy-project": {
+				RequirementsFile: reqPath,
+				CollectionsPath:  healthyDownloadPath,
+				LastRun:          time.Now().UTC(),
+			},
+		},
+	})
+
+	printer := &recordingPrinter{}
+	runtime := infra.New(printer, http.DefaultClient)
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+
+	// Confirmed killing mutation (reverting the probe in openProjectWorkspace
+	// from root.Stat("ansible_collections") back to
+	// os.Stat(filepath.Join(candidate, "ansible_collections"))): "expected
+	// Start to finish despite the escaping workspace, got failed to scan
+	// \"/var/.../003\": openat ansible_collections: path escapes from
+	// parent". The plain os.Stat follows the escaping symlink and reports a
+	// normal directory, so openProjectWorkspace treats the candidate as
+	// usable instead of refusing it, and the subsequent rooted read
+	// (scanInstalledCollections, still bound by root.FS()) then fails with a
+	// path-escape error that aborts Start instead of being skipped.
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to finish despite the escaping workspace, got %v", err)
+	}
+	// Confirmed killing mutation (deleting scanProjectWorkspace's out.Warnf
+	// call): "expected a warning naming the skipped project, got: [no
+	// persisted snapshot was found; skipping the extracted-cache sweep and
+	// leaving the snapshot untouched this run]" - no other warning names the
+	// skipped project.
+	if !printer.hasWarningContaining(`skipping project "escaping-project"`) {
+		t.Fatalf("expected a warning naming the skipped project, got: %v", printer.warnings)
+	}
+	// Documentary, not pinned: no single-guard mutation produces "run
+	// succeeded, warned, and still deleted the outside tree", since
+	// removeWorkspaceFiles refuses that removal independently of this
+	// package's scan-side rooting.
+	// TestDryRunReportsNoCandidatesFromEscapingWorkspace carries the pinned
+	// form of this property.
+	if _, statErr := os.Stat(outsideManifestPath); statErr != nil {
+		t.Fatalf("expected the outside manifest to survive, stat error: %v", statErr)
+	}
+	// Positive control on the identical run: proves the fixture is capable
+	// of a real removal, so the nil error above means the run actually did
+	// its job rather than merely failing to crash.
+	manifestPath := filepath.Join(installDir, "MANIFEST.json")
+	if _, statErr := os.Stat(manifestPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the healthy project's installed collection to be removed, stat error: %v", statErr)
+	}
+}
+
+// TestStartScansWorkspaceBehindRelativeSymlink is the positive control for
+// TestStartSkipsProjectWhoseWorkspaceEscapes, with the unsafe element
+// replaced by a safe one: ansible_collections is a relative, in-root symlink
+// to a real sibling directory. This must be scanned and cleaned up normally,
+// which is what stops a future implementer from "hardening" the probe in
+// openProjectWorkspace into a blanket rejection of any symlinked
+// ansible_collections, safe or not.
+func TestStartScansWorkspaceBehindRelativeSymlink(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	collectionsPath := t.TempDir()
+
+	installDir := filepath.Join(collectionsPath, "real_ac", "ns", "name")
+	if err := os.MkdirAll(installDir, helpers.DirMod); err != nil {
+		t.Fatalf("failed to create real_ac install dir: %v", err)
+	}
+	manifestPath := filepath.Join(installDir, "MANIFEST.json")
+	if err := os.WriteFile(manifestPath, []byte(testManifestJSON), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write MANIFEST.json: %v", err)
+	}
+
+	acLink := filepath.Join(collectionsPath, "ansible_collections")
+	if err := os.Symlink("real_ac", acLink); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+
+	registerCleanupProject(t, cacheDir, collectionsPath)
+
+	printer := &recordingPrinter{}
+	runtime := infra.New(printer, http.DefaultClient)
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed scanning through a relative in-root symlink, got %v", err)
+	}
+	if printer.hasWarningContaining("skipping project") {
+		t.Fatalf("expected no skip warning for a relative in-root symlink, got: %v", printer.warnings)
+	}
+	if _, statErr := os.Stat(manifestPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the collection behind the relative symlink to be removed, stat error: %v", statErr)
+	}
+}
+
+// TestStartScansThroughSymlinkedCollectionsPath proves the drop-in
+// compatibility case: the registered CollectionsPath itself - not a
+// component beneath it - is a symlink to a real directory holding a normal
+// ansible_collections tree. This is a different hop than
+// TestStartScansWorkspaceBehindRelativeSymlink exercises: that test covers a
+// component below the established root, this one covers root establishment
+// itself, and each breaks under a different wrong implementation - this one
+// specifically breaks if a future implementer moves the root down to
+// ansible_collections instead of the collections path.
+func TestStartScansThroughSymlinkedCollectionsPath(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	realCollectionsDir := t.TempDir()
+	installDir := seedInstallTree(t, realCollectionsDir)
+
+	collectionsPathLink := filepath.Join(t.TempDir(), "collections-link")
+	if err := os.Symlink(realCollectionsDir, collectionsPathLink); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+
+	registerCleanupProject(t, cacheDir, collectionsPathLink)
+
+	printer := &recordingPrinter{}
+	runtime := infra.New(printer, http.DefaultClient)
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed through a symlinked collections path, got %v", err)
+	}
+	if printer.hasWarningContaining("skipping project") {
+		t.Fatalf("expected no skip warning for a symlinked collections path, got: %v", printer.warnings)
+	}
+	manifestPath := filepath.Join(installDir, "MANIFEST.json")
+	if _, statErr := os.Stat(manifestPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the collection behind the symlinked collections path to be removed, stat error: %v", statErr)
+	}
+}
+
+// TestDryRunReportsNoCandidatesFromEscapingWorkspace proves a dry run against
+// TestStartSkipsProjectWhoseWorkspaceEscapes's escaping fixture, alone,
+// reports the skip warning but never previews a removal of the collection
+// living outside the collections tree.
+func TestDryRunReportsNoCandidatesFromEscapingWorkspace(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+
+	reqPath := filepath.Join(t.TempDir(), "requirements.yml")
+	if err := os.WriteFile(reqPath, []byte("collections: []\n"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write requirements file: %v", err)
+	}
+	escapingProject, outsideManifestPath := seedEscapingWorkspaceFixture(t, reqPath)
+
+	writeProjectRegistry(t, cacheDir, &store.ProjectRegistry{
+		Projects: map[string]store.ProjectRecord{
+			"escaping-project": escapingProject,
+		},
+	})
+
+	printer := &recordingPrinter{}
+	runtime := infra.New(printer, http.DefaultClient)
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: true}
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected dry-run Start to finish despite the escaping workspace, got %v", err)
+	}
+	// Confirmed killing mutation: this test run against the pre-change
+	// implementation of this package printed "would remove
+	// outside.coll@1.0.0" and Start still exited with a nil error - a
+	// preview of a deletion the real run could never actually perform, since
+	// removeWorkspaceFiles refuses it independently.
+	if printer.hasPrintContaining("would remove outside.coll@1.0.0") {
+		t.Fatalf("expected no dry-run candidate for a collection outside the collections tree, got prints: %v", printer.prints)
+	}
+	// Confirmed killing mutation (deleting scanProjectWorkspace's out.Warnf
+	// call): "expected a warning naming the skipped project, got: [no
+	// persisted snapshot was found; skipping the extracted-cache sweep and
+	// leaving the snapshot untouched this run]" - no other warning names the
+	// skipped project.
+	if !printer.hasWarningContaining(`skipping project "escaping-project"`) {
+		t.Fatalf("expected a warning naming the skipped project, got: %v", printer.warnings)
+	}
+	if _, statErr := os.Stat(outsideManifestPath); statErr != nil {
+		t.Fatalf("expected the outside manifest to survive, stat error: %v", statErr)
+	}
+}
+
+// TestScanAbortsOnUnreadableWorkspaceRoot proves the boundary between the two
+// new classifications openProjectWorkspace/scanProjectWorkspace draw: a
+// static symlink escape is skipped with a warning (see
+// TestStartSkipsProjectWhoseWorkspaceEscapes), but a genuine IO error reading
+// an otherwise-valid ansible_collections directory still aborts the whole
+// run, wrapped with the collections path that raw root-relative error
+// otherwise carries no indication of. Skipped when running as root, since
+// root bypasses the permission bits this test relies on to force the read
+// failure - matching TestScanAbortsOnRealIOErrorReadingManifest's own guard.
+func TestScanAbortsOnUnreadableWorkspaceRoot(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; permission-based read guard cannot be tested")
+	}
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+	installDir := seedInstallTree(t, downloadPath)
+	acDir := filepath.Join(downloadPath, "ansible_collections")
+
+	if err := os.Chmod(acDir, 0o000); err != nil {
+		t.Fatalf("failed to chmod ansible_collections unreadable: %v", err)
+	}
+	restored := false
+	restore := func() {
+		if restored {
+			return
+		}
+		if err := os.Chmod(acDir, helpers.DirMod); err != nil {
+			t.Errorf("failed to restore ansible_collections perms: %v", err)
+		}
+		restored = true
+	}
+	t.Cleanup(restore)
+
+	registerCleanupProject(t, cacheDir, downloadPath)
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	err := Start(t.Context(), cfg, runtime)
+	if err == nil {
+		t.Fatalf("expected Start to abort on an unreadable ansible_collections root, got nil")
+	}
+	if !strings.Contains(err.Error(), downloadPath) {
+		t.Fatalf("expected the error to name the collections path %s, got %v", downloadPath, err)
+	}
+	// The abort happens in buildReachable, before removeUnused ever runs, so
+	// nothing could have been deleted by this aborted run. The survival
+	// check below runs only after restore(), not right here: a mode-0
+	// ansible_collections blocks traversal to the manifest for this test's
+	// own os.Stat call, exactly as it did for the scan that just aborted.
+	restore()
+	assertManifestSurvives(t, installDir)
+
+	// Positive control: the identical fixture with ansible_collections
+	// readable again must complete and remove the unreferenced install,
+	// proving the abort above pins the permission failure specifically and
+	// not some other property of this fixture.
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed once ansible_collections is readable again, got %v", err)
+	}
+	manifestPath := filepath.Join(installDir, "MANIFEST.json")
+	if _, statErr := os.Stat(manifestPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the unreferenced install to be removed once the read succeeds, stat error: %v", statErr)
+	}
+}
+
+// buildNamespaceSymlinkFixture creates a collections path with an
+// ns.name@1.0.0 MANIFEST.json reachable either through a real
+// ansible_collections/ns directory (safe=true) or through a relative,
+// in-root symlink from ansible_collections/ns to a sibling hidden_ns
+// directory that lives inside collectionsPath but outside
+// ansible_collections (safe=false) - a target os.Root would follow if the
+// scan ever asked it to. It registers the project against cacheDir with an
+// empty requirements file (nothing reachable) and returns the manifest's
+// real on-disk path.
+func buildNamespaceSymlinkFixture(t *testing.T, cacheDir string, safe bool) string {
+	t.Helper()
+	collectionsPath := t.TempDir()
+	hiddenNsDir := filepath.Join(collectionsPath, "hidden_ns")
+	hiddenInstallDir := filepath.Join(hiddenNsDir, "name")
+	if err := os.MkdirAll(hiddenInstallDir, helpers.DirMod); err != nil {
+		t.Fatalf("failed to create hidden namespace install dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hiddenInstallDir, "MANIFEST.json"), []byte(testManifestJSON), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write MANIFEST.json: %v", err)
+	}
+
+	acDir := filepath.Join(collectionsPath, "ansible_collections")
+	if err := os.MkdirAll(acDir, helpers.DirMod); err != nil {
+		t.Fatalf("failed to create ansible_collections dir: %v", err)
+	}
+	nsPath := filepath.Join(acDir, "ns")
+
+	var manifestPath string
+	if safe {
+		if err := os.Rename(hiddenNsDir, nsPath); err != nil {
+			t.Fatalf("failed to move the namespace dir into place: %v", err)
+		}
+		manifestPath = filepath.Join(nsPath, "name", "MANIFEST.json")
+	} else {
+		if err := os.Symlink("../hidden_ns", nsPath); err != nil {
+			t.Skipf("symlinks unavailable on this platform: %v", err)
+		}
+		manifestPath = filepath.Join(hiddenNsDir, "name", "MANIFEST.json")
+	}
+
+	registerCleanupProject(t, cacheDir, collectionsPath)
+	return manifestPath
+}
+
+// TestScanSkipsSymlinkedNamespaceEntry pins the one containment property in
+// this package's rooted scan that the rooting itself does not provide: a
+// symlinked namespace entry is never indexed because fs.ReadDir's
+// DirEntry.IsDir() reports false for a symlink regardless of its target, and
+// scanInstalledCollections already skips any non-directory entry - true
+// before and after this package's rooting change, not something the rooting
+// itself adds. The safe case is the positive control on the identical
+// fixture shape: a real namespace directory in the same place is indexed and
+// removed normally.
+func TestScanSkipsSymlinkedNamespaceEntry(t *testing.T) {
+	t.Parallel()
+
+	t.Run("symlinked namespace entry is not indexed", func(t *testing.T) {
+		t.Parallel()
+		cacheDir := t.TempDir()
+		manifestPath := buildNamespaceSymlinkFixture(t, cacheDir, false)
+
+		cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+		runtime := newTestRuntime()
+
+		if err := Start(t.Context(), cfg, runtime); err != nil {
+			t.Fatalf("expected Start to succeed, got %v", err)
+		}
+		if _, statErr := os.Stat(manifestPath); statErr != nil {
+			t.Fatalf("expected the manifest behind the symlinked namespace entry to survive unindexed, stat error: %v", statErr)
+		}
+	})
+
+	t.Run("real namespace directory is indexed and removed", func(t *testing.T) {
+		t.Parallel()
+		cacheDir := t.TempDir()
+		manifestPath := buildNamespaceSymlinkFixture(t, cacheDir, true)
+
+		cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+		runtime := newTestRuntime()
+
+		if err := Start(t.Context(), cfg, runtime); err != nil {
+			t.Fatalf("expected Start to succeed, got %v", err)
+		}
+		if _, statErr := os.Stat(manifestPath); !os.IsNotExist(statErr) {
+			t.Fatalf("expected the manifest behind a real namespace directory to be removed, stat error: %v", statErr)
+		}
+	})
+}
+
+// buildNameSymlinkFixture creates a collections path with an ns.name@1.0.0
+// MANIFEST.json reachable either through a real ansible_collections/ns/name
+// directory (safe=true) or through a relative, in-root symlink from
+// ansible_collections/ns/name to a sibling hidden_name directory that lives
+// inside collectionsPath but outside ansible_collections (safe=false) - a
+// target os.Root would follow on a read. Unlike buildNamespaceSymlinkFixture,
+// the symlink here sits at the leaf of the walk (the name entry itself), not
+// at an intermediate component: ansible_collections/ns is always a real
+// directory in both cases. It registers the project against cacheDir with an
+// empty requirements file (nothing reachable) and returns the manifest's
+// real on-disk path plus the ansible_collections/ns/name entry's own path (a
+// symlink in the unsafe case, a real directory in the safe case).
+func buildNameSymlinkFixture(t *testing.T, cacheDir string, safe bool) (string, string) {
+	t.Helper()
+	collectionsPath := t.TempDir()
+	hiddenNameDir := filepath.Join(collectionsPath, "hidden_name")
+	if err := os.MkdirAll(hiddenNameDir, helpers.DirMod); err != nil {
+		t.Fatalf("failed to create hidden name install dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hiddenNameDir, "MANIFEST.json"), []byte(testManifestJSON), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write MANIFEST.json: %v", err)
+	}
+
+	nsDir := filepath.Join(collectionsPath, "ansible_collections", "ns")
+	if err := os.MkdirAll(nsDir, helpers.DirMod); err != nil {
+		t.Fatalf("failed to create ansible_collections/ns dir: %v", err)
+	}
+	namePath := filepath.Join(nsDir, "name")
+
+	var manifestPath string
+	if safe {
+		if err := os.Rename(hiddenNameDir, namePath); err != nil {
+			t.Fatalf("failed to move the name dir into place: %v", err)
+		}
+		manifestPath = filepath.Join(namePath, "MANIFEST.json")
+	} else {
+		if err := os.Symlink("../../hidden_name", namePath); err != nil {
+			t.Skipf("symlinks unavailable on this platform: %v", err)
+		}
+		manifestPath = filepath.Join(hiddenNameDir, "MANIFEST.json")
+	}
+
+	registerCleanupProject(t, cacheDir, collectionsPath)
+	return manifestPath, namePath
+}
+
+// TestScanSkipsSymlinkedNameEntry is the name-level sibling of
+// TestScanSkipsSymlinkedNamespaceEntry: an ansible_collections/<ns>/<name>
+// entry that is not a real directory is not an installed collection, so it
+// is neither indexed nor reported as removed.
+//
+// This is a correctness property, not a containment one - nothing escapes
+// either way, unlike the namespace-level guard. Disabling
+// scanNamespaceDir's own "if !nameEntry.IsDir() { continue }" guard removes
+// the symlink entry itself and reports the collection removed, while the
+// directory it points at is left untouched. The reason the two levels
+// differ: at the namespace level the symlink is an intermediate component of
+// removeInstalled's rooted RemoveAll("ansible_collections/<ns>/<name>"), so
+// os.Root resolves through it and destroys content inside the target - which
+// is why TestScanSkipsSymlinkedNamespaceEntry's guard is a containment
+// guard. At the name level, exercised here, that same symlink is the leaf of
+// that same RemoveAll, and RemoveAll unlinks a symlink rather than following
+// it. The safe case is the positive control on the identical fixture shape:
+// a real name directory in the same place is indexed and removed normally.
+func TestScanSkipsSymlinkedNameEntry(t *testing.T) {
+	t.Parallel()
+
+	t.Run("symlinked name entry is not indexed", func(t *testing.T) {
+		t.Parallel()
+		cacheDir := t.TempDir()
+		manifestPath, entryPath := buildNameSymlinkFixture(t, cacheDir, false)
+
+		printer := &recordingPrinter{}
+		runtime := infra.New(printer, http.DefaultClient)
+		cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+
+		if err := Start(t.Context(), cfg, runtime); err != nil {
+			t.Fatalf("expected Start to succeed, got %v", err)
+		}
+		// Confirmed killing mutation (deleting scanNamespaceDir's
+		// "if !nameEntry.IsDir() { continue }" guard): Start prints
+		// "removed ns.name@1.0.0" and the symlink entry itself is unlinked
+		// ("lstat .../ansible_collections/ns/name: no such file or
+		// directory"), even though nothing behind it is ever touched. This
+		// is the pinned assertion: newTestRuntime's no-op printer cannot see
+		// it, which is why this subtest builds its own recordingPrinter.
+		if printer.hasPrintContaining("removed ns.name@1.0.0") {
+			t.Fatalf("expected the symlinked name entry not to be reported as removed, got prints: %v", printer.prints)
+		}
+		// Documentary, not pinned: the hasPrintContaining check above already
+		// fails first under the identical mutation, so this assertion can
+		// never be the first failing line - it observes that same mutation
+		// directly, on the entry itself rather than on the printed line
+		// describing it.
+		if _, statErr := os.Lstat(entryPath); statErr != nil {
+			t.Fatalf("expected the symlink entry itself to survive, lstat error: %v", statErr)
+		}
+		// Documentary, not pinned: the target manifest survives under the
+		// killing mutation too, since that entry is the leaf of
+		// removeInstalled's rooted RemoveAll, and RemoveAll unlinks a
+		// symlink rather than following it into the directory it points at.
+		if _, statErr := os.Stat(manifestPath); statErr != nil {
+			t.Fatalf("expected the manifest behind the symlinked name entry to survive, stat error: %v", statErr)
+		}
+	})
+
+	t.Run("real name directory is indexed and removed", func(t *testing.T) {
+		t.Parallel()
+		cacheDir := t.TempDir()
+		manifestPath, _ := buildNameSymlinkFixture(t, cacheDir, true)
+
+		cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+		runtime := newTestRuntime()
+
+		if err := Start(t.Context(), cfg, runtime); err != nil {
+			t.Fatalf("expected Start to succeed, got %v", err)
+		}
+		if _, statErr := os.Stat(manifestPath); !os.IsNotExist(statErr) {
+			t.Fatalf("expected the manifest behind a real name directory to be removed, stat error: %v", statErr)
+		}
+	})
+}
+
+// TestScanSkipsNonRegularManifest is the regression test for the "one bad
+// project kills every project" defect at the manifest leaf: a MANIFEST.json
+// entry that is not a regular file - a symlink of any shape, or a directory
+// - must be warned about and skipped rather than aborting the whole run, the
+// same way a corrupt manifest already is. Each case registers a hostile
+// project (whose ansible_collections/ns/name/MANIFEST.json is built into the
+// shape under test) alongside a healthy project holding one unreferenced,
+// otherwise-ordinary ns.name@1.0.0 install, both sharing one empty
+// requirements file, so every subtest proves the whole property - the run
+// finishes AND the healthy project's cleanup actually happens - not merely
+// that no error was returned.
+//
+// The three symlink shapes are included specifically because Lstat, not the
+// symlink's target, is what manifestIsRegularFile classifies on: an absolute
+// target outside the root, an absolute target that geometrically resolves
+// back inside the root, and a relative in-root target all report the same
+// ModeSymlink regardless of where they point, so all three converge on the
+// identical warn-and-skip outcome the directory shape gets too. The relative
+// in-root case is the one shape where manifestIsRegularFile's own predicate,
+// not os.Root's separate escape refusal, is what does the rejecting: an
+// absolute symlink target, inside or outside the root, is refused by os.Root
+// itself regardless of this gate, since os.Root never consults the absolute
+// filesystem namespace, but a relative in-root target is exactly what
+// os.Root is documented to follow instead - the same behavior
+// TestStartScansWorkspaceBehindRelativeSymlink and
+// TestScanSkipsSymlinkedNameEntry rely on for a legitimate symlink elsewhere
+// in this walk. Without this gate's own mode check, that one shape would be
+// silently followed and read as the manifest rather than rejected - the
+// deliberate cost of making the rule uniform ("a regular file, or nothing,
+// with a warning") instead of depending on whether os.Root happens to follow
+// a given symlink.
+//
+// The named-pipe case pins the one shape where the gate is load-bearing for
+// more than correctness: Lstat reports a fifo's mode instantly, but a blind
+// ReadFile on the same path blocks in the open() syscall until a writer
+// appears - a writer this test never provides. Every case, this one
+// included, runs Start under a hard wall-clock bound rather than the plain
+// call every other subtest in this package uses, specifically so that a
+// regression reintroducing an unguarded read fails this test instead of
+// hanging the whole package until the test binary's own panic timeout.
+//
+// The positive control - a sixth case with a genuinely regular MANIFEST.json
+// at the identical path - proves the gate does not indiscriminately reject
+// every leaf: it is itself indexed and removed as an ordinary unreferenced
+// collection, exactly like the healthy project's.
+func TestScanSkipsNonRegularManifest(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		// build creates the hostile project's ansible_collections/ns/name/
+		// MANIFEST.json entry under nameDir (already created as a real
+		// directory by the caller) in the shape under test, and returns the
+		// manifest entry's own on-disk path plus - for a symlink shape only
+		// - its target file's path, so the caller can assert the target
+		// survives untouched. hostileCollectionsPath is the project's
+		// registered CollectionsPath, needed by the in-root shapes to place
+		// their target under it.
+		build func(t *testing.T, hostileCollectionsPath, nameDir string) (manifestPath, targetPath string)
+		name  string
+		// wantIndexed marks the positive control: a regular MANIFEST.json is
+		// expected to be indexed and removed rather than warned about.
+		wantIndexed bool
+	}{
+		{name: "absolute symlink targeting outside the root", build: buildManifestAbsoluteSymlinkOutsideRoot},
+		{name: "absolute symlink resolving back inside the root", build: buildManifestAbsoluteSymlinkInsideRoot},
+		{name: "relative in-root symlink", build: buildManifestRelativeInRootSymlink},
+		// The directory shape is deliberately not skipped when symlinks are
+		// unavailable: it needs no symlink support at all, and is the one
+		// that must run on every platform.
+		{name: "directory named MANIFEST.json", build: buildManifestAsDirectory},
+		{name: "named pipe", build: buildManifestAsNamedPipe},
+		{name: "positive control: regular file", build: buildManifestAsRegularFile, wantIndexed: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runNonRegularManifestCase(t, tc.build, tc.wantIndexed)
+		})
+	}
+}
+
+// buildManifestAbsoluteSymlinkOutsideRoot makes ansible_collections/ns/name/
+// MANIFEST.json an absolute symlink to a real manifest file entirely outside
+// the hostile project's own collections path.
+func buildManifestAbsoluteSymlinkOutsideRoot(t *testing.T, _, nameDir string) (string, string) {
+	t.Helper()
+	outsideDir := t.TempDir()
+	target := filepath.Join(outsideDir, "MANIFEST.json")
+	if err := os.WriteFile(target, []byte(testManifestJSON), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write outside target manifest: %v", err)
+	}
+	manifestPath := filepath.Join(nameDir, "MANIFEST.json")
+	if err := os.Symlink(target, manifestPath); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+	return manifestPath, target
+}
+
+// buildManifestAbsoluteSymlinkInsideRoot makes
+// ansible_collections/ns/name/MANIFEST.json an absolute symlink whose target
+// is an absolute path string even though it geometrically resolves back
+// inside hostileCollectionsPath: os.Root never consults the absolute
+// filesystem namespace, so this is refused exactly like the outside-root
+// case - but that refusal is not what manifestIsRegularFile's gate relies
+// on, since Lstat never resolves the target at all.
+func buildManifestAbsoluteSymlinkInsideRoot(t *testing.T, hostileCollectionsPath, nameDir string) (string, string) {
+	t.Helper()
+	targetDir := filepath.Join(hostileCollectionsPath, "geometric-target")
+	if err := os.MkdirAll(targetDir, helpers.DirMod); err != nil {
+		t.Fatalf("failed to create geometric target dir: %v", err)
+	}
+	target := filepath.Join(targetDir, "MANIFEST.json")
+	if err := os.WriteFile(target, []byte(testManifestJSON), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write geometrically-inside target manifest: %v", err)
+	}
+	manifestPath := filepath.Join(nameDir, "MANIFEST.json")
+	if err := os.Symlink(target, manifestPath); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+	return manifestPath, target
+}
+
+// buildManifestRelativeInRootSymlink makes
+// ansible_collections/ns/name/MANIFEST.json a relative, in-root symlink -
+// the one shape os.Root follows on an unguarded read, and so the one shape
+// whose behavior this gate actually changes.
+func buildManifestRelativeInRootSymlink(t *testing.T, hostileCollectionsPath, nameDir string) (string, string) {
+	t.Helper()
+	targetDir := filepath.Join(hostileCollectionsPath, "relative-target")
+	if err := os.MkdirAll(targetDir, helpers.DirMod); err != nil {
+		t.Fatalf("failed to create relative target dir: %v", err)
+	}
+	target := filepath.Join(targetDir, "MANIFEST.json")
+	if err := os.WriteFile(target, []byte(testManifestJSON), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write relative target manifest: %v", err)
+	}
+	manifestPath := filepath.Join(nameDir, "MANIFEST.json")
+	rel, err := filepath.Rel(nameDir, target)
+	if err != nil {
+		t.Fatalf("failed to compute relative target: %v", err)
+	}
+	if err := os.Symlink(rel, manifestPath); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+	return manifestPath, target
+}
+
+// buildManifestAsDirectory makes ansible_collections/ns/name/MANIFEST.json a
+// directory instead of a file - the shape that needs no symlink support at
+// all.
+func buildManifestAsDirectory(t *testing.T, _, nameDir string) (string, string) {
+	t.Helper()
+	manifestPath := filepath.Join(nameDir, "MANIFEST.json")
+	if err := os.MkdirAll(manifestPath, helpers.DirMod); err != nil {
+		t.Fatalf("failed to create directory-shaped manifest: %v", err)
+	}
+	return manifestPath, ""
+}
+
+// buildManifestAsNamedPipe makes ansible_collections/ns/name/MANIFEST.json a
+// named pipe (fifo) instead of a file - the shape that makes an unguarded
+// ReadFile block in open() until a writer appears, a writer this test never
+// provides. Lstat reports a fifo's mode instantly regardless, which is why
+// manifestIsRegularFile's gate must never fall through to opening a leaf it
+// has not already classified as regular.
+func buildManifestAsNamedPipe(t *testing.T, _, nameDir string) (string, string) {
+	t.Helper()
+	manifestPath := filepath.Join(nameDir, "MANIFEST.json")
+	if err := syscall.Mkfifo(manifestPath, 0o644); err != nil {
+		t.Skipf("named pipes unavailable on this platform: %v", err)
+	}
+	return manifestPath, ""
+}
+
+// buildManifestAsRegularFile writes a genuine, valid MANIFEST.json at
+// ansible_collections/ns/name/MANIFEST.json - the positive control every
+// non-regular shape above is contrasted against.
+func buildManifestAsRegularFile(t *testing.T, _, nameDir string) (string, string) {
+	t.Helper()
+	manifestPath := filepath.Join(nameDir, "MANIFEST.json")
+	if err := os.WriteFile(manifestPath, []byte(testManifestJSON), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write regular manifest: %v", err)
+	}
+	return manifestPath, ""
+}
+
+// nonRegularManifestStartBound bounds each TestScanSkipsNonRegularManifest
+// case's call to Start via runStartBounded. Every case actually returns in
+// well under a second, so this is generous headroom, not a tight budget: its
+// only job is to turn a regression that lets an unguarded read reach the
+// named-pipe case's blocking open() into a fast, named test failure instead
+// of a whole-package hang until the test binary's own panic timeout.
+const nonRegularManifestStartBound = 10 * time.Second
+
+// runStartBounded runs Start against cfg/runtime on its own goroutine and
+// waits for it under nonRegularManifestStartBound, rather than calling it
+// inline the way every other test in this package does. That bound is
+// specifically for the named-pipe case: manifestIsRegularFile's Lstat gate
+// is the only thing standing between this call and root.ReadFile's blocking
+// open() on a fifo with no writer, so if a regression ever removes that
+// gate, this call must fail the test rather than hang it - a plain,
+// unbounded Start call would hang the whole package until the test binary's
+// own panic timeout instead. errCh is buffered so the goroutine's send never
+// blocks when Start returns normally, and a goroutine still blocked in
+// open() when the bound fires is abandoned rather than waited on; it dies
+// with the test binary at the end of the run, since nothing else waits on
+// it.
+func runStartBounded(t *testing.T, cfg *config.Config, runtime *infra.Infra) {
+	t.Helper()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Start(t.Context(), cfg, runtime)
+	}()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("expected Start to succeed, got %v", err)
+		}
+	case <-time.After(nonRegularManifestStartBound):
+		t.Fatalf(
+			"Start did not return within %s: the manifest gate did not reject this shape, so the read blocked on open",
+			nonRegularManifestStartBound,
+		)
+	}
+}
+
+// runNonRegularManifestCase builds a hostile project (its
+// ansible_collections/ns/name/MANIFEST.json shaped by build) alongside a
+// healthy project holding one unreferenced, otherwise-ordinary
+// ns.name@1.0.0 install, both sharing one empty requirements file, then
+// runs Start and asserts the shared property every TestScanSkipsNonRegularManifest
+// case needs: the run finishes, and the healthy project's cleanup actually
+// happens despite whatever the hostile project's manifest leaf looks like.
+// wantIndexed selects the positive-control assertions (the hostile
+// project's own manifest is indexed and removed, no warning) instead of the
+// non-regular-shape ones (a warning names the hostile manifest, and its
+// symlink target - where the shape has one - survives untouched).
+func runNonRegularManifestCase(
+	t *testing.T,
+	build func(t *testing.T, hostileCollectionsPath, nameDir string) (manifestPath, targetPath string),
+	wantIndexed bool,
+) {
+	t.Helper()
+	cacheDir := t.TempDir()
+
+	hostileCollectionsPath := t.TempDir()
+	nameDir := filepath.Join(hostileCollectionsPath, "ansible_collections", "ns", "name")
+	if err := os.MkdirAll(nameDir, helpers.DirMod); err != nil {
+		t.Fatalf("failed to create hostile name dir: %v", err)
+	}
+	manifestPath, targetPath := build(t, hostileCollectionsPath, nameDir)
+
+	healthyDownloadPath := t.TempDir()
+	healthyInstallDir := seedInstallTree(t, healthyDownloadPath)
+
+	reqPath := filepath.Join(t.TempDir(), "requirements.yml")
+	if err := os.WriteFile(reqPath, []byte("collections: []\n"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write shared requirements file: %v", err)
+	}
+	writeProjectRegistry(t, cacheDir, &store.ProjectRegistry{
+		Projects: map[string]store.ProjectRecord{
+			"hostile-project": {
+				RequirementsFile: reqPath,
+				CollectionsPath:  hostileCollectionsPath,
+				LastRun:          time.Now().UTC(),
+			},
+			"healthy-project": {
+				RequirementsFile: reqPath,
+				CollectionsPath:  healthyDownloadPath,
+				LastRun:          time.Now().UTC(),
+			},
+		},
+	})
+
+	printer := &recordingPrinter{}
+	runtime := infra.New(printer, http.DefaultClient)
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+
+	runStartBounded(t, cfg, runtime)
+
+	// This is what proves the run actually did its job rather than merely
+	// not crashing: the healthy project's own unreferenced collection must
+	// still be removed despite the hostile project's manifest leaf.
+	healthyManifestPath := filepath.Join(healthyInstallDir, "MANIFEST.json")
+	if _, statErr := os.Stat(healthyManifestPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the healthy project's collection to be removed, stat error: %v", statErr)
+	}
+
+	if wantIndexed {
+		assertHostileManifestIndexed(t, printer, manifestPath)
+		return
+	}
+	assertHostileManifestWarnedAndSkipped(t, printer, manifestPath, targetPath)
+}
+
+// assertHostileManifestIndexed asserts the positive-control outcome: no
+// non-regular-manifest warning was recorded, and the hostile project's own
+// regular manifest was indexed and removed like any other unreferenced
+// collection.
+func assertHostileManifestIndexed(t *testing.T, printer *recordingPrinter, manifestPath string) {
+	t.Helper()
+	if printer.hasWarningContaining("skipping non-regular manifest") {
+		t.Fatalf("expected no non-regular-manifest warning for a regular manifest, got: %v", printer.warnings)
+	}
+	if _, statErr := os.Stat(manifestPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the hostile project's own regular manifest to be indexed and removed, stat error: %v", statErr)
+	}
+}
+
+// assertHostileManifestWarnedAndSkipped asserts the non-regular-shape
+// outcome: a warning names the hostile manifest path, and - documentary,
+// not pinned, since the gate never opens the entry at all - a symlink
+// shape's target (targetPath == "" for a shape with none) survives
+// untouched. Nothing in this run could make the target disappear regardless
+// of whether the gate is even present.
+func assertHostileManifestWarnedAndSkipped(t *testing.T, printer *recordingPrinter, manifestPath, targetPath string) {
+	t.Helper()
+	if !printer.hasWarningContaining(manifestPath) {
+		t.Fatalf("expected a warning naming the hostile manifest path, got: %v", printer.warnings)
+	}
+	if targetPath == "" {
+		return
+	}
+	if _, statErr := os.Stat(targetPath); statErr != nil {
+		t.Fatalf("expected the symlink target to survive, stat error: %v", statErr)
 	}
 }
 

@@ -278,7 +278,7 @@ S3 cache options (if `--s3-bucket` is set, S3 backend is used):
 - `--s3-session-token` (`$GO_GALAXY_S3_SESSION_TOKEN`, `$AWS_SESSION_TOKEN`)
 - `--s3-path-style-disabled` (`$GO_GALAXY_S3_PATH_STYLE_DISABLED`)
 
-`cleanup` aborts with a non-zero exit and deletes nothing if a recorded project's `requirements.yml` is present but cannot be read or parsed.
+`cleanup` aborts with a non-zero exit and deletes nothing if a recorded project's `requirements.yml` is present but cannot be read or parsed. A project whose `ansible_collections` entry does not resolve to a real directory inside its collections path - most commonly because that entry itself is a symlink escaping that path - is skipped instead, with a warning naming the project: nothing under it is scanned or removed, every other project's cleanup still proceeds, and `--dry-run` never previews a removal for it either, since a real run could not perform one. Within a project that does get scanned, an individual collection whose `MANIFEST.json` is not a regular file - a symlink, a directory, or anything else in its place - is skipped with its own warning naming the path, while the rest of that project's collections are still scanned and cleaned up normally.
 
 `cleanup`'s extracted-cache sweep keeps a collection warmed within the last 30 days even if no project currently installs it, so a `warm`-only machine does not lose the extracted trees it exists to produce; a warmed entry that goes stale (no warm run for 30 days) is swept like any other unreferenced entry.
 

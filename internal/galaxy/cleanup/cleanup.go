@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -170,20 +172,20 @@ func buildReachable(runtime *infra.Infra, registry *store.ProjectRegistry) (map[
 	constraints := make(map[string]*semver.Constraints)
 
 	for projectPath, project := range registry.Projects {
-		collectionsPath := pickCollectionsPath(projectPath, project)
-		if collectionsPath == "" {
-			continue
-		}
-		if err := scanInstalledCollections(runtime.Output, collectionsPath, installedIndex, installedByKey, depsByKey); err != nil {
+		scanned, err := scanProjectWorkspace(runtime.Output, projectPath, project, installedIndex, installedByKey, depsByKey)
+		if err != nil {
 			return nil, nil, err
 		}
-		// The project's workspace is present on disk (collectionsPath != "",
-		// checked above) and scanInstalledCollections has already populated
-		// installedByKey with its installed collections as deletion
-		// candidates. A requirements file that cannot be read or parsed here
-		// must abort the whole run rather than silently contributing zero
-		// reachability roots: the latter would make every uniquely-installed
-		// collection under this project look unreachable and get deleted.
+		if !scanned {
+			continue
+		}
+		// scanned is true only when this project's workspace was opened and
+		// walked, so installedByKey already carries its installed collections
+		// as deletion candidates. A requirements file that cannot be read or
+		// parsed here must abort the whole run rather than silently
+		// contributing zero reachability roots: the latter would make every
+		// uniquely-installed collection under this project look unreachable
+		// and get deleted.
 		roots, err := loadRequirements(project.RequirementsFile, "")
 		if err != nil {
 			return nil, nil, fmt.Errorf("%w: %s: %w", helpers.ErrProjectRequirementsUnreadable, project.RequirementsFile, err)
@@ -300,42 +302,229 @@ func finalizeCleanup(
 	return nil
 }
 
-// pickCollectionsPath chooses the collections path for a project.
-func pickCollectionsPath(projectPath string, project store.ProjectRecord) string {
-	candidates := []string{}
+// errWorkspaceUnrooted names a project's ansible_collections entry whose
+// probe (openProjectWorkspace's root.Stat call) returned a non-nil error
+// other than fs.ErrNotExist, as distinct from the entry simply not existing
+// or existing as something other than a directory - both ordinary skips,
+// neither evidence of an escape. That covers more than os.Root's own
+// refusal to resolve an escaping symlink: it also covers any other stat
+// failure the probe does not distinguish from one, such as a symlink loop
+// (ELOOP) reported directly by the kernel. It never leaves buildReachable:
+// openProjectWorkspace's caller renders it into an operator warning and
+// moves on, so it carries no exit code and is deliberately not
+// helpers.ErrCollectionsPathEscape, which is reserved for install-side
+// writes and is mapped to a real exit class in cmd/go-galaxy/exitcode.
+var errWorkspaceUnrooted = errors.New("ansible_collections does not resolve inside the project collections path")
+
+// workspace is one project's opened, rooted collections workspace: root and
+// fsys are both anchored at the collections path itself, never one level
+// down at its ansible_collections subdirectory, because os.OpenRoot follows
+// a symlink when establishing the root - rooting at ansible_collections
+// would simply adopt whatever it points at, leaving nothing left to refuse.
+// This is the same boundary openCollectionsRoot and removeWorkspaceFiles
+// already draw on the install and removal sides respectively.
+//
+// path stays an OS-native absolute string: it becomes an installedCollection's
+// CollectionsDir and is what removeWorkspaceFiles later opens its own,
+// separate os.Root at. Every path handed to root or fsys, by contrast, is
+// slash-separated (built with path.Join, never filepath.Join), matching the
+// io/fs convention both APIs use regardless of GOOS.
+//
+// That handoff is a string, not a live root, and the gap between the two
+// opens is real: ws.root itself is closed per project at the end of
+// scanProjectWorkspace, well before removeUnused ever runs, while
+// removeWorkspaceFiles re-opens its own, separate os.Root from this path
+// string alone, only once buildReachable has finished scanning every
+// project. os.OpenRoot follows a symlink when establishing a root - the same
+// property that lets a symlinked collections path work at all - so a local
+// writer able to replace the collections path itself in that window
+// redirects both of removeWorkspaceFiles's RemoveAll calls into a tree of
+// the writer's own choosing; the deletion stays contained relative to
+// whatever that second os.OpenRoot resolves to, but the scan no longer
+// controls which tree that turns out to be. This is the same class of
+// live-writer residual already accepted for a symlink planted deeper in the
+// tree (see removeInstalled's own doc comment below): the attacker already
+// needs write access to the collections path to win this race, and gains
+// nothing from it that writing there directly would not. Threading ws.root
+// through to the removal side instead of re-opening it would trade this
+// residual for a wider file-descriptor lifetime and a scan/removal ownership
+// split this package does not otherwise have.
+type workspace struct {
+	root *os.Root
+	fsys fs.FS
+	path string
+}
+
+// maxCollectionsPathCandidates is the number of collections-path candidates
+// collectionsPathCandidates can ever produce for one project: the recorded
+// CollectionsPath, plus a project-relative ".collections" and "collections"
+// fallback.
+const maxCollectionsPathCandidates = 3
+
+// collectionsPathCandidates builds the ordered list of collections-path
+// candidates for a project: its recorded CollectionsPath first (when set),
+// then the project-relative ".collections" and "collections" fallbacks
+// (when projectPath is known) - independently of each other, so a project
+// can contribute anywhere from zero to three candidates. Which candidate, if
+// any, is actually usable is openProjectWorkspace's decision, not this
+// function's.
+func collectionsPathCandidates(projectPath string, project store.ProjectRecord) []string {
+	candidates := make([]string, 0, maxCollectionsPathCandidates)
 	if project.CollectionsPath != "" {
 		candidates = append(candidates, project.CollectionsPath)
 	}
 	if projectPath != "" {
 		candidates = append(candidates, filepath.Join(projectPath, ".collections"), filepath.Join(projectPath, "collections"))
 	}
-	for _, candidate := range candidates {
-		if candidate == "" {
+	return candidates
+}
+
+// openProjectWorkspace opens the first usable collections-path candidate for
+// a project, rooted at that candidate via os.Root, and returns exactly one of
+// three outcomes distinguished without inspecting any error string:
+//
+//   - (workspace{}, nil): no candidate has an ansible_collections directory -
+//     the project has no workspace this run, the ordinary skip case.
+//   - (workspace{}, err): a candidate has an ansible_collections entry whose
+//     resolution os.Root refuses (errWorkspaceUnrooted) - a symlink escaping
+//     that candidate's root, most commonly. The caller must warn and skip the
+//     whole project rather than fall through to a later candidate: falling
+//     through to, say, a valid sibling ".collections" would silently retarget
+//     cleanup at a directory the operator never configured for this project.
+//   - (ws, nil): a usable workspace. The caller owns ws.root and must close
+//     it once done scanning.
+//
+// A non-nil statErr other than fs.ErrNotExist - including a symlink loop -
+// lands in the escape outcome: os.Root's own refusal is an unexported error
+// value matched by no exported sentinel, which is exactly why the split is
+// made on the probe's outcome (a non-nil, non-ENOENT statErr, or not) rather
+// than by inspecting the error's shape. A successful Stat on an
+// ansible_collections entry that turns out not to be a directory is the
+// ordinary skip instead, exactly like fs.ErrNotExist: neither is evidence of
+// an escape, so this function falls through and tries the next candidate for
+// both. This also means the escape is only caught statically, at this
+// probe: a local writer that swaps ansible_collections for an escaping
+// symlink between this probe and the later directory read
+// (scanInstalledCollections) makes that later read fail instead, and that
+// failure still aborts the whole run (wrapped by
+// scanProjectWorkspace as "failed to scan <path>") rather than being
+// downgraded to a skip - separating os.Root's static refusal from a genuine
+// IO failure at the read site would require matching that same unexported
+// error value, and treating every non-ENOENT read failure as a skip would
+// silently swallow real IO errors instead. Aborting on evidence of an active
+// local writer is the conservative outcome; the ansible_collections
+// misconfiguration this function exists to catch is closed deterministically
+// right here. The manifest leaf, further down the same walk, has its own
+// static checkpoint for the identical reason (scanCollectionDir's
+// manifestIsRegularFile gate) - what still aborts past either checkpoint is
+// always a genuine IO failure or a live-writer swap, never a static shape
+// either gate was built to catch.
+func openProjectWorkspace(projectPath string, project store.ProjectRecord) (workspace, error) {
+	for _, candidate := range collectionsPathCandidates(projectPath, project) {
+		root, err := os.OpenRoot(candidate)
+		if err != nil {
 			continue
 		}
-		if dirExists(filepath.Join(candidate, "ansible_collections")) {
-			return candidate
+		info, statErr := root.Stat("ansible_collections")
+		switch {
+		case statErr == nil && info.IsDir():
+			return workspace{root: root, fsys: root.FS(), path: candidate}, nil
+		case statErr != nil && !errors.Is(statErr, fs.ErrNotExist):
+			_ = root.Close()
+			return workspace{}, fmt.Errorf("%w: %q: %w", errWorkspaceUnrooted, filepath.Join(candidate, "ansible_collections"), statErr)
 		}
+		_ = root.Close()
 	}
-	return ""
+	return workspace{}, nil
 }
 
-// dirExists reports whether path exists and is a directory.
-func dirExists(path string) bool {
-	info, err := os.Stat(path)
+// scanProjectWorkspace opens projectPath's collections workspace and, if
+// usable, scans it into index/byKey/deps, returning scanned=true. It is the
+// per-project step buildReachable's registry loop drives.
+//
+//   - No candidate has an ansible_collections directory: (false, nil), the
+//     ordinary skip - identical to today's absent-workspace behavior.
+//   - A candidate's ansible_collections entry escapes its root: a single
+//     operator warning naming the project is emitted and (false, nil) is
+//     returned, so nothing under this project is scanned or removed this run
+//     but every other project's cleanup proceeds unaffected.
+//   - A usable workspace fails to scan (a genuine IO error, not an escape):
+//     the error is wrapped with the collections path and returned, aborting
+//     the whole run. Every path inside the scan is root-relative once ws is
+//     in play, so the raw error carries no indication of which project it
+//     came from without this wrap.
+//
+// ws.root is closed before returning in every case, releasing its file
+// descriptor before the next project's workspace is opened rather than
+// holding one open per project for the whole run.
+//
+// projectPath always derives from filepath.Dir of a requirements file path
+// (store.RecordProject) that can itself sit inside a directory whose name a
+// hostile checkout chose - a project subdirectory name is ordinary git tree
+// content, not a value this tool ever validates. The collections path
+// carries the same exposure whenever it too derives from projectPath - true
+// of both scan fallback candidates and of the default, relative
+// download-path, though not of an operator-configured absolute one - so
+// either string reaching this function's Warnf or error wrap can carry
+// attacker-chosen bytes, including terminal control sequences. The %q used
+// to render both here and in openProjectWorkspace's own wrapped error
+// narrows, rather than closes, that exposure: it renders control bytes as
+// escaped Go syntax instead of raw terminal control sequences for these two
+// values specifically, but the wrapped *fs.PathError underneath still
+// carries ansible_collections/<ns>/<name>/MANIFEST.json verbatim, unquoted,
+// and those namespace/name components are exactly as attacker-influenced.
+// Real closure of this surface is a sanitizing printer in internal/progress,
+// which this function does not attempt.
+func scanProjectWorkspace(
+	out output.Printer,
+	projectPath string,
+	project store.ProjectRecord,
+	index map[string][]installedCollection,
+	byKey map[string][]installedCollection,
+	deps map[string]map[string]string,
+) (bool, error) {
+	ws, err := openProjectWorkspace(projectPath, project)
 	if err != nil {
-		return false
+		out.Warnf("skipping project %q: %v; nothing under it was scanned or removed", projectPath, err)
+		return false, nil
 	}
-	return info.IsDir()
+	if ws.root == nil {
+		return false, nil
+	}
+	defer func() { _ = ws.root.Close() }()
+
+	if err := scanInstalledCollections(out, ws, index, byKey, deps); err != nil {
+		return false, fmt.Errorf("failed to scan %q: %w", ws.path, err)
+	}
+	return true, nil
 }
 
-// scanInstalledCollections indexes installed collections under collectionsPath.
-// Installed collections only ever live at the fixed
-// <collectionsPath>/ansible_collections/<ns>/<name>/MANIFEST.json depth, so
-// this walks exactly those two directory levels rather than the whole tree:
-// a MANIFEST.json nested deeper (e.g. inside a collection's own test
-// fixtures) is never mistaken for an installed collection, and the scan does
-// not pay for descending into every file of every installed collection.
+// scanInstalledCollections indexes installed collections under ws. Installed
+// collections only ever live at the fixed
+// <ws.path>/ansible_collections/<ns>/<name>/MANIFEST.json depth, so this
+// walks exactly those two directory levels rather than the whole tree: a
+// MANIFEST.json nested deeper (e.g. inside a collection's own test fixtures)
+// is never mistaken for an installed collection, and the scan does not pay
+// for descending into every file of every installed collection. Directory
+// reads (ansible_collections itself, and each namespace/name listing) go
+// through ws.fsys; the manifest file itself is read through ws.root directly
+// (scanCollectionDir's call to readManifest). Both are bound by the same
+// os.Root openProjectWorkspace established, so a symlink swap planted after
+// that root was opened cannot make the scan follow it out of ws.path. Every
+// component on this walk is closed by a checkpoint before it is ever opened,
+// though the checkpoint's shape differs by how the scan reaches that
+// component. ansible_collections is closed by openProjectWorkspace's own
+// static probe, which already found it clean before this function ever ran.
+// A namespace or a name component is closed by the parent fs.ReadDir call
+// that listed it as a real directory: a component that is already a symlink
+// at listing time is skipped by !IsDir() and never reaches a rooted read in
+// the first place, so openProjectWorkspace never needs to inspect those
+// components itself. The manifest leaf is the one component nothing lists on
+// the way in - scanCollectionDir reaches it directly by name, not through a
+// parent directory listing - so it carries its own static checkpoint
+// instead: manifestIsRegularFile's Lstat gate. See scanProjectWorkspace's
+// doc comment for what happens when a rooted read fails for a reason other
+// than a symlink swap.
 //
 // Manifests whose namespace/name/version cannot be safely used as filesystem
 // path elements are rejected at ingestion (see buildInstalledRecord): a
@@ -343,15 +532,14 @@ func dirExists(path string) bool {
 // whole run or indexing the tainted record.
 func scanInstalledCollections(
 	out output.Printer,
-	collectionsPath string,
+	ws workspace,
 	index map[string][]installedCollection,
 	byKey map[string][]installedCollection,
 	deps map[string]map[string]string,
 ) error {
-	root := filepath.Join(collectionsPath, "ansible_collections")
-	nsEntries, err := os.ReadDir(root)
+	nsEntries, err := fs.ReadDir(ws.fsys, "ansible_collections")
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 		return err
@@ -360,25 +548,26 @@ func scanInstalledCollections(
 		if !nsEntry.IsDir() {
 			continue
 		}
-		if err := scanNamespaceDir(out, collectionsPath, root, nsEntry.Name(), index, byKey, deps); err != nil {
+		if err := scanNamespaceDir(out, ws, nsEntry.Name(), index, byKey, deps); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// scanNamespaceDir scans every <root>/<ns>/<name> directory for a
-// MANIFEST.json, one namespace at a time.
+// scanNamespaceDir scans every ansible_collections/<ns>/<name> directory for
+// a MANIFEST.json, one namespace at a time.
 func scanNamespaceDir(
 	out output.Printer,
-	collectionsPath, root, ns string,
+	ws workspace,
+	ns string,
 	index map[string][]installedCollection,
 	byKey map[string][]installedCollection,
 	deps map[string]map[string]string,
 ) error {
-	nameEntries, err := os.ReadDir(filepath.Join(root, ns))
+	nameEntries, err := fs.ReadDir(ws.fsys, path.Join("ansible_collections", ns))
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			// The namespace directory vanished between the parent ReadDir
 			// and this one (e.g. a concurrent cleanup or install run) -
 			// skip it rather than aborting the whole scan.
@@ -390,28 +579,87 @@ func scanNamespaceDir(
 		if !nameEntry.IsDir() {
 			continue
 		}
-		if err := scanCollectionDir(out, collectionsPath, root, ns, nameEntry.Name(), index, byKey, deps); err != nil {
+		if err := scanCollectionDir(out, ws, ns, nameEntry.Name(), index, byKey, deps); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// scanCollectionDir probes <root>/<ns>/<name>/MANIFEST.json and, if present
-// and parseable, indexes the installed collection it describes.
+// manifestIsRegularFile reports whether ansible_collections/<ns>/<name>/
+// MANIFEST.json at rel is a regular file - the only shape scanCollectionDir
+// ever treats as an installed collection's manifest. Its error return is the
+// raw Lstat error, unwrapped: the caller distinguishes fs.ErrNotExist (no
+// MANIFEST.json here, the existing silent skip) from every other Lstat
+// failure (a genuine IO error, which aborts) the same way it already
+// distinguishes those two outcomes for readManifest's own error below.
+//
+// IsRegular is deliberately a predicate, not a symlink blocklist: it rejects
+// a symlink, a directory named MANIFEST.json, a fifo, a socket, and a device
+// in the same check, instead of enumerating shapes one at a time and risking
+// a future addition being missed. The fifo case is not academic -
+// root.ReadFile opens with O_RDONLY, which blocks on a fifo until a writer
+// appears, so a symlink-only blocklist would trade an abort for a hang. Lstat
+// (not Stat) is what makes a symlink itself the thing being classified rather
+// than whatever it points at.
+func manifestIsRegularFile(root *os.Root, rel string) (bool, error) {
+	info, err := root.Lstat(rel)
+	if err != nil {
+		return false, err
+	}
+	return info.Mode().IsRegular(), nil
+}
+
+// scanCollectionDir probes ansible_collections/<ns>/<name>/MANIFEST.json and,
+// if present, regular, and parseable, indexes the installed collection it
+// describes.
 func scanCollectionDir(
 	out output.Printer,
-	collectionsPath, root, ns, name string,
+	ws workspace,
+	ns, name string,
 	index map[string][]installedCollection,
 	byKey map[string][]installedCollection,
 	deps map[string]map[string]string,
 ) error {
-	manifestPath := filepath.Join(root, ns, name, "MANIFEST.json")
-	manifest, err := readManifest(manifestPath)
+	rel := path.Join("ansible_collections", ns, name, "MANIFEST.json")
+	manifestPath := filepath.Join(ws.path, filepath.FromSlash(rel))
+
+	regular, err := manifestIsRegularFile(ws.root, rel)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			// A <ns>/<name> directory without a MANIFEST.json is not an
 			// installed collection - skip it silently rather than aborting.
+			return nil
+		}
+		return err
+	}
+	if !regular {
+		// A MANIFEST.json entry that is not a regular file - a symlink, a
+		// directory, a fifo, or anything else - identifies no collection at
+		// all: it is neither a reachability source nor a deletion candidate,
+		// so it is reported (visible warning) but never opened, and the scan
+		// continues rather than aborting.
+		out.Warnf("skipping non-regular manifest at %q", manifestPath)
+		return nil
+	}
+
+	manifest, err := readManifest(ws.root, rel, manifestPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			// The entry vanished between the Lstat gate above and this read
+			// (e.g. a concurrent cleanup or install run) - skip it silently
+			// rather than aborting, the same benign race scanNamespaceDir's
+			// own vanished-namespace comment describes.
+			//
+			// Documented uncovered: reaching this arm requires winning a
+			// race between manifestIsRegularFile's Lstat above and this
+			// ReadFile - the entry must exist as a regular file at the
+			// first syscall and be gone by the second - and this test suite
+			// has no seam to force that timing. If this arm were removed, a
+			// manifest that vanishes mid-scan would abort the whole run
+			// instead of being skipped, which is exactly the "one bad
+			// project kills every project" class the rest of this scan is
+			// written to avoid.
 			return nil
 		}
 		if errors.Is(err, helpers.ErrCorruptManifest) {
@@ -424,7 +672,7 @@ func scanCollectionDir(
 		}
 		return err
 	}
-	record, key, ok, err := buildInstalledRecord(collectionsPath, manifestPath, manifest)
+	record, key, ok, err := buildInstalledRecord(ws.path, manifestPath, manifest)
 	if err != nil {
 		out.Warnf("skipping install with unsafe identifier at %s: %v", manifestPath, err)
 		return nil
@@ -438,20 +686,23 @@ func scanCollectionDir(
 	return nil
 }
 
-// readManifest reads and parses a MANIFEST.json. A read failure (including
-// os.IsNotExist for a missing file, which the caller checks for) is returned
-// as-is. A file that exists but fails to parse as JSON is reported as
+// readManifest reads and parses a MANIFEST.json at rel (slash-separated,
+// relative to root) through root. A read failure (including fs.ErrNotExist
+// for a missing file, which the caller checks for) is returned as-is.
+// display is the same location rendered as a plain, OS-native absolute
+// string, used only in the helpers.ErrCorruptManifest message: rel alone
+// would not tell an operator which project's manifest failed to parse. A
+// file that exists but fails to parse as JSON is reported as
 // helpers.ErrCorruptManifest wrapping the underlying decode error, rather
 // than silently discarding it: the caller decides how to surface that.
-func readManifest(path string) (types.GalaxyCollectionVersionInfoManifest, error) {
-	//nolint:gosec // path is built from a fixed <ansible_collections>/<ns>/<name>/MANIFEST.json probe.
-	data, err := os.ReadFile(path)
+func readManifest(root *os.Root, rel, display string) (types.GalaxyCollectionVersionInfoManifest, error) {
+	data, err := root.ReadFile(rel)
 	if err != nil {
 		return types.GalaxyCollectionVersionInfoManifest{}, err
 	}
 	var manifest types.GalaxyCollectionVersionInfoManifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		return types.GalaxyCollectionVersionInfoManifest{}, fmt.Errorf("%w at %s: %w", helpers.ErrCorruptManifest, path, err)
+		return types.GalaxyCollectionVersionInfoManifest{}, fmt.Errorf("%w at %s: %w", helpers.ErrCorruptManifest, display, err)
 	}
 	return manifest, nil
 }
@@ -780,7 +1031,7 @@ func reportLegacyArtifactSweepCandidate(ctx context.Context, runtime *infra.Infr
 // would see an empty keep set for every absent workspace, which is the
 // normal ephemeral-CI state, and would wipe the entire extracted cache. A
 // warmed entry is the only evidence a warm-only machine - no project
-// workspace exists at all, so pickCollectionsPath skips the project entirely
+// workspace exists at all, so scanProjectWorkspace skips the project entirely
 // and it never contributes to installedByKey/reachable either - still wants
 // its extracted trees; it expires purely by age (helpers.WarmedEntryMaxAge).
 //
