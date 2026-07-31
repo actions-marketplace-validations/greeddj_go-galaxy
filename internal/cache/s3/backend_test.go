@@ -545,9 +545,12 @@ func TestReadAllCappedAcceptsNormal(t *testing.T) {
 // and the same readObject call: a within-cap object at a neighboring key
 // round-trips its exact bytes with a nil error, proving the oversized case
 // above is a real refusal readObject's success path could otherwise have
-// taken, not evidence the fixture never reaches that path at all.
+// taken, not evidence the fixture never reaches that path at all. That half
+// stays a real stored object and a real upload; only the oversized half is
+// generated.
 func TestReadObjectReclassifiesOversizedStateObject(t *testing.T) {
-	b := newTestBackend(t)
+	t.Parallel()
+	b, fake := newTestBackendAndFake(t)
 	ctx := t.Context()
 	if err := b.Open(ctx); err != nil {
 		t.Fatalf("Open: %v", err)
@@ -555,12 +558,14 @@ func TestReadObjectReclassifiesOversizedStateObject(t *testing.T) {
 
 	// One byte past the compressed-size ceiling, on the non-gzip path, so the
 	// fixture needs no gzip compression/decompression work to trip the cap.
+	// The body is generated as it is served rather than stored: the ceiling is
+	// 256 MiB, so materializing it would cost that twice - once in this test
+	// and once in the fake - plus an upload of the same size that proves
+	// nothing. Nothing about the ceiling itself changes, so this still
+	// exercises readObject at the production constants rather than at a
+	// custom cap.
 	oversizedKey := b.key(statePrefix, "oversized-state-object.json")
-	oversized := make([]byte, helpers.StateObjectMaxCompressedSize+1)
-	if err := b.client.putObject(ctx, oversizedKey, bytes.NewReader(oversized), int64(len(oversized)),
-		"application/json", "", nil, false, ""); err != nil {
-		t.Fatalf("putObject(oversized): %v", err)
-	}
+	fake.serveSyntheticBody(oversizedKey, helpers.StateObjectMaxCompressedSize+1)
 
 	_, err := b.readObject(ctx, oversizedKey)
 	if !errors.Is(err, helpers.ErrStateObjectTooLarge) {
