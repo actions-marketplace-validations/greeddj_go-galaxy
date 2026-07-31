@@ -16,7 +16,7 @@ package collections_test
 //     downloadCollectionToCache to pass ctx straight through (dropping the
 //     context.WithTimeout and both artifactDeadlineError calls), hangs
 //     rather than fails - that hang is the defect itself, and is the
-//     strongest evidence in this change:
+//     strongest evidence that the deadline is what prevents it:
 //     "panic: test timed out after 30s
 //     running tests:
 //     TestArtifactByteDripFailsAtTheDownloadDeadline (30s)"

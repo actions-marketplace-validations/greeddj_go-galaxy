@@ -28,9 +28,9 @@ func runParseAnsibleConfigCases(t *testing.T, cases []parseAnsibleConfigCase) {
 			if err != nil {
 				t.Fatalf("parseAnsibleConfig() error = %v, want nil", err)
 			}
-			// ansibleConfig now carries GalaxyServers, a map field, so it is
-			// no longer comparable with !=; reflect.DeepEqual is the
-			// equivalent structural check.
+			// ansibleConfig carries GalaxyServers, a map field, so it is not
+			// comparable with !=; reflect.DeepEqual is the equivalent
+			// structural check.
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("parseAnsibleConfig() = %+v, want %+v", got, tt.want)
 			}

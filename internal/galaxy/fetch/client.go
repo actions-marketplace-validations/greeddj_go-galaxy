@@ -71,11 +71,11 @@ func newClient(timeout time.Duration, offline bool, servers []ServerAuth) *http.
 	}
 
 	auth := authTransport{base: dispatch, tokens: tokensByOrigin(servers)}
-	// The client itself carries no Timeout: bounding the entire request
-	// (headers plus however large the artifact body is) is exactly what
-	// this change replaces. watchdogTransport instead guards every body read
-	// individually, so a stalled connection is still caught without capping
-	// total transfer time.
+	// The client itself carries no Timeout, which would bound the entire
+	// request (headers plus however large the artifact body is) as a single
+	// cap. watchdogTransport instead guards every body read individually, so
+	// a stalled connection is still caught without capping total transfer
+	// time.
 	return &http.Client{Transport: watchdogTransport{base: auth, idle: timeout}}
 }
 

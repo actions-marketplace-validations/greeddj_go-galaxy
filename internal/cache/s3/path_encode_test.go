@@ -11,18 +11,18 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 )
 
-// TestRequestURLSignedPathMatchesSentPath is the load-bearing SigV4 proof for
-// this fix: for every key below, the canonical URI signed into the
-// Authorization header must be byte-identical to the path the stdlib
-// actually places on the wire. Before this fix, encodePath (net/url's
-// PathEscape-based encoder) and the raw objectPath fed straight into
-// http.NewRequestWithContext diverged for a key containing a space, a
-// literal '%', or a reserved character - net/url.Parse decodes and
-// re-escapes %XX sequences differently than encodePath's own escaping,
-// producing a mismatched signature (SignatureDoesNotMatch, surfaced as a
-// 403) even though the request was otherwise well-formed. Both PathStyle
-// modes are exercised because requestURL builds the sent URL differently in
-// each branch.
+// TestRequestURLSignedPathMatchesSentPath is the load-bearing SigV4 proof
+// that, for every key below, the canonical URI signed into the Authorization
+// header is byte-identical to the path the stdlib actually places on the
+// wire. encodePath (net/url's PathEscape-based encoder) and the raw
+// objectPath fed straight into http.NewRequestWithContext must agree for a
+// key containing a space, a literal '%', or a reserved character: routing
+// objectPath through net/url.Parse instead would decode and re-escape %XX
+// sequences differently than encodePath's own escaping, producing a
+// mismatched signature (SignatureDoesNotMatch, surfaced as a 403) even
+// though the request was otherwise well-formed. Both PathStyle modes are
+// exercised because requestURL builds the sent URL differently in each
+// branch.
 func TestRequestURLSignedPathMatchesSentPath(t *testing.T) {
 	t.Parallel()
 
@@ -192,8 +192,8 @@ func TestRequestURLUsesCachedEndpoint(t *testing.T) {
 // literal, every other byte becomes an uppercase-hex %XX escape (including a
 // literal '%' itself), and "/" is preserved or escaped depending on
 // encodeSlash. This is stricter than url.PathEscape, which leaves several
-// sub-delimiters (+$&,;=:@) literal - exactly the divergence that caused the
-// signing bug this change fixes.
+// sub-delimiters (+$&,;=:@) literal - exactly the divergence that would break
+// SigV4 signing if awsURIEncode's escaping matched url.PathEscape instead.
 func TestAwsURIEncodeMatchesS3(t *testing.T) {
 	t.Parallel()
 

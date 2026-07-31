@@ -206,9 +206,10 @@ func TestInstallDryRunProbeMarksUpToDate(t *testing.T) {
 // mirrors isCacheHit's own --no-cache guard rather than a bare artifact-store
 // probe: a warm cache under --no-cache must still be reported as
 // "would download", since that is what a real install would actually do
-// (isCacheHit itself returns false whenever cfg.NoCache is set). Before this
-// guard existed, this exact configuration made classifyDryRun claim the
-// artifact was cached while the real run would still hit the network.
+// (isCacheHit itself returns false whenever cfg.NoCache is set). Without
+// that mirroring, this exact configuration would make classifyDryRun claim
+// the artifact was cached even though the real run would still hit the
+// network.
 func TestClassifyDryRunMirrorsIsCacheHitUnderNoCache(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -405,16 +406,16 @@ func assertFailsOfflineClosed(t *testing.T, err error) {
 	}
 }
 
-// TestInstallDryRunDriftedOfflineEvictedReportsWouldFailAndFails closes the
-// specific preview/run disagreement this test was written to catch: a
-// collection that looks installed by the cheap check but whose tree has
-// drifted, whose cached artifact has been evicted (as cleanup would evict
-// it), and that cannot be re-downloaded because --offline is set. A real
-// install would re-extract (drift detected) and then fail to fetch a
-// replacement artifact; the dry run must report the same "would fail"
-// verdict and return the same error class, not the optimistic "up to date"
-// this exact scenario used to produce before checkExtractMarker replaced the
-// installRecordMatches-only gate in installDryRunProbe.
+// TestInstallDryRunDriftedOfflineEvictedReportsWouldFailAndFails pins the
+// preview/run agreement for a collection that looks installed by the cheap
+// check but whose tree has drifted, whose cached artifact has been evicted
+// (as cleanup would evict it), and that cannot be re-downloaded because
+// --offline is set. A real install would re-extract (drift detected) and
+// then fail to fetch a replacement artifact; the dry run must report the
+// same "would fail" verdict and return the same error class, not an
+// optimistic "up to date" - which is exactly what installDryRunProbe's
+// installRecordMatches-only gate alone would report, since checkExtractMarker
+// is what additionally catches the drift.
 func TestInstallDryRunDriftedOfflineEvictedReportsWouldFailAndFails(t *testing.T) {
 	t.Parallel()
 	cfg, state, cols := newDriftedOfflineEvictedFixture(t)

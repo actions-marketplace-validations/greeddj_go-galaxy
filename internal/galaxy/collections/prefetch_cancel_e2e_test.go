@@ -84,14 +84,14 @@ func newPrefetchCancelFixture(t *testing.T) (*config.Config, *infra.Infra, *fake
 // can ever unblock that worker, since nothing else in this test ever cancels
 // or times out the request.
 //
-// On the pre-fix code (a bare `go func()` with no cancel and no join),
-// Start would return once level 0's failure is reported, while acme.app's
-// prefetch worker is still blocked mid-request: the gauge would read 1, not
-// 0, and (worse) t.Cleanup's srv.Close would then block forever waiting for
-// that still in-flight request to finish, since nothing ever cancels it.
-// This test discriminates exactly that: it can only pass if runInstall's
-// defer chain cancels the prefetcher's context and joins every worker before
-// returning.
+// A naive implementation (a bare `go func()` with no cancel and no join)
+// would let Start return once level 0's failure is reported, while
+// acme.app's prefetch worker is still blocked mid-request: the gauge would
+// read 1, not 0, and (worse) t.Cleanup's srv.Close would then block forever
+// waiting for that still in-flight request to finish, since nothing would
+// ever cancel it. This test discriminates exactly that: it can only pass if
+// runInstall's defer chain cancels the prefetcher's context and joins every
+// worker before returning.
 func TestPrefetchWorkersJoinedOnLevelFailure(t *testing.T) {
 	t.Parallel()
 	cfg, runtime, s, countingRT := newPrefetchCancelFixture(t)
@@ -120,12 +120,13 @@ func TestPrefetchWorkersJoinedOnLevelFailure(t *testing.T) {
 
 // TestPrefetchWorkersJoinedOnSuccess asserts the same zero-in-flight-requests
 // invariant on a normal, fault-free two-collection install. Unlike
-// TestPrefetchWorkersJoinedOnLevelFailure, this passes even on the pre-fix
-// bare-goroutine code: with nothing hung or canceled, every prefetch
-// worker's own request completes and decrements the gauge well before
-// installLevels (let alone Start) returns. It is included only as a sanity
-// check on the happy path; the level-failure test above is the real guard
-// against a leaked or unjoined prefetch worker.
+// TestPrefetchWorkersJoinedOnLevelFailure, this test would also pass against
+// a naive bare-goroutine implementation with no cancel and no join: with
+// nothing hung or canceled, every prefetch worker's own request completes
+// and decrements the gauge well before installLevels (let alone Start)
+// returns. It is included only as a sanity check on the happy path; the
+// level-failure test above is the real guard against a leaked or unjoined
+// prefetch worker.
 func TestPrefetchWorkersJoinedOnSuccess(t *testing.T) {
 	t.Parallel()
 	cfg, runtime, _, countingRT := newPrefetchCancelFixture(t)

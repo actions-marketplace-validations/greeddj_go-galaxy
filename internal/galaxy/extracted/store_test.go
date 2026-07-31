@@ -493,11 +493,10 @@ func casEntryInfo(root, path string, d fs.DirEntry) (string, fs.FileInfo, error)
 	return rel, info, nil
 }
 
-// assertCASEntryMode applies the three-way permission contract from the
-// table in this commit's own documentation: the .ready marker is
-// helpers.FileMod, a directory is helpers.DirMod, and anything else (a
-// regular file, the only other kind a collection tarball produces) must
-// carry no write bit.
+// assertCASEntryMode applies the three-way permission contract enforced
+// below: the .ready marker is helpers.FileMod, a directory is
+// helpers.DirMod, and anything else (a regular file, the only other kind a
+// collection tarball produces) must carry no write bit.
 func assertCASEntryMode(t *testing.T, rel string, info fs.FileInfo, isDir bool) {
 	t.Helper()
 	switch {

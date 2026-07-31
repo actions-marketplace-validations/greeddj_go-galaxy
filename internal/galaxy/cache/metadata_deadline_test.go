@@ -13,9 +13,9 @@ package cache
 //     pass ctx straight through to helpers.Retry/fetchJSONBodyOnce (dropping
 //     the context.WithTimeout and both deadlineError calls), hangs rather
 //     than fails - that hang is the defect itself, and is the strongest
-//     evidence in this change. Run with a bounded -timeout so the harness
-//     kills it rather than blocking the suite forever, the observed output
-//     is:
+//     evidence that the deadline is what prevents it. Run with a bounded
+//     -timeout so the harness kills it rather than blocking the suite
+//     forever, the observed output is:
 //     "panic: test timed out after 5s
 //     running tests:
 //     TestMetadataByteDripFailsAtTheFetchDeadline (5s)"

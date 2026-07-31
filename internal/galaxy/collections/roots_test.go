@@ -10,9 +10,9 @@ import (
 
 // TestVerifyRootsResolved covers verifyRootsResolved's role as the sole
 // production post-condition asserting the solver returned a version for
-// every requested root: helpers.ErrMissingResolvedRoot had zero direct test
-// coverage before this, despite being a real fail-closed guard against a
-// solver that silently drops a root on the fresh-solve path.
+// every requested root: it exercises helpers.ErrMissingResolvedRoot, a real
+// fail-closed guard against a solver that silently drops a root on the
+// fresh-solve path.
 func TestVerifyRootsResolved(t *testing.T) {
 	t.Parallel()
 

@@ -263,9 +263,9 @@ func TestFetchJSONWithCachePolicyCorruptBodyRefetchesUnconditional(t *testing.T)
 	}
 }
 
-// TestFetchJSONWithCachePolicyCorruptExpiredBodyDoesNotRide304 covers the
-// trap this change closes: an expired AND corrupt cache entry must not be
-// revalidated conditionally, since a server that still has the same
+// TestFetchJSONWithCachePolicyCorruptExpiredBodyDoesNotRide304 covers an
+// entry that is both expired AND corrupt: it must not be revalidated
+// conditionally, since a server that still has the same
 // ETag/Last-Modified on file would reply 304 and hand back the exact same
 // unusable bytes forever. The corrupt body is instead treated as a miss and
 // refetched unconditionally, healing the entry.

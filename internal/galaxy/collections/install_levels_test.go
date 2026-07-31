@@ -1,13 +1,13 @@
 package collections
 
-// This file proves runInstallLevel's fix for the ErrMissingCollection early
-// return: that guard used to return from installLevels' per-level dispatch
-// loop without joining workers already dispatched for earlier keys in the
-// same level, leaking them (they still hold a sem slot, mutate the shared
-// Store, and can outlive runInstall's backend-lock release) and racing the
-// non-atomic failures read against a worker's atomic.AddInt32. Both tests
-// drive installLevels directly, since the guard and the join it must now
-// wait for are both internal to it.
+// This file pins runInstallLevel's ErrMissingCollection early-return
+// behavior: that guard must join every worker already dispatched for
+// earlier keys in the same level before returning, rather than leaking them
+// (they still hold a sem slot, mutate the shared Store, and can outlive
+// runInstall's backend-lock release) or racing the non-atomic failures read
+// against a worker's atomic.AddInt32. Both tests drive installLevels
+// directly, since the guard and the join it waits for are both internal to
+// it.
 
 import (
 	"context"
@@ -68,16 +68,13 @@ func TestInstallLevelsMissingCollectionSurfaces(t *testing.T) {
 // prefetcher whose done channel for key1 is left open, so it cannot complete
 // until the test releases it.
 //
-// Discrimination: the pre-fix installLevels returned from its dispatch loop
-// the moment the guard tripped, without ever calling wg.Wait() for that
-// level - so it would return almost immediately while key1's worker was still
-// parked. The fixed runInstallLevel registers `defer wg.Wait()` before its
-// dispatch loop, so the guard's return statement cannot actually hand control
-// back to installLevels until every dispatched worker in the level -
-// including the still-parked key1 - has finished. The first select below
-// asserts exactly that: on fixed code it must time out (installLevels is
-// still blocked inside the deferred wg.Wait()); on the pre-fix code it would
-// instead receive from done and fail the test immediately.
+// runInstallLevel registers `defer wg.Wait()` before its dispatch loop, so
+// the guard's return statement cannot hand control back to installLevels
+// until every dispatched worker in the level - including the still-parked
+// key1 - has finished. The first select below asserts exactly that:
+// installLevels must time out here, still blocked inside the deferred
+// wg.Wait(); receiving from done instead would mean the guard returned
+// without joining key1's worker.
 // newBlockedPrefetcher builds a prefetcher by hand with key registered and its
 // done channel left open, so prefetch.Wait(key) blocks until the caller calls
 // finish(key, ...) to close it. Built directly rather than through

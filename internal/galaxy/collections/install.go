@@ -616,9 +616,9 @@ func resolveArtifactSHA(
 // server col actually resolved from (col.Source, stamped by
 // solverResultToResolvedGraph/sourceFor with the server that answered during
 // solve - never a stale pin, never a bare cfg.Server). See helpers.ArtifactKey
-// for the collision this scoping closes: two servers publishing the same
-// <ns>-<name>-<version>.tar.gz used to collide on one flat cache slot with no
-// way for isCacheHit to detect it.
+// for the collision this scoping closes: without it, two servers publishing
+// the same <ns>-<name>-<version>.tar.gz would collide on one flat cache slot
+// with no way for isCacheHit to detect it.
 func artifactKey(col collection) string {
 	filename := fmt.Sprintf("%s-%s-%s.tar.gz", col.Namespace, col.Name, col.Version)
 	return helpers.ArtifactKey(col.Source, filename)

@@ -138,15 +138,14 @@ func TestWriteGalaxyInfoPersistsNoSignature(t *testing.T) {
 }
 
 // TestNewInstallTargetRefusesTraversingVersionBeforeWriteGalaxyInfo proves
-// the identity guard writeGalaxyInfo used to run itself (via the former
-// collectionInfoDir) now lives one call earlier, in newInstallTarget: a
-// version identifier with enough ".." segments to escape DownloadPath must be
-// refused there, before a target (and so before any write) ever exists, not
-// merely produce a directory somewhere unexpected. writeGalaxyInfo itself is
-// deliberately not called here - it now trusts target's already-validated
-// identity (see its own doc comment) - the discriminating proof for this
-// guard is newInstallTarget's own ok=false return plus the untouched victim
-// directory.
+// the identity guard lives in newInstallTarget, one call before
+// writeGalaxyInfo ever runs: a version identifier with enough ".." segments
+// to escape DownloadPath must be refused there, before a target (and so
+// before any write) ever exists, not merely produce a directory somewhere
+// unexpected. writeGalaxyInfo itself is deliberately not called here - it
+// trusts target's already-validated identity (see its own doc comment) -
+// the discriminating proof for this guard is newInstallTarget's own
+// ok=false return plus the untouched victim directory.
 //
 // Five ".." segments, not three: path.Join fuses the version's first ".."
 // into the synthetic "acme.widgets-.." element, consuming it for free, so
@@ -268,9 +267,9 @@ func TestInstallRecordMatchesAgreesWithWriteGalaxyInfo(t *testing.T) {
 	}
 }
 
-// An unsafe col.Version (e.g. "../../../../victim/pwned") no longer reaches
+// An unsafe col.Version (e.g. "../../../../victim/pwned") never reaches
 // installRecordMatches at all: newInstallTarget - the single chokepoint both
-// the install path and the .info sidecar path now go through - refuses to
+// the install path and the .info sidecar path go through - refuses to
 // build a target for such an identity in the first place, so there is no
 // coincidentally-matching decoy for installRecordMatches to be tricked by.
 // See TestNewInstallTargetRejectsUnsafeIdentifiers (installroot_test.go) for
@@ -327,12 +326,12 @@ func TestWriteGalaxyInfoIfPresentWarnsOnCollectionsPathEscape(t *testing.T) {
 //
 // The failure is manufactured by stripping write permission from
 // "ansible_collections" itself, rather than by pre-seeding target.info with a
-// regular file the way this test used to: writeGalaxyInfo now resets
-// target.info (RemoveAll then MkdirAll) before writing, and RemoveAll
-// happily unlinks a lone regular file sitting at that name, so that older
-// fixture no longer fails at all - it would make MkdirAll succeed instead of
-// failing. A permission-denied MkdirAll survives the reset unaffected: there
-// is nothing at target.info to remove, and creating it is what fails.
+// regular file: writeGalaxyInfo resets target.info (RemoveAll then MkdirAll)
+// before writing, and RemoveAll happily unlinks a lone regular file sitting
+// at that name, so a pre-seeded regular file would not produce a failure at
+// all - MkdirAll would simply succeed once the file is removed. A
+// permission-denied MkdirAll survives the reset unaffected: there is nothing
+// at target.info to remove, and creating it is what fails.
 func TestWriteGalaxyInfoIfPresentPrintsOnOrdinaryFailure(t *testing.T) {
 	t.Parallel()
 	if os.Geteuid() == 0 {

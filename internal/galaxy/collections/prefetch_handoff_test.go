@@ -329,19 +329,17 @@ func (f *prefetchHandoffFixture) runLevels(
 // for acme.app is reused by the install worker rather than fetched a second
 // time from the artifact store.
 //
-// Discrimination: on the pre-handoff code, installCollection had no way to
-// learn about the prefetcher's already-downloaded temp. prepareInstall would
-// see meta already set (from prefetch.Wait's old two-value signature) and
-// isCacheHit true (Has() reports the prefetcher's own Commit), taking the
-// cache-hit branch and calling artifacts.Fetch - so fetchCountFor would read
-// 1, not 0. This test's fetchCountFor(key) == 0 assertion is exactly the line
-// that would fail without this change.
+// This test's fetchCountFor(key) == 0 assertion pins that installCollection
+// reuses the prefetcher's already-downloaded temp instead of taking the
+// cache-hit branch and calling artifacts.Fetch a second time: prepareInstall
+// observes the prefetcher's handoff (its already-set meta and verified sha)
+// and skips the redundant fetch, so fetchCountFor reads 0.
 //
 // The hasCountFor(key) == 1 assertion below additionally proves the scan/
 // re-probe consolidation: buildPrefetchTasks' parallel scan issues the sole
-// Has probe for this key, prefetchOne no longer re-probes it, and the install
-// worker never probes a prefetched key either (that path was already removed
-// earlier). With the prefetchOne re-probe still present this would read 2.
+// Has probe for this key, prefetchOne does not re-probe it, and the install
+// worker never probes a prefetched key either. With the prefetchOne re-probe
+// still present this would read 2.
 func TestPrefetchedArtifactReusedNotRefetched(t *testing.T) {
 	t.Parallel()
 	srv := fakegalaxy.New(t)

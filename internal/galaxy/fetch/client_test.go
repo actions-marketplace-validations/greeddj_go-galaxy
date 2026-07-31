@@ -30,8 +30,9 @@ const waitBound = 5 * time.Second
 // TestNew_ResponseHeaderTimeout_FiresOnHang exercises the transport-level
 // half of the no-progress timeout: a server that never writes a status line
 // or headers must make the request fail once ResponseHeaderTimeout - wired
-// to cfg.Timeout - elapses, rather than hang indefinitely (the whole
-// response Timeout that used to bound this was removed).
+// to cfg.Timeout - elapses, rather than hang indefinitely; the client
+// carries no whole-response Timeout to fall back on, only this
+// transport-level bound and watchdogTransport's own per-read guard.
 func TestNew_ResponseHeaderTimeout_FiresOnHang(t *testing.T) {
 	t.Parallel()
 

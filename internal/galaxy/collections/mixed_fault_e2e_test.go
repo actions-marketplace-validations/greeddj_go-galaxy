@@ -4,16 +4,17 @@ package collections_test
 // stall_e2e_test.go) covers the shape a security audit measured: one run
 // installing two collections, where one is byte-dripped (ending on
 // helpers.ArtifactDownloadDeadline) and the other is mid-body stalled (ending
-// on helpers.ErrReadStalled) at the same time. Before the fix, the stalled
-// collection's error carried a %w-wrapped context.Canceled - the cause of the
-// watchdog canceling its own derived context to unblock the stuck read - which
-// exitcode.FromError's context.Canceled case (checked ahead of every other
-// class) matched, misclassifying the whole run as ExitInterrupt (130) even
-// though the run also carries helpers.ErrArtifactDownloadDeadline, a sentinel
-// that has never been reachable via context.Canceled. After the fix, the
-// watchdog renders that cause with %v instead, so the mixed run correctly
-// classifies as ExitInstall (5), matching every other per-collection failure
-// joined behind helpers.ErrInstallationFailed.
+// on helpers.ErrReadStalled) at the same time. The watchdog renders the
+// stalled collection's cause with %v, not %w, so its context.Canceled - the
+// cause of the watchdog canceling its own derived context to unblock the
+// stuck read - does not reach errors.Is; wrapping it with %w instead would
+// let exitcode.FromError's context.Canceled case (checked ahead of every
+// other class) match it and misclassify the whole run as ExitInterrupt (130)
+// even though the run also carries helpers.ErrArtifactDownloadDeadline, a
+// sentinel that has never been reachable via context.Canceled. With %v
+// rendering, the mixed run correctly classifies as ExitInstall (5), matching
+// every other per-collection failure joined behind
+// helpers.ErrInstallationFailed.
 //
 // Three fixture parameters are load-bearing:
 //

@@ -29,10 +29,11 @@ const DepsCacheKeySeparator = "|"
 
 // ScopedDepsCacheKey builds the deps-cache key for fqdnAtVersion (an
 // "<ns>.<name>@<version>" pin) scoped to serverBase, the server that
-// actually answered its metadata fetch. Before this scoping, two servers
-// publishing the same namespace.name@version with different dependency
-// graphs collided on a single deps-cache entry, so whichever one resolved
-// first silently dictated the dependencies used for both. serverBase is
+// actually answered its metadata fetch. Without the serverBase prefix, two
+// servers publishing the same namespace.name@version with different
+// dependency graphs would collide on a single deps-cache entry, so whichever
+// one resolved first would silently dictate the dependencies used for both.
+// serverBase is
 // expected to be the normalized server base a collection actually resolved
 // from (MetadataProvider.recordBinding's bound base) - never a
 // stale/unpinned collection source and never a bare configured server
@@ -47,10 +48,11 @@ func ScopedDepsCacheKey(serverBase, fqdnAtVersion string) string {
 // ArtifactKey builds the cache key for a collection artifact tarball named
 // filename, scoped to serverBase so two servers that publish the same
 // namespace/name/version (and therefore the same tarball filename) never
-// share a cache slot. Before this scoping, the key was filename alone
-// (percent-encoded), so two servers publishing the same name collided on one
-// cache entry with no metadata round trip able to catch it - isCacheHit
-// would serve whichever artifact happened to land first, indefinitely.
+// share a cache slot. Without the server scope, the key would be filename
+// alone (percent-encoded), so two servers publishing the same name would
+// collide on one cache entry with no metadata round trip able to catch it -
+// isCacheHit would serve whichever artifact happened to land first,
+// indefinitely.
 //
 // The key is "<fp>.<url.QueryEscape(filename)>": flat (contains no "/"), so
 // both the local backend's filepath.Join(cacheDir, key) and the S3 backend's

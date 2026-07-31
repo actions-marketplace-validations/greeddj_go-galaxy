@@ -10,8 +10,7 @@ import (
 )
 
 // failureRecorder is a concurrency-safe collector of per-collection install
-// failures, replacing the bare *int32 that level workers used to increment
-// directly. It keeps the repo's documented invariant ("failures tracked with
+// failures. It keeps the repo's documented invariant ("failures tracked with
 // atomic.Int32") for the hot-path count check between levels, while also
 // retaining each failure's cause so the run's final error can name what
 // actually went wrong instead of only how many collections failed.
@@ -41,8 +40,8 @@ func (r *failureRecorder) record(err error) {
 
 // count reports the number of failures recorded so far. Called by the
 // level-break check between install levels, so it stays a plain
-// atomic.Int32 load rather than taking the mutex - the same hot-path
-// reasoning that justified atomic.Int32 before this type existed.
+// atomic.Int32 load rather than taking the mutex, keeping that hot-path
+// check as cheap as a single atomic load.
 func (r *failureRecorder) count() int32 {
 	return r.n.Load()
 }
@@ -75,16 +74,17 @@ type failureSummary struct {
 }
 
 // installError builds the run's headline error for the install command. The
-// literal "%w for %d collections" wording must stay byte-identical to what
-// finalizeInstall produced before this type existed, since it is part of the
-// run's user-facing output.
+// literal "%w for %d collections" wording is part of the run's user-facing
+// output and must stay stable: changing it would change what operators and
+// log-scrapers see for the same underlying condition.
 func (s failureSummary) installError() error {
 	return s.wrap(fmt.Errorf("%w for %d collections", helpers.ErrInstallationFailed, s.count))
 }
 
 // warmError builds the run's headline error for the warm command. The
-// literal "%w: warm failed for %d collections" wording must stay
-// byte-identical to what warmWithState produced before this type existed.
+// literal "%w: warm failed for %d collections" wording is part of the run's
+// user-facing output and must stay stable for the same reason installError's
+// does.
 //
 // This is a separate method from installError, rather than one method taking
 // the headline format as a parameter, so both literal strings stay visible

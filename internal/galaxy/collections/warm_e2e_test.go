@@ -89,9 +89,9 @@ func assertMetricsCommand(t *testing.T, path, want string) {
 // artifact cache and the content-addressable extracted store, without ever
 // creating an ansible_collections tree under cfg.DownloadPath (warm never
 // installs) and without recording anything in the persisted snapshot's
-// installed set (warm never calls recordInstall). It also asserts warm's
-// side of this commit's fix: each collection gets a Warmed entry keyed by its
-// own ns.name@version, recording exactly the artifact sha the collection
+// installed set (warm never calls recordInstall). It also asserts warm's own
+// bookkeeping: each collection gets a Warmed entry keyed by its own
+// ns.name@version, recording exactly the artifact sha the collection
 // actually resolved to.
 func TestWarmColdCachePopulatesCacheWithoutInstalling(t *testing.T) {
 	t.Parallel()

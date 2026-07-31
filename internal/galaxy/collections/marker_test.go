@@ -45,9 +45,9 @@ const validMarkerSHA = "0123456789abcdef0123456789abcdef0123456789abcdef01234567
 // extract-done marker for target by calling writeExtractMarker itself, so
 // every test that seeds an "already installed" tree gets a tally that
 // actually matches the tree on disk (entries=0 dirs=0 bytes=0 for an empty
-// tree) - the shared helper the architect asked for, so canSkipInstall's now
-// tally-checking gate does not reject a seed that used to pass under the bare
-// os.Stat check the legacy "ok" sentinel satisfied.
+// tree): canSkipInstall's tally-checking gate rejects a marker that merely
+// exists but does not carry a matching tally, so a bare os.Stat-satisfying
+// placeholder is not enough here.
 func seedValidExtractMarker(t *testing.T, target installTarget, sha string) {
 	t.Helper()
 	if err := writeExtractMarker(target, sha); err != nil {
@@ -505,17 +505,15 @@ func TestPrefetchScanUsesCheapCheck(t *testing.T) {
 // buildTraversalFixture builds an installPath four real path elements deep
 // under a "containment" directory (collections/ansible_collections/ns/name -
 // the exact shape a real install produces), itself nested one level inside a
-// t.TempDir() sandbox. This mirrors the architect's own verified proof of
-// concept (an installPath of this same four-element depth under a root)
-// while keeping every path this fixture's tests can possibly reach -
-// including an unbounded escape - inside the sandbox this test owns and
-// t.TempDir() cleans up, never a real host path. The traversal counts below
-// are load-bearing: six ".." segments (no leading dot) exactly cancel the
-// four real installPath elements plus the one pop that only undoes the
+// t.TempDir() sandbox, keeping every path this fixture's tests can possibly
+// reach - including an unbounded escape - inside the sandbox this test owns
+// and t.TempDir() cleans up, never a real host path. The traversal counts
+// below are load-bearing: six ".." segments (no leading dot) exactly cancel
+// the four real installPath elements plus the one pop that only undoes the
 // ".extract-done.." literal filename the join produces (never a real ".."
-// token on its own), landing the escape exactly at containment - matching
-// the architect's own root/home/ci/.ssh/authorized_keys arithmetic. A
-// leading "./" on that same six-segment sha adds one more real pop with no
+// token on its own), landing the escape exactly at containment - the same
+// arithmetic a real root/home/ci/.ssh/authorized_keys escape would require.
+// A leading "./" on that same six-segment sha adds one more real pop with no
 // corresponding cancellation, landing one level further out, at sandbox
 // itself - the unbounded property: capping ".." tokens at installPath's own
 // component count would not have stopped this, since the leading "./"
@@ -541,7 +539,8 @@ func buildTraversalFixture(t *testing.T) (string, string, string) {
 
 // TestVerifyExtractMarkerRefusesTraversalSHA proves verifyExtractMarker
 // rejects a traversal sha before ever computing a marker path from it: a
-// victim seeded at exactly the location the pre-fix join would have reached
+// victim seeded at exactly the location a naive join (installPath plus
+// ".extract-done." plus the raw sha) would reach
 // (containment/home/ci/.ssh/authorized_keys, six ".." segments popping
 // installPath's four real elements plus the one that only cancels the
 // ".extract-done.." literal name) survives byte-identical, and exactly one
@@ -575,8 +574,8 @@ func TestVerifyExtractMarkerRefusesTraversalSHA(t *testing.T) {
 // "./" variant: the same six ".." segments as
 // TestVerifyExtractMarkerRefusesTraversalSHA, but with one more real pop
 // than that capped case buys for free, landing one level past containment
-// (at sandbox itself, standing in for the architect's real /etc/passwd
-// escape past the test root entirely). Nothing under sandbox - not just
+// (at sandbox itself, standing in for a real /etc/passwd escape past the
+// test root entirely). Nothing under sandbox - not just
 // under installPath - may be touched.
 func TestVerifyExtractMarkerRefusesUnboundedTraversalSHA(t *testing.T) {
 	t.Parallel()
@@ -709,9 +708,9 @@ func TestMarkerRelRejectsNonDigest(t *testing.T) {
 
 // BenchmarkScanTree measures one scanTree pass over a single
 // collection-sized tree: 500 files spread across 50 subdirectories at ~2000
-// bytes each, matching the per-collection shape behind the architect's
-// fleet-scale measurement (100 such trees - 50,000 files, 100 MB total, APFS,
-// warm - costing 0.56 ms serially per tree, 222 ms total serially, 73 ms at 8
+// bytes each, matching the per-collection shape behind a fleet-scale
+// measurement (100 such trees - 50,000 files, 100 MB total, APFS, warm -
+// costing 0.56 ms serially per tree, 222 ms total serially, 73 ms at 8
 // workers). This keeps that number reproducible in the repository rather
 // than living only in a report.
 func BenchmarkScanTree(b *testing.B) {

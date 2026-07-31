@@ -171,7 +171,8 @@ func conditionalityDropCases() []conditionalityDropCase {
 }
 
 // TestConditionalityDropFamily covers the resolutions that a residual left by
-// a backtracked, unsatisfiable parent version used to silently drop.
+// a backtracked, unsatisfiable parent version must still constrain, rather
+// than being dropped once the parent version that introduced it is rejected.
 func TestConditionalityDropFamily(t *testing.T) {
 	t.Parallel()
 	root := []Requirement{{Package: "acme.foo", Constraint: ">=1.0.0"}}

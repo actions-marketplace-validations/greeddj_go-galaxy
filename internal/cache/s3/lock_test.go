@@ -216,8 +216,8 @@ func TestLockConcurrentFreshAcquireSingleWinner(t *testing.T) {
 }
 
 // TestLockReclaimsExpiredLock seeds a lock object whose TTL has elapsed
-// (judged by Last-Modified staleness, since lockExpired is not rewritten in
-// this commit) under a foreign token, then confirms a single Backend
+// (judged by Last-Modified staleness, which is what lockExpired checks)
+// under a foreign token, then confirms a single Backend
 // reclaims it: the stored token becomes the reclaimer's and the deadline
 // moves forward from the seeded (deliberately far-past) one. The comparison
 // is against the seeded deadline rather than time.Now(): RFC3339 only

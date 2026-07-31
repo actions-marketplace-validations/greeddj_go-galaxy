@@ -207,18 +207,14 @@ func TestLoadStoreToleratesLegacyRootsKey(t *testing.T) {
 // It exists separately from TestLoadStoreToleratesLegacyRootsKey because null
 // and {} are different decoder inputs: only an explicit null overwrites a
 // pre-initialized map with a nil one, while {} and an absent key leave it
-// alone. That difference is exactly why this shape, and not {}, used to
-// trigger a panic. Against the pre-removal code, "roots": null nilled Store's
-// Roots map and the very next production SetRoots call panicked with
-// "assignment to entry in nil map", crashing the process with exit status 2 -
-// which this program's exit-code taxonomy classifies as ExitUsage, so a
-// poisoned or merely stale snapshot masqueraded as a config error.
+// alone.
 //
-// This test does NOT pin that panic, and claiming otherwise would retire
-// scrutiny it never earned: it passes against the pre-removal code too, since
-// LoadStore itself always returned normally and the crash came later, at the
-// SetRoots call site. What prevents the panic recurring is that the field and
-// its only mutator no longer exist, which the compiler enforces.
+// This test does not, and cannot, exercise a panic from a nilled Roots map:
+// Store has no Roots field and no SetRoots mutator (see
+// TestLoadStoreToleratesLegacyRootsKey for why "roots" itself is still a
+// recognized-but-unknown key) for "roots": null to nil out, so there is no
+// production call site left for a nil map to reach. This test only pins
+// decode tolerance for the null shape itself.
 func TestLoadStoreToleratesNullRootsKey(t *testing.T) {
 	t.Parallel()
 	b := newTestBackend(t)

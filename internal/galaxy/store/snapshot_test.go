@@ -603,8 +603,7 @@ func TestSnapshotPrunesStaleAndFutureAcrossAllBuckets(t *testing.T) {
 // bucketHasKey reports whether key is present in m. It is generic purely so
 // assertStalePruned can drive one loop over all four differently-typed
 // buckets instead of repeating the same three-way presence check per bucket,
-// which is what previously pushed that function over its cyclomatic
-// complexity budget.
+// which would push that function over its cyclomatic complexity budget.
 func bucketHasKey[T any](m map[string]T, key string) bool {
 	_, ok := m[key]
 	return ok
@@ -908,8 +907,7 @@ func assertStoreMapsNonNil(t *testing.T, st *Store) {
 // a freshly constructed Store - against the just-decoded one instead, then
 // reads every value back through the matching assert* helpers. Without
 // Store.ensureMaps running after the decode, populateTestStore's first
-// map-indexing call panics with "assignment to entry in nil map" - see the
-// revert-check note in the developer report for the observed panic output.
+// map-indexing call panics with "assignment to entry in nil map".
 func TestUnmarshalJSONRestoresEveryNilMap(t *testing.T) {
 	t.Parallel()
 	fixed := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)

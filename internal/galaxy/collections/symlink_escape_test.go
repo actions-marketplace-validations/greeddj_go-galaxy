@@ -3,7 +3,7 @@ package collections
 // This file proves the install-side symlink hardening (installroot.go):
 // every write this package makes into cfg.DownloadPath funnels through one
 // os.Root, so a symlinked ansible_collections - or a symlinked namespace/name
-// component beneath it - can no longer redirect a write outside DownloadPath.
+// component beneath it - cannot redirect a write outside DownloadPath.
 // Each test targets one write site directly (extractCollection, writeGalaxyInfo,
 // verifyExtractMarker, canSkipInstall) with a pre-existing "outside" tree
 // standing in for real content a symlink swap would otherwise have destroyed
@@ -110,12 +110,11 @@ func realInstallFixture(t *testing.T, col collection) installTarget {
 }
 
 // TestExtractCollectionSymlinkedPrefixLeavesOutsideTreeIntact is the
-// load-bearing proof of the fix: a symlinked ansible_collections used to make
-// extractCollection's os.RemoveAll(installPath) follow the symlink and
-// destroy whatever real content lived at its target, exactly the corruption
-// the architect reproduced. A real, pre-existing tree is seeded at the
-// symlink's actual on-disk target - the same location a pre-fix
-// extractCollection would have wiped - and must survive byte-identical.
+// load-bearing proof that extractCollection's os.RemoveAll(installPath) does
+// not follow a symlinked ansible_collections and destroy whatever real
+// content lives at its target. A real, pre-existing tree is seeded at the
+// symlink's actual on-disk target - the same location an unrooted
+// os.RemoveAll would reach - and must survive byte-identical.
 // t.Errorf, not t.Fatalf, on the sentinel error check: the tree assertion
 // below is what actually discriminates a real fix from one that merely
 // returns the right error class while still destroying data through a stale
@@ -194,14 +193,13 @@ func TestWriteGalaxyInfoSymlinkedPrefixWritesNothingOutside(t *testing.T) {
 }
 
 // TestVerifyExtractMarkerSymlinkedPrefixLeavesOutsideMarkerIntact proves
-// verifyExtractMarker's best-effort cleanup no longer unlinks a marker
-// reachable only through a symlinked prefix. Before this change, that cleanup
-// ran through a plain path (filepath.Join(installPath, ...) then os.Remove),
-// which followed the symlink exactly like the RemoveAll bug this package's
-// other write sites already fixed; now it goes through target.root, which
-// refuses to traverse the escaping "ansible_collections" component at all, so
-// the outside marker survives even though verifyExtractMarker still correctly
-// reports it as unverified.
+// verifyExtractMarker's best-effort cleanup never unlinks a marker reachable
+// only through a symlinked prefix. The cleanup resolves the marker path
+// through target.root rather than a plain path join
+// (filepath.Join(installPath, ...) then os.Remove); a plain join would
+// follow the symlink, but target.root refuses to traverse the escaping
+// "ansible_collections" component at all, so the outside marker survives
+// even though verifyExtractMarker still correctly reports it as unverified.
 func TestVerifyExtractMarkerSymlinkedPrefixLeavesOutsideMarkerIntact(t *testing.T) {
 	t.Parallel()
 	col := collection{Namespace: "acme", Name: "widgets", Version: "1.0.0"}

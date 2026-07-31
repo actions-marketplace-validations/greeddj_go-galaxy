@@ -17,14 +17,15 @@ import (
 )
 
 // TestWarmThenCleanupKeepsExtractedTrees is the end-to-end regression guard
-// for this commit's fix. collections.Warm never calls recordInstall, so a
-// warm-only project's ansible_collections workspace never exists on disk;
-// cleanup.Start's project scan (pickCollectionsPath) skips such a project
-// entirely, so it contributes nothing to installedByKey or reachable. Before
-// this fix, extractedKeepSet only ever consulted the (now empty)
-// InstalledArtifactSHAByKey, so a single Warm followed by a single
-// cleanup.Start left 0 entries under <cacheDir>/extracted/ - wiping exactly
-// the expensive work warm exists to produce.
+// proving warm's extracted trees survive a cleanup run. collections.Warm
+// never calls recordInstall, so a warm-only project's ansible_collections
+// workspace never exists on disk; cleanup.Start's project scan
+// (pickCollectionsPath) skips such a project entirely, so it contributes
+// nothing to installedByKey or reachable. extractedKeepSet must therefore
+// also consult the snapshot's Warmed set, not only InstalledArtifactSHAByKey,
+// or a single Warm followed by a single cleanup.Start would leave 0 entries
+// under <cacheDir>/extracted/ - wiping exactly the expensive work warm
+// exists to produce.
 func TestWarmThenCleanupKeepsExtractedTrees(t *testing.T) {
 	t.Parallel()
 	f := newE2EFixture(t)

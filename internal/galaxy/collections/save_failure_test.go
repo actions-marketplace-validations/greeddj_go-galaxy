@@ -18,16 +18,16 @@ package collections
 //
 //   - TestWarmWithStateSaveFailureWritesMetricsNoCollections: reverting
 //     warmWithState to call SaveStore, return early on its error, and only
-//     then call writeRunMetrics (undoing change 3's reordering) makes it fail
-//     with:
+//     then call writeRunMetrics makes it fail with:
 //     "read metrics file /.../metrics.json: open /.../metrics.json: no such
 //     file or directory"
 //     since readMetricsCommand's t.Fatalf on the missing file fires before
 //     the test's own assertion is ever reached.
 //   - TestWarmWithStateSaveFailureKeepsWarmFailureClass: reverting
-//     warmWithState's tail to the old precedence - SaveStore, then
-//     writeRunMetrics, then `if saveErr != nil { return saveErr }` ahead of
-//     the failures check, with no annotateSaveFailure - makes it fail with:
+//     warmWithState to classify by the save failure first instead of by the
+//     collection-failure count - SaveStore, then writeRunMetrics, then
+//     `if saveErr != nil { return saveErr }` ahead of the failures check,
+//     with no annotateSaveFailure - makes it fail with:
 //     "expected errors.Is helpers.ErrInstallationFailed, got simulated
 //     SaveStore failure"
 //   - TestInstallWithStateSaveFailureWritesMetrics: a regression pin on an
@@ -36,28 +36,29 @@ package collections
 //     the call with `if finalErr == nil`) makes it fail with:
 //     "read metrics file /.../metrics.json: open /.../metrics.json: no such
 //     file or directory"
-//   - TestInstallWithStateSaveFailureKeepsInstallFailureClass: FAILS ON HEAD
-//     before this change - reverting finalizeInstall to its old precedence
-//     (`if err := backend.SaveStore(...); err != nil { return err }`, checked
-//     before the failures count) makes it fail with:
+//   - TestInstallWithStateSaveFailureKeepsInstallFailureClass: reverting
+//     finalizeInstall to classify by the save failure first instead of by
+//     the collection-failure count (`if err := backend.SaveStore(...); err
+//     != nil { return err }`, checked before the failures tally) makes it
+//     fail with:
 //     "expected errors.Is helpers.ErrInstallationFailed, got simulated
 //     SaveStore failure"
-//     confirming the architect's probe: a failing save silently discarded the
+//     confirming that a failing save silently discarded the
 //     ErrInstallationFailed classification instead of folding the save error
 //     in alongside it.
-//   - TestLockWithStateSaveFailureWritesMetricsAndKeepsLockfile: FAILS ON HEAD
-//     before this change - reverting lockWithState's tail to the old order
-//     (SaveStore, return early on its error, then writeRunMetrics, then the
-//     "Lockfile written" announcement) makes assertion (c) fail with:
+//   - TestLockWithStateSaveFailureWritesMetricsAndKeepsLockfile: reverting
+//     lockWithState's tail to return early on a SaveStore error - before
+//     writeRunMetrics runs and before the "Lockfile written" line is printed
+//     - makes assertion (c) fail with:
 //     "expected a persistent \"Lockfile written\" line, got []"
 //     and assertion (d), which is fatal and therefore the one that actually
 //     stops the test, fail with:
 //     "read metrics file /.../metrics.json: open /.../metrics.json: no such
 //     file or directory"
-//   - TestLockWithStateWritesLockfileAndMetrics: this is the refactor's own
-//     regression net for lockWithState - there was zero prior test coverage of
-//     any lock run, so this passes on both HEAD and the fix and exists purely
-//     so the split does not silently move untested code.
+//   - TestLockWithStateWritesLockfileAndMetrics exercises lockWithState's
+//     happy path with a real (not save-failing) backend, confirming the split
+//     between runLock and lockWithState does not leave any of lockWithState's
+//     own logic untested.
 //   - TestInstallWithStateSaveFailureKeepsInstallFailureClass and
 //     TestWarmWithStateSaveFailureKeepsWarmFailureClass's added
 //     helpers.ErrDownloadFailed assertion: reverting failureSummary.wrap to
@@ -185,9 +186,9 @@ func TestWarmWithStateSaveFailureWritesMetricsNoCollections(t *testing.T) {
 // (the sentinel cmd/go-galaxy/exitcode maps to the install exit class) as
 // well as the save error itself - a nonzero collection-failure count stays
 // the primary, classifiable error even when the save also failed, with the
-// save error folded in as context rather than replacing it. This inverts the
-// pre-fix test, which asserted the save error won outright and the
-// ErrInstallationFailed class was lost.
+// save error folded in as context rather than replacing it. Classifying by
+// the save error alone would instead let it win outright and lose the
+// ErrInstallationFailed class.
 func TestWarmWithStateSaveFailureKeepsWarmFailureClass(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -267,13 +268,13 @@ func TestInstallWithStateSaveFailureWritesMetrics(t *testing.T) {
 	}
 }
 
-// TestInstallWithStateSaveFailureKeepsInstallFailureClass pins the fix to
-// finalizeInstall's precedence bug (change 2): before the fix, a failing
-// SaveStore returned immediately with the bare save error, before failures
-// was ever checked, so a run that also had a failed collection lost its
-// ErrInstallationFailed classification entirely and degraded to the
-// generic/unclassified exit code. FAILS ON HEAD - see this file's header
-// comment for the exact observed message.
+// TestInstallWithStateSaveFailureKeepsInstallFailureClass pins
+// finalizeInstall's failure-classification precedence: a failing SaveStore
+// must not return immediately with the bare save error ahead of the
+// failures check, since a run that also had a failed collection would then
+// lose its ErrInstallationFailed classification entirely and degrade to the
+// generic/unclassified exit code. See this file's header comment for the
+// exact observed message from the killing mutation.
 func TestInstallWithStateSaveFailureKeepsInstallFailureClass(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -378,11 +379,9 @@ func TestLockWithStateSaveFailureWritesMetricsAndKeepsLockfile(t *testing.T) {
 	}
 }
 
-// TestLockWithStateWritesLockfileAndMetrics is the refactor's own regression
-// net: before this change, there was zero test coverage of any lock run at
-// all, so splitting runLock into runLock/lockWithState would otherwise move
-// entirely untested code. It exercises the happy path with a real (not
-// save-failing) backend.
+// TestLockWithStateWritesLockfileAndMetrics exercises lockWithState's happy
+// path with a real (not save-failing) backend, confirming a successful lock
+// run writes both the lockfile and the metrics report.
 func TestLockWithStateWritesLockfileAndMetrics(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

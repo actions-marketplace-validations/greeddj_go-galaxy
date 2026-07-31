@@ -342,10 +342,11 @@ func warmDryRunSHA(col collection, warmed map[string]string) string {
 // isCacheHit's guard does, and forceDownload never applies here (a dry run
 // never evicts or retries, since it never prepares an artifact at all). These
 // two predicates must never drift apart - a mirror, not an independent
-// reimplementation. A proven case for why this matters: before this guard
-// existed, --no-cache with a warm cache made this function say "artifact
-// cached" while isCacheHit itself returned false, so a real install would
-// still download despite the dry run's optimistic report. cfg is never nil
+// reimplementation. A proven case for why this matters: without this
+// mirroring, --no-cache with a warm cache would make this function say
+// "artifact cached" even though isCacheHit itself returns false, so a real
+// install would still download despite the dry run's optimistic report. cfg
+// is never nil
 // here - classifyDryRun's own callers already dereference it unconditionally
 // (cfg.Workers, cfg.Offline) before this is ever reached - so, exactly like
 // isCacheHit itself, there is no defensive nil check.

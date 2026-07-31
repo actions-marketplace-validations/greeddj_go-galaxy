@@ -69,18 +69,19 @@ func (s *Artifacts) Fetch(ctx context.Context, key string) (cacheManager.Artifac
 // case-only difference is a rejection, not a match. Lowercase hex is the
 // only shape anything in this program ever writes - hex.EncodeToString at
 // every producer, including this package's own Commit and hashReader - and
-// the local backend (local.Artifacts.Fetch) has required exactly that shape
-// on its own sidecar since before this comparison was tightened, leaving this
-// backend the last one that still accepted a second, uppercase spelling. That
-// spelling now has nowhere to go: helpers.IsSHA256Hex gates resolveArtifactSHA,
-// so a digest accepted here but rejected there fails the install with
-// helpers.ErrMalformedArtifactSHA256, which is deliberately outside the
-// evict-and-refetch class - every run against such an object would fail
-// identically, with no recovery. Rejecting it here instead is what turns that
-// dead end into the recoverable path described below. Tightening this to == is
-// also the only place in this file where that matters: an uppercase actual can
-// never happen (this process's own hex.EncodeToString), so the entire
-// discriminating power is on expected, the metadata read back from the object.
+// the local backend (local.Artifacts.Fetch) requires exactly that shape on
+// its own sidecar too, so this exact comparison is what keeps this backend
+// from being the only place in the program still willing to accept a second,
+// uppercase spelling. That spelling has nowhere to go: helpers.IsSHA256Hex
+// gates resolveArtifactSHA, so a digest accepted here but rejected there
+// fails the install with helpers.ErrMalformedArtifactSHA256, which is
+// deliberately outside the evict-and-refetch class - every run against such
+// an object would fail identically, with no recovery. Rejecting it here
+// instead is what turns that dead end into the recoverable path described
+// below. The exact comparison is also the only place in this file where the
+// case distinction matters: an uppercase actual can never happen (this
+// process's own hex.EncodeToString), so the entire discriminating power is on
+// expected, the metadata read back from the object.
 //
 // The rejection is deliberately still classified as helpers.ErrSHA256Mismatch,
 // not helpers.ErrMalformedArtifactSHA256: prepareWithRecovery's

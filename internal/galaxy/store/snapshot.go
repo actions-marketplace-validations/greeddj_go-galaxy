@@ -649,10 +649,10 @@ func newRetentionWindow(now time.Time, maxAge time.Duration) retentionWindow {
 // would launder an invalid stamp into a valid one and hand it a fresh
 // full-length lease; rejecting the whole snapshot would turn a droppable
 // cache into an outage and would diverge from the local Bolt path. Dropping
-// is the only option that both stops the entry surviving forever (before
-// this fix, a stamp like "9999-01-01" passed the old strict-Before check
-// against the oldest bound and was rewritten verbatim into every later save)
-// and self-heals, since every bucket this guards is rebuildable.
+// is the only option that both stops the entry surviving forever - a stamp
+// like "9999-01-01" compared only against the oldest bound is never older
+// than that bound, so it would be rewritten into every later save - and
+// self-heals, since every bucket this guards is rebuildable.
 //
 // No skew tolerance, deliberately. With several machines on one cache, an
 // entry written by a machine whose clock runs ahead looks future to the

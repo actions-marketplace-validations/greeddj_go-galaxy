@@ -688,15 +688,15 @@ func TestMultiServerSnapshotReuseIsPartitionedByServerList(t *testing.T) {
 }
 
 // TestMultiServerArtifactCacheKeyIsScopedPerServer is the regression guard
-// for the artifact-cache collision this commit closes: two independent
+// for keeping the artifact-cache key scoped per server: two independent
 // projects, sharing one cache dir, each pin ns.shared@1.0.0 to a different
 // server carrying different artifact bytes for that same name and version.
-// Before the fix, both projects' downloads shared one flat cache key
-// (percent-encoded filename only, no server component), so the second
-// project's install would silently reuse the first project's cached tarball
-// - the wrong bytes, with no metadata round trip able to catch it. With the
-// fix, each server's bytes land under its own key, so both projects install
-// their own server's bytes and both cache entries coexist on disk.
+// Because helpers.ArtifactKey folds the server into the key rather than
+// using a flat, percent-encoded-filename-only key, each server's bytes land
+// under its own key, so both projects install their own server's bytes and
+// both cache entries coexist on disk, instead of the second project
+// silently reusing the first project's cached tarball - the wrong bytes,
+// with no metadata round trip able to catch the mismatch.
 func TestMultiServerArtifactCacheKeyIsScopedPerServer(t *testing.T) {
 	t.Parallel()
 	srvA := fakegalaxy.New(t)
@@ -779,9 +779,9 @@ func TestMultiServerDepsCacheKeyIsScopedPerServer(t *testing.T) {
 // TestMultiServerSourceSwitchForcesReinstall proves installEntryMatches'
 // server-source check end to end: a collection first installed pinned to A
 // is re-run against the same cache dir and download path but pinned to B
-// instead. Before the fix, canSkipInstall never compared the recorded
-// install's server against the newly resolved one, so the second run would
-// silently keep A's install untouched; B would never even be contacted.
+// instead. canSkipInstall compares the recorded install's server against the
+// newly resolved one, so a source change forces a reinstall against B rather
+// than silently keeping A's install untouched with B never even contacted.
 func TestMultiServerSourceSwitchForcesReinstall(t *testing.T) {
 	t.Parallel()
 	srvA := fakegalaxy.New(t)

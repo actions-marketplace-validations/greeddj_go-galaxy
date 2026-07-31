@@ -26,8 +26,8 @@ func TestArtifactKeyIsFlat(t *testing.T) {
 
 // TestArtifactKeyDifferentBasesYieldDifferentPrefixes is the collision
 // regression guard: two distinct server bases publishing the identical
-// filename must produce distinct keys, closing the pre-fix collision where
-// the key carried no server component at all.
+// filename must produce distinct keys, since ArtifactKey folds a server
+// fingerprint into the key rather than using the filename alone.
 func TestArtifactKeyDifferentBasesYieldDifferentPrefixes(t *testing.T) {
 	t.Parallel()
 	const filename = "ns-name-1.0.0.tar.gz"
@@ -101,7 +101,8 @@ func TestScopedDepsCacheKeyNeverCollidesWithOldFormat(t *testing.T) {
 
 // TestScopedDepsCacheKeyDistinguishesServers proves two different bases for
 // the identical fqdn@version produce two different scoped keys - the
-// collision regression guard for the deps-cache side of this fix.
+// collision regression guard for the deps-cache side of the server-scoped
+// key shape.
 func TestScopedDepsCacheKeyDistinguishesServers(t *testing.T) {
 	t.Parallel()
 	const fqdnAtVersion = "acme.widgets@1.0.0"

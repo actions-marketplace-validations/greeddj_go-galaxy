@@ -207,10 +207,10 @@ func TestCanSkipInstallRefusesPoisonedSnapshotSHA(t *testing.T) {
 // TestInstallRecordMatchesRefusesUnsafeMarkerSHA proves installRecordMatches's
 // own markerRel call specifically, independent of canSkipInstall's
 // separate verifyExtractMarker backstop: a file is seeded at exactly the
-// location the pre-fix inline filepath.Join(installPath,
-// helpers.ExtractMarkerPrefix+entry.ArtifactSHA256) would have found present
-// - so a bare os.Stat-based check would have coincidentally succeeded and
-// falsely reported a match - and installRecordMatches must still return
+// location a naive filepath.Join(installPath,
+// helpers.ExtractMarkerPrefix+entry.ArtifactSHA256) would find present - so
+// a bare os.Stat-based check using that join would coincidentally succeed
+// and falsely report a match - and installRecordMatches must still return
 // false, because it never even reaches that os.Stat call for an unsafe sha.
 func TestInstallRecordMatchesRefusesUnsafeMarkerSHA(t *testing.T) {
 	t.Parallel()

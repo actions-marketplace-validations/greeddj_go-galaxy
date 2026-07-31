@@ -18,14 +18,14 @@ package collections
 //     stderr rather than failing, and never claims "frozen": true in its
 //     metrics report.
 //
-// TestLockFrozenIsIgnoredAndNotReported FAILS ON HEAD before the fix this file
-// accompanies (runLock's --frozen warning and writeRunMetrics's explicit
-// frozen parameter, both in start.go). Reverting those two changes and running
-// just this test produces the exact output observed:
+// Reverting both runLock's --frozen warning (dropping the `if cfg.Frozen`
+// Warnf block) and writeRunMetrics's explicit frozen parameter (both in
+// start.go) and running just TestLockFrozenIsIgnoredAndNotReported produces
+// the exact output observed:
 //
-//	lock_command_test.go:269: expected a --frozen-has-no-effect warning on
+//	lock_command_test.go:271: expected a --frozen-has-no-effect warning on
 //	stderr, got []
-//	--- FAIL: TestLockFrozenIsIgnoredAndNotReported (0.04s)
+//	--- FAIL: TestLockFrozenIsIgnoredAndNotReported (0.05s)
 //
 // which is assertion (b) - printer.hasWarnContaining never fires because
 // runLock never called Warnf in the first place, and that t.Fatalf stops the
@@ -235,8 +235,8 @@ func assertReplacedNotMerged(t *testing.T, fresh, stale string) {
 // on lock: the run still regenerates the lockfile from a fresh resolve
 // (ignoring a stale pin the flag would otherwise have honored on
 // install/warm), warns rather than fails, and never claims "frozen": true in
-// its metrics report. See this file's header comment for the exact pre-fix
-// failure.
+// its metrics report. See this file's header comment for the exact killing-
+// mutation output.
 func TestLockFrozenIsIgnoredAndNotReported(t *testing.T) {
 	t.Parallel()
 	cfg, runtime, printer, _ := newLockRun(t)

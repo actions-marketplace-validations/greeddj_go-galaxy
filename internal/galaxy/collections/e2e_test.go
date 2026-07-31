@@ -327,7 +327,7 @@ func assertFrozenCorruptedPinFailsClosed(t *testing.T, f *e2eFixture, lockPath s
 		t.Fatal("expected an error from a corrupted lockfile pin, got nil")
 	}
 	// Start aggregates per-collection install failures behind
-	// helpers.ErrInstallationFailed, but the triggering cause is no longer
+	// helpers.ErrInstallationFailed, but the triggering cause is not
 	// swallowed: it is joined into the same error tree (see failureSummary),
 	// so both the aggregate classification and the actual
 	// helpers.ErrSHA256Mismatch cause are reachable through errors.Is at this
@@ -521,10 +521,11 @@ func writeRequirementsMulti(t *testing.T, path string, names ...string) {
 // TestNoDepsSnapshotNotReusedByDepsRun proves the full-match snapshot-reuse
 // path (loadResolvedFromSnapshot, gated by RequirementsHash) cannot serve a
 // --no-deps snapshot - roots only, nil graph edges - to a later run that
-// resolves the full dependency graph. Before the fix, requirementsSignatureFromSpec
-// did not encode the --no-deps mode, so the second run's identical (in every
-// field the old signature hashed) requirements matched the stored hash and
-// reused the --no-deps graph verbatim, silently skipping acme.lib.
+// resolves the full dependency graph. requirementsSignatureFromSpec encodes
+// the --no-deps mode as part of the hashed requirements signature, so a mode
+// change alone changes RequirementsHash and forces a fresh resolve instead
+// of matching the stored hash and reusing the --no-deps graph verbatim,
+// which would silently skip acme.lib.
 func TestNoDepsSnapshotNotReusedByDepsRun(t *testing.T) {
 	t.Parallel()
 	f := newE2EFixture(t)
@@ -760,10 +761,10 @@ func TestArtifactMetricsLockCountsNothing(t *testing.T) {
 // nil-deps graph entry across a mode change either. Adding acme.tool as a
 // second, previously-unseen root alongside the unchanged acme.app root is
 // what routes resolution through tryIncrementalResolve rather than
-// loadResolvedFromSnapshot: before the fix, tryIncrementalResolve checked
-// only per-root spec equality against RequirementsSnapshot and never
-// consulted RequirementsHash, so it happily preserved acme.app's --no-deps
-// (nil-deps) snapshot entry, silently skipping acme.lib.
+// loadResolvedFromSnapshot: tryIncrementalResolve checks RequirementsHash in
+// addition to per-root spec equality against RequirementsSnapshot, so
+// acme.app's --no-deps (nil-deps) snapshot entry is not reused once the mode
+// has changed, and acme.lib is resolved rather than silently skipped.
 func TestNoDepsSnapshotNotReusedIncrementally(t *testing.T) {
 	t.Parallel()
 	f := newE2EFixture(t)

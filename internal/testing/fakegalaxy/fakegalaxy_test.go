@@ -440,9 +440,9 @@ func TestArtifactDripFaultKeepsWritingUntilTheContextEnds(t *testing.T) {
 // TestJSONEndpointDripFaultWritesBytesAndBlocksUntilCanceled asserts a
 // DripInterval fault armed against a JSON endpoint (root metadata here, but
 // applyFault/enactFault is shared by all three) writes real bytes onto the
-// wire - proving it is not a silent no-op the way it was before this fault
-// arm existed - and never completes the response body on its own: the caller
-// must abort it. The read deadline used here is far shorter than the drip
+// wire rather than silently blocking with no output, and never completes
+// the response body on its own: the caller must abort it. The read deadline
+// used here is far shorter than the drip
 // interval, so a successful read of the opening byte plus a subsequent
 // timeout is only possible if the fake actually flushed data before blocking.
 //

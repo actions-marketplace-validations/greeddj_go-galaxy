@@ -1,8 +1,8 @@
 package collections
 
 // This file pins failureRecorder/failureSummary/summaryError's contract in
-// isolation, one layer below the end-to-end propagation this change adds
-// (see failure_propagation_test.go). Each test below was verified against
+// isolation, one layer below the end-to-end propagation covered in
+// failure_propagation_test.go. Each test below was verified against
 // the specific killing mutation named in its own doc comment, with the real
 // observed failure output quoted:
 //

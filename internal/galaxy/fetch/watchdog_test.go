@@ -212,7 +212,7 @@ func TestWatchdogBody_StallErrorDoesNotMatchContextCanceled(t *testing.T) {
 // ErrReadStalled branch in Read is never reached here at all - neither the
 // %v-vs-%w rendering choice nor the parentCtx.Err() == nil guard changes this
 // test's outcome, since both only matter once fired is true. The %v-vs-%w
-// distinction this fix introduces is instead pinned by
+// rendering distinction is instead pinned by
 // TestWatchdogBody_StallErrorDoesNotMatchContextCanceled above, which does
 // drive the watchdog to fire.
 func TestWatchdogBody_ParentCancelPropagatesContextCanceled(t *testing.T) {
@@ -258,17 +258,17 @@ func TestWatchdogBody_ParentCancelPropagatesContextCanceled(t *testing.T) {
 	}
 }
 
-// TestWatchdogBody_FiredWatchdogYieldsToParentCancel pins the fourth, and
-// only previously unpinned, cell of the truth table Read's guard at
-// `err != nil && b.fired.Load() && b.parentCtx.Err() == nil` decides:
-// fired=true (the watchdog already fired) crossed with parent already
-// canceled. Before the %v-not-%w fix, deleting the parentCtx guard was
-// harmless to the exit code in this cell too - the relabeled error still
-// carried context.Canceled through %w, so exitcode.FromError still matched
-// cancellation. After the fix, the same deletion would silently turn a
-// genuine operator Ctrl-C landing in this exact interleaving into
-// helpers.ErrReadStalled - a network failure, not an interrupt - so this fix
-// owes the guard its own pin.
+// TestWatchdogBody_FiredWatchdogYieldsToParentCancel pins the one cell of the
+// truth table Read's guard at
+// `err != nil && b.fired.Load() && b.parentCtx.Err() == nil` decides that no
+// other test in this file independently covers: fired=true (the watchdog
+// already fired) crossed with parent already canceled. Read renders this
+// cell's error with %v, not %w, so deleting the parentCtx guard would
+// silently turn a genuine operator Ctrl-C landing in this exact interleaving
+// into helpers.ErrReadStalled - a network failure, not an interrupt - rather
+// than leaving context.Canceled reachable through errors.Is the way %w
+// rendering would. This cell is exactly where the guard is load-bearing,
+// which is why it earns its own pin.
 //
 // gatedReadCloser (not blockingReadCloser) is required here: blockingReadCloser
 // unblocks the instant onStall cancels wctx, before a test could ever also
@@ -281,8 +281,8 @@ func TestWatchdogBody_ParentCancelPropagatesContextCanceled(t *testing.T) {
 // has fired": onStall calls b.fired.Store(true) before b.cancel(), and the
 // channel close/receive gives the happens-before edge that guarantees fired
 // is visible as true once wctx.Done() is observed. This is not a sleep-based
-// fixture on purpose - that class of fixture is exactly what let the
-// previously-unpinned cell above go unnoticed.
+// fixture on purpose - that class of fixture is exactly what would let the
+// cell pinned above go unverified.
 //
 // "parent still live" is the positive control on this exact construction: it
 // proves gatedReadCloser can still produce the ordinary fired-and-stalled

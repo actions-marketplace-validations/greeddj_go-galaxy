@@ -180,9 +180,9 @@ func (s *solveState) propagatePackage(p string, changed map[string]bool) (bool, 
 // fact twice is always sound to skip (a repeated derivation never carries
 // new information), so this guard costs nothing and catches any accidental
 // re-derivation regardless of cause - it is not what makes the solver
-// terminate (the boundary-extended universe fix is what prevents the
-// specific infinite re-derivation cycle this guard was originally added to
-// paper over; see conflict.go and term.go's extended-universe comments).
+// terminate: the boundary-extended universe fix is what prevents the
+// specific infinite re-derivation cycle this guard alone cannot stop; see
+// conflict.go and term.go's extended-universe comments.
 // withoutTautologicalTerms returns inc with any always-satisfiable
 // (full-permitted) term removed, so conflict resolution's returned root cause
 // relates as the unit clause it logically is: an always-true term is redundant

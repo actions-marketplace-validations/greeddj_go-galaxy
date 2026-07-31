@@ -53,8 +53,8 @@ func (e *downloadAttemptError) Unwrap() error {
 // The checks below are split into isEarlyTerminalDownloadError,
 // isLateTerminalDownloadError, and isRetryableAttemptError purely to stay
 // under the cyclomatic-complexity budget; together with the inline
-// ErrReadStalled/context checks between them, they cover the exact same
-// classification in the exact same order as before the split.
+// ErrReadStalled/context checks between them, they implement one
+// classification in one fixed order, not three independent ones.
 func downloadRetryable(err error) bool {
 	if err == nil {
 		return false

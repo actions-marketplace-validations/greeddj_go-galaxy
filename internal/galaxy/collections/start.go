@@ -1021,7 +1021,7 @@ func runInstallLevel(
 // classification that still outranks it is cancellation - cmd/go-galaxy/exitcode
 // checks context.Canceled ahead of every class - so a save that fails because
 // the run was interrupted still exits as interrupted, which is what an
-// interrupted run should report and is what the pre-fix code did too.
+// interrupted run should report.
 func finalizeInstall(
 	ctx context.Context,
 	runtime *infra.Infra,

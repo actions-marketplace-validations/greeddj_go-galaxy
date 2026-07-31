@@ -20,9 +20,9 @@ const SHA256HexLen = 64
 // cache sidecar): on the local backend, local.Artifacts.Fetch gates the
 // sidecar with this exact predicate before ever surfacing it; on the S3
 // backend, s3.verifyArtifactSHA gates it with `==` against this process's
-// own computed digest - tightened from strings.EqualFold, which is what let
-// an uppercase x-amz-meta-sha256 value reach this far before that fix.
-// Rejecting uppercase here closes the same door a second time on both
+// own computed digest, not strings.EqualFold: using EqualFold there would
+// let an uppercase x-amz-meta-sha256 value reach this far. Rejecting
+// uppercase here closes the same door a second time on both
 // routes, rather than opening a new one - and is what lets both backends
 // agree on one canonical form for what a valid cached digest looks like.
 func IsSHA256Hex(s string) bool {

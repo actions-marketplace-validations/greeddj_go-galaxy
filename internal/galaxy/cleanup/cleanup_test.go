@@ -573,9 +573,10 @@ func TestStartDeletesUnreferencedWithValidRequirements(t *testing.T) {
 }
 
 // TestStartRemovesLegacyAndScopedArtifactKeys is the regression guard for
-// the one-time artifact-cache migration this commit's key-format change
-// requires: a cached tarball can exist under the pre-multi-server flat key
-// (legacyArtifactKey) and/or the current, server-scoped key
+// the one-time artifact-cache migration from the pre-multi-server flat key
+// shape to the current server-scoped one: a cached tarball can exist under
+// the pre-multi-server flat key (legacyArtifactKey) and/or the current,
+// server-scoped key
 // (helpers.ArtifactKey), and a single Start run against an unreferenced
 // collection must remove both - the scoped key via removeUnused's own purge
 // (driven by the persisted InstalledEntry.Source), the legacy key via
@@ -741,7 +742,8 @@ func seedExtractedDir(t *testing.T, cacheDir, sha string) {
 // which deliberately has no ansible_collections subdirectory. This makes
 // pickCollectionsPath skip the project entirely, so its installed snapshot
 // entries are never scanned, never pruned, and never contribute to
-// installedByKey - the normal ephemeral-CI state this commit's fix targets.
+// installedByKey - the normal ephemeral-CI state where a fresh runner has no
+// local ansible_collections workspace at all.
 func recordAbsentWorkspaceProject(t *testing.T, cfg *config.Config, runtime *infra.Infra, downloadPath string) {
 	t.Helper()
 	reqPath := filepath.Join(t.TempDir(), "requirements.yml")
@@ -837,15 +839,15 @@ func seedSnapshotInstalledAndWarmed(
 	}
 }
 
-// TestSweepKeepsWarmedShaWithNoInstalledEntry is the core regression guard
-// for this commit's fix: a warm-only machine's snapshot has no Installed
-// entries at all (warm never calls recordInstall), only a Warmed entry, and
-// its recorded project's workspace does not exist (pickCollectionsPath
-// returns "" and the project is skipped entirely, exactly like
-// TestSweepKeepsCacheWhenWorkspaceAbsent's install-side scenario). Before
-// this fix, extractedKeepSet only ever consulted InstalledArtifactSHAByKey,
-// so this exact setup produced an empty keep set and Sweep(empty) wiped the
-// extracted tree warm had just materialized.
+// TestSweepKeepsWarmedShaWithNoInstalledEntry pins the invariant that a
+// warm-only machine's snapshot - which has no Installed entries at all,
+// since warm never calls recordInstall, only a Warmed entry - still keeps
+// its extracted tree during a sweep. Its recorded project's workspace does
+// not exist (pickCollectionsPath returns "" and the project is skipped
+// entirely, exactly like TestSweepKeepsCacheWhenWorkspaceAbsent's
+// install-side scenario), so extractedKeepSet must also consult the
+// Warmed set's sha, not only InstalledArtifactSHAByKey, or Sweep would wipe
+// the extracted tree warm had just materialized.
 func TestSweepKeepsWarmedShaWithNoInstalledEntry(t *testing.T) {
 	t.Parallel()
 	cacheDir := t.TempDir()
@@ -1050,10 +1052,11 @@ func TestScanSkipsDirWithoutManifest(t *testing.T) {
 // TestRemovesAllCopiesInOneRun proves that when the same ns.name@version is
 // installed under two distinct projects' collections paths, both on-disk
 // copies are removed in a single Start run rather than one copy per run.
-// Before this fix, installedByKey was map[string]installedCollection: the
-// second project's scan silently overwrote the first project's record for
-// the same key, so removeUnused only ever saw and removed the last copy
-// scanned, leaving the other to survive until a later run.
+// installedByKey is keyed by ns.name@version but holds every project's copy
+// for that key (map[string][]installedCollection), so a second project's
+// scan appends to, rather than overwrites, the first project's record, and
+// removeUnused sees and removes every recorded copy, not just the last one
+// scanned.
 func TestRemovesAllCopiesInOneRun(t *testing.T) {
 	t.Parallel()
 	cacheDir := t.TempDir()
@@ -1932,12 +1935,13 @@ func TestSweepExtractedStoreNoopWhenCacheDirEmpty(t *testing.T) {
 }
 
 // TestStartLeavesExtractedCacheWhenNoSnapshotPersisted is THE regression test
-// for this fix: an absent workspace plus a project registered for GC plus NO
-// persisted snapshot at all (a fresh cache dir - no seedSnapshotInstalled,
-// no seedSnapshotWarmed) used to hand sweepExtractedStore an empty keep set
-// indistinguishable from "nothing is installed or warmed anywhere", wiping
-// the entire extracted store on the strength of having no evidence at all.
-// With the WasPersisted guard in place, the extracted dir must survive.
+// for the WasPersisted guard: an absent workspace plus a project registered
+// for GC plus NO persisted snapshot at all (a fresh cache dir - no
+// seedSnapshotInstalled, no seedSnapshotWarmed) produces an empty keep set
+// that is indistinguishable from "nothing is installed or warmed anywhere".
+// Without the WasPersisted guard, sweepExtractedStore would wipe the entire
+// extracted store on the strength of having no evidence at all; the guard
+// instead skips the sweep, so the extracted dir must survive.
 func TestStartLeavesExtractedCacheWhenNoSnapshotPersisted(t *testing.T) {
 	t.Parallel()
 	cacheDir := t.TempDir()
@@ -1956,12 +1960,12 @@ func TestStartLeavesExtractedCacheWhenNoSnapshotPersisted(t *testing.T) {
 	assertExtractedDirsSurvive(t, cacheDir, "sha-orphaned-by-no-snapshot")
 }
 
-// TestStartDoesNotFabricatePersistedSnapshot proves the write-side half of
-// this fix: when Start runs with no persisted snapshot to begin with, it must
-// not call SaveStore at all, since doing so would stamp Meta.LastSnapshot for
-// the first time and fabricate a persisted-and-empty snapshot the next run
-// would read as positive evidence that nothing is installed or warmed
-// anywhere. Reloading through a fresh backend after Start must still report
+// TestStartDoesNotFabricatePersistedSnapshot proves the write-side guard:
+// when Start runs with no persisted snapshot to begin with, it must not call
+// SaveStore at all, since doing so would stamp Meta.LastSnapshot for the
+// first time and fabricate a persisted-and-empty snapshot the next run would
+// read as positive evidence that nothing is installed or warmed anywhere.
+// Reloading through a fresh backend after Start must still report
 // WasPersisted() == false.
 func TestStartDoesNotFabricatePersistedSnapshot(t *testing.T) {
 	t.Parallel()
@@ -2040,11 +2044,11 @@ func TestStartTwiceWithNoSnapshotLeavesExtractedCacheIntact(t *testing.T) {
 }
 
 // TestStartSweepsExtractedCacheWhenSnapshotIsPersistedButEmpty is the
-// narrowness guard for the read-side half of this fix: a snapshot that was
-// actually persisted - even one whose Installed/Warmed maps are both empty -
-// is real evidence ("nothing is referenced"), unlike an absent snapshot
-// ("unknown"), and the guard must not treat the two the same. An orphaned
-// extracted dir must still be swept in this case.
+// narrowness guard on the read side: a snapshot that was actually persisted -
+// even one whose Installed/Warmed maps are both empty - is real evidence
+// ("nothing is referenced"), unlike an absent snapshot ("unknown"), and the
+// guard must not treat the two the same. An orphaned extracted dir must
+// still be swept in this case.
 func TestStartSweepsExtractedCacheWhenSnapshotIsPersistedButEmpty(t *testing.T) {
 	t.Parallel()
 	cacheDir := t.TempDir()
@@ -2067,8 +2071,8 @@ func TestStartSweepsExtractedCacheWhenSnapshotIsPersistedButEmpty(t *testing.T) 
 }
 
 // TestStartRemovesUnreferencedInstallWithNoPersistedSnapshot is the
-// narrowness guard on the other half of this fix: removeUnused is driven by
-// the on-disk workspace scan plus each project's requirements.yml, not by
+// narrowness guard confirming removeUnused stays unconditional: it is driven
+// by the on-disk workspace scan plus each project's requirements.yml, not by
 // the snapshot, so it must stay authoritative regardless of whether any
 // snapshot was ever persisted. A present workspace holding an unreferenced
 // collection must still have its on-disk install tree removed even with no
