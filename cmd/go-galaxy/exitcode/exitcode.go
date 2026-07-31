@@ -351,7 +351,6 @@ func isConfigUsageError(err error) bool {
 		errors.Is(err, helpers.ErrInvalidTimeout) ||
 		errors.Is(err, helpers.ErrAnsibleConfigNotFound) ||
 		errors.Is(err, helpers.ErrWarmCacheDisabled) ||
-		errors.Is(err, helpers.ErrDryRunUnsupported) ||
 		errors.Is(err, helpers.ErrCacheBackendUnusable)
 }
 

@@ -141,11 +141,6 @@ var fromErrorCases = []exitCase{
 		wantCode: ExitUsage,
 	},
 	{
-		name:     "dry-run unsupported",
-		err:      fmt.Errorf("%w: ctx", helpers.ErrDryRunUnsupported),
-		wantCode: ExitUsage,
-	},
-	{
 		name:     "unclassified error falls back to ExitError",
 		err:      errTestGeneric,
 		wantCode: ExitError,

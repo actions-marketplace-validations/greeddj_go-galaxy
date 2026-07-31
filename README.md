@@ -138,7 +138,7 @@ Clean unreachable collections:
 ### Commands
 
 - `install` (`i`) - install collections from `requirements.yml`.
-- `lock` (`l`) - resolve and write `requirements.lock.yml` for reproducible CI. `--frozen` has no effect on `lock` - the lockfile is always regenerated from a fresh resolve and the run warns on stderr; use `install --frozen` or `warm --frozen` to actually consume an existing lockfile. `--dry-run` is not implemented on `lock` - see the breaking-change note under [install options](#install-options).
+- `lock` (`l`) - resolve and write `requirements.lock.yml` for reproducible CI. `--frozen` has no effect on `lock` - `lock` always resolves fresh instead of consuming an existing lockfile, and the run warns on stderr; use `install --frozen` or `warm --frozen` to actually consume an existing lockfile. Under `--dry-run`, `lock` diffs a fresh resolve against whatever lockfile is already on disk and reports what would change, without writing a lockfile - see [install options](#install-options) for the full `--dry-run` semantics.
 - `warm` (`w`) - populate the artifact + extracted caches without installing (for CI image bake). Requires a cache: `--no-cache` is rejected as a usage error rather than downloading everything and discarding it. A warmed collection's extracted tree is protected from `cleanup` for 30 days after its last warm, so a machine that warms and then stops warming eventually reclaims the space. Under `--dry-run`, `warm` reports per collection whether it is already warm or would be warmed, downloads no artifact, and writes no warmed entry; it still rejects `--no-cache` as a usage error regardless of `--dry-run`, since `--no-cache` leaves warm nothing to do either way - see [install options](#install-options) for the full `--dry-run` semantics.
 - `hash` (`h`) - print a deterministic cache key (`sha256:…`) for use as a CI cache key.
 - `tree` (`t`) - print the resolved dependency tree from the lockfile; requires a lockfile and fails if one is absent.
@@ -155,45 +155,58 @@ Clean unreachable collections:
 
 - `--verbose` - verbose output (`$GO_GALAXY_VERBOSE`)
 - `--quiet, -q` - quiet mode (`$GO_GALAXY_QUIET`)
-- `--dry-run` (`$GO_GALAXY_DRY_RUN`) - report what `install` or `warm` would do, without
+- `--dry-run` (`$GO_GALAXY_DRY_RUN`) - report what `install`, `warm`, or `lock` would do, without
   downloading any artifact, creating any install tree or extracted tree, recording any install,
-  writing any warmed entry, registering the project, honoring `--clear-cache`, or writing the
-  metrics report. It still takes the exclusive cache lock. It updates the resolve-side metadata
-  caches, but only when a persisted snapshot already existed for this cache; against a cache that
-  was never saved before, the run saves nothing and prints a stderr warning that the caches it
-  built are discarded - a preview must never leave behind a persisted-and-empty snapshot that a
-  later `cleanup` would read as evidence that nothing is installed or warmed anywhere. Each
-  collection is reported as would install/would warm, already up to date/already warm, or would
-  fail; a would-fail verdict means the artifact isn't cached and `--offline` forbids downloading
-  it, and a nonzero would-fail count exits with the install-failure code (`5`) - the same code a
-  real run would exit with, because that install or warm would certainly fail. The dry-run banner
-  is printed to stderr and survives `--quiet`, because the flag is env-sourced
-  (`$GO_GALAXY_DRY_RUN`) and an org-wide CI environment block would otherwise turn every install
-  or warm into a silent no-op.
-  A dry run reports whether an artifact is cached, not whether it still matches its lockfile pin.
-  Under `--frozen --offline`, any line that reports the artifact as cached - `Already warm`,
-  `Would warm (artifact cached)`, or `Would install (artifact cached)` - states presence only: a
-  cached tarball whose bytes have drifted off their pin fails the real run closed with a
-  checksum-mismatch error, since it cannot refetch while offline. `Up to date` is not affected,
-  because a real install skips such a collection without ever opening its tarball. The run prints
-  a one-time stderr warning whenever both flags are set together, naming this exact gap; it is a
-  disclosure, not a fix.
+  writing any warmed entry, writing any lockfile, registering the project, honoring
+  `--clear-cache`, or writing the metrics report. It still takes the exclusive cache lock. It
+  updates the resolve-side metadata caches, but only when a persisted snapshot already existed for
+  this cache; against a cache that was never saved before, the run saves nothing and prints a
+  stderr warning that the caches it built are discarded - a preview must never leave behind a
+  persisted-and-empty snapshot that a later `cleanup` would read as evidence that nothing is
+  installed or warmed anywhere.
+  For `install` and `warm`, each collection is reported as would install/would warm, already up
+  to date/already warm, or would fail; a would-fail verdict means the artifact isn't cached and
+  `--offline` forbids downloading it, and a nonzero would-fail count exits with the
+  install-failure code (`5`) - the same code a real run would exit with, because that install or
+  warm would certainly fail. The dry-run banner is printed to stderr and survives `--quiet`,
+  because the flag is env-sourced (`$GO_GALAXY_DRY_RUN`) and an org-wide CI environment block
+  would otherwise turn every install, warm, or lock run into a silent no-op.
+  For `install` and `warm`, a dry run reports whether an artifact is cached, not whether it still
+  matches its lockfile pin. Under `--frozen --offline`, any line that reports the artifact as
+  cached - `Already warm`, `Would warm (artifact cached)`, or `Would install (artifact cached)` -
+  states presence only: a cached tarball whose bytes have drifted off their pin fails the real run
+  closed with a checksum-mismatch error, since it cannot refetch while offline. `Up to date` is
+  not affected, because a real install skips such a collection without ever opening its tarball.
+  The run prints a one-time stderr warning whenever both flags are set together, naming this exact
+  gap; it is a disclosure, not a fix.
+  For `lock`, a dry run builds the lockfile in memory from a fresh resolve, loads whatever
+  lockfile is already on disk, and reports how the two differ instead of writing anything. A
+  `Would change: server <from> -> <to>` line prints first when the file-level `server` field
+  itself would change, followed by one line per added, updated, or removed collection - `Would
+  add: <name>@<version>`, `Would update: <name> (<field> <from> -> <to>; ...)`, `Would remove:
+  <name>@<version>` - and a trailing summary whose verdict is `lockfile would change` unless
+  nothing at all would change, in which case it reads `lockfile is up to date`; a change to only
+  the file-level `server` field flips this verdict even though every per-collection count stays
+  zero, since that alone would still rewrite the file on a real run. A lockfile already on disk
+  that cannot be loaded (a bad schema version, unparseable YAML, or any other read failure) is
+  warned about on stderr and then treated the same as no lockfile at all - every collection
+  reports as added - because a real `lock` run never reads that file, it only overwrites it, so
+  the preview cannot fail on it either.
   **Breaking change:** before this release, `--dry-run` (and `$GO_GALAXY_DRY_RUN`) had no effect
-  on `install`, `warm`, or `lock` - only `cleanup` implemented it - so `install --dry-run` performed
-  a full, real install and `warm --dry-run` performed a full, real warm. They now install and warm
-  nothing, and preview instead. A CI job that carried an ambient `$GO_GALAXY_DRY_RUN` and was
-  really installing collections will now finish successfully with nothing installed; a bake job
-  carrying the same ambient variable will now finish successfully with an empty cache, producing a
-  green build and an empty image. In both cases the stderr banner above is the only signal, so a
-  job that branches on the exit code alone will not notice. If a shared `$GO_GALAXY_DRY_RUN` CI
-  environment variable is set, scope it to the jobs that actually want it, or unset it for
-  `install` and `warm` jobs where it must not silently install or warm nothing. `--dry-run` is
-  also a global flag inherited by every subcommand from the root command, so `lock` accepts it
-  too - but it refuses to run under it, exiting with the usage code (`2`) and `--dry-run is not
-  implemented for this command`, rather than silently overwriting the lockfile. `cleanup`
-  implements its own `--dry-run` (see [cleanup options](#cleanup-options)); the read-only commands
-  (`hash`, `tree`, `explain`, `outdated`) ignore the flag, since they have no product for
-  `--dry-run` to suppress.
+  on `install` or `warm` - only `cleanup` implemented it - so `install --dry-run` performed a
+  full, real install and `warm --dry-run` performed a full, real warm; `lock --dry-run` refused to
+  run at all, exiting with the usage code (`2`). `install` and `warm` now install and warm
+  nothing, and preview instead; `lock` now previews instead of refusing. A CI job that carried an
+  ambient `$GO_GALAXY_DRY_RUN` and was really installing collections will now finish successfully
+  with nothing installed; a bake job carrying the same ambient variable will now finish
+  successfully with an empty cache, producing a green build and an empty image; a lock job
+  carrying it will now finish successfully having left the lockfile untouched instead of exiting
+  with a usage error. In every case the stderr banner above is the only signal, so a job that
+  branches on the exit code alone will not notice. If a shared `$GO_GALAXY_DRY_RUN` CI environment
+  variable is set, scope it to the jobs that actually want it, or unset it for `install`, `warm`,
+  and `lock` jobs where it must not silently do nothing. `cleanup` implements its own `--dry-run`
+  (see [cleanup options](#cleanup-options)); the read-only commands (`hash`, `tree`, `explain`,
+  `outdated`) ignore the flag, since they have no product for `--dry-run` to suppress.
 - `--cache-dir` (`$GO_GALAXY_CACHE_DIR`, `$ANSIBLE_GALAXY_CACHE_DIR`)
 - `--server` (`$GO_GALAXY_SERVER`, `$ANSIBLE_GALAXY_SERVER`)
 - `--token` (`$GO_GALAXY_TOKEN`) - Galaxy API token for the single effective server;
@@ -613,7 +626,7 @@ pipelines can branch on failure type without parsing log output:
 |-----:|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 |    0 | Success                                                                                                                                                                           |
 |    1 | Generic failure (does not match any class below)                                                                                                                                  |
-|    2 | Usage or configuration error (invalid flags, requirements, `ansible.cfg`, an unimplemented flag e.g. `--dry-run` on `lock`, or a cache backend that cannot be used as configured) |
+|    2 | Usage or configuration error (invalid flags, requirements, `ansible.cfg`, an unsupported collection source, or a cache backend that cannot be used as configured)                 |
 |    3 | Dependency resolution failure (conflicts, missing candidates, cycle)                                                                                                              |
 |    4 | Network or Galaxy API failure (timeouts, stalled transfers, metadata and cache-state deadlines, offline-mode violations, or an unreachable cache backend)                         |
 |    5 | Install-time failure (unsafe archive/symlink content, empty file, missing artifact cache)                                                                                         |

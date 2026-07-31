@@ -7,6 +7,7 @@ import (
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
+	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 	"github.com/greeddj/go-galaxy/internal/galaxy/lockfile"
 )
 
@@ -161,4 +162,123 @@ func lockfileDepsToKeys(deps []string, byFQDN map[string]lockfile.Entry) []strin
 		out = append(out, fmt.Sprintf("%s@%s", dep, entry.Version))
 	}
 	return out
+}
+
+// lockDryRunBaseline loads the lockfile already on disk at path, to serve as
+// the "before" side of the diff a dry run reports against a fresh resolve. It
+// returns nil - "no baseline" - both when the file does not exist yet and
+// when it exists but cannot be loaded, and never fails the run either way.
+//
+// An absent file is silent: "no lockfile yet" is the ordinary first-lock
+// case, and the resulting all-Added report already says so on its own.
+//
+// A present but unusable file - a bad schema version, unparseable YAML,
+// duplicate names, or any other lockfile.Load failure - is warned about
+// before being treated as no baseline, because a silent all-Added report
+// against a corrupt file would be indistinguishable from one against a
+// project that genuinely has no lockfile yet; the warning is what keeps that
+// report honest. It is not, however, a reason to fail the preview: a real
+// `lock` run never reads this file at all, it only ever overwrites it, so a
+// preview refusing to proceed here would invent a failure class the command
+// it previews does not have. Warnf, not Printf: it must survive --quiet and
+// reach stderr, matching every other dry-run disclosure in this package.
+//
+// This is `lock`'s own preview policy, specific to a command whose product is
+// to replace this file wholesale - it is deliberately not shared with a
+// future command that instead consumes the lockfile: that caller has to call
+// lockfile.Load itself and fail closed on an unusable file, the same way
+// resolveOrLoadLockfile already does for --frozen.
+func lockDryRunBaseline(runtime *infra.Infra, path string) *lockfile.File {
+	lf, err := lockfile.Load(path)
+	if err == nil {
+		return lf
+	}
+	if !lockfile.IsNotExist(err) {
+		runtime.Output.Warnf("existing lockfile %s cannot be read (%v); reporting every collection as added", path, err)
+	}
+	return nil
+}
+
+// reportLockfileDiff prints what `lock` would write for lf at path: the
+// file-level server line first (if any), then one line per changed
+// collection, then a single trailing summary - and nothing else on a diff
+// with no changes at all.
+//
+// Every per-entry line goes through Okf, matching classifyDryRun's own
+// register: a server change, an add, an update, and a removal are all work
+// the command would do, not a failure - Errorf would misstate that. The
+// trailing summary goes through PersistentPrintf, exactly like
+// classifyDryRun's own "Dry run: ..." line, with the same counts-first shape
+// so the two commands' summaries are eyeball-comparable. Both tiers survive
+// --quiet, which is what keeps the preview usable from a job that otherwise
+// silences ordinary output.
+//
+// The summary's verdict term is derived from diff.Empty() itself, never from
+// the counts: "lockfile would change" unless diff.Empty() is true, in which
+// case "lockfile is up to date". This is deliberately not "any count is
+// nonzero", because diff.Empty() also covers diff.Server - a change to lf's
+// file-level Server field with every collection otherwise untouched leaves
+// every count at its unchanged value, and a verdict built from the counts
+// alone would report "up to date" for a run that would still rewrite the
+// file. Deriving the verdict from Empty() instead means any future field
+// Diff gains cannot reintroduce that bug: whatever makes Empty() false also
+// flips the verdict, by construction, with no second place to remember to
+// update.
+//
+// The unchanged count is derived - len(lf.Collections) minus the added and
+// updated counts - rather than carried on Diff itself. That subtraction is
+// exact only because lf is always buildLockfile's own output: its entries
+// come from an fqdn-keyed map, so a name can never repeat within lf, and
+// every one of lf's entries is therefore counted by Compare as exactly one of
+// Added, Updated, or neither (unchanged) - never more than once.
+func reportLockfileDiff(runtime *infra.Infra, lf *lockfile.File, path string, diff lockfile.Diff) {
+	if diff.Server != nil {
+		runtime.Output.Okf("Would change: %s", renderFieldChange(*diff.Server))
+	}
+	for _, e := range diff.Added {
+		runtime.Output.Okf("Would add: %s@%s", e.Name, e.Version)
+	}
+	for _, c := range diff.Updated {
+		runtime.Output.Okf("Would update: %s (%s)", c.To.Name, renderFieldChanges(c.Fields()))
+	}
+	for _, e := range diff.Removed {
+		runtime.Output.Okf("Would remove: %s@%s", e.Name, e.Version)
+	}
+	unchanged := len(lf.Collections) - len(diff.Added) - len(diff.Updated)
+	verdict := "lockfile would change"
+	if diff.Empty() {
+		verdict = "lockfile is up to date"
+	}
+	runtime.Output.PersistentPrintf(
+		"Dry run: %s; %d would be added, %d would be updated, %d would be removed, %d unchanged (%s)",
+		verdict, len(diff.Added), len(diff.Updated), len(diff.Removed), unchanged, path,
+	)
+}
+
+// renderFieldChange renders one FieldChange as "version 0.9.0 -> 1.0.0".
+func renderFieldChange(f lockfile.FieldChange) string {
+	return fmt.Sprintf("%s %s -> %s", f.Field, quoteEmpty(f.From), quoteEmpty(f.To))
+}
+
+// renderFieldChanges renders one updated entry's changed fields as
+// "version 0.9.0 -> 1.0.0; sha256 (none) -> c101ba4c...". Values are never
+// abbreviated, unlike that example: a truncated sha256 can make two different
+// digests look identical, which is exactly the difference this report exists
+// to surface.
+func renderFieldChanges(fields []lockfile.FieldChange) string {
+	parts := make([]string, 0, len(fields))
+	for _, f := range fields {
+		parts = append(parts, renderFieldChange(f))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// quoteEmpty renders an empty field value as "(none)" so a line reporting a
+// value gained or lost does not read as though it changed into nothing
+// visible at all.
+func quoteEmpty(v string) string {
+	if v == "" {
+		return "(none)"
+	}
+	return v
 }

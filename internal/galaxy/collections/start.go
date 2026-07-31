@@ -300,27 +300,20 @@ func Lock(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
 // owns the actual work once state is initialized. Same lifecycle/work
 // boundary runInstall and runWarm already draw.
 func runLock(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
-	// lock does not implement --dry-run: it would still overwrite the
-	// lockfile from a fresh resolve, with nothing in its output marking the
-	// run as a dry run at all. Checked first, ahead of the --frozen warning
-	// below, so a run that cannot proceed emits nothing else - and before
-	// anything is opened, locked, or printed, matching runWarm's identical
-	// guard.
-	if cfg.DryRun {
-		return fmt.Errorf("%w: lock would still overwrite the lockfile", helpers.ErrDryRunUnsupported)
-	}
 	// --frozen is registered on lock only because lock shares
 	// helpers.CollectionFlags with install and warm; lock never consumes a
-	// lockfile - it always rewrites one from a fresh resolve - so the flag
-	// cannot be honored here. This warns rather than failing the run: the
-	// realistic way the flag reaches a lock invocation is an ambient
-	// GO_GALAXY_FROZEN in a CI environment block shared by every job, and
-	// failing a lock job that is otherwise exactly right is a worse trade
-	// than one line on stderr. Warnf, not Printf: it must survive --quiet
-	// and must not touch stdout.
+	// lockfile - it always resolves fresh - so the flag cannot be honored
+	// here. This warns rather than failing the run: the realistic way the
+	// flag reaches a lock invocation is an ambient GO_GALAXY_FROZEN in a CI
+	// environment block shared by every job, and failing a lock job that is
+	// otherwise exactly right is a worse trade than one line on stderr.
+	// Warnf, not Printf: it must survive --quiet and must not touch stdout.
+	// The wording states what lock does not do (consume a lockfile) rather
+	// than what it does to the file on disk, so it stays true under
+	// --dry-run too, which resolves fresh and writes nothing at all.
 	if cfg.Frozen {
-		runtime.Output.Warnf("--frozen has no effect on lock: the lockfile is always regenerated from a fresh resolve. " +
-			"Use install --frozen or warm --frozen to consume an existing lockfile.")
+		runtime.Output.Warnf("--frozen has no effect on lock: lock always resolves fresh instead of consuming an existing lockfile. " +
+			"Use install --frozen or warm --frozen to consume one.")
 	}
 	runtime.Output.Printf("🔒 Generating lockfile")
 	start := time.Now()
@@ -362,6 +355,9 @@ func lockWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra
 		return err
 	}
 	path := lockfile.ResolveDefaultPath(cfg.RequirementsFile, cfg.LockFile)
+	if cfg.DryRun {
+		return lockDryRun(ctx, cfg, runtime, state, lf, path, start)
+	}
 	if err := lockfile.Save(path, lf); err != nil {
 		return err
 	}
@@ -384,6 +380,42 @@ func lockWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra
 	// install and warm - do not add one here. The literal false is not a
 	// placeholder: it is the truth for this command, which never reads
 	// cfg.Frozen (see runLock's warning above, printed instead of honoring it).
+	writeRunMetrics(cfg, runtime, "lock", start, len(lf.Collections), 0, false)
+	return saveErr
+}
+
+// lockDryRun substitutes for lockWithState's lockfile.Save and its
+// "Lockfile written" announcement: it reports how lf - the fresh resolve's
+// own result - differs from whatever is already on disk at path, and writes
+// no lockfile at all. The announcement is not merely relocated but
+// suppressed outright: under --dry-run no file was written, so printing that
+// line would be a false statement about this run.
+//
+// The snapshot is still saved, through the same saveDryRunSnapshotIfPersisted
+// guard install and warm use rather than a bare SaveStore: lock's resolve-side
+// metadata caches are pure, reconstructible cache, not lock's product (the
+// lockfile is), so a dry run keeps them - while the guard still refuses to
+// manufacture a persisted snapshot where none existed. See installDryRun's own
+// doc comment for what a later cleanup run would read into a fabricated one;
+// the same reasoning applies here unchanged.
+//
+// writeRunMetrics is called unconditionally, matching every other command's
+// tail; it self-suppresses under cfg.DryRun (see its own doc comment), so this
+// call site does not need to know that. Its arguments are the same ones the
+// real path passes: the resolved collection count, a truthful zero failure
+// count (lock has no per-collection failure), and frozen=false, since lock
+// never consumes a lockfile regardless of --dry-run.
+func lockDryRun(
+	ctx context.Context,
+	cfg *config.Config,
+	runtime *infra.Infra,
+	state *installState,
+	lf *lockfile.File,
+	path string,
+	start time.Time,
+) error {
+	reportLockfileDiff(runtime, lf, path, lockfile.Compare(lockDryRunBaseline(runtime, path), lf))
+	saveErr := saveDryRunSnapshotIfPersisted(ctx, runtime, state)
 	writeRunMetrics(cfg, runtime, "lock", start, len(lf.Collections), 0, false)
 	return saveErr
 }
@@ -600,8 +632,8 @@ func prepareInstallPlan(
 // initInstall is the single function every collection command that can be in
 // dry-run mode must pass through, so emitting dryRunBanner here makes "no
 // command is in dry-run mode silently" a structural property rather than a
-// per-call-site convention - a future lock --dry-run inherits it by deleting
-// its own guard in runLock, with nothing else to remember.
+// per-call-site convention - install, warm, and lock all reach the banner
+// through this one call site, with nothing per-command to remember.
 func initInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) (*installState, error) {
 	if cfg.DryRun {
 		dryRunBanner(runtime)
