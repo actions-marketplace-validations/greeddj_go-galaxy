@@ -44,6 +44,7 @@ var sentinelClassCases = []struct {
 	{name: "errS3InvalidEndpoint", err: errS3InvalidEndpoint, class: classUnusable},
 	{name: "errS3ConditionalPutUnsupported", err: errS3ConditionalPutUnsupported, class: classUnusable},
 	{name: "errS3LockWaitTimeout", err: errS3LockWaitTimeout, class: classBusy},
+	{name: "errS3LockWaitNoHolderObserved", err: errS3LockWaitNoHolderObserved, class: classUnavailable},
 	{name: "errS3LockLost", err: errS3LockLost, class: classNone},
 	{name: "errS3TokenGeneration", err: errS3TokenGeneration, class: classNone},
 	{name: "errS3NotFound", err: errS3NotFound, class: classNone},

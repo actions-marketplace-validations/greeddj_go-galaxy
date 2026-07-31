@@ -2,8 +2,11 @@ package s3
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"io"
+	"maps"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -52,7 +55,12 @@ type fakeS3 struct {
 	requests map[string]int
 	// drips is keyed by object key, armed via dripGet: a matching GET never
 	// finishes its body on its own (see driveDripGet).
-	drips                 map[string]time.Duration
+	drips map[string]time.Duration
+	// headTokenSwaps is keyed by object key, armed via raceTokenOnNextHead:
+	// the next HEAD served for that key rewrites the stored object's token
+	// first, simulating another writer's PUT landing in between this call's
+	// own write and its own follow-up HEAD.
+	headTokenSwaps        map[string]string
 	failDeleteObjects     *deleteObjectsFailure
 	lastDeleteHeaders     http.Header
 	bucket                string
@@ -399,10 +407,29 @@ func (f *fakeS3) handleObject(w http.ResponseWriter, r *http.Request, key string
 	}
 }
 
+// raceTokenOnNextHead arms a one-shot rewrite of the stored object's
+// recorded token, applied the next time a HEAD request for key is served
+// (see handleHead). It simulates another acquirer's write landing in the
+// narrow window between this call's own successful create/reclaim PUT and
+// its own follow-up ownership-verifying HEAD - the race claim (lock.go)
+// exists specifically to detect. It fires exactly once: the swap is cleared
+// as soon as it is applied, so a subsequent HEAD sees the rewritten token
+// undisturbed rather than swapping again.
+func (f *fakeS3) raceTokenOnNextHead(key, token string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.headTokenSwaps == nil {
+		f.headTokenSwaps = make(map[string]string)
+	}
+	f.headTokenSwaps[key] = token
+}
+
 // handleHead reports the stored object's metadata headers and Last-Modified
 // verbatim, or 404 if absent. This backs the lock protocol's HEAD-only reads
 // (token/deadline verification never needs to transfer the body). A forced
-// failure armed via failNext takes precedence over the normal response.
+// failure armed via failNext takes precedence over the normal response; a
+// swap armed via raceTokenOnNextHead is applied to the stored object before
+// this response is built.
 func (f *fakeS3) handleHead(w http.ResponseWriter, key string) {
 	f.countRequest(key, http.MethodHead)
 	// The body (if any) is deliberately not written here: real HTTP HEAD
@@ -415,6 +442,24 @@ func (f *fakeS3) handleHead(w http.ResponseWriter, key string) {
 	}
 	f.mu.Lock()
 	obj, ok := f.objects[key]
+	if ok {
+		if token, swap := f.headTokenSwaps[key]; swap {
+			// Every write path publishes a fresh meta map rather than
+			// mutating one already stored in f.objects (handlePut ->
+			// captureMeta builds a new map on every PUT) - the invariant
+			// that lets handleHead/handleGet read obj.meta in
+			// writeObjectHeaders after releasing f.mu without racing a
+			// concurrent writer on the same map. This swap upholds that
+			// invariant the same way: it clones obj.meta into a fresh map,
+			// applies the swapped token there, and only then replaces the
+			// stored fakeObject - it never writes through the old map.
+			fresh := maps.Clone(obj.meta)
+			fresh["X-Amz-Meta-Token"] = token
+			obj.meta = fresh
+			f.objects[key] = obj
+			delete(f.headTokenSwaps, key)
+		}
+	}
 	f.mu.Unlock()
 	if !ok {
 		w.WriteHeader(http.StatusNotFound)
@@ -643,4 +688,49 @@ func newTestBackendWithFake(t *testing.T, fake *fakeS3) *Backend {
 		t.Fatalf("New: %v", err)
 	}
 	return backend
+}
+
+// newAcceptingNeverRespondingListener starts a live local TCP listener that
+// accepts every connection and drains what it reads, but never writes a
+// response, so a caller waiting on response headers gets exactly that: a
+// connection, and then silence. It is shared across this package's test
+// files, each pointing it at a different consumer: Client.do's own
+// response-header-timeout row (cache_backend_classification_test.go, which
+// also uses it for a dial-timeout row that never actually reaches the accept
+// loop before its own deadline fires) and the distributed lock's
+// wait-ceiling classification (lock_test.go, simulating a live but
+// unresponsive S3 endpoint during acquisition).
+func newAcceptingNeverRespondingListener(t *testing.T) net.Listener {
+	t.Helper()
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	// done gates when an accepted connection is finally closed: closing it the
+	// instant the request is drained would abort the connection out from under
+	// a caller still waiting on response headers, turning the intended timeout
+	// into an immediate EOF/connection-reset instead.
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		close(done)
+		_ = ln.Close()
+	})
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				buf := make([]byte, 4096)
+				_, _ = c.Read(buf) // drain the request; a response is never written.
+				<-done             // hold the connection open, silently, until the test cleans up.
+				_ = c.Close()
+			}(conn)
+		}
+	}()
+
+	return ln
 }

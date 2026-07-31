@@ -261,47 +261,6 @@ func assertLiveTimeoutClassifiesAsCacheBackendUnavailable(
 	}
 }
 
-// newAcceptingNeverRespondingListener starts a live local TCP listener that
-// accepts every connection and drains what it reads, but never writes a
-// response, so a caller waiting on response headers gets exactly that: a
-// connection, and then silence. It is used for both timeout shapes above -
-// the dial-timeout row never actually reaches the accept loop before its own
-// deadline fires, and the response-header-timeout row depends on it.
-func newAcceptingNeverRespondingListener(t *testing.T) net.Listener {
-	t.Helper()
-	var lc net.ListenConfig
-	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("net.Listen: %v", err)
-	}
-	// done gates when an accepted connection is finally closed: closing it the
-	// instant the request is drained would abort the connection out from under
-	// a caller still waiting on response headers, turning the intended timeout
-	// into an immediate EOF/connection-reset instead.
-	done := make(chan struct{})
-	t.Cleanup(func() {
-		close(done)
-		_ = ln.Close()
-	})
-
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				buf := make([]byte, 4096)
-				_, _ = c.Read(buf) // drain the request; a response is never written.
-				<-done             // hold the connection open, silently, until the test cleans up.
-				_ = c.Close()
-			}(conn)
-		}
-	}()
-
-	return ln
-}
-
 // TestClientDoExcludesCallerCancellationFromCacheBackendUnavailable is the
 // refusal companion to TestClientDoClassifiesConnectionFailureAsCacheBackendUnavailable,
 // named above as this test's positive control: that test already proves

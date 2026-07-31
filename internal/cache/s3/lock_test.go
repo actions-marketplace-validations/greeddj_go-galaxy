@@ -3,9 +3,12 @@ package s3
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +20,12 @@ import (
 // across the tests that seed a lock object out-of-band to simulate
 // contention, reclaim, or takeover scenarios.
 const foreignToken = "foreign-token"
+
+// errRawInFlightPlaceholder stands in for tryAcquireOnce's raw in-flight S3
+// transport failure in TestWaitCeilingErrClassification's table: only its
+// non-nilness matters to waitCeilingErr, so one static sentinel serves every
+// row that needs a placeholder, rather than a fresh dynamic error per row.
+var errRawInFlightPlaceholder = errors.New("raw in-flight transport failure")
 
 // testLockTiming returns a lockTiming with ttl set to the given value and
 // every other interval shrunk to make the lock's state machine fast and
@@ -116,15 +125,17 @@ func newLockBackendWithFake(t *testing.T, timing lockTiming) (*Backend, *fakeS3)
 	return newLockBackendAt(t, srv.URL, srv.Client(), timing), fake
 }
 
-// seedLockObject writes the lock object directly (bypassing acquireLock) to
-// set up contention/reclaim scenarios ahead of a real Lock call.
-func seedLockObject(ctx context.Context, t *testing.T, b *Backend, token string, deadline time.Time) {
+// seedLockObject writes the lock object directly (bypassing acquireLock),
+// under foreignToken, to set up contention/reclaim scenarios ahead of a real
+// Lock call - every caller in this suite simulates a different acquirer, so
+// the token is fixed rather than taken as a parameter.
+func seedLockObject(ctx context.Context, t *testing.T, b *Backend, deadline time.Time) {
 	t.Helper()
 	if err := b.Open(ctx); err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	key := b.key(locksPrefix, lockObject)
-	if err := b.putLock(ctx, key, token, deadline, false); err != nil {
+	if err := b.putLock(ctx, key, foreignToken, deadline, false); err != nil {
 		t.Fatalf("seed lock object: %v", err)
 	}
 }
@@ -233,7 +244,7 @@ func TestLockReclaimsExpiredLock(t *testing.T) {
 	ctx := context.Background()
 
 	pastDeadline := time.Now().UTC().Add(-time.Hour)
-	seedLockObject(ctx, t, b, foreignToken, pastDeadline)
+	seedLockObject(ctx, t, b, pastDeadline)
 
 	release, err := b.Lock(ctx)
 	if err != nil {
@@ -269,7 +280,7 @@ func TestLockWaitsThenTimesOutOnLiveLock(t *testing.T) {
 	b.lock = timing
 	ctx := context.Background()
 
-	seedLockObject(ctx, t, b, foreignToken, time.Now().UTC().Add(b.lock.ttl))
+	seedLockObject(ctx, t, b, time.Now().UTC().Add(b.lock.ttl))
 
 	start := time.Now()
 	_, err := b.Lock(ctx)
@@ -293,6 +304,234 @@ func TestLockWaitsThenTimesOutOnLiveLock(t *testing.T) {
 	}
 }
 
+// newSilentEndpointBackend builds a Backend pointed at a live TCP listener
+// that accepts every connection and never answers a single request (see
+// newAcceptingNeverRespondingListener). client is built and assigned to the
+// Backend directly, bypassing Open's ensureBucket/probeConditionalPut calls:
+// both would otherwise run on the raw ctx Backend.Lock passes to Open, before
+// acquireLock ever constructs waitCtx, so they are unbounded by waitCeiling -
+// calling them against a listener that never answers would hang the test
+// itself rather than exercising acquireLock's own wait ceiling, which is
+// this helper's entire point.
+func newSilentEndpointBackend(t *testing.T, waitCeiling time.Duration) *Backend {
+	t.Helper()
+	ln := newAcceptingNeverRespondingListener(t)
+	cfg := config.S3CacheConfig{
+		Endpoint:  "http://" + ln.Addr().String(),
+		Bucket:    "test",
+		Region:    "us-east-1",
+		AccessKey: "x",
+		SecretKey: "y",
+		PathStyle: true,
+		Enabled:   true,
+	}
+	client, err := newClient(cfg, http.DefaultClient)
+	if err != nil {
+		t.Fatalf("newClient: %v", err)
+	}
+	timing := testLockTiming(time.Minute)
+	timing.waitCeiling = waitCeiling
+	return &Backend{client: client, lock: timing}
+}
+
+// TestLockWaitCeilingDistinguishesSilentBackendFromContention pins
+// waitCeilingErr's discriminator between the two failures the S3 lock's
+// wait ceiling can produce, under an identical wait ceiling for both rows so
+// neither timing difference can explain the result: a silent endpoint that
+// never answers a single request must classify as an unreached backend
+// (helpers.ErrCacheBackendUnavailable), never as contention
+// (helpers.ErrCacheBusy) - the defect this test guards against is exactly a
+// silent, reachable endpoint being reported as "another process holds the
+// cache". The second row is this table's positive control: a live foreign
+// lock that outlasts the identical ceiling proves the fixture family (and
+// waitCeilingErr itself) still produces genuine contention when contention is
+// what actually happened, so the first row's refusal is not merely a
+// classifier that never fires at all.
+func TestLockWaitCeilingDistinguishesSilentBackendFromContention(t *testing.T) {
+	t.Parallel()
+
+	const waitCeiling = 200 * time.Millisecond
+
+	tests := []struct {
+		build    func(t *testing.T) *Backend
+		name     string
+		wantBusy bool
+	}{
+		{
+			name: "silent endpoint never answers a request",
+			build: func(t *testing.T) *Backend {
+				t.Helper()
+				return newSilentEndpointBackend(t, waitCeiling)
+			},
+			wantBusy: false,
+		},
+		{
+			name: "live foreign lock outlasts the ceiling",
+			build: func(t *testing.T) *Backend {
+				t.Helper()
+				b := newTestBackend(t)
+				timing := testLockTiming(5 * time.Second) // stays live for the whole test window
+				timing.waitCeiling = waitCeiling
+				b.lock = timing
+				seedLockObject(context.Background(), t, b, time.Now().UTC().Add(b.lock.ttl))
+				return b
+			},
+			wantBusy: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b := tc.build(t)
+
+			_, err := b.Lock(context.Background())
+			if err == nil {
+				t.Fatalf("expected Lock to fail, got nil")
+			}
+
+			if got := errors.Is(err, helpers.ErrCacheBusy); got != tc.wantBusy {
+				t.Fatalf("errors.Is(err, helpers.ErrCacheBusy) = %v, want %v (err: %v)", got, tc.wantBusy, err)
+			}
+			if tc.wantBusy {
+				return
+			}
+			if !errors.Is(err, helpers.ErrCacheBackendUnavailable) {
+				t.Fatalf("expected errors.Is(err, helpers.ErrCacheBackendUnavailable), got %v", err)
+			}
+		})
+	}
+}
+
+// TestLockAcquireTimesOutAfterObservationThenSilence pins acquireLock's
+// accumulation of observedHolder across attempts, not just the attempt in
+// flight when the wait ceiling fires: a live foreign lock is seeded so the
+// very first HEAD observes it, and every HEAD after that one hangs - never
+// answering at all - until the wait ceiling itself ends the wait. The
+// attempt actually in flight when acquireLock gives up therefore observed
+// nothing; Lock must still report errS3LockWaitTimeout, proving the
+// accumulation is a logical OR across the whole wait, not the last attempt's
+// own answer. This is also waitCeilingErr's own "stale evidence" residual
+// (see its doc comment) made executable: the backend genuinely goes silent,
+// rather than merely failing, for the remainder of the wait.
+func TestLockAcquireTimesOutAfterObservationThenSilence(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeS3()
+	key := path.Join(locksPrefix, lockObject)
+	lockPath := "/" + fake.bucket + "/" + key
+
+	var headCount atomic.Int32
+	// hangGate lets every HEAD to the lock key past the first block
+	// indefinitely, simulating a backend that goes silent for the rest of
+	// the wait. It is closed, and only then is the server closed, in a
+	// single t.Cleanup - the same ordering newAcceptingNeverRespondingListener
+	// uses for its own held connections: closing the server first would
+	// block in Close() waiting for this still-blocked handler to return,
+	// the exact teardown hang this ordering avoids.
+	hangGate := make(chan struct{})
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead && r.URL.Path == lockPath {
+			if headCount.Add(1) == 1 {
+				fake.ServeHTTP(w, r)
+				return
+			}
+			select {
+			case <-r.Context().Done():
+				http.Error(w, r.Context().Err().Error(), http.StatusGatewayTimeout)
+			case <-hangGate:
+			}
+			return
+		}
+		fake.ServeHTTP(w, r)
+	})
+	srv := httptest.NewServer(handler)
+	t.Cleanup(func() {
+		close(hangGate)
+		srv.Close()
+	})
+
+	timing := testLockTiming(5 * time.Second) // stays live for the whole test window
+	timing.waitCeiling = 300 * time.Millisecond
+	b := newLockBackendAt(t, srv.URL, srv.Client(), timing)
+
+	seedLockObject(context.Background(), t, b, time.Now().UTC().Add(b.lock.ttl))
+
+	_, err := b.Lock(context.Background())
+	if !errors.Is(err, errS3LockWaitTimeout) {
+		t.Fatalf("expected errS3LockWaitTimeout, got %v", err)
+	}
+	// lockPath is assembled here rather than asked of the backend, and it
+	// equals the client's real request path only while the backend prefix is
+	// empty. Should the two ever diverge, no HEAD is gated, every attempt
+	// observes the holder, and the assertion above passes for the wrong
+	// reason - as a duplicate of TestLockWaitsThenTimesOutOnLiveLock.
+	if got := headCount.Load(); got < 2 {
+		t.Fatalf("HEAD count on the lock key = %d, want at least 2: the gate never matched, so no attempt was ever silenced", got)
+	}
+}
+
+// TestLockAcquireSurfacesAHardFailureOverTheCeiling pins
+// acquireLockAttemptErr's live-waitCtx branch: an attempt that comes back
+// with its own failure while the wait ceiling is still live ends the whole
+// acquisition immediately, carrying that call's own sentinel, rather than
+// being held until the ceiling and reclassified as a wait-ceiling outcome.
+// It is the executable proof of waitCeilingErr's "a backend that answers
+// only with failures is a different case" paragraph.
+//
+// The first HEAD is served by the fake on purpose, so this wait genuinely
+// observes a live foreign holder before the failures start: that is what
+// makes the interesting half observable - a hard failure is not converted
+// into errS3LockWaitTimeout even when this wait already has the observation
+// that would otherwise justify it.
+//
+// waitCeiling is set far above the client's own retry budget so the ceiling
+// cannot be what ends the wait; it is a liveness margin, not a timing
+// assertion, and nothing here asserts elapsed time.
+func TestLockAcquireSurfacesAHardFailureOverTheCeiling(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeS3()
+	key := path.Join(locksPrefix, lockObject)
+	lockPath := "/" + fake.bucket + "/" + key
+
+	var headCount atomic.Int32
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead && r.URL.Path == lockPath && headCount.Add(1) > 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		fake.ServeHTTP(w, r)
+	})
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+
+	timing := testLockTiming(30 * time.Second) // stays live for the whole test window
+	timing.waitCeiling = 5 * time.Second
+	b := newLockBackendAt(t, srv.URL, srv.Client(), timing)
+
+	seedLockObject(context.Background(), t, b, time.Now().UTC().Add(b.lock.ttl))
+
+	_, err := b.Lock(context.Background())
+	if !errors.Is(err, errS3HeadFailed) {
+		t.Fatalf("expected errS3HeadFailed, got %v", err)
+	}
+	// Documentary, not pinned: neither can be the first failing line here.
+	// errS3HeadFailed and the two wait-ceiling sentinels are disjoint error
+	// trees, so any state satisfying the assertion above already fails both
+	// of these. They are kept because they name the confusion this test
+	// exists to rule out.
+	if errors.Is(err, errS3LockWaitTimeout) || errors.Is(err, errS3LockWaitNoHolderObserved) {
+		t.Fatalf("a hard failure must not be reclassified as a wait-ceiling outcome, got %v", err)
+	}
+	// Same reasoning as its sibling above: without this, a diverged lockPath
+	// would leave every HEAD served normally, and the run would fail on
+	// something other than the branch under test.
+	if got := headCount.Load(); got < 2 {
+		t.Fatalf("HEAD count on the lock key = %d, want at least 2: the gate never matched, so no attempt ever failed hard", got)
+	}
+}
+
 // TestLockAcquirePropagatesCallerCancellation confirms that when the
 // caller's own context is canceled while Lock is still contending for a
 // live foreign lock, the caller cancellation is what surfaces - not
@@ -307,7 +546,7 @@ func TestLockAcquirePropagatesCallerCancellation(t *testing.T) {
 	timing.waitCeiling = 10 * time.Second
 	b.lock = timing
 
-	seedLockObject(context.Background(), t, b, foreignToken, time.Now().UTC().Add(b.lock.ttl))
+	seedLockObject(context.Background(), t, b, time.Now().UTC().Add(b.lock.ttl))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -340,6 +579,108 @@ func TestLockAcquirePropagatesCallerCancellation(t *testing.T) {
 	// errS3LockWaitTimeout.
 	if errors.Is(err, helpers.ErrCacheBusy) {
 		t.Fatalf("expected the caller cancellation, not helpers.ErrCacheBusy, got %v", err)
+	}
+}
+
+// TestWaitCeilingErrClassification directly unit-tests waitCeilingErr over
+// all three of its parameters: a canceled parent wins even over an observed
+// holder; observed alone decides contention versus no-observation, regardless
+// of inFlight; and inFlight only matters, as a diagnostic cause, once
+// observed is false. This is the table that pins observed's priority over
+// inFlight: observed is checked first, so a non-nil inFlight - which ordinary
+// contention produces about as often as a nil one, since the wait ceiling
+// lands inside an in-flight attempt about as often as inside a backoff sleep
+// - never overrides a genuine observation.
+func TestWaitCeilingErrClassification(t *testing.T) {
+	t.Parallel()
+
+	canceledParent, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// noHolderSynthetic is deliberately NOT a shape tryAcquireOnce's own
+	// in-flight transport errors ever take: it double-wraps context.Canceled
+	// with %w, a signature no producer in this package builds for an
+	// in-flight S3 call's failure. It exists to pin that waitCeilingErr's %v
+	// rendering of inFlight keeps context.Canceled unreachable through
+	// errors.Is regardless of what inFlight itself happens to wrap, not only
+	// for the shapes a real producer builds today - the same reason
+	// retry_test.go's stalledSynthetic exists for s3Retryable.
+	noHolderSynthetic := fmt.Errorf("synthetic in-flight failure: %w", context.Canceled)
+
+	tests := []waitCeilingErrCase{
+		{
+			name:         "a canceled parent wins even over an observed holder",
+			parent:       canceledParent,
+			observed:     true,
+			wantCanceled: true,
+		},
+		{
+			name:     "an observed holder is contention regardless of a non-nil inFlight",
+			parent:   context.Background(),
+			observed: true,
+			inFlight: errRawInFlightPlaceholder,
+			wantBusy: true,
+		},
+		{
+			name:            "no observed holder with a non-nil cause is unavailable",
+			parent:          context.Background(),
+			observed:        false,
+			inFlight:        errRawInFlightPlaceholder,
+			wantUnavailable: true,
+		},
+		{
+			name:            "a synthetic cause wrapping context.Canceled still classifies as unavailable, not canceled",
+			parent:          context.Background(),
+			observed:        false,
+			inFlight:        noHolderSynthetic,
+			wantUnavailable: true,
+		},
+		{
+			name:            "no observed holder with a nil cause is still unavailable",
+			parent:          context.Background(),
+			observed:        false,
+			inFlight:        nil,
+			wantUnavailable: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assertWaitCeilingErrClassification(t, tc)
+		})
+	}
+}
+
+// waitCeilingErrCase is one row of TestWaitCeilingErrClassification's table.
+type waitCeilingErrCase struct {
+	parent          context.Context //nolint:containedctx // a direct table-driven parameter to waitCeilingErr, not a stored request context.
+	inFlight        error
+	name            string
+	observed        bool
+	wantBusy        bool
+	wantUnavailable bool
+	wantCanceled    bool
+}
+
+// assertWaitCeilingErrClassification runs one row's body: call waitCeilingErr
+// with tc's parameters and assert the result's class membership. Split out of
+// TestWaitCeilingErrClassification purely to stay under the funlen budget;
+// the two together still cover the same five rows.
+func assertWaitCeilingErrClassification(t *testing.T, tc waitCeilingErrCase) {
+	t.Helper()
+	err := waitCeilingErr(tc.parent, tc.observed, tc.inFlight)
+	if err == nil {
+		t.Fatalf("expected a non-nil error")
+	}
+	if got := errors.Is(err, helpers.ErrCacheBusy); got != tc.wantBusy {
+		t.Errorf("errors.Is(err, helpers.ErrCacheBusy) = %v, want %v (err: %v)", got, tc.wantBusy, err)
+	}
+	if got := errors.Is(err, helpers.ErrCacheBackendUnavailable); got != tc.wantUnavailable {
+		t.Errorf("errors.Is(err, helpers.ErrCacheBackendUnavailable) = %v, want %v (err: %v)", got, tc.wantUnavailable, err)
+	}
+	if got := errors.Is(err, context.Canceled); got != tc.wantCanceled {
+		t.Errorf("errors.Is(err, context.Canceled) = %v, want %v (err: %v)", got, tc.wantCanceled, err)
 	}
 }
 
@@ -521,7 +862,9 @@ func TestHeartbeatSurvivesTransientHeadFailures(t *testing.T) {
 // following create-if-absent PUT report precondition-failed - exactly as
 // real S3 would if another acquirer's create landed first. reclaimIfExpired
 // must report this as "not acquired, no immediate retry" (nil release,
-// retryNow=false, nil error) rather than as an error or a retryNow signal.
+// retryNow=false) and, since that other creator is an acquirer this call did
+// observe, observed=true - see TestTryAcquireOnceReportsObservationPerBranch
+// for the same branch exercised through tryAcquireOnce's full entry point.
 func TestReclaimIfExpiredLosesRaceOnRecreate(t *testing.T) {
 	t.Parallel()
 	fake := newFakeS3()
@@ -543,24 +886,26 @@ func TestReclaimIfExpiredLosesRaceOnRecreate(t *testing.T) {
 	// acquirer's create winning the race for the just-deleted key.
 	fake.failNext(key, http.MethodPut, http.StatusPreconditionFailed, 1)
 
-	release, retryNow, err := b.reclaimIfExpired(ctx, key, "our-token")
+	attempt, err := b.reclaimIfExpired(ctx, key, "our-token")
 	if err != nil {
 		t.Fatalf("reclaimIfExpired: %v", err)
 	}
-	if release != nil {
+	if attempt.release != nil {
 		t.Fatalf("expected no release function for a lost recreate race")
 	}
-	if retryNow {
+	if attempt.retryNow {
 		t.Fatalf("expected retryNow=false for a lost recreate race (back off, don't retry immediately)")
+	}
+	if !attempt.observed {
+		t.Fatalf("expected observed=true: another creator winning the race is an acquirer this call saw")
 	}
 }
 
 // TestReclaimIfExpiredRetriesImmediatelyWhenObjectVanished directly
 // unit-tests reclaimIfExpired's vanished-object branch: HEAD on a key that
 // was never written returns not-found, which must be reported as an
-// immediate-retry signal (retryNow=true) rather than an error, since
-// acquireLock's caller loop uses it to retry the create without waiting
-// out a backoff interval.
+// immediate-retry signal (retryNow=true) rather than an error, and as
+// observed=false: a vanished object proves nothing about another acquirer.
 func TestReclaimIfExpiredRetriesImmediatelyWhenObjectVanished(t *testing.T) {
 	t.Parallel()
 	b := newTestBackend(t)
@@ -570,15 +915,145 @@ func TestReclaimIfExpiredRetriesImmediatelyWhenObjectVanished(t *testing.T) {
 	}
 
 	key := b.key(locksPrefix, "never-written-lock")
-	release, retryNow, err := b.reclaimIfExpired(ctx, key, "token")
+	attempt, err := b.reclaimIfExpired(ctx, key, "token")
 	if err != nil {
 		t.Fatalf("reclaimIfExpired: %v", err)
 	}
-	if release != nil {
+	if attempt.release != nil {
 		t.Fatalf("expected no release function when the object has vanished")
 	}
-	if !retryNow {
+	if !attempt.retryNow {
 		t.Fatalf("expected retryNow=true when the object has vanished")
+	}
+	if attempt.observed {
+		t.Fatalf("expected observed=false: a vanished object is not evidence of another acquirer")
+	}
+}
+
+// TestTryAcquireOnceReportsObservationPerBranch pins lockAttempt.observed at
+// each of tryAcquireOnce's branches, against the real fake backend rather
+// than by constructing a lockAttempt value directly: the evidence a wait
+// ultimately reports as contention (see waitCeilingErr) must come from these
+// functions actually answering the backend's responses, not from a value a
+// test merely asserts about in isolation.
+func TestTryAcquireOnceReportsObservationPerBranch(t *testing.T) {
+	t.Parallel()
+
+	tests := []tryAcquireOnceObservationCase{
+		{
+			name: "a live unexpired foreign holder is observed",
+			setup: func(t *testing.T, b *Backend, _ *fakeS3, _ string) {
+				t.Helper()
+				seedLockObject(context.Background(), t, b, time.Now().UTC().Add(b.lock.ttl))
+			},
+			wantObserved: true,
+		},
+		{
+			// The object is absent when this call's own create-if-absent PUT
+			// runs, so it succeeds; the armed swap then simulates another
+			// acquirer's write landing before this call's own follow-up
+			// ownership-verifying HEAD, in the same generation of the object
+			// this call itself just created.
+			name: "a foreign token racing in right after our own create is observed",
+			setup: func(t *testing.T, b *Backend, fake *fakeS3, key string) {
+				t.Helper()
+				if err := b.Open(context.Background()); err != nil {
+					t.Fatalf("Open: %v", err)
+				}
+				fake.raceTokenOnNextHead(key, foreignToken)
+			},
+			wantObserved: true,
+		},
+		{
+			// Two real PUTs happen inside this one tryAcquireOnce call: the
+			// initial create-if-absent (which fails against the genuinely
+			// present, expired seeded object) and the post-delete recreate.
+			// Both are forced to precondition-failed here, so the second -
+			// the recreate - loses the race exactly as reclaimIfExpired's own
+			// final branch expects, regardless of which PUT the fault budget
+			// happens to land on first.
+			name: "another creator winning the race for the just-deleted object is observed",
+			setup: func(t *testing.T, b *Backend, fake *fakeS3, key string) {
+				t.Helper()
+				seedLockObject(context.Background(), t, b, time.Now().UTC().Add(-time.Hour))
+				fake.failNext(key, http.MethodPut, http.StatusPreconditionFailed, 2)
+			},
+			wantObserved: true,
+		},
+		{
+			name: "the object vanishing between our failed create and our HEAD is not observed",
+			setup: func(t *testing.T, b *Backend, fake *fakeS3, key string) {
+				t.Helper()
+				seedLockObject(context.Background(), t, b, time.Now().UTC().Add(b.lock.ttl))
+				fake.failNext(key, http.MethodHead, http.StatusNotFound, 1)
+			},
+			wantRetryNow: true,
+		},
+		{
+			name: "a successful claim on an empty bucket is not observed",
+			setup: func(t *testing.T, b *Backend, _ *fakeS3, _ string) {
+				t.Helper()
+				if err := b.Open(context.Background()); err != nil {
+					t.Fatalf("Open: %v", err)
+				}
+			},
+			wantRelease: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assertTryAcquireOnceObservation(t, tc)
+		})
+	}
+}
+
+// tryAcquireOnceObservationCase is one row of
+// TestTryAcquireOnceReportsObservationPerBranch's table: setup arranges the
+// fake and the Backend's lock object into the state that reaches one
+// tryAcquireOnce branch, and the want fields describe that branch's expected
+// lockAttempt.
+type tryAcquireOnceObservationCase struct {
+	setup        func(t *testing.T, b *Backend, fake *fakeS3, key string)
+	name         string
+	wantObserved bool
+	wantRetryNow bool
+	wantRelease  bool
+}
+
+// assertTryAcquireOnceObservation runs one row's body: build a fresh Backend
+// and fake, arrange tc's precondition via tc.setup, call tryAcquireOnce once,
+// and assert every field of the returned lockAttempt against tc's want
+// fields, releasing the lock afterward if one was acquired. Split out of
+// TestTryAcquireOnceReportsObservationPerBranch purely to stay under the
+// funlen budget; the two together still cover the same five rows.
+func assertTryAcquireOnceObservation(t *testing.T, tc tryAcquireOnceObservationCase) {
+	t.Helper()
+	fake := newFakeS3()
+	b := newTestBackendWithFake(t, fake)
+	b.lock = testLockTiming(time.Minute)
+	key := b.key(locksPrefix, lockObject)
+
+	tc.setup(t, b, fake, key)
+
+	attempt, err := b.tryAcquireOnce(context.Background(), key, "our-token")
+	if err != nil {
+		t.Fatalf("tryAcquireOnce: %v", err)
+	}
+	if attempt.observed != tc.wantObserved {
+		t.Errorf("attempt.observed = %v, want %v", attempt.observed, tc.wantObserved)
+	}
+	if attempt.retryNow != tc.wantRetryNow {
+		t.Errorf("attempt.retryNow = %v, want %v", attempt.retryNow, tc.wantRetryNow)
+	}
+	if gotRelease := attempt.release != nil; gotRelease != tc.wantRelease {
+		t.Errorf("attempt.release != nil = %v, want %v", gotRelease, tc.wantRelease)
+	}
+	if attempt.release != nil {
+		if err := attempt.release(); err != nil {
+			t.Errorf("release: %v", err)
+		}
 	}
 }
 
@@ -591,10 +1066,15 @@ func TestReclaimIfExpiredRetriesImmediatelyWhenObjectVanished(t *testing.T) {
 // for the entire waitCeiling window; this test shrinks waitCeiling so the
 // spin (if unbounded) would produce a very large number of requests in a
 // short, deterministic window, and confirms both that Lock still terminates
-// with errS3LockWaitTimeout (not a raw transport/context error leaking out)
-// and that the number of PUT attempts against the lock key stays in the tens
-// rather than growing to the thousands an unbounded spin would produce over
-// the same window.
+// (not a raw transport/context error leaking out) and that the number of PUT
+// attempts against the lock key stays in the tens rather than growing to the
+// thousands an unbounded spin would produce over the same window.
+//
+// The terminal error is errS3LockWaitNoHolderObserved, not errS3LockWaitTimeout:
+// this fixture never produces a completed observation of another acquirer -
+// every create sees the object present, every HEAD sees it missing, a
+// self-contradicting sequence a conforming backend never sustains - so there
+// is no holder for "retry when the other run finishes" to be advice about.
 func TestLockAcquireBoundsImmediateRetrySpin(t *testing.T) {
 	t.Parallel()
 	fake := newFakeS3()
@@ -618,8 +1098,8 @@ func TestLockAcquireBoundsImmediateRetrySpin(t *testing.T) {
 	_, err := b.Lock(ctx)
 	elapsed := time.Since(start)
 
-	if !errors.Is(err, errS3LockWaitTimeout) {
-		t.Fatalf("expected errS3LockWaitTimeout, got %v", err)
+	if !errors.Is(err, errS3LockWaitNoHolderObserved) {
+		t.Fatalf("expected errS3LockWaitNoHolderObserved, got %v", err)
 	}
 	// A generous upper margin over waitCeiling: it only needs to catch a
 	// genuine hang regression, not pin down the exact backoff-jitter tail.

@@ -37,7 +37,9 @@ type lockTiming struct {
 	// the caller originally acquired the lock with.
 	releaseTimeout time.Duration
 	// waitCeiling bounds the total time acquireLock spends contending for
-	// the lock before giving up with errS3LockWaitTimeout.
+	// the lock before giving up - with errS3LockWaitTimeout if this wait
+	// ever observed another acquirer holding the lock, or
+	// errS3LockWaitNoHolderObserved otherwise (see waitCeilingErr).
 	waitCeiling time.Duration
 	// backoffBase and backoffCap bound the full-jitter exponential backoff
 	// between failed acquisition attempts.
@@ -90,24 +92,24 @@ func (b *Backend) acquireLock(ctx context.Context, key string) (func() error, er
 	// all for the entire waitCeiling window.
 	var consecutiveRetryNow int
 
+	// observedHolder records whether ANY attempt during this wait completed
+	// an observation that another acquirer holds the lock - see lockAttempt
+	// and waitCeilingErr for what counts. It accumulates before the switch
+	// below so every branch (including retryNow's continue) contributes,
+	// and it is never reset: one observation anywhere in the wait is enough
+	// to classify the eventual timeout as contention rather than an
+	// unreachable backend.
+	var observedHolder bool
+
 	for attempt := 0; ; attempt++ {
-		release, retryNow, err := b.tryAcquireOnce(waitCtx, key, token)
+		res, err := b.tryAcquireOnce(waitCtx, key, token)
+		observedHolder = observedHolder || res.observed
 		switch {
 		case err != nil:
-			// An in-flight S3 call can fail with a raw transport error
-			// (e.g. "context deadline exceeded") the instant waitCtx's
-			// timeout fires, before ever reaching the backoff select
-			// below. Once waitCtx is done, classify why: a caller
-			// cancellation must still surface as such (so the exit-code
-			// taxonomy maps a Ctrl-C to ExitInterrupt), while a ceiling
-			// that fired on its own becomes errS3LockWaitTimeout.
-			if waitCtx.Err() != nil {
-				return nil, waitCeilingErr(ctx)
-			}
-			return nil, err
-		case release != nil:
-			return release, nil
-		case retryNow:
+			return nil, acquireLockAttemptErr(ctx, waitCtx, observedHolder, err)
+		case res.release != nil:
+			return res.release, nil
+		case res.retryNow:
 			consecutiveRetryNow++
 			if consecutiveRetryNow <= maxImmediateLockRetries {
 				continue
@@ -121,32 +123,66 @@ func (b *Backend) acquireLock(ctx context.Context, key string) (func() error, er
 		default:
 			consecutiveRetryNow = 0
 		}
-		if err := b.lockBackoff(ctx, waitCtx, attempt); err != nil {
+		if err := b.lockBackoff(ctx, waitCtx, attempt, observedHolder); err != nil {
 			return nil, err
 		}
 	}
 }
 
+// acquireLockAttemptErr classifies a failed attempt's error inside
+// acquireLock's loop. It is split out purely to keep acquireLock under the
+// cyclomatic-complexity budget: it is one classification step, not a
+// decision point of its own.
+//
+// An in-flight S3 call can fail with a raw transport error (e.g. "context
+// deadline exceeded") the instant waitCtx's timeout fires, before ever
+// reaching the backoff select in lockBackoff. Once waitCtx is done, classify
+// why: a caller cancellation must still surface as such (so the exit-code
+// taxonomy maps a Ctrl-C to ExitInterrupt); otherwise, waitCeilingErr decides
+// by observed - whether some earlier attempt in this wait already produced a
+// completed observation of another acquirer - not by whether this particular
+// attempt happened to end in an error, since the ceiling lands inside an
+// in-flight attempt about as often as inside a backoff sleep (see
+// waitCeilingErr's doc comment for why that ordering matters). A live waitCtx
+// means the error is this attempt's own, unrelated to the ceiling, and is
+// returned unclassified.
+func acquireLockAttemptErr(ctx, waitCtx context.Context, observed bool, err error) error {
+	if waitCtx.Err() != nil {
+		return waitCeilingErr(ctx, observed, err)
+	}
+	return err
+}
+
+// lockAttempt describes what one create-or-reclaim step learned. The zero
+// value means "this attempt proved nothing": a new return path that forgets
+// to set observed degrades to "contention not proven", never to a false
+// claim that another acquirer was seen. release and a non-nil error are
+// mutually exclusive: acquireLock's loop checks err before release, so a
+// producer that returned both would silently drop the closure, leaking the
+// heartbeat goroutine and the lock object until its TTL elapses. No current
+// path returns both.
+type lockAttempt struct {
+	release  func() error // non-nil once this call holds the lock
+	retryNow bool         // the object vanished between our PUT and the HEAD; retry with no backoff
+	observed bool         // the backend answered that another acquirer has it
+}
+
 // tryAcquireOnce performs a single create-or-reclaim step against the lock
 // object. opCtx bounds all the S3 calls made during this step (the shared
-// wait-ceiling context). It returns a non-nil release function on success;
-// retryNow=true when the object vanished between the failed create and the
-// follow-up HEAD, so the caller should retry immediately without sleeping
-// out a backoff interval; or an error.
-func (b *Backend) tryAcquireOnce(opCtx context.Context, key, token string) (func() error, bool, error) {
+// wait-ceiling context). See lockAttempt for what the returned value means;
+// a non-nil error means the step itself failed rather than merely losing the
+// race.
+func (b *Backend) tryAcquireOnce(opCtx context.Context, key, token string) (lockAttempt, error) {
 	deadline := time.Now().UTC().Add(b.lock.ttl)
 	putErr := b.putLock(opCtx, key, token, deadline, true)
 	if putErr == nil {
-		release, ok, err := b.claim(opCtx, key, token)
-		if err != nil || ok {
-			return release, false, err
-		}
-		// Another writer's create raced in between our PUT and the
-		// verifyOwner HEAD; back off and retry.
-		return nil, false, nil
+		// claim itself decides whether this counts as an observation of
+		// another acquirer (a foreign token raced in ahead of us) or a
+		// successful claim; either way it is this step's whole answer.
+		return b.claim(opCtx, key, token)
 	}
 	if !errors.Is(putErr, errS3PreconditionFailed) {
-		return nil, false, putErr
+		return lockAttempt{}, putErr
 	}
 	return b.reclaimIfExpired(opCtx, key, token)
 }
@@ -154,26 +190,35 @@ func (b *Backend) tryAcquireOnce(opCtx context.Context, key, token string) (func
 // reclaimIfExpired runs after a failed create-if-absent PUT: it HEADs the
 // existing object and, if its TTL has elapsed, reclaims it (delete then
 // recreate under our token). See tryAcquireOnce for the return contract.
-func (b *Backend) reclaimIfExpired(opCtx context.Context, key, token string) (func() error, bool, error) {
+//
+// Observing an expired holder is deliberately NOT recorded as observed: an
+// expired lock is ours to take, not evidence that another acquirer holds it.
+// Three outcomes below do count: a live, unexpired holder; another creator
+// winning the race for the object this call just deleted; or, via the
+// recreate's own call into claim, a foreign token found on the object this
+// call just recreated - the post-reclaim counterpart to claim's own
+// fresh-create race (see claim's doc comment).
+func (b *Backend) reclaimIfExpired(opCtx context.Context, key, token string) (lockAttempt, error) {
 	headers, headErr := b.client.headObject(opCtx, key)
 	switch {
 	case errors.Is(headErr, errS3NotFound):
 		// The holder released (or its create raced with a delete) right
 		// after our precondition failure: retry the create immediately.
-		return nil, true, nil
+		return lockAttempt{retryNow: true}, nil
 	case headErr != nil:
-		return nil, false, headErr
+		return lockAttempt{}, headErr
 	}
 
 	if !lockExpired(headers, b.lock.ttl) {
-		// The holder is still live: back off and retry later.
-		return nil, false, nil
+		// The holder is still live: back off and retry later. This is the
+		// primary contention signal.
+		return lockAttempt{observed: true}, nil
 	}
 
 	// The holder's TTL has elapsed: reclaim by deleting unconditionally and
 	// recreating the object with a fresh deadline under our token.
 	if err := b.client.deleteObject(opCtx, key); err != nil {
-		return nil, false, err
+		return lockAttempt{}, err
 	}
 	reclaimDeadline := time.Now().UTC().Add(b.lock.ttl)
 	putErr := b.putLock(opCtx, key, token, reclaimDeadline, true)
@@ -181,23 +226,30 @@ func (b *Backend) reclaimIfExpired(opCtx context.Context, key, token string) (fu
 		return b.claim(opCtx, key, token)
 	}
 	if !errors.Is(putErr, errS3PreconditionFailed) {
-		return nil, false, putErr
+		return lockAttempt{}, putErr
 	}
-	// Somebody else's create won the race for the just-deleted object.
-	return nil, false, nil
+	// Somebody else's create won the race for the object this call just
+	// deleted: that creator is another acquirer we observed, even though
+	// the reclaim itself lost.
+	return lockAttempt{observed: true}, nil
 }
 
 // claim verifies that the lock object this call just wrote is still ours
 // (guarding against a concurrent writer racing in between the PUT and this
-// check) and, if so, starts the heartbeat and returns the release closure.
-func (b *Backend) claim(opCtx context.Context, key, token string) (func() error, bool, error) {
+// check) and, if so, starts the heartbeat and returns the release closure. A
+// foreign token found on the object counts as observing another acquirer,
+// covering both callers: the fresh-create race and the post-reclaim race.
+func (b *Backend) claim(opCtx context.Context, key, token string) (lockAttempt, error) {
 	ours, err := b.verifyOwner(opCtx, key, token)
-	if err != nil || !ours {
-		return nil, false, err
+	if err != nil {
+		return lockAttempt{}, err
+	}
+	if !ours {
+		return lockAttempt{observed: true}, nil
 	}
 	//nolint:contextcheck // startHeartbeat's release closure deliberately builds its own fresh
 	// context instead of reusing opCtx: opCtx may already be canceled by the time release runs.
-	return b.startHeartbeat(key, token), true, nil
+	return lockAttempt{release: b.startHeartbeat(key, token)}, nil
 }
 
 // verifyOwner reports whether the lock object's recorded token matches
@@ -259,28 +311,98 @@ func generateLockToken() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
-// waitCeilingErr classifies why the wait-ceiling context ended. If the
-// caller's own context was canceled or hit its deadline, that error is
-// propagated unchanged so the exit-code taxonomy still maps a caller Ctrl-C
-// to ExitInterrupt; only a ceiling that fired while the caller is still live
-// becomes errS3LockWaitTimeout.
-func waitCeilingErr(parent context.Context) error {
+// waitCeilingErr classifies why the wait-ceiling context ended. The
+// discriminator is positive evidence, not timing: observed reports whether
+// any attempt during this wait completed an answer from the backend that
+// another acquirer holds the lock (see lockAttempt), accumulated by
+// acquireLock across the whole wait and never reset - one observation
+// anywhere in the wait is enough. inFlight is the raw error the attempt in
+// progress when the ceiling fired returned, if any; it is consulted only
+// when observed is false.
+//
+// The check order is load-bearing:
+//
+//  1. parent.Err() != nil: the caller's own context was canceled or hit its
+//     deadline first. That error is propagated unchanged, regardless of
+//     observed or inFlight, so the exit-code taxonomy still maps a caller
+//     Ctrl-C to ExitInterrupt.
+//  2. observed: some attempt in this wait already produced a completed
+//     answer that another acquirer holds the lock. This is genuine
+//     contention: errS3LockWaitTimeout. Checked before inFlight,
+//     deliberately: the acquisition loop alternates an attempt and a
+//     backoff sleep, so the ceiling lands inside an in-flight attempt about
+//     as often as inside a sleep, and ordinary contention therefore ends
+//     with inFlight non-nil about as often as it ends with inFlight nil.
+//     Testing inFlight first would misclassify ordinary contention as an
+//     unreachable backend purely on where the ceiling happened to land.
+//  3. inFlight != nil: the ceiling fired with a request still outstanding
+//     and no prior observation - errS3LockWaitNoHolderObserved, wrapping
+//     inFlight for diagnostic context.
+//  4. otherwise: the ceiling fired during a backoff sleep with no prior
+//     observation at all - a misbehaving backend that never once produced
+//     a usable answer (e.g. a create-if-absent PUT that keeps answering
+//     412 while a follow-up HEAD keeps reporting the object missing).
+//     Also errS3LockWaitNoHolderObserved, with no cause to wrap.
+//
+// RESIDUAL: stale evidence, and only in the hanging/silent case. An
+// attempt's error only ever reaches this function once the ceiling has
+// already fired - acquireLockAttemptErr returns any attempt error
+// unclassified while waitCtx is still live, so a backend that keeps
+// answering, even with failures, never gets this far (see the next
+// paragraph). The residual is real only when this run observed a holder
+// once, early in the wait, and the backend then goes silent - hangs, or
+// stops answering at all - for the rest of the wait: errS3LockWaitTimeout
+// still reports contention in that case, since it claims "at some point
+// during this wait the backend told us another acquirer had it", never "the
+// backend was healthy when we gave up".
+// TestLockAcquireTimesOutAfterObservationThenSilence (lock_test.go) is this
+// residual's executable proof: an observed holder followed by a HEAD that
+// never answers again until the ceiling.
+//
+// A backend that answers only with failures is a different case, not this
+// residual: any attempt error while the wait ceiling is still live ends the
+// whole acquisition immediately (acquireLockAttemptErr's own live-waitCtx
+// branch), so a HEAD/PUT/DELETE that comes back with its own 5xx surfaces
+// that call's own errS3*Failed sentinel directly, not either wait-ceiling
+// one. It only reaches errS3LockWaitNoHolderObserved in the narrower case
+// where that attempt - including its own internal client-level retries - is
+// still unresolved once the ceiling has already elapsed. Either way the
+// class is identical, since errS3*Failed already carries
+// helpers.ErrCacheBackendUnavailable on its own.
+// TestLockAcquireSurfacesAHardFailureOverTheCeiling (lock_test.go) is this
+// paragraph's executable proof.
+//
+// The cause is rendered with %v, never %w: this sentinel describes why work
+// ended, so leaving context.DeadlineExceeded/context.Canceled reachable
+// through errors.Is here would hand a hostile or dead endpoint the interrupt
+// exit code instead of the network one, since exitcode.FromError checks
+// cancellation first.
+func waitCeilingErr(parent context.Context, observed bool, inFlight error) error {
 	if err := parent.Err(); err != nil {
 		return err
 	}
-	return errS3LockWaitTimeout
+	if observed {
+		return errS3LockWaitTimeout
+	}
+	if inFlight != nil {
+		//nolint:errorlint // deliberately %v, not %w: see the doc comment above.
+		return fmt.Errorf("%w: %v", errS3LockWaitNoHolderObserved, inFlight)
+	}
+	return errS3LockWaitNoHolderObserved
 }
 
 // lockBackoff sleeps a full-jitter exponential backoff interval before the
 // next acquisition attempt, honoring waitCtx cancellation. It returns
-// waitCeilingErr(parent) once waitCtx (the shared wait-ceiling context
-// derived from parent) expires.
-func (b *Backend) lockBackoff(parent, waitCtx context.Context, attempt int) error {
+// waitCeilingErr(parent, observed, nil) once waitCtx (the shared
+// wait-ceiling context derived from parent) expires: nil for inFlight
+// because no request is outstanding during a backoff sleep, and observed is
+// acquireLock's own accumulated flag, passed through unchanged.
+func (b *Backend) lockBackoff(parent, waitCtx context.Context, attempt int, observed bool) error {
 	timer := time.NewTimer(helpers.BackoffDelay(b.lock.backoffBase, b.lock.backoffCap, attempt))
 	defer timer.Stop()
 	select {
 	case <-waitCtx.Done():
-		return waitCeilingErr(parent)
+		return waitCeilingErr(parent, observed, nil)
 	case <-timer.C:
 		return nil
 	}

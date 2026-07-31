@@ -470,9 +470,12 @@ bucket that cannot be reached, or that answers a request with a failure of its o
 `4` - retry once the outage clears. A bucket that parses but cannot back the distributed
 lock's mutual-exclusion guarantee (it does not enforce conditional PUT), or an
 `--s3-endpoint` that fails to parse, exits `2` - no retry helps; the configuration itself
-has to change. A bucket that is reachable and usable but whose lock this run does not
-acquire before its own wait ceiling elapses exits `8` - normally because another run holds
-it. See "Exit codes" below for the exact messages to grep for.
+has to change. A bucket whose lock this run does not acquire before its own wait ceiling
+elapses exits `8` only when this run actually saw another acquirer holding that lock
+during the wait; a wait that reached the bucket but never got that answer - an endpoint
+that never replies, replies only with failures, or contradicts itself - exits `4` instead,
+alongside the other unreachable-backend cases. See "Exit codes" below for the exact
+messages to grep for.
 
 ## Security / Trust model
 
@@ -632,7 +635,7 @@ pipelines can branch on failure type without parsing log output:
 |    5 | Install-time failure (unsafe archive/symlink content, empty file, missing artifact cache)                                                                                         |
 |    6 | Lockfile error (missing, invalid, or mismatched with requirements)                                                                                                                |
 |    7 | Artifact-integrity failure (content does not authenticate against its naming sha256, or the digest is malformed)                                                                  |
-|    8 | Cache contention (the cache lock is held elsewhere, or was not acquired before this run's wait ceiling elapsed)                                                                   |
+|    8 | Cache contention (the cache lock is held elsewhere, or the S3 lock's wait ceiling elapsed after this run observed another holder)                                                 |
 |  130 | Interrupted (a caught SIGINT, or the caller's own context canceled)                                                                                                               |
 
 Exit `7` covers content that failed to authenticate against the sha256 that
@@ -661,15 +664,19 @@ conditional PUT, so the distributed lock cannot guarantee mutual exclusion),
 `cache backend unavailable` (exit `4` - the backend could not be reached, or
 answered with a failure that is not this program's own doing), `another
 process holds the cache` (exit `8` - a local Bolt file open timed out against
-another process's held lock, or the S3 lock's wait ceiling elapsed before this
-run acquired it), and `another instance is running` (exit `8` - a second local
-run found the lock already held and refused to start immediately).
+another process's held lock, or the S3 lock's wait ceiling elapsed after this
+run observed another acquirer holding it), and `another instance is running`
+(exit `8` - a second local run found the lock already held and refused to
+start immediately).
 
-On the S3 backend, exit `8` says only that this run did not get the lock
-before its wait ceiling elapsed - normally another run holds it, though a
-bucket that accepts connections and then never answers can surface the same
-way. If exit `8` repeats with no other run in flight, check the endpoint
-rather than waiting.
+On the S3 backend, exit `8` means this run saw another acquirer holding the
+cache lock at some point during the wait - not that the backend was still
+healthy when the wait gave up, since one observation early in the wait is
+enough even if the backend answers nothing at all for the rest of it. A run
+that never got such an answer from the bucket in the first place - one that
+accepts connections and never replies, replies only with failures, or
+contradicts itself about whether the lock object exists - exits `4` with
+`cache backend unavailable` instead.
 
 ## Metrics
 

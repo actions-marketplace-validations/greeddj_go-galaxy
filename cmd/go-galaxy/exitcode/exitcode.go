@@ -55,11 +55,13 @@ const (
 	// holder. This is a contention class, distinct from ExitNetwork: the
 	// operator's actionable remedy is to retry, possibly after the other
 	// holder finishes, rather than to treat it as a dead or misconfigured
-	// backend. Disclosed, not hidden: the S3 producer's wait-ceiling arm can
-	// report this class even when the attempt that ended the wait actually
-	// failed for a live-backend transport reason racing the ceiling's own
-	// expiry - see internal/cache/s3/variables.go's partition doc for the
-	// mechanism and what bounds how narrow that window is.
+	// backend. On the S3 backend this class requires positive evidence: the
+	// run observed another acquirer holding the lock at least once before its
+	// wait ceiling elapsed. A wait that never obtained that evidence
+	// classifies as ExitNetwork instead, so an endpoint that answered nothing
+	// is never reported as a busy one - see internal/cache/s3/variables.go's
+	// partition doc and lock.go's waitCeilingErr for the mechanism and its
+	// one disclosed residual.
 	ExitCacheBusy = 8
 	// ExitInterrupt indicates the run was canceled, either by a caught
 	// signal falling back to this default or by context cancellation.

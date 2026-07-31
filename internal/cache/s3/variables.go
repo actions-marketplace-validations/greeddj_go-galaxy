@@ -27,28 +27,36 @@ import (
 //     carries it too: ensureBucket already resolves a bucket-absent HEAD by
 //     creating the bucket, so the only way this sentinel escapes is a PUT or
 //     list answered 404 mid-run against a bucket Open already ensured exists -
-//     a remote-state condition, not a configuration one.
+//     a remote-state condition, not a configuration one. errS3LockWaitNoHolderObserved
+//     carries it too: acquireLock's wait-ceiling arm (waitCeilingErr, lock.go)
+//     reports it when the wait ceiling elapses without this wait ever having
+//     observed another acquirer holding the lock - covering an endpoint that
+//     accepts connections and never replies, and one that contradicts itself
+//     about whether the lock object exists. A backend that instead answers
+//     only with failures does not reach this sentinel the same way: its own
+//     errS3*Failed sentinel surfaces directly while the wait ceiling is
+//     still live (see waitCeilingErr's own doc comment), landing in this
+//     class anyway only because errS3*Failed already carries it.
 //   - helpers.ErrCacheBackendUnusable: the configured backend cannot provide a
 //     guarantee this tool requires - discovered once at Open, against a probe
 //     this tool controls, rather than against arbitrary remote state, and
 //     never retryable - a backend that does not enforce conditional PUT
 //     (errS3ConditionalPutUnsupported) or an endpoint that fails to parse into
 //     a usable host (errS3InvalidEndpoint).
-//   - helpers.ErrCacheBusy: the lock is held by another holder and the wait
-//     ceiling elapsed before it was released (errS3LockWaitTimeout).
-//     DISCLOSED, not hidden: acquireLock's wait-ceiling arm
-//     (waitCeilingErr, lock.go) reports this class whenever the shared
-//     wait-ceiling context has itself expired by the time an attempt's error
-//     is observed, even when that attempt's own failure was actually a
-//     transport-level one (helpers.ErrCacheBackendUnavailable) that merely
-//     raced the ceiling rather than being caused by it - a genuine dead
-//     backend can therefore surface as mere contention if its failure lands
-//     in the last stretch of the wait ceiling. The window this can happen in
-//     is bounded by one request's own worst-case latency before it errors
-//     out, dominated under default configuration by
-//     helpers.FetchDefaultTimeout's 30-second ResponseHeaderTimeout - narrow
-//     against lockWaitCeiling's 5 minutes, but not zero. This is registered
-//     separately, not fixed here.
+//   - helpers.ErrCacheBusy: this acquisition observed another acquirer
+//     holding the lock - a live, unexpired holder; a foreign token on the
+//     object this call just wrote; or another creator winning the race for
+//     an expired holder's just-deleted object - and the wait ceiling
+//     elapsed before it was released (errS3LockWaitTimeout). The verdict
+//     rests on an answer the backend gave during this wait, never on what
+//     happened to be in flight when the ceiling fired, so it does not
+//     depend on where in the acquisition loop the ceiling falls. It claims
+//     that the backend told us, at some point during this wait, that
+//     someone else had it - not that the backend was still healthy when the
+//     wait ended. A wait that never obtained such an answer - an endpoint
+//     that accepts connections and never replies, or contradicts itself -
+//     ends with errS3LockWaitNoHolderObserved instead, which carries
+//     helpers.ErrCacheBackendUnavailable.
 //   - Nothing, split into three honest groups rather than one: (a)
 //     errS3ClientNil, errS3HTTPClientNil, and errS3BucketEmpty guard
 //     construction-time state no operator input reaches; (b) errS3LockLost is
@@ -62,8 +70,9 @@ import (
 //     token is not a cache-backend condition this partition is about.
 //     errS3NotFound and errS3PreconditionFailed are consumed as control flow
 //     by their own callers - Has, LoadStore, LoadProjectRegistry, and the
-//     lock protocol (lock.go:148, lock.go:183, backend.go:295) - rather than
-//     being classified; errS3NotFound is not always fully absorbed, though:
+//     lock protocol's tryAcquireOnce/reclaimIfExpired (lock.go) and
+//     probeConditionalPut (backend.go) - rather than being classified;
+//     errS3NotFound is not always fully absorbed, though:
 //     Artifacts.Fetch surfaces it to a cache-hit arm
 //     (internal/galaxy/collections/install.go's fetchArtifact) whose object
 //     vanished between Has and Fetch, where it becomes a per-collection cause
@@ -80,8 +89,12 @@ import (
 // first, making the classification depend on FromError's own ordering rather
 // than on what the sentinel means.
 var (
-	errS3LockLost                  = errors.New("s3 lock ownership was lost to another holder")
-	errS3LockWaitTimeout           = fmt.Errorf("%w: s3 lock wait ceiling exceeded", helpers.ErrCacheBusy)
+	errS3LockLost                 = errors.New("s3 lock ownership was lost to another holder")
+	errS3LockWaitTimeout          = fmt.Errorf("%w: s3 lock wait ceiling exceeded", helpers.ErrCacheBusy)
+	errS3LockWaitNoHolderObserved = fmt.Errorf(
+		"%w: s3 lock wait ceiling elapsed without ever observing a lock holder",
+		helpers.ErrCacheBackendUnavailable,
+	)
 	errS3TokenGeneration           = errors.New("s3 lock token generation failed")
 	errS3NotFound                  = errors.New("s3 object not found")
 	errS3BucketNotFound            = fmt.Errorf("%w: s3 bucket not found", helpers.ErrCacheBackendUnavailable)
@@ -144,7 +157,9 @@ const (
 	// context.
 	lockReleaseTimeout = 30 * time.Second
 	// lockWaitCeiling bounds the total time acquireLock will spend
-	// contending for the lock before giving up with errS3LockWaitTimeout.
+	// contending for the lock before giving up - with errS3LockWaitTimeout
+	// if this wait ever observed another acquirer holding the lock, or
+	// errS3LockWaitNoHolderObserved otherwise (see waitCeilingErr).
 	lockWaitCeiling = 5 * time.Minute
 	// lockBackoffBase and lockBackoffCap bound the full-jitter exponential
 	// backoff between failed acquisition attempts.

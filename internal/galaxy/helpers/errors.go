@@ -79,7 +79,8 @@ var (
 	// ErrCacheBusy indicates the cache is held by another holder and could
 	// not be acquired within this backend's own ceiling - true of a local
 	// Bolt open timeout and of the S3 distributed lock's wait-ceiling
-	// timeout alike; neither names the other's mechanism.
+	// timeout against an observed holder alike; neither names the other's
+	// mechanism.
 	ErrCacheBusy = errors.New("another process holds the cache")
 	// ErrCacheBackendUnavailable indicates a remote cache backend could not
 	// be reached, or answered a request with a failure that is not this
