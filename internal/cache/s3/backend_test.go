@@ -531,6 +531,65 @@ func TestReadAllCappedAcceptsNormal(t *testing.T) {
 	})
 }
 
+// TestReadObjectReclassifiesOversizedStateObject proves readObject's own
+// reclassification of a size-ceiling failure, not readAllCapped's: a state
+// object that overruns helpers.StateObjectMaxCompressedSize fails with
+// helpers.ErrStateObjectTooLarge and NOT helpers.ErrArtifactTooLarge, even
+// though readAllCapped's own cap failure - the one readObject wraps - always
+// carries the latter (TestReadAllCappedRejectsOversizedRaw pins that shape
+// directly). This exercises readObject through a real HTTP round trip
+// against the fake S3 server, at the actual production ceiling, rather than
+// readAllCapped's own custom-cap unit tests above.
+//
+// The positive control lives in the same test, against the same key prefix
+// and the same readObject call: a within-cap object at a neighboring key
+// round-trips its exact bytes with a nil error, proving the oversized case
+// above is a real refusal readObject's success path could otherwise have
+// taken, not evidence the fixture never reaches that path at all.
+func TestReadObjectReclassifiesOversizedStateObject(t *testing.T) {
+	b := newTestBackend(t)
+	ctx := t.Context()
+	if err := b.Open(ctx); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	// One byte past the compressed-size ceiling, on the non-gzip path, so the
+	// fixture needs no gzip compression/decompression work to trip the cap.
+	oversizedKey := b.key(statePrefix, "oversized-state-object.json")
+	oversized := make([]byte, helpers.StateObjectMaxCompressedSize+1)
+	if err := b.client.putObject(ctx, oversizedKey, bytes.NewReader(oversized), int64(len(oversized)),
+		"application/json", "", nil, false, ""); err != nil {
+		t.Fatalf("putObject(oversized): %v", err)
+	}
+
+	_, err := b.readObject(ctx, oversizedKey)
+	if !errors.Is(err, helpers.ErrStateObjectTooLarge) {
+		t.Fatalf("readObject(oversized) error = %v, want errors.Is(err, ErrStateObjectTooLarge) = true", err)
+	}
+	// The load-bearing partition check: readAllCapped's own cap failure
+	// always carries helpers.ErrArtifactTooLarge, since it is built on the
+	// same sizeLimitedReader an artifact download uses. This must be false
+	// only because readObject deliberately breaks that errors.Is chain by
+	// rendering the cause with %v instead of %w.
+	if errors.Is(err, helpers.ErrArtifactTooLarge) {
+		t.Fatalf("readObject(oversized) error = %v, want errors.Is(err, ErrArtifactTooLarge) = false", err)
+	}
+
+	withinCapKey := b.key(statePrefix, "within-cap-state-object.json")
+	want := []byte(`{"projects":{}}`)
+	if err := b.client.putObject(ctx, withinCapKey, bytes.NewReader(want), int64(len(want)),
+		"application/json", "", nil, false, ""); err != nil {
+		t.Fatalf("putObject(within cap): %v", err)
+	}
+	got, err := b.readObject(ctx, withinCapKey)
+	if err != nil {
+		t.Fatalf("readObject(within cap) error = %v, want nil", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("readObject(within cap) = %q, want %q", got, want)
+	}
+}
+
 // gzipBytes gzip-encodes data using the standard library's compress/gzip,
 // which produces the same on-the-wire format klauspost/pgzip reads, so it
 // stands in for a real state object without pulling the production gzip

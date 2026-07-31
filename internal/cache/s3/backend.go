@@ -302,7 +302,9 @@ func (b *Backend) probeConditionalPut(ctx context.Context) error {
 // readObject downloads a cache-state object (the S3 snapshot or the project
 // registry) and transparently inflates gzip data if needed, bounding both the
 // raw and inflated size so a planted oversized or high-ratio gzip object
-// cannot be buffered whole into memory.
+// cannot be buffered whole into memory. A size-ceiling failure is reported to
+// the caller as helpers.ErrStateObjectTooLarge, not readAllCapped's own
+// helpers.ErrArtifactTooLarge - see the reclassification below for why.
 func (b *Backend) readObject(ctx context.Context, key string) ([]byte, error) {
 	resp, err := b.client.getObject(ctx, key)
 	if err != nil {
@@ -314,12 +316,24 @@ func (b *Backend) readObject(ctx context.Context, key string) ([]byte, error) {
 	data, err := readAllCapped(resp.Body, resp.Header, key,
 		helpers.StateObjectMaxCompressedSize, helpers.StateObjectMaxDecompressedSize)
 	if err != nil {
-		// Name the offending key on the size ceiling specifically: it is the
-		// one failure mode here that is actionable (a planted or corrupt
-		// object), so it is worth the extra context. errors.Is still finds
-		// helpers.ErrArtifactTooLarge through the %w wrap.
+		// Reclassify the size ceiling into its own state-object sentinel,
+		// deliberately breaking the errors.Is chain to
+		// helpers.ErrArtifactTooLarge: readAllCapped's cap failure carries
+		// that sentinel only because it is built on the same sizeLimitedReader
+		// an artifact download uses, but a state object is not an artifact.
+		// Leaving both sentinels reachable here would let this error carry two
+		// exit classes at once - ExitCacheCorrupt from the state-object
+		// sentinel and ExitNetwork from the artifact one - leaving
+		// exitcode.FromError's own check order to decide which wins rather
+		// than what the error means. (Neither sentinel belongs to the three
+		// cache-backend classes variables.go's partition governs; this is
+		// FromError's rule, not that one.) The cause is rendered with %v, not
+		// %w, so only errors.Is matching against helpers.ErrArtifactTooLarge is
+		// dropped; the "read N bytes, limit is M" detail readAllCapped's own
+		// error carries still renders into the message.
 		if errors.Is(err, helpers.ErrArtifactTooLarge) {
-			return nil, fmt.Errorf("state object %s: %w", key, err)
+			//nolint:errorlint // deliberately %v, not %w: see the comment above.
+			return nil, fmt.Errorf("%w: state object %s: %v", helpers.ErrStateObjectTooLarge, key, err)
 		}
 		return nil, err
 	}

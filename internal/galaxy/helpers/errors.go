@@ -176,6 +176,16 @@ var (
 	// so silently substituting an empty registry would make it believe
 	// nothing is reachable and delete every installed collection.
 	ErrCorruptProjectRegistry = errors.New("corrupt project registry")
+	// ErrStateObjectTooLarge indicates a persisted cache-state object (the S3
+	// snapshot or project registry) could not be read within its declared
+	// size ceiling - StateObjectMaxCompressedSize on the wire,
+	// StateObjectMaxDecompressedSize once inflated - so a planted oversized
+	// or high-ratio gzip object is never buffered whole into memory. Like
+	// ErrCorruptProjectRegistry, the object this names cannot be trusted by
+	// anyone and must be discarded (or replaced by clearing the cache)
+	// before a run can proceed; it is never retried, since the same bytes
+	// would overrun the same ceiling again.
+	ErrStateObjectTooLarge = errors.New("cache state object exceeds the maximum allowed size")
 
 	// ErrOfflineMode indicates a network operation was attempted in offline mode.
 	ErrOfflineMode = errors.New("offline mode is enabled, network access is forbidden")

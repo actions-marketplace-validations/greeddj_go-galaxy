@@ -625,18 +625,19 @@ RUN go-galaxy warm --frozen
 `go-galaxy` exits with a class-specific code instead of a flat `1`, so CI
 pipelines can branch on failure type without parsing log output:
 
-| Code | Meaning                                                                                                                                                                           |
-|-----:|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-|    0 | Success                                                                                                                                                                           |
-|    1 | Generic failure (does not match any class below)                                                                                                                                  |
-|    2 | Usage or configuration error (invalid flags, requirements, `ansible.cfg`, an unsupported collection source, or a cache backend that cannot be used as configured)                 |
-|    3 | Dependency resolution failure (conflicts, missing candidates, cycle)                                                                                                              |
-|    4 | Network or Galaxy API failure (timeouts, stalled transfers, metadata and cache-state deadlines, offline-mode violations, or an unreachable cache backend)                         |
-|    5 | Install-time failure (unsafe archive/symlink content, empty file, missing artifact cache)                                                                                         |
-|    6 | Lockfile error (missing, invalid, or mismatched with requirements)                                                                                                                |
-|    7 | Artifact-integrity failure (content does not authenticate against its naming sha256, or the digest is malformed)                                                                  |
-|    8 | Cache contention (the cache lock is held elsewhere, or the S3 lock's wait ceiling elapsed after this run observed another holder)                                                 |
-|  130 | Interrupted (a caught SIGINT, or the caller's own context canceled)                                                                                                               |
+| Code | Meaning                                                                                                                                                                                                                                                                                                                                  |
+|-----:|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+|    0 | Success                                                                                                                                                                                                                                                                                                                                  |
+|    1 | Generic failure (does not match any class below)                                                                                                                                                                                                                                                                                         |
+|    2 | Usage or configuration error (invalid flags, requirements, `ansible.cfg`, an unsupported collection source, an explicit namespace conflicting with a dotted collection name, an unsupported cache-snapshot schema version, an unreadable or unparseable project requirements file, or a cache backend that cannot be used as configured) |
+|    3 | Dependency resolution failure (conflicts, missing candidates, cycle)                                                                                                                                                                                                                                                                     |
+|    4 | Network or Galaxy API failure (timeouts, stalled transfers, metadata and cache-state deadlines, a versions listing that exceeded its page ceiling, a response body that exceeded its size ceiling (an artifact, a metadata document, or a bucket listing), offline-mode violations, or an unreachable cache backend)                                                                        |
+|    5 | Install-time failure (unsafe archive/symlink content, empty file, missing artifact cache)                                                                                                                                                                                                                                                |
+|    6 | Lockfile error (missing, invalid, or mismatched with requirements)                                                                                                                                                                                                                                                                       |
+|    7 | Artifact-integrity failure (content does not authenticate against its naming sha256, or the digest is malformed)                                                                                                                                                                                                                         |
+|    8 | Cache contention (the cache lock is held elsewhere, or the S3 lock's wait ceiling elapsed after this run observed another holder)                                                                                                                                                                                                        |
+|    9 | Persisted cache state is corrupt or oversized and must be discarded (a project registry that fails to decode, or a state object that exceeds its size ceiling)                                                                                                                                                                           |
+|  130 | Interrupted (a caught SIGINT, or the caller's own context canceled)                                                                                                                                                                                                                                                                      |
 
 Exit `7` covers content that failed to authenticate against the sha256 that
 named it - a lockfile pin, a Galaxy server's declared digest, a cache sidecar,
@@ -677,6 +678,19 @@ that never got such an answer from the bucket in the first place - one that
 accepts connections and never replies, replies only with failures, or
 contradicts itself about whether the lock object exists - exits `4` with
 `cache backend unavailable` instead.
+
+Exit `9` means the persisted cache state itself - not this reader's ability
+to interpret it - cannot be trusted by anyone and must be discarded before the
+run can proceed: grep the run's output for `corrupt project registry` or
+`cache state object exceeds the maximum allowed size` to tell which one fired.
+The remedy is mechanical and safe to automate: delete the offending object (or
+the whole cache directory / bucket prefix), or rerun with `--clear-cache`,
+then rerun the command. This is deliberately distinct from exit `2`: a
+snapshot a newer binary wrote in a schema this one cannot safely interpret
+(`unsupported snapshot schema version`) exits `2` instead, since the snapshot
+itself is not damaged, only unreadable by this particular binary, and
+discarding it would destroy a shared cache other, newer runners still depend
+on.
 
 ## Metrics
 

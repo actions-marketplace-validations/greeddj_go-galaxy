@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/greeddj/go-galaxy/cmd/go-galaxy/exitcode"
 	cacheBackend "github.com/greeddj/go-galaxy/internal/cache"
 	cacheManager "github.com/greeddj/go-galaxy/internal/galaxy/cache"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
@@ -129,7 +130,11 @@ const testManifestJSON = `{
 // TestStartAbortsOnCorruptRegistryBeforeDeletion proves that a project
 // registry file which fails to decode aborts cleanup.Start with a wrapped
 // helpers.ErrCorruptProjectRegistry, through the real local cache backend,
-// lock, and Bolt store - not just at the LoadProjectRegistry unit level.
+// lock, and Bolt store - not just at the LoadProjectRegistry unit level. It
+// also proves the error this real pipeline returns classifies as
+// exitcode.ExitCacheCorrupt: exitcode.FromError is exercised against the
+// genuine wrap chain Start builds here, rather than a synthetic sentinel
+// constructed directly in a test.
 //
 // A registry file has to be unparseable JSON to exercise this path at all,
 // so it cannot also encode a valid project entry pointing at the seeded
@@ -157,6 +162,9 @@ func TestStartAbortsOnCorruptRegistryBeforeDeletion(t *testing.T) {
 	err := Start(t.Context(), cfg, runtime)
 	if !errors.Is(err, helpers.ErrCorruptProjectRegistry) {
 		t.Fatalf("expected ErrCorruptProjectRegistry, got %v", err)
+	}
+	if got := exitcode.FromError(err); got != exitcode.ExitCacheCorrupt {
+		t.Fatalf("exitcode.FromError(err) = %d, want ExitCacheCorrupt (%d)", got, exitcode.ExitCacheCorrupt)
 	}
 	assertManifestSurvives(t, installDir)
 }

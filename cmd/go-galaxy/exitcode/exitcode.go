@@ -63,6 +63,25 @@ const (
 	// partition doc and lock.go's waitCeilingErr for the mechanism and its
 	// one disclosed residual.
 	ExitCacheBusy = 8
+	// ExitCacheCorrupt indicates the persisted cache state itself - a project
+	// registry that exists but fails to decode, or a state object that could
+	// not be read within its declared size ceiling - cannot be used by
+	// anyone and must be discarded before the run can proceed. The remedy is
+	// mechanical and safe to automate: delete the offending object (or the
+	// whole cache directory / bucket prefix) or rerun with --clear-cache,
+	// then rerun the command.
+	//
+	// This is deliberately distinct from ExitUsage: helpers.ErrUnsupportedSchemaVersion
+	// - a snapshot a newer binary wrote in a shape this one cannot safely
+	// interpret - classifies ExitUsage instead of this class, because the
+	// snapshot itself is not damaged, only unreadable by this particular
+	// reader. Discarding it would destroy a shared cache the newer binary's
+	// other runners still depend on, and the actual remedy is an environment
+	// change (a newer binary, or pointing at a different cache), which is
+	// what ExitUsage means. See isCacheCorruptError and
+	// isRecordedStateUsageError below for the two classifiers this split
+	// lives in.
+	ExitCacheCorrupt = 9
 	// ExitInterrupt indicates the run was canceled, either by a caught
 	// signal falling back to this default or by context cancellation.
 	ExitInterrupt = 130
@@ -75,10 +94,10 @@ const signalExitBase = 128
 // FromError classifies err into an exit code by matching it against the
 // known sentinel errors declared in internal/galaxy/helpers, in priority
 // order: cancellation, integrity, lock, install, network, cache contention,
-// resolution, then usage/config. The first matching class wins; unrecognized
-// errors fall back to ExitError. The per-class checks are split into helpers
-// below to keep this function short; each still short-circuits on the first
-// match.
+// cache corruption, resolution, then usage/config. The first matching class
+// wins; unrecognized errors fall back to ExitError. The per-class checks are
+// split into helpers below to keep this function short; each still
+// short-circuits on the first match.
 func FromError(err error) int {
 	switch {
 	case err == nil:
@@ -111,8 +130,9 @@ func FromError(err error) int {
 }
 
 // fromErrorTail classifies err by the rule FromError's own doc comment
-// states - network, cache contention, resolution, then usage/config, in that
-// order - falling back to ExitError when nothing matches. Split out of
+// states - network, cache contention, cache corruption, resolution, then
+// usage/config, in that order - falling back to ExitError when nothing
+// matches. Split out of
 // FromError purely to stay under the cyclomatic-complexity budget:
 // golangci-lint's cyclop reported "calculated cyclomatic complexity for
 // function FromError is 11, max is 10" once the cache-contention case was
@@ -145,6 +165,21 @@ func fromErrorTail(err error) int {
 	// it, which would swallow a contention failure that happens to wrap one.
 	case isCacheBusyError(err):
 		return ExitCacheBusy
+	// isCacheCorruptError sits directly below isCacheBusyError and above
+	// isResolutionError. It must stay below FromError's own
+	// isLockError/isInstallError cases (checked ahead of fromErrorTail
+	// entirely), for the identical reason isCacheBusyError's own comment
+	// gives: if either of this class's sentinels is ever joined behind
+	// helpers.ErrInstallationFailed, isInstallError must claim the tree
+	// first and classify it ExitInstall, the same per-collection
+	// aggregation rule every class in this function already follows. It
+	// sits above isResolutionError and isUsageError so that isUsageError's
+	// broad fs.ErrNotExist arm can never claim a state-object read that
+	// happens to wrap an os-level cause ahead of this more specific verdict
+	// - the same defensive posture isCacheBusyError's own position takes
+	// against that identical arm.
+	case isCacheCorruptError(err):
+		return ExitCacheCorrupt
 	case isResolutionError(err):
 		return ExitResolution
 	case isUsageError(err):
@@ -152,6 +187,35 @@ func fromErrorTail(err error) int {
 	default:
 		return ExitError
 	}
+}
+
+// isCacheCorruptError reports whether err says the persisted cache state
+// itself - not this reader's ability to interpret it - cannot be used by
+// anyone and must be discarded before the run can proceed: a project
+// registry that exists but fails to decode (helpers.ErrCorruptProjectRegistry),
+// or a state object that could not be read within its declared size ceiling
+// (helpers.ErrStateObjectTooLarge). helpers.ErrUnsupportedSchemaVersion is
+// deliberately not a member: a schema version newer than this binary
+// understands means the snapshot was written correctly by a newer binary,
+// not that its bytes are damaged, so isRecordedStateUsageError classifies it
+// instead - see that function's own doc comment for the flip side of this
+// distinction.
+//
+// No error tree produced by this program carries both this class and the
+// network class today: a size-ceiling failure is only ever detected after
+// its GET has already answered with a 200 (Client.getObject returns a
+// response to readObject only on that status; every other status or
+// transport failure returns an error before readAllCapped ever runs), and a
+// decode failure never touches the network at all. Neither sentinel carries
+// a context.DeadlineExceeded/context.Canceled cause either, so
+// cache.deadlineError (the StateObjectDeadline decorator's normalizer) never
+// relabels one into helpers.ErrStateObjectDeadline - its own precondition
+// requires the error being normalized to already carry one of those two
+// signals, which a size-cap rejection or a corrupt-registry decode error
+// never does.
+func isCacheCorruptError(err error) bool {
+	return errors.Is(err, helpers.ErrCorruptProjectRegistry) ||
+		errors.Is(err, helpers.ErrStateObjectTooLarge)
 }
 
 // isIntegrityError reports whether err is an artifact-digest authentication
@@ -198,6 +262,17 @@ func isFileIntegrityError(err error) bool {
 }
 
 // isArchiveError reports whether err is an unsafe-archive sentinel.
+// helpers.ErrArchiveTooManyEntries and helpers.ErrArchiveDuplicateEntry are
+// listed here alongside the other seven for consistency, not because either
+// changes classification: both are raised only from inside
+// archive.ExtractTarGz, which is reached only from a per-collection install
+// or warm worker (extractCollection's unpack, directly or through the
+// extracted store's ingest, and warmVerifyAndEnsure on the warm path), so
+// both always reach isInstallError already joined behind
+// helpers.ErrInstallationFailed - isFileIntegrityError's match on
+// that headline alone already classifies the tree ExitInstall, via
+// short-circuit evaluation, without isInstallError ever calling into this
+// function for it.
 func isArchiveError(err error) bool {
 	return errors.Is(err, helpers.ErrArchivePathContainsSymlinkComponent) ||
 		errors.Is(err, helpers.ErrArchiveExceedsMaxSize) ||
@@ -205,7 +280,9 @@ func isArchiveError(err error) bool {
 		errors.Is(err, helpers.ErrArchiveEntryIsTooLarge) ||
 		errors.Is(err, helpers.ErrArchiveEntryEscapesDestination) ||
 		errors.Is(err, helpers.ErrArchiveEntryIsAbsolutePath) ||
-		errors.Is(err, helpers.ErrArchiveEntryHasEmptyName)
+		errors.Is(err, helpers.ErrArchiveEntryHasEmptyName) ||
+		errors.Is(err, helpers.ErrArchiveTooManyEntries) ||
+		errors.Is(err, helpers.ErrArchiveDuplicateEntry)
 }
 
 // isSymlinkError reports whether err is an unsafe-symlink sentinel. This
@@ -214,6 +291,10 @@ func isArchiveError(err error) bool {
 // tree itself - a component of cfg.DownloadPath, most dangerously
 // ansible_collections or a namespace/name directory beneath it, that
 // resolves outside the collections root os.Root enforces.
+// helpers.ErrUnsafeRemovalPath sits here too: cleanup's removeInstalled
+// raises it for the identical meaning on the delete side - a computed
+// removal path that failed a containment check against its expected root -
+// so an install-side escape and a cleanup-side one classify identically.
 func isSymlinkError(err error) bool {
 	return errors.Is(err, helpers.ErrSymlinkTargetResolvesToSelf) ||
 		errors.Is(err, helpers.ErrSymlinkTargetEscapesDestination) ||
@@ -221,7 +302,8 @@ func isSymlinkError(err error) bool {
 		errors.Is(err, helpers.ErrSymlinkTargetResolvesToRoot) ||
 		errors.Is(err, helpers.ErrSymlinkTargetIsAbsolute) ||
 		errors.Is(err, helpers.ErrSymlinkTargetIsEmpty) ||
-		errors.Is(err, helpers.ErrCollectionsPathEscape)
+		errors.Is(err, helpers.ErrCollectionsPathEscape) ||
+		errors.Is(err, helpers.ErrUnsafeRemovalPath)
 }
 
 // isNetworkError reports whether err is a network or Galaxy API sentinel,
@@ -287,8 +369,21 @@ func isNetworkError(err error) bool {
 // download deadline, a persisted cache-state operation's own deadline, a bare
 // download failure, a cache backend that could not be reached or answered
 // with a failure that is not this program's own doing
-// (helpers.ErrCacheBackendUnavailable), or a server-list walk aborting on a
-// credential failure or an exhausted retry budget.
+// (helpers.ErrCacheBackendUnavailable), a server-list walk aborting on a
+// credential failure or an exhausted retry budget, or any capped response
+// body that overran its ceiling before it finished streaming
+// (helpers.ErrArtifactTooLarge - helpers.NewSizeLimitedReader raises it for
+// an artifact download, a Galaxy metadata document over MetadataMaxSize, and
+// an S3 list or batch-delete response over S3ListMaxSize alike). The one
+// capped body that does not land here is a persisted cache-state object,
+// which carries helpers.ErrStateObjectTooLarge instead, since a state object
+// this program cannot read is a corrupt-cache condition rather than a
+// network one. The size-ceiling class is deliberately not
+// ExitIntegrity: it is a size ceiling, not a digest that failed to match -
+// the same shape as the deadline sentinels above it, unaggregated here and
+// ExitInstall once joined behind helpers.ErrInstallationFailed by
+// isFileIntegrityError's match on that headline, identical to every other
+// per-collection cause.
 func isTransportError(err error) bool {
 	return errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, helpers.ErrArtifactDownloadDeadline) ||
@@ -298,23 +393,32 @@ func isTransportError(err error) bool {
 		errors.Is(err, helpers.ErrDownloadFailed) ||
 		errors.Is(err, helpers.ErrCacheBackendUnavailable) ||
 		errors.Is(err, helpers.ErrGalaxyAuthFailed) ||
-		errors.Is(err, helpers.ErrGalaxyServerUnavailable)
+		errors.Is(err, helpers.ErrGalaxyServerUnavailable) ||
+		errors.Is(err, helpers.ErrArtifactTooLarge)
 }
 
 // isMetadataFetchError reports whether err is a Galaxy metadata-response
 // sentinel: metadata that could not be fetched (including one whose fetch
-// exceeded its own deadline) or parsed into the shape this tool expects.
+// exceeded its own deadline, or whose versions list kept reporting more
+// pages than the page ceiling allows) or parsed into the shape this tool
+// expects.
 func isMetadataFetchError(err error) bool {
 	return errors.Is(err, helpers.ErrMetadataUnavailable) ||
 		errors.Is(err, helpers.ErrMetadataIsNil) ||
 		errors.Is(err, helpers.ErrMissingDownloadURL) ||
 		errors.Is(err, helpers.ErrVersionsPayloadEmpty) ||
 		errors.Is(err, helpers.ErrVersionsPayloadUnsupported) ||
+		errors.Is(err, helpers.ErrVersionsPagingExceeded) ||
 		errors.Is(err, helpers.ErrMetadataFetchDeadline)
 }
 
 // isResolutionError reports whether err is a dependency-resolution sentinel
-// (conflicting constraints, missing candidates, or a cycle in the graph).
+// (conflicting constraints, missing candidates, a cycle in the graph, or a
+// dependency map key that is not a valid "namespace.name" FQDN). The last
+// one, helpers.ErrInvalidDependencyKey, is malformed graph input discovered
+// while walking a collection's declared dependencies - no retry repairs it,
+// the same reasoning that makes every other member of this class a
+// resolution failure rather than a network or install one.
 func isResolutionError(err error) bool {
 	return errors.Is(err, helpers.ErrNoVersionSatisfiesConstraints) ||
 		errors.Is(err, helpers.ErrConflictingRootConstraints) ||
@@ -324,7 +428,8 @@ func isResolutionError(err error) bool {
 		errors.Is(err, helpers.ErrMissingResolvedParent) ||
 		errors.Is(err, helpers.ErrMissingResolvedDependency) ||
 		errors.Is(err, helpers.ErrMissingResolvedRoot) ||
-		errors.Is(err, helpers.ErrLoadMetadataFailed)
+		errors.Is(err, helpers.ErrLoadMetadataFailed) ||
+		errors.Is(err, helpers.ErrInvalidDependencyKey)
 }
 
 // isUsageError reports whether err is a configuration or CLI-input sentinel
@@ -339,12 +444,20 @@ func isUsageError(err error) bool {
 }
 
 // isConfigUsageError reports whether err is a config/environment-level usage
-// sentinel. helpers.ErrCacheBackendUnusable belongs here on the same
+// sentinel or a recorded-state usage sentinel. Split into two sub-checks
+// purely to stay under the cyclomatic-complexity budget; the two together
+// still cover the exact same sentinel set.
+func isConfigUsageError(err error) bool {
+	return isEnvironmentUsageError(err) || isRecordedStateUsageError(err)
+}
+
+// isEnvironmentUsageError reports whether err is a config/environment-level
+// usage sentinel. helpers.ErrCacheBackendUnusable belongs here on the same
 // predicate as every other member: the remedy is a configuration change and
 // no retry can succeed, since the configured backend cannot provide a
 // guarantee this tool requires (or cannot be addressed at all) regardless of
 // how many times the same request is retried.
-func isConfigUsageError(err error) bool {
+func isEnvironmentUsageError(err error) bool {
 	return errors.Is(err, fs.ErrNotExist) ||
 		errors.Is(err, helpers.ErrConfigIsNil) ||
 		errors.Is(err, helpers.ErrS3EmptyCreds) ||
@@ -354,6 +467,31 @@ func isConfigUsageError(err error) bool {
 		errors.Is(err, helpers.ErrAnsibleConfigNotFound) ||
 		errors.Is(err, helpers.ErrWarmCacheDisabled) ||
 		errors.Is(err, helpers.ErrCacheBackendUnusable)
+}
+
+// isRecordedStateUsageError reports whether err is a usage sentinel about
+// something this program persisted or tracks on a caller's behalf and cannot
+// use as recorded, where the fix is an operator action, never a retry.
+//
+// helpers.ErrUnsupportedSchemaVersion belongs here rather than in
+// isCacheCorruptError for the identical reason that function's own doc
+// comment states from the other side: a schema version newer than this
+// binary understands describes this reader, not the snapshot - the object
+// was written correctly by a newer binary this one cannot safely interpret,
+// so the remedy is an environment change (a newer binary, or a different
+// cache), not discarding data a newer runner still depends on.
+//
+// helpers.ErrProjectRequirementsUnreadable belongs here on the same
+// predicate: a recorded project's requirements file this program cannot
+// read or parse, whatever the underlying cause, is something an operator
+// must fix by hand - editing or restoring the file - not something retrying
+// the same run can repair. A missing file and a malformed one both classify
+// here: isEnvironmentUsageError's fs.ErrNotExist arm already covers the
+// former, and this arm covers every other unreadable-or-unparseable cause
+// the same way, so both converge on the same exit code.
+func isRecordedStateUsageError(err error) bool {
+	return errors.Is(err, helpers.ErrUnsupportedSchemaVersion) ||
+		errors.Is(err, helpers.ErrProjectRequirementsUnreadable)
 }
 
 // isGalaxyServerConfigError reports whether err is a Galaxy server
@@ -394,14 +532,20 @@ func isGalaxyServerPolicyError(err error) bool {
 		errors.Is(err, helpers.ErrAmbiguousGalaxyToken)
 }
 
-// isCollectionNameUsageError reports whether err is an invalid-collection-name/format sentinel.
+// isCollectionNameUsageError reports whether err is an invalid-collection-name/format
+// sentinel. helpers.ErrConflictingNamespaceName joins this class for the
+// same reason: an explicit namespace given alongside a dotted collection
+// name is a malformed requirements.yml entry, raised while parsing
+// requirements before any resolution or network work starts, exactly like
+// every other member here.
 func isCollectionNameUsageError(err error) bool {
 	return errors.Is(err, helpers.ErrEmptyCollectionName) ||
 		errors.Is(err, helpers.ErrInvalidCollectionName) ||
 		errors.Is(err, helpers.ErrInvalidCollectionKey) ||
 		errors.Is(err, helpers.ErrUnsupportedCollectionSource) ||
 		errors.Is(err, helpers.ErrUnsupportedCollectionType) ||
-		errors.Is(err, helpers.ErrUnsupportedCollectionFormat)
+		errors.Is(err, helpers.ErrUnsupportedCollectionFormat) ||
+		errors.Is(err, helpers.ErrConflictingNamespaceName)
 }
 
 // isCollectionListUsageError reports whether err is an invalid-collections-list

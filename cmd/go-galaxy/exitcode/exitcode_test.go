@@ -24,6 +24,14 @@ var errTestGeneric = errors.New("some unclassified error")
 // production code never compares against it.
 var errTestSaveFailure = errors.New("simulated save failure")
 
+// errTestUnreadableCause stands in for a project requirements file's
+// non-fs.ErrNotExist read/parse failure (a malformed YAML document, not a
+// missing file) in fromErrorCases's "project requirements unreadable,
+// non-fs.ErrNotExist cause" row. Declared as a static package-level
+// sentinel, rather than an inline errors.New call, purely to satisfy err113 -
+// production code never compares against it.
+var errTestUnreadableCause = errors.New("yaml: unexpected end of file")
+
 // exitCase is one FromError classification expectation.
 type exitCase struct {
 	err      error
@@ -187,6 +195,93 @@ var fromErrorCases = []exitCase{
 		name:     "another instance is running",
 		err:      fmt.Errorf("%w: ctx", helpers.ErrAnotherInstanceIsRunning),
 		wantCode: ExitCacheBusy,
+	},
+	{
+		name:     "corrupt project registry",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrCorruptProjectRegistry),
+		wantCode: ExitCacheCorrupt,
+	},
+	{
+		name:     "state object too large",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrStateObjectTooLarge),
+		wantCode: ExitCacheCorrupt,
+	},
+	{
+		// A newer-than-supported schema version describes this reader, not
+		// damaged bytes: see ExitCacheCorrupt's own doc comment for why this
+		// is ExitUsage rather than ExitCacheCorrupt.
+		name:     "unsupported schema version",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrUnsupportedSchemaVersion),
+		wantCode: ExitUsage,
+	},
+	{
+		// The real production shape wraps a second cause with %w
+		// (fmt.Errorf("%w: %s: %w", ...)); a non-fs.ErrNotExist cause is the
+		// row that actually exercises isConfigUsageError's own arm rather
+		// than the fs.ErrNotExist row already covered elsewhere in this
+		// table - this is what proves the same-condition/two-codes split
+		// documented on isConfigUsageError is gone.
+		name:     "project requirements unreadable, non-fs.ErrNotExist cause",
+		err:      fmt.Errorf("%w: requirements.yml: %w", helpers.ErrProjectRequirementsUnreadable, errTestUnreadableCause),
+		wantCode: ExitUsage,
+	},
+	{
+		name:     "conflicting namespace name",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrConflictingNamespaceName),
+		wantCode: ExitUsage,
+	},
+	{
+		name:     "versions paging exceeded",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrVersionsPagingExceeded),
+		wantCode: ExitNetwork,
+	},
+	{
+		name:     "invalid dependency key",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrInvalidDependencyKey),
+		wantCode: ExitResolution,
+	},
+	{
+		name:     "unsafe removal path",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrUnsafeRemovalPath),
+		wantCode: ExitInstall,
+	},
+	{
+		name:     "archive duplicate entry",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrArchiveDuplicateEntry),
+		wantCode: ExitInstall,
+	},
+	{
+		name:     "archive too many entries",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrArchiveTooManyEntries),
+		wantCode: ExitInstall,
+	},
+	{
+		// Paired with "artifact too large, aggregated" below: this row is the
+		// bare/unaggregated shape, reached wherever a capped body overruns
+		// its ceiling outside any per-collection worker - an oversized Galaxy
+		// metadata document at resolve time, or an oversized S3 listing or
+		// batch-delete response during an init-time ClearFiles - so no
+		// helpers.ErrInstallationFailed headline exists to fold it behind. It
+		// classifies ExitNetwork: a size ceiling, not a digest mismatch, so
+		// ExitIntegrity is deliberately not the answer.
+		name:     "artifact too large, bare",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrArtifactTooLarge),
+		wantCode: ExitNetwork,
+	},
+	{
+		// Paired with "artifact too large, bare" above: the identical
+		// sentinel, joined behind collections.Start's own
+		// helpers.ErrInstallationFailed headline the way a per-collection
+		// worker's failure actually reaches FromError, classifies
+		// ExitInstall instead - proving the two rows exercise different
+		// classifiers (isTransportError bare vs. isFileIntegrityError's
+		// headline match once aggregated) rather than the same one twice.
+		name: "artifact too large, aggregated behind installation failure",
+		err: errors.Join(
+			fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed),
+			helpers.ErrArtifactTooLarge,
+		),
+		wantCode: ExitInstall,
 	},
 }
 
@@ -655,6 +750,101 @@ func TestCanceledOutranksCacheBusy(t *testing.T) {
 	joined := errors.Join(context.Canceled, helpers.ErrCacheBusy)
 	if got := FromError(joined); got != ExitInterrupt {
 		t.Errorf("FromError(joined) = %d, want %d", got, ExitInterrupt)
+	}
+}
+
+// TestCacheCorruptOutranksUsage pins that isCacheCorruptError is checked
+// before isUsageError in fromErrorTail, mirroring TestCacheBusyOutranksUsage:
+// a helpers.ErrCorruptProjectRegistry wrapped around fs.ErrNotExist
+// (isUsageError's own broad fs.ErrNotExist arm) still classifies as
+// ExitCacheCorrupt, not ExitUsage.
+func TestCacheCorruptOutranksUsage(t *testing.T) {
+	err := fmt.Errorf("%w: %w", helpers.ErrCorruptProjectRegistry, fs.ErrNotExist)
+	if got := FromError(err); got != ExitCacheCorrupt {
+		t.Errorf("FromError(err) = %d, want %d", got, ExitCacheCorrupt)
+	}
+}
+
+// TestCanceledOutranksCacheCorrupt pins FromError's top-level priority: a
+// context.Canceled sentinel still outranks a joined
+// helpers.ErrCorruptProjectRegistry, since the cancellation case is checked
+// before fromErrorTail is ever reached.
+func TestCanceledOutranksCacheCorrupt(t *testing.T) {
+	joined := errors.Join(context.Canceled, helpers.ErrCorruptProjectRegistry)
+	if got := FromError(joined); got != ExitInterrupt {
+		t.Errorf("FromError(joined) = %d, want %d", got, ExitInterrupt)
+	}
+}
+
+// genericSentinels is every sentinel this package deliberately leaves
+// unclassified - FromError falls back to ExitError for each - rather than by
+// omission. A fixed table naming both the sentinel and the reason it stays
+// generic: an error absorbed at its own producer before ever reaching
+// FromError, or an internal nil guard with no operator-actionable meaning.
+// The rest of this file is this table's own positive control: the same
+// FromError demonstrably returns every other exit code for every other
+// sentinel it recognizes, so ExitError here is a verdict, not the absence of
+// a check.
+//
+// This table covers internal/galaxy/helpers only. The exported sentinels
+// declared outside it - internal/galaxy/extracted's ErrStoreNotConfigured,
+// ErrSHAEmpty, and ErrSHAUnsafe - are deliberately not matched by name
+// anywhere in this package, on a predicate rather than a list: every path
+// that raises one runs inside a per-collection install or warm worker, so it
+// arrives joined behind helpers.ErrInstallationFailed and isFileIntegrityError
+// already classifies the tree ExitInstall. Matching them by name would mean
+// importing internal/galaxy/extracted into the CLI's classifier for no
+// behavioral change. If one of them is ever surfaced outside such a worker it
+// silently becomes ExitError, which is the case this note exists to make
+// visible.
+//
+//nolint:gochecknoglobals // a fixed table consumed by one test, not mutable shared state
+var genericSentinels = []struct {
+	err  error
+	name string
+}{
+	{
+		// Consumed at the producer: internal/cache/s3/backend.go's LoadStore
+		// and internal/galaxy/store/snapshot.go's Load both resolve this
+		// sentinel into a drop-and-rebuild (a fresh empty store, nil error)
+		// before it can ever propagate to a caller, let alone FromError.
+		name: "outdated schema version",
+		err:  helpers.ErrOutdatedSchemaVersion,
+	},
+	{
+		// Consumed at the producer: internal/galaxy/cleanup/cleanup.go warns
+		// and continues past a MANIFEST.json that fails to parse, treating it
+		// as neither a reachability root nor a deletion candidate rather than
+		// returning it from Start.
+		name: "corrupt manifest",
+		err:  helpers.ErrCorruptManifest,
+	},
+	{
+		// An internal nil guard in store.Save with no operator meaning: a nil
+		// *bbolt.DB reaching Save is this program's own bookkeeping bug, not
+		// a condition a CI pipeline should branch on.
+		name: "bolt db is nil",
+		err:  helpers.ErrDbNil,
+	},
+	{
+		// An internal nil guard in store.Save with no operator meaning,
+		// identical reasoning to "bolt db is nil" above.
+		name: "store is nil",
+		err:  helpers.ErrStoreNil,
+	},
+}
+
+// TestGenericSentinelsMapToExitError pins every deliberately-unclassified
+// sentinel to ExitError, wrapped so the check goes through errors.Is rather
+// than requiring exact identity.
+func TestGenericSentinelsMapToExitError(t *testing.T) {
+	for _, tt := range genericSentinels {
+		t.Run(tt.name, func(t *testing.T) {
+			wrapped := fmt.Errorf("%w: ctx", tt.err)
+			if got := FromError(wrapped); got != ExitError {
+				t.Errorf("FromError(%v) = %d, want %d", wrapped, got, ExitError)
+			}
+		})
 	}
 }
 
