@@ -223,19 +223,60 @@ func parseDependencies(deps map[string]string) (map[string]string, error) {
 // operator- or program-chosen - it usually is not. MetadataProvider's own
 // Universe/Dependencies/resolveRoot (internal/galaxy/collections/provider.go)
 // issue one root-metadata fetch plus one version-detail fetch per
-// (package, version) the solver explores, and that package set comes from
-// extractDependencies(info) - server-declared metadata - with no step,
-// package, or version cap anywhere in internal/galaxy/solver, so that
-// multiplier is server-chosen and unbounded too. What actually distinguishes
-// this loop is that it is the one place a SINGLE LOGICAL metadata operation
-// (fetch the whole versions list) is split into a server-chosen NUMBER of
-// requests against ONE URL - a shared budget is coherent there, because it
-// is still bounding one operation. The resolver's request count is also
-// server-chosen, but it is a sequence of DISTINCT operations (a different
-// package or version each time), for which a shared budget is not
-// defensible and is deliberately not applied - each of those requests pays
-// its own separate helpers.MetadataFetchDeadline instead, and the walk
-// aborts on the very first one that expires.
+// (package, version) the solver explores. That multiplier spans two axes -
+// which packages get explored, and how many versions each explored package
+// has - and both are effectively uncapped. The package axis: the packages
+// the solver explores are seeded by the operator's own roots, parsed out of
+// requirements.yml by buildSolverRequirements, and then extended
+// transitively, without limit, by extractDependencies(info) -
+// server-declared metadata naming further packages to fetch. The version
+// axis: parseVersionsPayload returns every entry a page's data/results array
+// carries, with no truncation to the versionLimit requested, so a server
+// that answers a limit=100 request with far more than 100 entries has all
+// of them collected regardless. maxVersionPages caps something narrower
+// than "how many versions a package can have": it is the number of
+// REQUESTS loadVersionsListCached will issue enumerating one package's
+// versions (100, after which the loop fails hard via
+// helpers.ErrVersionsPagingExceeded rather than truncating), not the
+// version count those requests carry. The solver does have a step bound,
+// fuelLimit, but at 1,000,000 iterations it is far too large to bound
+// network work in any practical sense - it exists to catch an algorithm
+// defect, not to cap an input. The request count MetadataProvider issues is
+// still server-chosen and effectively unbounded on both axes. What actually
+// distinguishes this loop is that it is the one place a SINGLE LOGICAL
+// metadata operation (fetch the whole versions list) is split into a
+// server-chosen NUMBER of requests against ONE URL - a shared budget is
+// coherent there, because it is still bounding one operation. The
+// resolver's request count is also server-chosen, but it is a sequence of
+// DISTINCT operations (a different package or version each time), for which
+// a shared budget is not defensible and is deliberately not applied - each
+// of those requests pays its own separate helpers.MetadataFetchDeadline
+// instead, and the walk aborts on the very first one that expires.
+//
+// This leaves a residual: a run at the front of that server-chosen request
+// sequence can hold the backend's whole-run exclusive lock (see "Cache
+// backend abstraction" in CLAUDE.md) for as long as the sequence takes, and
+// that residual is known and deliberately accepted rather than capped. A
+// request-count cap bounds the wrong quantity: the server chooses each
+// request's own duration within helpers.MetadataFetchDeadline regardless of
+// how many requests are allowed, so any count generous enough not to break a
+// legitimate large dependency graph still concedes hours of lock hold to a
+// server that stalls every request right up to that per-request ceiling.
+// Capping the resolve would not even bound the hold on its own: installLevels
+// runs under the same lock afterward, paying up to
+// helpers.ArtifactDownloadDeadline per artifact for a collection count
+// written directly into requirements.yml - an independent contributor to the
+// hold, just as uncapped as the resolve. On the shared-cache (S3) backend,
+// reaching the lock at all already requires bucket write access -
+// Backend.Open's conditional-PUT probe and Lock's own acquireLock both write
+// objects, the same trust boundary Backend.LoadStore/LoadProjectRegistry
+// establishes in "Cache backend abstraction" - so a principal holding it can
+// poison the snapshot outright, which is worse than a denial of service. The
+// local backend has no equivalent waiter to starve in the first place: its
+// Lock is a non-blocking flock, and a second run fails immediately with
+// helpers.ErrAnotherInstanceIsRunning rather than waiting for the first to
+// finish. A cap added here would break resolves that work today without
+// bounding the hold time it is meant to fix.
 //
 // Here, the multiplier is bounded at least: maxVersionPages (100) requests
 // at up to helpers.MetadataFetchDeadline (2 minutes) each would be 200

@@ -462,6 +462,23 @@ Artifacts and cache metadata are stored in S3; collections are still installed l
   a local cache directory - the local Bolt snapshot is implicitly trusted for the same
   reason, since writing it already requires local filesystem access to the cache
   directory.
+- On the shared S3 cache, the backend's exclusive lock is held for a whole run, so its
+  hold time is proportional to the work that run requests: a large legitimate install
+  holds it for as long as the install takes, and a run pointed at a slow or hostile
+  Galaxy server - including one named by a requirements.yml `source:` that matches no
+  configured server - can hold it far longer, while other runners sharing the bucket
+  give up waiting and fail. A principal who can run against the shared bucket already
+  holds bucket write credentials: a run against the S3 cache writes to it regardless of
+  what it is asked to do - artifacts, the snapshot, the project registry - and the lock
+  itself is taken by writing an object, so a read-only credential cannot run at all.
+  Restricting bucket write access - the same guidance as the bullet above - is what
+  bounds this too. Give untrusted runs (for example, CI jobs building from an untrusted
+  branch or fork) their own bucket, or a prefix of their own together with a credential
+  restricted to that prefix, or no S3 cache at all, rather than shared-bucket write
+  credentials. `--s3-prefix` on its own is not a boundary: it selects which keys a run
+  reads and writes, not which keys its credential may touch, so a run holding a
+  bucket-wide credential can still write every other prefix - including the lock - no
+  matter what the flag says.
 - Snapshot and project-registry reads are size-capped (a compressed-size ceiling and a
   decompressed-size ceiling), so a hostile-but-writable bucket cannot OOM the process
   with an oversized object or a gzip bomb.

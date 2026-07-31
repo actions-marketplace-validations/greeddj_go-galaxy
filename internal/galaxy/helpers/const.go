@@ -277,7 +277,12 @@ const (
 	// per-request value multiplies across a run instead of bounding it. 15
 	// minutes would be formally protective and practically toothless against
 	// a 1.5 MB response - a link that slow is already pathological long
-	// before the ceiling would ever fire.
+	// before the ceiling would ever fire. This ceiling bounds one request,
+	// never a resolve's total: a resolve's request count is itself
+	// server-chosen, so the total time a resolve can hold the backend lock is
+	// not bounded by this constant - see loadVersionsListCached's doc comment
+	// (internal/galaxy/collections/resolve.go) for why that residual is
+	// accepted rather than capped.
 	//
 	// The versions-list paging loop (loadVersionsListCached) is the one
 	// exception to "one request, one budget": it establishes a single shared
