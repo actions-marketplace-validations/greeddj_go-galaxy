@@ -324,7 +324,13 @@ const (
 	// dead-run sweep and the --clear-cache sweep.
 	ArtifactDownloadTempPrefix = ".download-"
 
-	// FetchDefaultTimeout is the overall HTTP client timeout.
+	// FetchDefaultTimeout is the value --timeout takes when neither the flag
+	// nor its env sources supply one. It bounds time to first byte
+	// (Transport.ResponseHeaderTimeout) and the body watchdog's per-read
+	// inactivity window, making it a no-progress budget rather than a cap on
+	// a whole request or a whole transfer: the live HTTP client carries no
+	// such cap, which is what lets a large artifact keep streaming for as
+	// long as it keeps making progress.
 	FetchDefaultTimeout = 30 * time.Second
 	// FetchDialContextTimeout is the dial timeout for outbound connections.
 	FetchDialContextTimeout = 10 * time.Second

@@ -1,11 +1,17 @@
 package helpers
 
-import "time"
+import (
+	galaxyhelpers "github.com/greeddj/go-galaxy/internal/galaxy/helpers"
+)
 
 const (
-	dirSuffix                   = ".cache/go-galaxy"
-	defaultHomeDir              = "/root"
-	defaultTimeout              = 30 * time.Second
+	dirSuffix      = ".cache/go-galaxy"
+	defaultHomeDir = "/root"
+	// defaultTimeout is only what --timeout advertises as its default; the
+	// value the config layer actually falls back to is
+	// galaxyhelpers.FetchDefaultTimeout, so the flag's help text is derived
+	// from that same constant rather than restating it.
+	defaultTimeout              = galaxyhelpers.FetchDefaultTimeout
 	defaultServerURL            = "https://galaxy.ansible.com"
 	defaultCollectionsPath      = ".collections"
 	defaultRequirementsFilePath = "requirements.yml"
