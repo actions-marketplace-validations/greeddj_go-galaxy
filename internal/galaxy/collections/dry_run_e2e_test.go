@@ -5,8 +5,8 @@ package collections_test
 // live fake Galaxy server: nothing is downloaded, nothing lands in the
 // install tree, the artifact cache, or the extracted store, no install or
 // warmed entry is recorded in the reloaded snapshot, and the backend lock is
-// still taken for the run's whole duration. The snapshot save itself is
-// conditional: it proceeds when a persisted snapshot already existed
+// still taken and still held once the run is mid-resolve. The snapshot save
+// itself is conditional: it proceeds when a persisted snapshot already existed
 // (TestInstallDryRunSavesMetadataCachesWhenSnapshotExists - the metadata
 // caches are reconstructible cache, not this command's product) and is
 // skipped when one did not (TestInstallDryRunDoesNotFabricateASnapshot - a
@@ -169,22 +169,51 @@ func TestInstallDryRunSavesMetadataCachesWhenSnapshotExists(t *testing.T) {
 	}
 }
 
+// dryRunLockObservationCeiling is a liveness ceiling, not a timing margin:
+// every assertion in assertDryRunStillTakesBackendLock is made only after an
+// observed event, so a slow machine makes that helper slower, never wrong.
+// The ceiling fires only when the run genuinely never reaches its resolve,
+// and a run that dies before getting there is caught by the done channel
+// instead, in milliseconds.
+const dryRunLockObservationCeiling = 10 * time.Second
+
 // assertDryRunStillTakesBackendLock proves initInstall's exclusive backend
-// lock is acquired, and held for the run's whole duration, exactly as it is
-// on a real run of whichever command run drives: a Hang fault on the
+// lock is acquired, and is still held once the run is mid-resolve, exactly as
+// it is on a real run of whichever command run drives: a Hang fault on the
 // root-metadata endpoint parks the dry run mid-resolve - well after
-// initInstall's Lock call - and a concurrent lock attempt against the same
-// cache directory must fail for as long as that run is in flight, then
-// succeed once its context is canceled and it unwinds. Shared by
+// initInstall's Lock call - one concurrent lock attempt against the same
+// cache directory must fail while the run is parked there, and the lock must
+// be free again once its context is canceled and it unwinds. Those are two
+// sampled points, not a continuum: nothing here observes the interval between
+// them.
+//
+// Waiting for that mid-resolve moment must never touch the lock itself.
+// store.AcquireLock is non-blocking (LOCK_NB) and initInstall makes exactly
+// one Lock attempt with no retry, so an observer holding the lock even
+// momentarily can hold it in the very window initInstall tries - killing the
+// run it exists to observe, which then never takes the lock at all and leaves
+// the observer to conclude that no lock is ever held. The signal used instead
+// is the fake server's own request counter: dispatchRootMetadata increments it
+// before handleRootMetadata applies the Hang fault, and that request is issued
+// from the resolve, downstream of initInstall's Lock. So a count of at least
+// one means the run is past Lock and cannot proceed until its context is
+// canceled: the only production timer that could unpark it is
+// helpers.MetadataFetchDeadline, two minutes, orders above the gap between
+// that signal and the single lock attempt that follows it.
+//
+// The final acquisition, after the run unwinds, is this fixture's positive
+// control: the same store.AcquireLock call on the same cacheDir succeeds, so
+// the mid-resolve refusal is contention with the run rather than a lock path
+// that would fail for any caller. Shared by
 // TestInstallDryRunStillTakesBackendLock and TestWarmDryRunStillTakesBackendLock,
 // which differ only in which collections.* entry point they drive.
 func assertDryRunStillTakesBackendLock(t *testing.T, run func(context.Context, *config.Config, *infra.Infra) error) {
 	t.Helper()
 	root := t.TempDir()
 	cacheDir := filepath.Join(root, "cache")
-	// Pre-created so the polling loop below never races initInstall's own
-	// os.MkdirAll: every lock attempt it makes is either "lock held elsewhere"
-	// or "lock free", never "parent directory missing".
+	// Pre-created so the lock attempts below never race initInstall's own
+	// os.MkdirAll: each one is either "lock held elsewhere" or "lock free",
+	// never "parent directory missing".
 	if err := os.MkdirAll(cacheDir, helpers.DirMod); err != nil {
 		t.Fatalf("mkdir cacheDir: %v", err)
 	}
@@ -223,37 +252,67 @@ func assertDryRunStillTakesBackendLock(t *testing.T, run func(context.Context, *
 		done <- run(ctx, cfg, runtime)
 	}()
 
-	deadline := time.Now().Add(5 * time.Second)
-	var lockErr error
-	for time.Now().Before(deadline) {
-		release, err := store.AcquireLock(cacheDir)
-		if err == nil {
-			// Raced ahead of initInstall's own Lock call; release immediately
-			// and retry rather than falsely concluding no lock is held.
-			_ = release()
-			time.Sleep(5 * time.Millisecond)
-			continue
-		}
-		lockErr = err
-		break
-	}
-	if lockErr == nil {
-		t.Fatal("expected a concurrent lock attempt to fail while the dry run holds the backend lock, but it kept succeeding")
-	}
-	if !errors.Is(lockErr, helpers.ErrAnotherInstanceIsRunning) {
-		t.Fatalf("expected errors.Is ErrAnotherInstanceIsRunning, got %v", lockErr)
+	waitForResolveInFlight(t, s, done)
+
+	if release, err := store.AcquireLock(cacheDir); err == nil {
+		_ = release()
+		t.Fatal("expected the single concurrent lock attempt to fail while the dry run holds the backend lock, but it succeeded")
+	} else if !errors.Is(err, helpers.ErrAnotherInstanceIsRunning) {
+		// Documentary, not pinned: this line is reachable only when
+		// AcquireLock fails for a reason other than EWOULDBLOCK, which is an
+		// IO failure on the lock path itself rather than anything the code
+		// under test decides. It is kept to tell contention apart from one.
+		t.Fatalf("expected errors.Is ErrAnotherInstanceIsRunning, got %v", err)
 	}
 
 	cancel()
-	if err := <-done; err == nil {
-		t.Fatal("expected the canceled dry run to return an error")
-	}
+	awaitCanceledRun(t, done)
 
 	release, err := store.AcquireLock(cacheDir)
 	if err != nil {
 		t.Fatalf("expected the lock to be free once the dry run unwound, got %v", err)
 	}
 	_ = release()
+}
+
+// waitForResolveInFlight blocks until the fake server has seen the run's
+// root-metadata request, which is the observable proof that the run is past
+// initInstall's Lock and is now parked on the Hang fault. It never touches
+// the backend lock; see assertDryRunStillTakesBackendLock for why an observer
+// that did could kill the run it is observing. A run that returns before
+// reaching its resolve never held the lock at all, so there is nothing left
+// to observe and the caller is told that rather than being left to conclude
+// from a silent timeout that no lock is ever taken.
+func waitForResolveInFlight(t *testing.T, s *fakegalaxy.Server, done <-chan error) {
+	t.Helper()
+	deadline := time.Now().Add(dryRunLockObservationCeiling)
+	for s.Count(fakegalaxy.EndpointRootMetadata) < 1 {
+		select {
+		case runErr := <-done:
+			t.Fatalf("the run returned before it reached its resolve, so it never held the lock to observe: %v", runErr)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the root metadata endpoint received no request within %v", dryRunLockObservationCeiling)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// awaitCanceledRun joins an already-canceled run and requires it to report an
+// error. The join is bounded: an unbounded receive on a run that never
+// unwinds would take the whole test binary down with a "test timed out"
+// panic instead of failing this test by name.
+func awaitCanceledRun(t *testing.T, done <-chan error) {
+	t.Helper()
+	select {
+	case runErr := <-done:
+		if runErr == nil {
+			t.Fatal("expected the canceled dry run to return an error")
+		}
+	case <-time.After(dryRunLockObservationCeiling):
+		t.Fatalf("the dry run did not return within %v after its context was canceled", dryRunLockObservationCeiling)
+	}
 }
 
 // TestInstallDryRunStillTakesBackendLock is assertDryRunStillTakesBackendLock
