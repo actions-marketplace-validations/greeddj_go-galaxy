@@ -406,6 +406,175 @@ func TestPutObjectPreconditionFailedIsNotRetried(t *testing.T) {
 	}
 }
 
+// newRedirectRefusalFixture starts two httptest servers - a front server the
+// returned *Client is configured to talk to, and a target server it must
+// never reach - and builds the *Client from a fresh *http.Client dedicated
+// to this fixture. When redirect is true, the front server answers every
+// request with a 302 to the target; when false, it answers 200 directly, so
+// the identical fixture also serves as this behavior's own positive control.
+// The returned counters record how many requests each server received.
+func newRedirectRefusalFixture(t *testing.T, redirect bool) (*Client, *atomic.Int32, *atomic.Int32) {
+	t.Helper()
+
+	var target atomic.Int32
+	targetSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		target.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(targetSrv.Close)
+
+	var front atomic.Int32
+	frontSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		front.Add(1)
+		if redirect {
+			http.Redirect(w, r, targetSrv.URL+r.URL.Path, http.StatusFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(frontSrv.Close)
+
+	cfg := config.S3CacheConfig{
+		Endpoint:  frontSrv.URL,
+		Bucket:    "test",
+		Region:    "us-east-1",
+		AccessKey: "x",
+		SecretKey: "y",
+		PathStyle: true,
+		Enabled:   true,
+	}
+	c, err := newClient(cfg, frontSrv.Client())
+	if err != nil {
+		t.Fatalf("newClient: %v", err)
+	}
+	return c, &front, &target
+}
+
+// TestClientRefusesEndpointRedirect proves that a redirect answered by the
+// configured S3 endpoint is refused rather than followed: getObject fails
+// with helpers.ErrCacheBackendUnusable and NOT ALSO
+// helpers.ErrCacheBackendUnavailable - the exclusivity variables.go's own
+// partition doc requires of every sentinel that can escape this package,
+// checked here against the actual error tree do() produces for this
+// scenario rather than only against the bare errS3RedirectRefused variable
+// (sentinel_class_test.go's own coverage) - the redirect target never
+// receives a request, and the front endpoint is asked exactly once, proving
+// the refusal is not itself retried as an ordinary transport failure.
+func TestClientRefusesEndpointRedirect(t *testing.T) {
+	t.Parallel()
+	client, frontRequests, targetRequests := newRedirectRefusalFixture(t, true)
+
+	resp, err := client.getObject(context.Background(), "redirect-object")
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	if !errors.Is(err, helpers.ErrCacheBackendUnusable) {
+		t.Fatalf("expected errors.Is(err, helpers.ErrCacheBackendUnusable), got %v", err)
+	}
+	if errors.Is(err, helpers.ErrCacheBackendUnavailable) {
+		t.Fatalf("expected err to NOT also carry helpers.ErrCacheBackendUnavailable "+
+			"(exclusive with helpers.ErrCacheBackendUnusable per variables.go's partition), got %v", err)
+	}
+	// Documentary, not pinned: this cannot be the first failing line, because
+	// any state that lets a request reach the target also makes getObject
+	// succeed (the target answers 200), which the non-nil check above catches
+	// first. It is kept as a direct statement of the containment property the
+	// refusal exists to provide. Reordering the chain to "fix" that would
+	// only make the non-nil check documentary instead.
+	if got := targetRequests.Load(); got != 0 {
+		t.Fatalf("expected zero requests reaching the redirect target, got %d", got)
+	}
+	// Pinned, and not by the same state as the exclusivity check above: a
+	// classifier that retried the refusal would leave the error tree clean
+	// and drive this count to s3RetryMaxAttempts, failing here alone.
+	if got := frontRequests.Load(); got != 1 {
+		t.Fatalf("expected exactly 1 request to the configured endpoint (not retried), got %d", got)
+	}
+}
+
+// TestClientRefusesEndpointRedirectPositiveControl is
+// TestClientRefusesEndpointRedirect's positive control on the identical
+// fixture: with the front server answering 200 instead of redirecting,
+// getObject succeeds. This proves the refusal above exercises the redirect
+// path itself, rather than some other property of the fixture (a bad
+// signature, an unreachable endpoint) that would fail getObject regardless
+// of whether a redirect was ever involved.
+func TestClientRefusesEndpointRedirectPositiveControl(t *testing.T) {
+	t.Parallel()
+	client, frontRequests, targetRequests := newRedirectRefusalFixture(t, false)
+
+	resp, err := client.getObject(context.Background(), "redirect-object")
+	if err != nil {
+		t.Fatalf("expected getObject to succeed against a direct 200 response, got %v", err)
+	}
+	_ = resp.Body.Close()
+	if got := frontRequests.Load(); got != 1 {
+		t.Fatalf("expected exactly 1 request to the configured endpoint, got %d", got)
+	}
+	if got := targetRequests.Load(); got != 0 {
+		t.Fatalf("expected zero requests to the unused redirect target, got %d", got)
+	}
+}
+
+// TestS3RedirectPolicyDoesNotAffectTheSharedClient is the load-bearing test
+// for newClient's copy-not-mutate decision: it builds a single *http.Client,
+// passes it to newClient, and then drives a real redirect through that
+// SAME, original *http.Client - never through the *Client newClient
+// returned. The redirect is still followed and reaches the target exactly
+// once, proving newClient's CheckRedirect assignment landed on a private
+// copy rather than on the caller's own client, which internal/galaxy/fetch
+// shares for Galaxy metadata and artifact downloads and whose own tests
+// depend on the default (redirect-following) behavior.
+func TestS3RedirectPolicyDoesNotAffectTheSharedClient(t *testing.T) {
+	t.Parallel()
+
+	var targetRequests atomic.Int32
+	targetSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		targetRequests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(targetSrv.Close)
+
+	frontSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, targetSrv.URL+r.URL.Path, http.StatusFound)
+	}))
+	t.Cleanup(frontSrv.Close)
+
+	shared := frontSrv.Client()
+
+	cfg := config.S3CacheConfig{
+		Endpoint:  frontSrv.URL,
+		Bucket:    "test",
+		Region:    "us-east-1",
+		AccessKey: "x",
+		SecretKey: "y",
+		PathStyle: true,
+		Enabled:   true,
+	}
+	if _, err := newClient(cfg, shared); err != nil {
+		t.Fatalf("newClient: %v", err)
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, frontSrv.URL+"/probe", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequestWithContext: %v", err)
+	}
+	resp, err := shared.Do(req)
+	if err != nil {
+		t.Fatalf("expected the original, shared client to still follow a redirect, got %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected a 200 from the followed redirect, got %d", resp.StatusCode)
+	}
+	if got := targetRequests.Load(); got != 1 {
+		t.Fatalf("expected the redirect to be followed and reach the target exactly once, got %d", got)
+	}
+}
+
 // assertContainsCodeAndMessage fails the test unless err's message contains
 // both code and message, which s3StatusError appends in parentheses after
 // the HTTP status line.

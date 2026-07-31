@@ -72,7 +72,80 @@ func newClient(cfg config.S3CacheConfig, httpClient *http.Client) (*Client, erro
 	// here are exactly what requestURL would have derived from the trimmed
 	// cfg.Endpoint on every request - safe to cache once and reuse.
 	cfg.Endpoint = strings.TrimRight(endpoint, "/")
-	return &Client{cfg: cfg, client: httpClient, endpointHost: parsed.Host, endpointScheme: parsed.Scheme}, nil
+
+	// This client gets its own private copy of httpClient, with
+	// CheckRedirect set to refuseRedirect (see that function's doc comment
+	// for why every redirect is refused, not just a cross-host one), rather
+	// than a mutation of httpClient in place. httpClient is the same
+	// *http.Client internal/galaxy/fetch builds and internal/cache.New
+	// threads through as runtime.HTTP for Galaxy metadata fetches and
+	// artifact downloads too - and that client's default (nil) CheckRedirect
+	// is load-bearing there: internal/galaxy/fetch/client_test.go's
+	// TestNew_RedirectFromInsecureOriginToSecureOriginUsesSecureTransport and
+	// auth_test.go's TestAuthTransport_RoundTrip_CrossOriginRedirectDropsToken
+	// both drive a real redirect through that exact client and assert on the
+	// outcome. Mutating httpClient.CheckRedirect here would silently
+	// disable redirects for those callers as a side effect of constructing
+	// an S3 client, which is not this function's business to decide. The
+	// copy is a shallow struct copy, so Transport (and Jar, if any) stay
+	// shared with httpClient - the connection pool is unaffected - only the
+	// two http.Client values' CheckRedirect fields diverge.
+	redirectless := *httpClient
+	redirectless.CheckRedirect = refuseRedirect
+	return &Client{cfg: cfg, client: &redirectless, endpointHost: parsed.Host, endpointScheme: parsed.Scheme}, nil
+}
+
+// refuseRedirect is the redirectless http.Client copy's CheckRedirect hook:
+// it refuses every redirect the S3 endpoint answers with, unconditionally,
+// rather than allowing same-origin or same-host-scheme-upgrade hops through.
+// SigV4 signs the Host header and the canonical URI, so a redirect to a
+// different path breaks the signature, and a redirect to a different host
+// breaks it further by losing the Authorization header - which net/http
+// strips only for a destination that is neither the same hostname nor a
+// subdomain of it, comparing hostnames alone, so neither a different port
+// nor a different scheme causes a strip. Such a hop cannot produce a
+// verifiable request in any shape this client emits; following it only
+// trades a legible "redirected to <origin>" for an opaque
+// "403 SignatureDoesNotMatch".
+//
+// What following a redirect adds, beyond that, is exposure. net/http strips
+// only Authorization, Www-Authenticate, Cookie, Cookie2, and the two Proxy-
+// headers, so every X-Amz-* header this client sets - X-Amz-Security-Token,
+// X-Amz-Content-Sha256, X-Amz-Date - travels to the target, which is the one
+// party that did not already see the original request. On 307 and 308 the
+// body is replayed too whenever GetBody is set, which it is for every
+// bytes.Reader body here (the gzipped snapshot, the project registry, the
+// lock object). And because the hostname comparison ignores the scheme, an
+// https-to-http hop would carry the whole signed header set in cleartext,
+// where it is replayable rather than merely observable.
+//
+// A same-host scheme upgrade is refused too, deliberately: it is the one hop
+// that could in principle verify (SigV4 does not sign the scheme), so
+// refusing it does cost a working configuration - an http:// endpoint whose
+// front redirects to https:// on the same host and path. Papering over that
+// endpoint is still worse than surfacing it, because the request that
+// triggered the redirect already put this client's credentials on the wire
+// in the clear before this hook ever runs: its SigV4 Authorization header
+// always, and X-Amz-Security-Token whenever a session token is configured.
+//
+// Who can emit a redirect is a predicate, not a list: any party that already
+// sees this request in the clear - the configured endpoint itself, or any
+// intermediate the client accepts a certificate from, which on a plaintext
+// endpoint includes an environment-configured HTTP proxy and any on-path
+// attacker.
+//
+// req is the pending request for the redirect target, not the request that
+// triggered it; req.Response is the response that caused this redirect and
+// is populated only during a client redirect, so it is nil-checked before
+// use. via (the redirect chain so far) is unused: refusing on the first hop
+// makes a chain impossible.
+func refuseRedirect(req *http.Request, _ []*http.Request) error {
+	status := "redirect"
+	if req.Response != nil {
+		status = req.Response.Status
+	}
+	return fmt.Errorf("%w: %s redirected to %s; configure --s3-endpoint as that origin",
+		errS3RedirectRefused, status, helpers.Origin(req.URL))
 }
 
 // do delegates to c.client.Do and normalizes a transport-level failure into
@@ -153,20 +226,40 @@ func newClient(cfg config.S3CacheConfig, httpClient *http.Client) (*Client, erro
 // error returns unlabeled rather than as helpers.ErrCacheBackendUnavailable -
 // the caller's own decision to stop wins over labeling the failure as the
 // backend's fault.
+//
+// A redirect refusal (errS3RedirectRefused, raised by c.client's
+// CheckRedirect hook - see refuseRedirect) gets an arm of its own, and what
+// matters about its position is only that it precedes the wrap below; its
+// order relative to the context exclusion above is not observable, since
+// both arms return the same error unwrapped. Without the arm the refusal
+// would fall through to the wrap and pick up
+// helpers.ErrCacheBackendUnavailable on top of the
+// helpers.ErrCacheBackendUnusable errS3RedirectRefused already carries - two
+// classes on one error tree, which this package's own partition rule (see
+// variables.go) forbids - and s3Retryable would then retry it as an ordinary
+// transport failure, spending the whole retry budget re-triggering the same
+// refusal instead of returning it once.
+//
+// c.client.Do returns a non-nil *http.Response alongside a CheckRedirect
+// error and this arm discards it, which leaks nothing: net/http has already
+// closed that body before returning, as http.Client.CheckRedirect's own
+// godoc states.
 func (c *Client) do(req *http.Request) (*http.Response, error) {
 	// #nosec G704 -- req's own Host header is always this Client's configured
 	// S3 endpoint: requestURL builds it from c.cfg.Endpoint/c.cfg.Bucket in
 	// path-style mode, or from c.endpointHost/c.endpointScheme in virtual-host
 	// mode - never from a remote value. Only the object key path segment
 	// varies, which is not an SSRF vector since req's own destination host is
-	// fixed by configuration; this does not speak to where an HTTP redirect
-	// might send a later hop (no CheckRedirect is configured anywhere in this
-	// client's transport chain, so Go's default up-to-10-redirect behavior
-	// applies), which is a pre-existing, out-of-scope property of this client,
-	// not something this guard claims to bound.
+	// fixed by configuration; c.client's CheckRedirect (refuseRedirect, set
+	// once in newClient on this client's own private copy) refuses every
+	// redirect the endpoint answers with, so a later hop can never move this
+	// request's destination host away from what this guard bounds either.
 	resp, err := c.client.Do(req)
 	if err == nil {
 		return resp, nil
+	}
+	if errors.Is(err, errS3RedirectRefused) {
+		return nil, err
 	}
 	if req.Context().Err() != nil {
 		return nil, err

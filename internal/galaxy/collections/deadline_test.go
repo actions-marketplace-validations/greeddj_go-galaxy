@@ -167,6 +167,32 @@ var artifactDeadlineErrorCases = []artifactDeadlineErrorCase{
 		wantSame: true,
 	},
 	{
+		// A store that cannot serve as a cache backend keeps its own
+		// identity for the same reason. helpers.ErrCacheBackendUnusable is
+		// exitcode's ExitUsage signal - "no retry can help, change the
+		// configuration" - while the deadline sentinel is ExitNetwork, whose
+		// whole meaning is "retry later"; relabeling would tell a CI job to
+		// retry a configuration that can never work, and hands the remote the
+		// choice of which class it gets, since it controls whether a transfer
+		// stalls to the budget before it answers.
+		// Killing mutation: deleting artifactDeadlineError's
+		// ErrCacheBackendUnusable exclusion fails this case with
+		// "artifactDeadlineError = artifact download deadline exceeded after
+		// 1s: cache backend cannot be used as configured: endpoint answered
+		// with a redirect, want unchanged ...".
+		name: "own deadline fired while parent is live, cause is an unusable backend: error passes through unchanged",
+		buildParent: func() (context.Context, context.CancelFunc) {
+			return context.WithCancel(context.Background())
+		},
+		buildDl: func(parent context.Context) (context.Context, context.CancelFunc) {
+			dlCtx, cancel := context.WithTimeout(parent, time.Nanosecond)
+			<-dlCtx.Done()
+			return dlCtx, cancel
+		},
+		err:      fmt.Errorf("%w: endpoint answered with a redirect", helpers.ErrCacheBackendUnusable),
+		wantSame: true,
+	},
+	{
 		name: "parent explicitly canceled: error passes through unchanged",
 		buildParent: func() (context.Context, context.CancelFunc) {
 			parent, cancel := context.WithCancel(context.Background())

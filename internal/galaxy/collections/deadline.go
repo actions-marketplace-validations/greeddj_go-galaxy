@@ -56,6 +56,20 @@ func artifactDeadlineError(parent, dlCtx context.Context, budget time.Duration, 
 	if errors.Is(err, helpers.ErrSHA256Mismatch) {
 		return err
 	}
+	// A backend that cannot serve as one keeps its own identity for the same
+	// reason. helpers.ErrCacheBackendUnusable means no retry can help and the
+	// only remedy is a configuration change - exitcode classifies it
+	// ExitUsage, while this sentinel classifies ExitNetwork, the one class
+	// whose whole point is "retry later". Relabeling it would tell a CI job
+	// to retry a configuration that can never work, and would let the remote
+	// choose which of the two it gets by stalling a transfer to the budget
+	// and only then answering with, say, a redirect. Like the digest case
+	// above, this can never suppress a genuine deadline: a budget expiry
+	// produces a context error, never a claim about what the configured store
+	// is incapable of.
+	if errors.Is(err, helpers.ErrCacheBackendUnusable) {
+		return err
+	}
 	if parent.Err() != nil || !errors.Is(dlCtx.Err(), context.DeadlineExceeded) {
 		return err
 	}

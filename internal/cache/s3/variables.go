@@ -16,7 +16,10 @@ import (
 //   - helpers.ErrCacheBackendUnavailable: a status the remote itself answered
 //     (a non-2xx from an idempotent verb - GET/HEAD/PUT/DELETE/list - against
 //     an object or the bucket, excepting the two statuses consumed as control
-//     flow below: 404 -> errS3NotFound, 412 -> errS3PreconditionFailed), or
+//     flow below - 404 -> errS3NotFound, 412 -> errS3PreconditionFailed - and
+//     a redirect, which never reaches status classification at all: c.client's
+//     CheckRedirect hook refuses it before Do returns, landing it in the
+//     Unusable bullet below as errS3RedirectRefused), or
 //     errS3TransportFailed, which Client.do wraps around a transport-level
 //     failure while the caller's own context is still live - a connect
 //     refusal, a DNS failure, a TLS failure, a dial timeout, or a
@@ -39,11 +42,18 @@ import (
 //     still live (see waitCeilingErr's own doc comment), landing in this
 //     class anyway only because errS3*Failed already carries it.
 //   - helpers.ErrCacheBackendUnusable: the configured backend cannot provide a
-//     guarantee this tool requires - discovered once at Open, against a probe
-//     this tool controls, rather than against arbitrary remote state, and
-//     never retryable - a backend that does not enforce conditional PUT
-//     (errS3ConditionalPutUnsupported) or an endpoint that fails to parse into
-//     a usable host (errS3InvalidEndpoint).
+//     guarantee this tool requires, and never retryable - a backend that does
+//     not enforce conditional PUT (errS3ConditionalPutUnsupported) or an
+//     endpoint that fails to parse into a usable host (errS3InvalidEndpoint),
+//     both discovered once at Open against a probe this tool controls rather
+//     than against arbitrary remote state; or an endpoint that answers any
+//     request with an HTTP redirect (errS3RedirectRefused), discovered
+//     wherever it first happens rather than only at Open. SigV4 signs the
+//     Host header and the canonical URI, so a redirect to a different path or
+//     host cannot produce a verifiable request in any shape this client
+//     emits. Every member of this class shares the same remedy: a
+//     configuration change, addressing the store the way it wants to be
+//     addressed, not a retry.
 //   - helpers.ErrCacheBusy: this acquisition observed another acquirer
 //     holding the lock - a live, unexpired holder; a foreign token on the
 //     object this call just wrote; or another creator winning the race for
@@ -117,6 +127,7 @@ var (
 		"%w: s3 backend does not enforce conditional PUT (If-None-Match); distributed locking cannot guarantee mutual exclusion",
 		helpers.ErrCacheBackendUnusable,
 	)
+	errS3RedirectRefused = fmt.Errorf("%w: s3 endpoint answered with a redirect", helpers.ErrCacheBackendUnusable)
 )
 
 const (
