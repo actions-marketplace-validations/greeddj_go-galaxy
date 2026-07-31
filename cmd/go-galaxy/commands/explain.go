@@ -11,6 +11,7 @@ import (
 
 	"github.com/greeddj/go-galaxy/cmd/go-galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/lockfile"
+	"github.com/greeddj/go-galaxy/internal/safeout"
 	"github.com/urfave/cli/v3"
 )
 
@@ -54,7 +55,17 @@ func Explain() *cli.Command {
 	}
 }
 
+// printExplain writes why target was resolved to its locked version and
+// which other collections depend on it.
+//
+// w is wrapped in safeout.NewWriter as the first statement so every write
+// this function and the helpers it calls (printEntryHeader,
+// printRequiredBy, printDepends) make is sanitized, regardless of what a
+// lockfile entry's Name/Version/Source/SHA256/Deps contain - a lockfile
+// can be edited by hand or reach this command from an untrusted source,
+// and its fields are otherwise printed verbatim.
 func printExplain(w io.Writer, lf *lockfile.File, target string, roots map[string]bool) error {
+	w = safeout.NewWriter(w)
 	entry, rdeps, found := findExplainTarget(lf, target)
 	if !found {
 		return fmt.Errorf("%w: %s", errExplainNotFound, target)

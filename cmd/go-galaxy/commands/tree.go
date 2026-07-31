@@ -10,6 +10,7 @@ import (
 	"github.com/greeddj/go-galaxy/cmd/go-galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/lockfile"
 	"github.com/greeddj/go-galaxy/internal/galaxy/requirements"
+	"github.com/greeddj/go-galaxy/internal/safeout"
 	"github.com/urfave/cli/v3"
 )
 
@@ -62,7 +63,14 @@ func loadRootFQDNs(reqPath string) ([]string, error) {
 // printTree writes the header line (the actual requirements path passed in,
 // not a hardcoded name) followed by the dependency tree rooted at each entry
 // in roots.
+//
+// w is wrapped in safeout.NewWriter as the first statement so every write
+// this function and the helpers it calls (walkTree) make is sanitized,
+// regardless of what a lockfile entry's Name/Version/Deps contain - a
+// lockfile can be edited by hand or reach this command from an untrusted
+// source, and its fields are otherwise printed verbatim.
 func printTree(w io.Writer, reqPath string, lf *lockfile.File, roots []string) {
+	w = safeout.NewWriter(w)
 	byFQDN := make(map[string]lockfile.Entry, len(lf.Collections))
 	for _, e := range lf.Collections {
 		byFQDN[e.Name] = e

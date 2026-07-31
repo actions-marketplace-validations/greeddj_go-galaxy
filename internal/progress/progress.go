@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/briandowns/spinner"
+	"github.com/greeddj/go-galaxy/internal/safeout"
 )
 
 const (
@@ -22,6 +23,10 @@ const (
 	ok             = ansiGreen + "✔" + ansiReset
 	fail           = ansiRed + "✗" + ansiReset
 	warn           = ansiYellow + "!" + ansiReset
+	okPrefix       = ok + " "
+	failPrefix     = fail + " "
+	warnPrefix     = warn + " "
+	debugPrefix    = "🚧 Debug: "
 )
 
 // Progress renders CLI progress output with optional spinner. Regular output
@@ -81,13 +86,13 @@ func isStdoutTerminal() bool {
 
 // Okf prints a success message with a colored marker. For standalone use.
 func Okf(format string, args ...any) {
-	_, _ = fmt.Fprintf(os.Stdout, ok+" "+format+"\n", args...)
+	writeLine(os.Stdout, okPrefix, safeout.Clean(fmt.Sprintf(format, args...)))
 }
 
 // Errorf prints an error message with a colored marker to stderr. For
 // standalone use.
 func Errorf(format string, args ...any) {
-	_, _ = fmt.Fprintf(os.Stderr, fail+" "+format+"\n", args...)
+	writeLine(os.Stderr, failPrefix, safeout.Clean(fmt.Sprintf(format, args...)))
 }
 
 // Printf updates the spinner suffix when a spinner is active, otherwise
@@ -99,38 +104,46 @@ func (p *Progress) Printf(format string, args ...any) {
 		// The spinner render goroutine reads Suffix under the spinner's own
 		// lock, so the update must take that same lock to avoid a data race.
 		p.s.Lock()
-		p.s.Suffix = fmt.Sprintf(" "+format, args...)
+		p.s.Suffix = " " + string(safeout.Clean(fmt.Sprintf(format, args...)))
 		p.s.Unlock()
 		return
 	}
 	if p.q {
 		return
 	}
-	_, _ = fmt.Fprintf(p.out, format+"\n", args...)
+	p.emit(p.out, "", safeout.Clean(fmt.Sprintf(format, args...)))
 }
 
 // PersistentPrintf prints a persistent line to stdout that survives spinner
 // updates.
 func (p *Progress) PersistentPrintf(format string, args ...any) {
-	p.persist(p.out, fmt.Sprintf(format, args...))
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.emit(p.out, "", safeout.Clean(fmt.Sprintf(format, args...)))
 }
 
 // Okf prints a success message with a colored marker to stdout.
 func (p *Progress) Okf(format string, args ...any) {
-	p.persist(p.out, ok+" "+fmt.Sprintf(format, args...))
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.emit(p.out, okPrefix, safeout.Clean(fmt.Sprintf(format, args...)))
 }
 
 // Errorf prints an error message with a colored marker to stderr, so failures
 // do not contaminate stdout consumers.
 func (p *Progress) Errorf(format string, args ...any) {
-	p.persist(p.errOut, fail+" "+fmt.Sprintf(format, args...))
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.emit(p.errOut, failPrefix, safeout.Clean(fmt.Sprintf(format, args...)))
 }
 
 // Warnf prints a warning message with a colored marker to stderr. Like
 // Errorf, it always emits regardless of verbose/quiet mode and never
 // touches stdout, consistent with the stdout-purity rule.
 func (p *Progress) Warnf(format string, args ...any) {
-	p.persist(p.errOut, warn+" "+fmt.Sprintf(format, args...))
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.emit(p.errOut, warnPrefix, safeout.Clean(fmt.Sprintf(format, args...)))
 }
 
 // Debugf prints a debug message when verbose mode is enabled.
@@ -138,7 +151,7 @@ func (p *Progress) Debugf(format string, args ...any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.v {
-		_, _ = fmt.Fprintf(p.out, "🚧 Debug: "+format+"\n", args...)
+		p.emit(p.out, debugPrefix, safeout.Clean(fmt.Sprintf(format, args...)))
 	}
 }
 
@@ -147,11 +160,15 @@ func (p *Progress) DebugSincef(start time.Time, format string, args ...any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.v {
-		_, _ = fmt.Fprintf(p.out, "⏱️ Debug Timing ("+time.Since(start).Round(time.Millisecond).String()+"): "+format+"\n", args...)
+		prefix := "⏱️ Debug Timing (" + time.Since(start).Round(time.Millisecond).String() + "): "
+		p.emit(p.out, prefix, safeout.Clean(fmt.Sprintf(format, args...)))
 	}
 }
 
-// Write implements io.Writer for log output integration.
+// Write implements io.Writer for log output integration. This is the path
+// log.SetOutput(p) sends the stdlib logger's output through under -v (see
+// cmd/go-galaxy/commands/runner.go), so it sanitizes precisely because
+// nothing in this program controls what a dependency writes to that logger.
 func (p *Progress) Write(payload []byte) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -159,16 +176,10 @@ func (p *Progress) Write(payload []byte) (int, error) {
 	if message == "" {
 		return len(payload), nil
 	}
-	if p.s != nil {
-		p.s.Stop()
-		_, _ = fmt.Fprintln(p.out, message)
-		p.s.Restart()
-		return len(payload), nil
-	}
 	if p.q {
 		return len(payload), nil
 	}
-	_, _ = fmt.Fprintln(p.out, message)
+	p.emit(p.out, "", safeout.Clean(message))
 	return len(payload), nil
 }
 
@@ -181,17 +192,34 @@ func (p *Progress) Close() {
 	}
 }
 
-// persist writes a persistent line to w, stopping and restarting the spinner
-// around it so the line survives the spinner. It always emits regardless of
-// verbose/quiet mode - result lines (success/failure) must never be swallowed.
-func (p *Progress) persist(w io.Writer, msg string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// emit writes prefix and msg to w as a single decorated line, stopping and
+// restarting the spinner around the write when one is active so the line
+// survives it. p.mu must be held by the caller.
+//
+// It is the funnel for every line a *Progress writes; the package-level
+// helpers, which own no spinner, reach writeLine directly instead.
+func (p *Progress) emit(w io.Writer, prefix string, msg safeout.Text) {
 	if p.s != nil {
 		p.s.Stop()
-		_, _ = fmt.Fprintf(w, "%s\n", msg)
+		writeLine(w, prefix, msg)
 		p.s.Restart()
 		return
 	}
-	_, _ = fmt.Fprintf(w, "%s\n", msg)
+	writeLine(w, prefix, msg)
+}
+
+// writeLine is the one place this package turns a decorated line into bytes,
+// and it enforces the package's governing rule: sanitize the payload,
+// decorate afterwards, never sanitize a line that has already been
+// decorated. Every caller passes msg as a safeout.Text - built by applying
+// safeout.Clean to exactly what entered through a parameter (a caller's
+// format/args, or Write's payload) - so a prefix this file declares (a
+// colored marker, a debug tag, a timing string) is never itself subject to
+// Clean, and an already-sanitized payload is never re-sanitized. The
+// safeout.Text parameter type makes this a compile-time property: writeLine
+// cannot be called with a plain string where Text is required, so
+// sanitize-then-decorate is type-checked rather than a convention callers
+// must remember.
+func writeLine(w io.Writer, prefix string, msg safeout.Text) {
+	_, _ = fmt.Fprintf(w, "%s%s\n", prefix, msg)
 }

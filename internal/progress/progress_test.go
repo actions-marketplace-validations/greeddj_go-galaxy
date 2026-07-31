@@ -545,3 +545,319 @@ func TestPackageLevelErrorf(t *testing.T) {
 		t.Fatalf("expected %q, got %q", want, string(got))
 	}
 }
+
+// hostileCallerText is a caller-supplied message carrying an ANSI escape
+// and a lone CR, and hostileCallerTextClean is its expected sanitized form,
+// spelled out by hand rather than computed by calling safeout.Clean: every
+// test below asserts against this literal so a broken Clean cannot also
+// break the expectation it is being checked against. Both are shared by
+// every sanitization test in this file so a single fixture backs every
+// tier.
+const (
+	hostileCallerText      = "before\x1b[31mred\rafter"
+	hostileCallerTextClean = "before\ufffd[31mred\ufffdafter"
+)
+
+// capturePipe redirects *target (os.Stdout or os.Stderr) to a pipe for the
+// duration of fn, and returns everything fn caused to be written to it.
+// Used for the package-level Okf/Errorf helpers, which write directly to
+// os.Stdout/os.Stderr rather than to an injectable io.Writer.
+func capturePipe(t *testing.T, target **os.File, fn func()) string {
+	t.Helper()
+	orig := *target
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create pipe: %v", err)
+	}
+	*target = w
+	defer func() { *target = orig }()
+
+	fn()
+
+	if closeErr := w.Close(); closeErr != nil {
+		t.Fatalf("failed to close pipe writer: %v", closeErr)
+	}
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("failed to read pipe: %v", err)
+	}
+	return string(got)
+}
+
+// tierCase is one row of TestTiersSanitizeCallerText's table: a method that
+// renders caller-supplied text, and the expected exact line it produces on
+// whichever of stdout/stderr it targets (exactly one of wantOut/wantErr is
+// set).
+type tierCase struct {
+	invoke  func(p *Progress, msg string)
+	wantOut func(msg, clean string) string // non-empty when the tier lands on stdout
+	wantErr func(msg, clean string) string // non-empty when the tier lands on stderr
+	name    string
+}
+
+// sanitizingTiers is TestTiersSanitizeCallerText's table, factored out to a
+// package-level function (rather than inlined in the test body) purely to
+// keep that test function's own length within budget.
+func sanitizingTiers() []tierCase {
+	return []tierCase{
+		{
+			name:    "Printf",
+			invoke:  func(p *Progress, msg string) { p.Printf("%s", msg) },
+			wantOut: func(_, clean string) string { return clean + "\n" },
+		},
+		{
+			name:    "PersistentPrintf",
+			invoke:  func(p *Progress, msg string) { p.PersistentPrintf("%s", msg) },
+			wantOut: func(_, clean string) string { return clean + "\n" },
+		},
+		{
+			name:    "Okf",
+			invoke:  func(p *Progress, msg string) { p.Okf("%s", msg) },
+			wantOut: func(_, clean string) string { return okPrefix + clean + "\n" },
+		},
+		{
+			name:    "Errorf",
+			invoke:  func(p *Progress, msg string) { p.Errorf("%s", msg) },
+			wantErr: func(_, clean string) string { return failPrefix + clean + "\n" },
+		},
+		{
+			name:    "Warnf",
+			invoke:  func(p *Progress, msg string) { p.Warnf("%s", msg) },
+			wantErr: func(_, clean string) string { return warnPrefix + clean + "\n" },
+		},
+		{
+			name:    "Debugf",
+			invoke:  func(p *Progress, msg string) { p.Debugf("%s", msg) },
+			wantOut: func(_, clean string) string { return debugPrefix + clean + "\n" },
+		},
+		{
+			name:    "Write",
+			invoke:  func(p *Progress, msg string) { _, _ = p.Write([]byte(msg)) },
+			wantOut: func(_, clean string) string { return clean + "\n" },
+		},
+	}
+}
+
+// runTierCase drives one tierCase against a fresh non-spinner Progress and
+// asserts the exact resulting line on whichever stream the tier targets,
+// and that the other stream stayed empty.
+func runTierCase(t *testing.T, tc tierCase, msg, clean string) {
+	t.Helper()
+	p, out, errOut := stateB()
+	defer p.Close()
+	tc.invoke(p, msg)
+	if tc.wantOut != nil {
+		assertBuf(t, out, tc.wantOut(msg, clean))
+		assertEmpty(t, errOut)
+		return
+	}
+	assertBuf(t, errOut, tc.wantErr(msg, clean))
+	assertEmpty(t, out)
+}
+
+// TestTiersSanitizeCallerText is the core sanitization regression test: one
+// table covering every tier that renders caller-supplied text, each with a
+// benign row (the positive control, asserting the exact line including its
+// own prefix) and a hostile row (asserting the exact sanitized line). The
+// method tiers all run against a non-spinner Progress (state B, verbose) so
+// Debugf's row actually emits and Printf's row exercises its non-spinner
+// branch specifically - the spinner-suffix branch has its own test,
+// TestPrintfSpinnerSuffixIsSanitized. DebugSincef and the two package-level
+// helpers do not fit the same table shape (nondeterministic timing for the
+// former, a different transport - os.Stdout/os.Stderr rather than an
+// injectable io.Writer - for the latter) and are covered by their own
+// dedicated subtests below instead of forcing an awkward fit.
+func TestTiersSanitizeCallerText(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range sanitizingTiers() {
+		t.Run(tc.name+"/benign", func(t *testing.T) {
+			t.Parallel()
+			runTierCase(t, tc, "benign text", "benign text")
+		})
+		t.Run(tc.name+"/hostile", func(t *testing.T) {
+			t.Parallel()
+			runTierCase(t, tc, hostileCallerText, hostileCallerTextClean)
+		})
+	}
+}
+
+// TestDebugSincefSanitizesCallerText covers DebugSincef separately from
+// TestTiersSanitizeCallerText's table: its prefix embeds a nondeterministic
+// elapsed-time string, so only the fixed prefix and fixed suffix around
+// that timing text can be asserted, not the exact line.
+func TestDebugSincefSanitizesCallerText(t *testing.T) {
+	t.Parallel()
+
+	const wantPrefix = "⏱️ Debug Timing ("
+
+	check := func(t *testing.T, msg, wantSuffix string) {
+		t.Helper()
+		p, out, errOut := stateB()
+		defer p.Close()
+		p.DebugSincef(time.Now(), "%s", msg)
+		got := out.String()
+		if !strings.HasPrefix(got, wantPrefix) {
+			t.Fatalf("expected prefix %q, got %q", wantPrefix, got)
+		}
+		if !strings.HasSuffix(got, wantSuffix) {
+			t.Fatalf("expected suffix %q, got %q", wantSuffix, got)
+		}
+		assertEmpty(t, errOut)
+	}
+
+	t.Run("benign", func(t *testing.T) {
+		t.Parallel()
+		check(t, "benign text", "): benign text\n")
+	})
+	t.Run("hostile", func(t *testing.T) {
+		t.Parallel()
+		check(t, hostileCallerText, "): "+hostileCallerTextClean+"\n")
+	})
+}
+
+// TestPackageLevelHelpersSanitizeCallerText covers the standalone
+// package-level Okf/Errorf, which write directly to os.Stdout/os.Stderr
+// (they run before any Progress exists) rather than to an injectable
+// io.Writer, so they need capturePipe instead of the buffer-based tiers
+// above.
+func TestPackageLevelHelpersSanitizeCallerText(t *testing.T) {
+	cases := []struct {
+		name   string
+		target **os.File
+		invoke func(msg string)
+		prefix string
+	}{
+		{"Okf", &os.Stdout, func(msg string) { Okf("%s", msg) }, okPrefix},
+		{"Errorf", &os.Stderr, func(msg string) { Errorf("%s", msg) }, failPrefix},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name+"/benign", func(t *testing.T) {
+			got := capturePipe(t, tc.target, func() { tc.invoke("benign text") })
+			want := tc.prefix + "benign text\n"
+			if got != want {
+				t.Fatalf("expected %q, got %q", want, got)
+			}
+		})
+		t.Run(tc.name+"/hostile", func(t *testing.T) {
+			got := capturePipe(t, tc.target, func() { tc.invoke(hostileCallerText) })
+			want := tc.prefix + hostileCallerTextClean + "\n"
+			if got != want {
+				t.Fatalf("expected %q, got %q", want, got)
+			}
+		})
+	}
+}
+
+// TestPrintfSpinnerSuffixIsSanitized covers Printf's spinner branch (state
+// A): a hostile message must reach the spinner's Suffix field already
+// sanitized, and must never reach out directly. The benign row is this
+// test's positive control, on the same fixture shape, proving the suffix
+// carries real content rather than always being empty or replaced.
+func TestPrintfSpinnerSuffixIsSanitized(t *testing.T) {
+	t.Parallel()
+
+	t.Run("benign", func(t *testing.T) {
+		t.Parallel()
+		p, out, _ := stateA()
+		defer p.Close()
+		p.Printf("%s", "benign text")
+		if want := " benign text"; p.s.Suffix != want {
+			t.Fatalf("suffix = %q, want %q", p.s.Suffix, want)
+		}
+		assertEmpty(t, out)
+	})
+
+	t.Run("hostile", func(t *testing.T) {
+		t.Parallel()
+		p, out, _ := stateA()
+		defer p.Close()
+		p.Printf("%s", hostileCallerText)
+		want := " " + hostileCallerTextClean
+		if p.s.Suffix != want {
+			t.Fatalf("suffix = %q, want %q", p.s.Suffix, want)
+		}
+		assertEmpty(t, out)
+	})
+}
+
+// TestResultMarkerEscapesSurviveAHostileMessage covers Okf/Errorf/Warnf
+// against a hostile message with two independently reachable assertions in
+// a t.Fatalf chain: (1) the line still starts with the raw marker constant
+// (its own ANSI escape bytes intact), reachable on its own by a
+// writer-level sanitizer that would strip the message but also corrupt a
+// decoration this file adds; and (2), reached only once (1) already holds,
+// that the message half is exactly the sanitized form, reachable on its
+// own by a missing Clean call that leaves the marker intact but the
+// message raw. Each assertion therefore pins a distinct failure mode
+// rather than restating the other.
+func TestResultMarkerEscapesSurviveAHostileMessage(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		invoke func(p *Progress, msg string)
+		stream func(out, errOut *bytes.Buffer) *bytes.Buffer
+		name   string
+		prefix string
+	}{
+		{
+			name: "Okf", prefix: okPrefix,
+			invoke: func(p *Progress, msg string) { p.Okf("%s", msg) },
+			stream: func(out, _ *bytes.Buffer) *bytes.Buffer { return out },
+		},
+		{
+			name: "Errorf", prefix: failPrefix,
+			invoke: func(p *Progress, msg string) { p.Errorf("%s", msg) },
+			stream: func(_, errOut *bytes.Buffer) *bytes.Buffer { return errOut },
+		},
+		{
+			name: "Warnf", prefix: warnPrefix,
+			invoke: func(p *Progress, msg string) { p.Warnf("%s", msg) },
+			stream: func(_, errOut *bytes.Buffer) *bytes.Buffer { return errOut },
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p, out, errOut := stateB()
+			defer p.Close()
+			tc.invoke(p, hostileCallerText)
+			got := tc.stream(out, errOut).String()
+
+			// (1) the marker's own bytes are intact.
+			if !strings.HasPrefix(got, tc.prefix) {
+				t.Fatalf("line %q does not start with raw marker %q", got, tc.prefix)
+			}
+			// (2) reached only when (1) held: the message half is
+			// sanitized.
+			want := tc.prefix + hostileCallerTextClean + "\n"
+			if got != want {
+				t.Fatalf("line = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestSpinnerWritesOutsideThisPackagesWriters pins the spinner-frame
+// guarantee this package relies on: newProgress never assigns p.s.Writer,
+// so spinner frames render through a writer this package does not own -
+// neither out nor errOut - and are not its responsibility to sanitize.
+// Only the lines this package writes itself are. The assertions below check
+// exactly that, and stay valid however the spinner chooses its own writer.
+func TestSpinnerWritesOutsideThisPackagesWriters(t *testing.T) {
+	t.Parallel()
+	var out, errOut bytes.Buffer
+	p := newProgress(false, false, true, &out, &errOut)
+	defer p.Close()
+	if p.s == nil {
+		t.Fatal("expected spinner to be created for verbose=false, quiet=false, terminal=true")
+	}
+	if p.s.Writer == io.Writer(&out) {
+		t.Fatal("spinner.Writer must not be this package's out buffer")
+	}
+	if p.s.Writer == io.Writer(&errOut) {
+		t.Fatal("spinner.Writer must not be this package's errOut buffer")
+	}
+}
