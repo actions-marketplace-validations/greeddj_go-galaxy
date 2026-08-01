@@ -566,7 +566,11 @@ func TestDryRunBannerEmittedExactlyOnceAcrossCommands(t *testing.T) {
 // TestInitInstallDryRunSkipsClearCache proves --clear-cache is suppressed
 // under a dry run, with a warning explaining why, since deleting cached
 // artifacts is exactly the kind of destructive mutation --dry-run exists to
-// prevent.
+// prevent. Its positive control is
+// TestInitInstallClearCacheWipesArtifactsAndMetadataCaches: this test
+// proves only that the branch is skipped, which says nothing about what
+// the branch does, so that test proves what a real (non-dry-run) run
+// actually wipes and keeps.
 func TestInitInstallDryRunSkipsClearCache(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

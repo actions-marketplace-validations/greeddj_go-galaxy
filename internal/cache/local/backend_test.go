@@ -48,6 +48,43 @@ func TestBackendOpenRejectsEmptyCacheDir(t *testing.T) {
 	}
 }
 
+// TestBackendClearFilesRejectsEmptyCacheDir confirms ClearFiles' own empty-
+// cacheDir guard, mirroring TestBackendOpenRejectsEmptyCacheDir above. This
+// is a uniformity guard across the Backend surface, not a path a real run
+// can reach: backend.Open already fails first via ensureDir for an empty
+// cfg.CacheDir, so no caller reaches ClearFiles with one in practice. What
+// it buys is specific: without it, store.ClearCacheFiles("") would reach
+// os.ReadDir(""), whose resulting ErrNotExist is swallowed by
+// ClearCacheFiles' own not-exist arm - so a Backend constructed directly
+// with an empty cacheDir (bypassing Open) would report silent success on a
+// destructive operation instead of failing loudly.
+func TestBackendClearFilesRejectsEmptyCacheDir(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty cache dir", func(t *testing.T) {
+		t.Parallel()
+		b := New("")
+		if err := b.ClearFiles(context.Background()); !errors.Is(err, helpers.ErrCacheDirEmpty) {
+			t.Fatalf("expected errors.Is(err, helpers.ErrCacheDirEmpty), got %v", err)
+		}
+	})
+
+	// The positive control: a real cacheDir reaches and passes ClearFiles,
+	// proving "empty cache dir" above is refused by the guard and not by
+	// some unrelated failure that would refuse any cacheDir.
+	t.Run("real cache dir", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writeCacheFile(t, dir, "acme-widgets-1.0.0.tar.gz", []byte("tarball"))
+
+		b := New(dir)
+		if err := b.ClearFiles(context.Background()); err != nil {
+			t.Fatalf("ClearFiles: %v", err)
+		}
+		assertFileAbsent(t, dir, "acme-widgets-1.0.0.tar.gz")
+	})
+}
+
 func TestBackendLockFailsFastWhenHeld(t *testing.T) {
 	t.Parallel()
 
