@@ -215,3 +215,114 @@ func TestArtifactsDeleteToleratesMissingSidecar(t *testing.T) {
 // non-hex characters) moved to helpers.IsSHA256Hex and is exercised by
 // helpers.TestIsSHA256Hex; this package now only calls it, so it no longer
 // needs its own copy of that table.
+
+// assertLocalMetaFoundMatchesHas re-probes testArtifactKey with Has and
+// fails the test unless it reports the identical presence metaFound just
+// reported - the equality cacheManager.ArtifactStore's own doc comment
+// requires between the two methods, and the one dryRunArtifactMeta
+// (internal/galaxy/collections) depends on to keep mirroring isCacheHit.
+func assertLocalMetaFoundMatchesHas(t *testing.T, a *Artifacts, metaFound bool) {
+	t.Helper()
+	hasFound, err := a.Has(context.Background(), testArtifactKey)
+	if err != nil {
+		t.Fatalf("Has error: %v", err)
+	}
+	if hasFound != metaFound {
+		t.Fatalf("Has found=%v, Meta found=%v, want equal", hasFound, metaFound)
+	}
+}
+
+// TestArtifactsMetaAbsentReportsNotFound proves Meta reports found=false with
+// a nil map and a nil error for a key that was never committed - the
+// identical outcome Has itself reports for the same key.
+func TestArtifactsMetaAbsentReportsNotFound(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	a := NewArtifacts(dir)
+
+	meta, found, err := a.Meta(context.Background(), testArtifactKey)
+	if err != nil {
+		t.Fatalf("Meta error: %v", err)
+	}
+	if found {
+		t.Fatalf("expected found=false for an absent key, got true (meta=%#v)", meta)
+	}
+	if meta != nil {
+		t.Fatalf("expected a nil meta map for an absent key, got %#v", meta)
+	}
+	assertLocalMetaFoundMatchesHas(t, a, found)
+}
+
+// TestArtifactsMetaPresentWithValidDigestReturnsIt proves Meta surfaces a
+// committed artifact's sidecar digest exactly as Fetch itself would.
+func TestArtifactsMetaPresentWithValidDigestReturnsIt(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	a := NewArtifacts(dir)
+	commitTempArtifact(t, a, []byte("tarball bytes"), map[string]string{"sha256": testSHA})
+
+	meta, found, err := a.Meta(context.Background(), testArtifactKey)
+	if err != nil {
+		t.Fatalf("Meta error: %v", err)
+	}
+	if !found {
+		t.Fatal("expected found=true for a committed key")
+	}
+	if got := meta["sha256"]; got != testSHA {
+		t.Fatalf("expected Meta to report sha256 %q, got %q", testSHA, got)
+	}
+	assertLocalMetaFoundMatchesHas(t, a, found)
+}
+
+// TestArtifactsMetaPresentWithNoSidecarReportsFoundNilMeta proves Meta still
+// reports found=true for a committed artifact with no sidecar (committed
+// with no sha256 in meta), while its own meta map is nil: "cached, no
+// recorded metadata", exactly the tri-state cacheManager.ArtifactStore's own
+// doc comment names.
+func TestArtifactsMetaPresentWithNoSidecarReportsFoundNilMeta(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	a := NewArtifacts(dir)
+	commitTempArtifact(t, a, []byte("tarball bytes"), nil)
+
+	meta, found, err := a.Meta(context.Background(), testArtifactKey)
+	if err != nil {
+		t.Fatalf("Meta error: %v", err)
+	}
+	if !found {
+		t.Fatal("expected found=true for a committed key with no sidecar")
+	}
+	if meta != nil {
+		t.Fatalf("expected a nil meta map with no sidecar, got %#v", meta)
+	}
+	assertLocalMetaFoundMatchesHas(t, a, found)
+}
+
+// TestArtifactsMetaPresentWithNonHexSidecarReportsFoundNilMeta proves Meta
+// applies the identical helpers.IsSHA256Hex gate Fetch does: a present but
+// non-hex sidecar is reported as found=true (the tarball itself is still
+// cached) with a nil meta map, never the unverifiable garbage.
+func TestArtifactsMetaPresentWithNonHexSidecarReportsFoundNilMeta(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	a := NewArtifacts(dir)
+	commitTempArtifact(t, a, []byte("tarball bytes"), map[string]string{"sha256": testSHA})
+
+	garbage := strings.Repeat("z", 64)
+	sidecarPath := filepath.Join(dir, testArtifactKey) + helpers.ArtifactSHASidecarSuffix
+	if err := os.WriteFile(sidecarPath, []byte(garbage), helpers.FileMod); err != nil {
+		t.Fatalf("corrupt sidecar: %v", err)
+	}
+
+	meta, found, err := a.Meta(context.Background(), testArtifactKey)
+	if err != nil {
+		t.Fatalf("Meta error: %v", err)
+	}
+	if !found {
+		t.Fatal("expected found=true: the tarball itself is still cached even though its sidecar is garbage")
+	}
+	if meta != nil {
+		t.Fatalf("expected a nil meta map for a non-hex sidecar, got %#v", meta)
+	}
+	assertLocalMetaFoundMatchesHas(t, a, found)
+}

@@ -17,6 +17,17 @@ type ArtifactFile struct {
 // ArtifactStore provides access to cached collection artifacts.
 type ArtifactStore interface {
 	Has(ctx context.Context, key string) (bool, error)
+	// Meta reports key's cached metadata without ever reading the artifact
+	// body, under a tri-state contract every implementation must uphold
+	// exactly: found=false, err=nil means key is not cached at all - the
+	// identical meaning as Has's own false, nil; found=true with a nil or
+	// empty map means key is cached but carries no recorded metadata; a
+	// non-nil err means the store could not be consulted, and found carries
+	// no meaning in that case. Has stays a separate method rather than being
+	// replaced everywhere by this one: it sits on the install hot path
+	// (isCacheHit) and the prefetch scan, and on the local backend Meta costs
+	// an extra sidecar read those two callers would only discard.
+	Meta(ctx context.Context, key string) (map[string]string, bool, error)
 	Fetch(ctx context.Context, key string) (ArtifactFile, error)
 	TempFile(ctx context.Context, prefix string) (*os.File, func(), error)
 	Commit(ctx context.Context, key, tmpPath string, meta map[string]string) (ArtifactFile, error)

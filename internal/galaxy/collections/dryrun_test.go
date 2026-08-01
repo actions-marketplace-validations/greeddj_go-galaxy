@@ -18,10 +18,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	cacheManager "github.com/greeddj/go-galaxy/internal/galaxy/cache"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
+	"github.com/greeddj/go-galaxy/internal/galaxy/extracted"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
@@ -69,7 +72,7 @@ func TestClassifyDryRunSortedOrder(t *testing.T) {
 		printer := &capturingPrinter{}
 		runtime := infra.New(printer, http.DefaultClient)
 
-		// artifacts is nil throughout: dryRunArtifactCached treats a nil store as
+		// artifacts is nil throughout: dryRunArtifactMeta treats a nil store as
 		// "not cached", which is the only classification this test needs and
 		// avoids depending on any real cache state. root is nil too - cfg has no
 		// DownloadPath, and a nil store already makes installRecordMatches
@@ -152,6 +155,92 @@ func TestClassifyDryRunReportsCacheHitVsMiss(t *testing.T) {
 	}
 }
 
+// errSwitchOrderProbeStub is a sentinel distinct from helpers.ErrOfflineMode,
+// so TestReportDryRunResultsOfflineGuardOutranksProbeFailure and its positive
+// control below can tell which of the two reportDryRunResults actually
+// recorded, rather than the two colliding under errors.Is.
+var errSwitchOrderProbeStub = errors.New("stub probe failure, must not surface when the offline guard applies")
+
+// TestReportDryRunResultsOfflineGuardOutranksProbeFailure pins
+// reportDryRunResults' own documented switch order: its !res.cached &&
+// cfg.Offline case is checked before its res.fail != nil case, so an uncached
+// collection under --offline whose probe ALSO returned a non-nil fail is
+// reported and recorded under the offline cause, never the probe's own fail.
+// This is the only state that discriminates the two orderings - every other
+// fixture in this file drives its probe online - so this drives classifyDryRun
+// directly with a stub probe fixed to exactly that state instead of relying
+// on any real probe to ever reach it.
+//
+// TestReportDryRunResultsReportsProbeFailureWhenCached is this test's
+// required positive control, on the identical fixture: it proves the offline
+// cause winning above is a genuine ordering effect of a state that can report
+// either cause, not a stub that always reports the offline one regardless of
+// what it is given.
+func TestReportDryRunResultsOfflineGuardOutranksProbeFailure(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Workers: 1, Offline: true}
+	col := collection{Namespace: "ns", Name: "app", Version: "1.0.0"}
+	cols := map[string]collection{col.key(): col}
+	probe := func(context.Context, collection) dryRunClassification {
+		return dryRunClassification{cached: false, fail: errSwitchOrderProbeStub}
+	}
+
+	printer := &capturingPrinter{}
+	runtime := infra.New(printer, http.DefaultClient)
+	summary := classifyDryRun(context.Background(), runtime, cfg, cols, installDryRunVerbs, probe)
+
+	if summary.count != 1 {
+		t.Fatalf("summary.count = %d, want 1", summary.count)
+	}
+	if !errors.Is(summary.cause, helpers.ErrOfflineMode) {
+		t.Errorf("expected the recorded cause to be helpers.ErrOfflineMode, got %v", summary.cause)
+	}
+	if errors.Is(summary.cause, errSwitchOrderProbeStub) {
+		t.Errorf("expected the probe's own fail to be shadowed by the offline guard, got %v", summary.cause)
+	}
+	if !printer.hasErrContaining("not cached and --offline forbids downloading") {
+		t.Errorf("expected the offline \"Would fail\" line, got errs=%v", printer.errs)
+	}
+	if printer.hasErrContaining(errSwitchOrderProbeStub.Error()) {
+		t.Errorf("expected the probe's own error text never to reach stderr, got errs=%v", printer.errs)
+	}
+}
+
+// TestReportDryRunResultsReportsProbeFailureWhenCached is the positive
+// control TestReportDryRunResultsOfflineGuardOutranksProbeFailure's own doc
+// comment requires: on the identical fixture, with the collection reported
+// cached instead of uncached, the offline case no longer applies and the
+// probe's own fail is what wins.
+func TestReportDryRunResultsReportsProbeFailureWhenCached(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Workers: 1, Offline: true}
+	col := collection{Namespace: "ns", Name: "app", Version: "1.0.0"}
+	cols := map[string]collection{col.key(): col}
+	probe := func(context.Context, collection) dryRunClassification {
+		return dryRunClassification{cached: true, fail: errSwitchOrderProbeStub}
+	}
+
+	printer := &capturingPrinter{}
+	runtime := infra.New(printer, http.DefaultClient)
+	summary := classifyDryRun(context.Background(), runtime, cfg, cols, installDryRunVerbs, probe)
+
+	if summary.count != 1 {
+		t.Fatalf("summary.count = %d, want 1", summary.count)
+	}
+	if !errors.Is(summary.cause, errSwitchOrderProbeStub) {
+		t.Errorf("expected the recorded cause to be the probe's own fail, got %v", summary.cause)
+	}
+	if errors.Is(summary.cause, helpers.ErrOfflineMode) {
+		t.Errorf("expected no offline cause once the collection is reported cached, got %v", summary.cause)
+	}
+	if !printer.hasErrContaining(errSwitchOrderProbeStub.Error()) {
+		t.Errorf("expected the probe's own \"Would fail\" line, got errs=%v", printer.errs)
+	}
+	if printer.hasErrContaining("not cached and --offline forbids downloading") {
+		t.Errorf("expected no offline line once the collection is reported cached, got errs=%v", printer.errs)
+	}
+}
+
 // TestInstallDryRunProbeMarksUpToDate proves installDryRunProbe reports a
 // collection whose on-disk install already satisfies installRecordMatches as
 // already up to date, not as "would install", and that this reuses
@@ -202,7 +291,7 @@ func TestInstallDryRunProbeMarksUpToDate(t *testing.T) {
 	}
 }
 
-// TestClassifyDryRunMirrorsIsCacheHitUnderNoCache proves dryRunArtifactCached
+// TestClassifyDryRunMirrorsIsCacheHitUnderNoCache proves dryRunArtifactMeta
 // mirrors isCacheHit's own --no-cache guard rather than a bare artifact-store
 // probe: a warm cache under --no-cache must still be reported as
 // "would download", since that is what a real install would actually do
@@ -375,10 +464,10 @@ func newDriftedOfflineEvictedFixture(t *testing.T) (*config.Config, *installStat
 // assertReportsSingleWouldFail asserts classifyDryRun reported exactly one
 // would-fail collection, named key, on the Errorf tier, and reported it on
 // neither the "up to date" nor the "would install" tier.
-func assertReportsSingleWouldFail(t *testing.T, printer *capturingPrinter, wouldFail int, key string) {
+func assertReportsSingleWouldFail(t *testing.T, printer *capturingPrinter, summary failureSummary, key string) {
 	t.Helper()
-	if wouldFail != 1 {
-		t.Fatalf("expected classifyDryRun to report 1 would-fail collection, got %d", wouldFail)
+	if summary.count != 1 {
+		t.Fatalf("expected classifyDryRun to report 1 would-fail collection, got %d", summary.count)
 	}
 	if !printer.hasErrContaining("Would fail: " + key) {
 		t.Errorf("expected a \"Would fail: %s\" line, got %v", key, printer.errs)
@@ -425,8 +514,8 @@ func TestInstallDryRunDriftedOfflineEvictedReportsWouldFailAndFails(t *testing.T
 	reportRuntime := infra.New(printer, http.DefaultClient)
 	installRoot := newTestCollectionsRoot(t, cfg.DownloadPath)
 	probe := installDryRunProbe(cfg, state.store, state.backend.Artifacts(), installRoot)
-	wouldFail := classifyDryRun(context.Background(), reportRuntime, cfg, cols, installDryRunVerbs, probe)
-	assertReportsSingleWouldFail(t, printer, wouldFail, "acme.app@1.0.0")
+	summary := classifyDryRun(context.Background(), reportRuntime, cfg, cols, installDryRunVerbs, probe)
+	assertReportsSingleWouldFail(t, printer, summary, "acme.app@1.0.0")
 
 	// installDryRun's own error-wrap must classify identically to a real
 	// failed install.
@@ -679,5 +768,443 @@ func TestWriteRunMetricsDryRunSkipsAndWarns(t *testing.T) {
 	}
 	if !printer.hasWarnContaining(metricsPath) {
 		t.Errorf("expected a warning naming the skipped metrics path, got %v", printer.warns)
+	}
+}
+
+// countingArtifactMetaCalls is a stub cacheManager.ArtifactStore that counts,
+// per artifact key, how many times Has and Meta were each called - proving
+// dryRunArtifactMeta replaces the dry run's former Has() round trip rather
+// than adding a second one alongside it (see
+// TestClassifyDryRunCallsMetaExactlyOncePerCollectionNeverHas). Fetch,
+// TempFile, Commit, and Delete are never called by a dry-run probe, so they
+// return errStubNotImplemented (declared in prefetch_scan_test.go) to make an
+// accidental call fail loudly instead of silently.
+type countingArtifactMetaCalls struct {
+	metaCalls map[string]int
+	hasCalls  map[string]int
+	present   map[string]bool
+	mu        sync.Mutex
+}
+
+func (a *countingArtifactMetaCalls) Has(_ context.Context, key string) (bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.hasCalls[key]++
+	return a.present[key], nil
+}
+
+func (a *countingArtifactMetaCalls) Meta(_ context.Context, key string) (map[string]string, bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.metaCalls[key]++
+	return nil, a.present[key], nil
+}
+
+func (a *countingArtifactMetaCalls) Fetch(context.Context, string) (cacheManager.ArtifactFile, error) {
+	return cacheManager.ArtifactFile{}, errStubNotImplemented
+}
+
+func (a *countingArtifactMetaCalls) TempFile(context.Context, string) (*os.File, func(), error) {
+	return nil, nil, errStubNotImplemented
+}
+
+func (a *countingArtifactMetaCalls) Commit(context.Context, string, string, map[string]string) (cacheManager.ArtifactFile, error) {
+	return cacheManager.ArtifactFile{}, errStubNotImplemented
+}
+
+func (a *countingArtifactMetaCalls) Delete(context.Context, string) error {
+	return errStubNotImplemented
+}
+
+// TestClassifyDryRunCallsMetaExactlyOncePerCollectionNeverHas is the direct
+// mechanical proof behind dryRunArtifactMeta's own doc comment claim: on the
+// S3 backend, replacing the dry run's former Has() call with a Meta() call
+// costs nothing extra, because production code calls ArtifactStore.Meta at
+// most once per collection - once for a collection that reaches the artifact
+// probe, never for one already reported settled - and never calls Has at
+// all. This fixture's nil root makes nothing settled, so every collection
+// here does reach the probe; collections alternate cached/uncached so both of
+// dryRunArtifactMeta's branches run under the identical assertion.
+func TestClassifyDryRunCallsMetaExactlyOncePerCollectionNeverHas(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Workers: 4}
+
+	const keyCount = 12
+	cols := make(map[string]collection, keyCount)
+	artifacts := &countingArtifactMetaCalls{
+		metaCalls: make(map[string]int),
+		hasCalls:  make(map[string]int),
+		present:   make(map[string]bool),
+	}
+	for i := range keyCount {
+		name := fmt.Sprintf("c%02d", i)
+		col := collection{Namespace: "ns", Name: name, Version: "1.0.0"}
+		cols[col.key()] = col
+		artifacts.present[artifactKey(col)] = i%2 == 0
+	}
+
+	runtime := infra.New(noopPrinter{}, http.DefaultClient)
+	// root is nil: cfg has no DownloadPath, so newInstallTarget's own
+	// nil-root guard makes every collection report ok=false, keeping this
+	// test isolated to the artifact-cache probe this test is about.
+	probe := installDryRunProbe(cfg, store.New(), artifacts, nil)
+	classifyDryRun(context.Background(), runtime, cfg, cols, installDryRunVerbs, probe)
+
+	artifacts.mu.Lock()
+	defer artifacts.mu.Unlock()
+	for key, col := range cols {
+		ak := artifactKey(col)
+		if got := artifacts.metaCalls[ak]; got != 1 {
+			t.Errorf("collection %s: Meta call count = %d, want exactly 1", key, got)
+		}
+		if got := artifacts.hasCalls[ak]; got != 0 {
+			t.Errorf("collection %s: Has call count = %d, want 0 (a dry run must never call Has directly)", key, got)
+		}
+	}
+}
+
+// pinVerdictTestPin and pinVerdictTestRecorded are two well-formed but
+// distinct 64-char lowercase hex digests, used by both
+// TestDryRunPinVerdictSuppressedWhenOnline and
+// TestDryRunPinVerdictSuppressedForSettledCollection as a lockfile
+// pin/recorded-digest pair that disagrees.
+const (
+	pinVerdictTestPin      = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	pinVerdictTestRecorded = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+)
+
+// TestDryRunPinVerdictSuppressedWhenOnline proves dryRunPinVerdict's
+// !cfg.Offline arm: a cached artifact whose recorded digest disagrees with
+// the lockfile pin produces no verdict while online, since a real run's own
+// canRetryCacheHit can still evict and refetch a mismatched cache hit in
+// that case - the disagreement is a cost (one wasted refetch), never a
+// certain failure, so reporting one here would be the wrong answer. The
+// positive control is TestDryRunPinVerdictSuppressedForSettledCollection's
+// own fixture-sanity check, which proves the identical two digests DO
+// produce a verdict once cfg.Offline is true - so this test is not passing
+// merely because dryRunPinVerdict never fires for any input.
+func TestDryRunPinVerdictSuppressedWhenOnline(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Offline: false}
+	col := collection{Namespace: "acme", Name: "app", Version: "1.0.0", SHA256: pinVerdictTestPin}
+	meta := map[string]string{"sha256": pinVerdictTestRecorded}
+
+	if err := dryRunPinVerdict(cfg, true, meta, col); err != nil {
+		t.Fatalf("expected no verdict while online, got %v", err)
+	}
+}
+
+// TestDryRunPinVerdictSuppressedForSettledCollection proves
+// installDryRunProbe's settled check runs, and returns, before
+// dryRunPinVerdict is ever consulted: acme.app is installed for real first
+// (a matching install record, a matching extract marker, and a cache
+// sidecar digest equal to the lockfile pin), and only then is the artifact
+// cache's SIDECAR alone - not the tarball, not the store's own installed
+// record, not the extract marker - overwritten with a different, well-formed
+// digest. The probe must still report the collection settled, with no fail,
+// because installRecordMatches (installEntryMatches, specifically) already
+// required entry.ArtifactSHA256 == col.SHA256 before this probe ever reaches
+// the artifact cache at all - see installDryRunProbe's own doc comment for
+// why settled is checked first.
+//
+// This is non-vacuous: the fixture-sanity check below calls dryRunPinVerdict
+// directly against the identical pin/recorded-digest pair, under the
+// identical --offline config, and requires it to fire.
+//
+// Verified against a real mutation that drops the settled branch's early
+// return (letting the function fall through to the pin check regardless of
+// a settled match, while discarding the now-unused entry): this test failed
+// with "expected the collection to be reported settled despite the drifted
+// sidecar, got {fail:0x... settled:false cached:true}" followed by
+// "expected no fail verdict for a settled collection, got sha256 mismatch:
+// the cached artifact's recorded digest does not match the lockfile pin and
+// --offline forbids refetching" - both assertions below this comment fire,
+// confirming they pin the settled-first order rather than restating
+// dryRunPinVerdict's own contract a second time.
+func TestDryRunPinVerdictSuppressedForSettledCollection(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cacheDir := filepath.Join(root, "cache")
+	downloadPath := filepath.Join(root, "install")
+	reqPath := filepath.Join(root, "requirements.yml")
+	mustWriteFile(t, reqPath, []byte("collections:\n  - name: acme.app\n    version: \"*\"\n"))
+
+	srv := fakegalaxy.New(t)
+	version := srv.AddVersion("acme", "app", "1.0.0", nil)
+
+	cfg := &config.Config{
+		Server:           srv.URL(),
+		CacheDir:         cacheDir,
+		DownloadPath:     downloadPath,
+		RequirementsFile: reqPath,
+		Workers:          1,
+	}
+	state := newLocalState(t, cfg)
+	runtime := infra.New(noopPrinter{}, srv.Client())
+	if err := installWithState(context.Background(), cfg, runtime, state, time.Now()); err != nil {
+		t.Fatalf("installWithState (perform the real install): %v", err)
+	}
+
+	// The probe below runs under --offline: that is the one config where
+	// dryRunPinVerdict can fire at all (its own !cfg.Offline arm suppresses
+	// every online disagreement), so this is the config that actually
+	// exercises the settled short-circuit rather than vacuously passing
+	// through the offline guard.
+	cfg.Offline = true
+	col := collection{Namespace: "acme", Name: "app", Version: "1.0.0", Source: srv.URL(), SHA256: version.SHA256}
+
+	sidecarPath := filepath.Join(cacheDir, artifactKey(col)) + helpers.ArtifactSHASidecarSuffix
+	if err := os.WriteFile(sidecarPath, []byte(pinVerdictTestRecorded), helpers.FileMod); err != nil {
+		t.Fatalf("drift the cache sidecar: %v", err)
+	}
+
+	if err := dryRunPinVerdict(cfg, true, map[string]string{"sha256": pinVerdictTestRecorded}, col); err == nil {
+		t.Fatal("fixture sanity: expected dryRunPinVerdict to fire directly for the drifted sidecar under --offline")
+	}
+
+	installRoot := newTestCollectionsRoot(t, cfg.DownloadPath)
+	probe := installDryRunProbe(cfg, state.store, state.backend.Artifacts(), installRoot)
+	got := probe(context.Background(), col)
+	if !got.settled {
+		t.Errorf("expected the collection to be reported settled despite the drifted sidecar, got %+v", got)
+	}
+	if got.fail != nil {
+		t.Errorf("expected no fail verdict for a settled collection, got %v", got.fail)
+	}
+}
+
+// TestDryRunPinVerdictNoVerdictArms is a table-driven proof of every "no
+// verdict" arm dryRunPinVerdict's own doc comment names, other than the
+// !cfg.Offline arm (pinned separately by
+// TestDryRunPinVerdictSuppressedWhenOnline) and the recorded-equals-pin arm
+// (pinned by TestWarmDryRunAndRunDisagreeOnAFrozenOfflineDriftedCacheHit's
+// own drifted-bytes fixture): an empty pin, an uncached collection, an empty
+// recorded digest, and a recorded digest that is not helpers.IsSHA256Hex all
+// produce nil under --offline, the one config where a verdict could
+// otherwise fire. The positive control in the same table (matching row) is
+// what proves the config itself is capable of producing a verdict, so a nil
+// result on every other row is a real refusal rather than evidence the
+// helper never fires at all.
+func TestDryRunPinVerdictNoVerdictArms(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Offline: true}
+
+	for _, tt := range dryRunPinVerdictNoVerdictCases() {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := dryRunPinVerdict(cfg, tt.cached, tt.meta, tt.col)
+			if tt.wantErr && err == nil {
+				t.Fatal("expected a verdict, got nil")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("expected no verdict, got %v", err)
+			}
+		})
+	}
+}
+
+// dryRunPinVerdictNoVerdictCases is the table
+// TestDryRunPinVerdictNoVerdictArms runs, factored out purely to keep that
+// function itself short.
+func dryRunPinVerdictNoVerdictCases() []struct {
+	meta    map[string]string
+	name    string
+	col     collection
+	cached  bool
+	wantErr bool
+} {
+	col := collection{Namespace: "acme", Name: "app", Version: "1.0.0", SHA256: pinVerdictTestPin}
+	unpinnedCol := collection{Namespace: "acme", Name: "app", Version: "1.0.0"}
+
+	return []struct {
+		meta    map[string]string
+		name    string
+		col     collection
+		cached  bool
+		wantErr bool
+	}{
+		{
+			name:   "empty pin",
+			col:    unpinnedCol,
+			cached: true,
+			meta:   map[string]string{"sha256": pinVerdictTestRecorded},
+		},
+		{
+			name:   "not cached",
+			col:    col,
+			cached: false,
+			meta:   map[string]string{"sha256": pinVerdictTestRecorded},
+		},
+		{
+			name:   "empty recorded digest",
+			col:    col,
+			cached: true,
+			meta:   map[string]string{"sha256": ""},
+		},
+		{
+			name:   "nil meta map",
+			col:    col,
+			cached: true,
+			meta:   nil,
+		},
+		{
+			name:   "malformed recorded digest",
+			col:    col,
+			cached: true,
+			meta:   map[string]string{"sha256": "not-a-valid-hex-digest"},
+		},
+		{
+			name:   "matching recorded digest",
+			col:    col,
+			cached: true,
+			meta:   map[string]string{"sha256": pinVerdictTestPin},
+		},
+		{
+			// Positive control: the identical cached/offline config, with a
+			// well-formed recorded digest that genuinely disagrees with the
+			// pin, must produce a verdict - proving the "no verdict" rows
+			// above are real refusals of that same config, not evidence
+			// dryRunPinVerdict never fires under it at all.
+			name:    "disagreeing well-formed digest fires",
+			col:     col,
+			cached:  true,
+			meta:    map[string]string{"sha256": pinVerdictTestRecorded},
+			wantErr: true,
+		},
+	}
+}
+
+// TestInstallDryRunProbeReportsUnsafeIdentifierWhenRootExists proves
+// installDryRunProbe's own newInstallTarget ok=false, root != nil arm: a
+// collection whose namespace fails helpers.IsPathElement is reported a
+// would-fail carrying helpers.ErrUnsafeCollectionIdentifier, rather than
+// silently falling through unclassified. This arm is unreachable through the
+// full production pipeline - buildCollectionsMap already rejects the
+// identical identifier before any collection reaches a probe (see
+// installDryRunProbe's own doc comment) - so it is exercised here by calling
+// the probe directly, bypassing buildCollectionsMap, the only way to reach
+// it at all.
+func TestInstallDryRunProbeReportsUnsafeIdentifierWhenRootExists(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{DownloadPath: t.TempDir()}
+	root := newTestCollectionsRoot(t, cfg.DownloadPath)
+	col := collection{Namespace: "../escape", Name: "app", Version: "1.0.0"}
+
+	probe := installDryRunProbe(cfg, store.New(), nil, root)
+	got := probe(context.Background(), col)
+
+	if got.settled {
+		t.Errorf("expected the collection not to be reported settled, got %+v", got)
+	}
+	if got.fail == nil {
+		t.Fatal("expected a fail verdict for an unsafe collection identifier, got nil")
+	}
+	if !errors.Is(got.fail, helpers.ErrUnsafeCollectionIdentifier) {
+		t.Errorf("expected errors.Is helpers.ErrUnsafeCollectionIdentifier, got %v", got.fail)
+	}
+}
+
+// metaFoundWithErrorArtifacts is a stub cacheManager.ArtifactStore whose Meta
+// always answers found=true alongside a non-nil error - the one state
+// ArtifactStore's own doc comment marks as meaningless ("a non-nil err means
+// the store could not be consulted, and found carries no meaning in that
+// case") but that a degraded or unreachable backend can still produce, and
+// that dryRunArtifactMeta's own `err != nil || !found` guard exists to fail
+// closed on. found=true paired with a non-nil error is the discriminating
+// shape here, and nothing else in this package produces it: two of this
+// package's other stub ArtifactStores (concurrentProbeArtifacts,
+// presenceArtifacts) do return a non-nil Meta error, but always paired with
+// found=false, so `!found` already short-circuits dryRunArtifactMeta's guard
+// before `err != nil` is ever load-bearing - which is exactly why
+// go tool cover -func reports the guard as 100% covered purely on the
+// strength of its `!found` half, while a mutation dropping the `err != nil`
+// check still goes undetected: a stub answering found=false here would leave
+// that same gap open. Has and every method besides Meta return
+// errStubNotImplemented, since neither installDryRunProbe nor
+// warmDryRunProbe ever needs them.
+type metaFoundWithErrorArtifacts struct{}
+
+// errStubMetaUnreachable is the error metaFoundWithErrorArtifacts.Meta always
+// returns, standing in for a cache backend that could not be consulted at
+// all (a transport failure, most concretely).
+var errStubMetaUnreachable = errors.New("stub: meta probe unreachable")
+
+func (metaFoundWithErrorArtifacts) Has(context.Context, string) (bool, error) {
+	return false, errStubNotImplemented
+}
+
+func (metaFoundWithErrorArtifacts) Meta(context.Context, string) (map[string]string, bool, error) {
+	return map[string]string{"sha256": pinVerdictTestRecorded}, true, errStubMetaUnreachable
+}
+
+func (metaFoundWithErrorArtifacts) Fetch(context.Context, string) (cacheManager.ArtifactFile, error) {
+	return cacheManager.ArtifactFile{}, errStubNotImplemented
+}
+
+func (metaFoundWithErrorArtifacts) TempFile(context.Context, string) (*os.File, func(), error) {
+	return nil, nil, errStubNotImplemented
+}
+
+func (metaFoundWithErrorArtifacts) Commit(context.Context, string, string, map[string]string) (cacheManager.ArtifactFile, error) {
+	return cacheManager.ArtifactFile{}, errStubNotImplemented
+}
+
+func (metaFoundWithErrorArtifacts) Delete(context.Context, string) error {
+	return errStubNotImplemented
+}
+
+// TestInstallDryRunProbeTreatsMetaErrorAsNotCached proves dryRunArtifactMeta's
+// `err != nil` half of its `if err != nil || !found` guard, reached through
+// installDryRunProbe: a Meta call answering found=true alongside a non-nil
+// error must be classified not-cached, never a cache hit and never a
+// probe-level fail of its own - a store that could not be consulted is not
+// evidence the artifact is absent, and reporting it as either "cached" or
+// "would fail" would both be lies a preview cannot afford.
+//
+// root is nil so newInstallTarget's own nil-root guard makes the collection
+// report ok=false before the pin check, isolating this test to the artifact
+// probe branch alone - the same isolation
+// TestClassifyDryRunCallsMetaExactlyOncePerCollectionNeverHas already uses.
+func TestInstallDryRunProbeTreatsMetaErrorAsNotCached(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{}
+	col := collection{Namespace: "acme", Name: "app", Version: "1.0.0"}
+
+	probe := installDryRunProbe(cfg, store.New(), metaFoundWithErrorArtifacts{}, nil)
+	got := probe(context.Background(), col)
+
+	if got.cached {
+		t.Errorf("expected cached=false when Meta answers found=true alongside a non-nil error, got %+v", got)
+	}
+	if got.fail != nil {
+		t.Errorf("expected no fail verdict from a Meta error alone, got %v", got.fail)
+	}
+	if got.settled {
+		t.Errorf("expected settled=false, got %+v", got)
+	}
+}
+
+// TestWarmDryRunProbeTreatsMetaErrorAsNotCached is
+// TestInstallDryRunProbeTreatsMetaErrorAsNotCached's counterpart for
+// warmDryRunProbe: the identical Meta failure must also be reported as
+// not-cached there, before ever reaching extractStore.Ready under a sha this
+// probe could not have named from a genuine cache miss anyway.
+func TestWarmDryRunProbeTreatsMetaErrorAsNotCached(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{}
+	col := collection{Namespace: "acme", Name: "app", Version: "1.0.0"}
+	extractStore := extracted.NewStore(t.TempDir())
+
+	probe := warmDryRunProbe(cfg, metaFoundWithErrorArtifacts{}, extractStore, map[string]string{})
+	got := probe(context.Background(), col)
+
+	if got.cached {
+		t.Errorf("expected cached=false when Meta answers found=true alongside a non-nil error, got %+v", got)
+	}
+	if got.fail != nil {
+		t.Errorf("expected no fail verdict from a Meta error alone, got %v", got.fail)
+	}
+	if got.settled {
+		t.Errorf("expected settled=false, got %+v", got)
 	}
 }

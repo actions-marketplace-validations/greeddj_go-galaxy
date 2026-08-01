@@ -19,6 +19,17 @@ import (
 // nothing about which setting to fix.
 var errEmptyDownloadPath = errors.New("--download-path (or [defaults] collections_path) is empty")
 
+// errCollectionsTreeNotUsable stands in for a real filesystem error that a
+// dry-run probe never actually triggers: probeAnsibleCollectionsUsable and
+// dryRunNamespaceProbe (dryrun.go) both classify a suspect path with
+// classifyCollectionsRootError, which wants a genuine kernel error to embed
+// in its own message, and a preview never calls the MkdirAll/RemoveAll that
+// would produce one. This sentinel is what gets embedded instead, naming the
+// observed condition - the target is not usable as a collections directory -
+// rather than fabricating a fake mkdirat/removeall *fs.PathError that never
+// happened.
+var errCollectionsTreeNotUsable = errors.New("not usable as a collections directory")
+
 // installTarget is the resolved, path-safe location of one collection's
 // on-disk footprint: its install directory and its .info sidecar directory,
 // both expressed relative to root so every write below funnels through the
@@ -133,7 +144,11 @@ func newInstallTarget(root *os.Root, cfg *config.Config, col collection) (instal
 // yet is reported as (nil, nil) - "no target to root at" - which every
 // create=false caller (shouldSchedulePrefetch, installDryRunProbe) already
 // treats as "not installed"/"absent" via newInstallTarget's own nil-root
-// guard, rather than as an error.
+// guard, rather than as an error. Once opened, this branch also runs
+// probeAnsibleCollectionsUsable - see its own doc comment for the predicate
+// and why it exists: without it, a preview against a symlinked or otherwise
+// unusable ansible_collections would report success today where a real,
+// non-dry-run run of the identical configuration would certainly fail.
 func openCollectionsRoot(downloadPath string, create bool) (*os.Root, error) {
 	if strings.TrimSpace(downloadPath) == "" {
 		return nil, errEmptyDownloadPath
@@ -145,6 +160,10 @@ func openCollectionsRoot(downloadPath string, create bool) (*os.Root, error) {
 			if errors.Is(err, fs.ErrNotExist) {
 				return nil, nil //nolint:nilnil // absent DownloadPath on a dry run is "nothing to describe yet", not a failure.
 			}
+			return nil, err
+		}
+		if err := probeAnsibleCollectionsUsable(root); err != nil {
+			_ = root.Close()
 			return nil, err
 		}
 		return root, nil
@@ -161,6 +180,60 @@ func openCollectionsRoot(downloadPath string, create bool) (*os.Root, error) {
 		return nil, classifyCollectionsRootError(root, "ansible_collections", err)
 	}
 	return root, nil
+}
+
+// probeAnsibleCollectionsUsable checks, without creating, modifying, or
+// removing anything, whether a real (non-dry-run) run's own
+// root.MkdirAll("ansible_collections") would succeed against root's
+// ansible_collections entry. Measured directly against a real install, every
+// shape agrees between the real run and this probe:
+//
+//	ansible_collections shape                         | real run | this probe
+//	--------------------------------------------------|----------|-----------
+//	absent                                            | ok       | ok (nil)
+//	real directory                                    | ok       | ok (nil)
+//	symlink, relative, in-root, to a directory        | ok       | ok (nil)
+//	symlink, escaping (relative or absolute)          | fails    | fails (ErrCollectionsPathEscape)
+//	symlink, dangling                                 | fails    | fails (ErrCollectionsPathEscape)
+//	regular file                                      | fails    | fails (unclassified, matching the real run's own bare mkdirat failure)
+//
+// Two entries in that table are the reason this needs both Stat and Lstat,
+// not one alone. Stat is required for the dangling case: root.MkdirAll
+// itself fails against a dangling ansible_collections symlink (there is
+// nothing valid for MkdirAll to no-op against), but Stat alone reports
+// fs.ErrNotExist for that exact shape - the symlink follows to a target that
+// does not exist - which would misreport a real run's failure as this
+// probe's success. Lstat is what tells a dangling symlink (Lstat succeeds,
+// reporting the symlink entry itself) apart from a genuinely absent entry
+// (Lstat also reports fs.ErrNotExist, the ordinary case root.MkdirAll would
+// create from scratch). And "is it a symlink" is not enough on its own
+// either: an in-root relative symlink to a real directory is ACCEPTED by a
+// real run (root.MkdirAll no-ops against an existing directory, symlink or
+// not), so a bare Lstat-mode-bit check would misreport that accepted shape
+// as unusable.
+//
+// The exact predicate, therefore: Stat succeeds and reports a directory
+// (covers the real-directory and in-root-symlink-to-a-directory rows), OR
+// Lstat reports fs.ErrNotExist (covers the absent row - nothing there at
+// all). Either one is "ok" and returns nil. Anything else - Stat failing for
+// a reason Lstat did not already excuse, or Stat succeeding on something
+// that is not a directory - is classified through classifyCollectionsRootError,
+// the identical classifier openCollectionsRoot's own create=true branch
+// already uses on the identical path, so a symlink classifies
+// helpers.ErrCollectionsPathEscape (matching the real run's own
+// classification of the identical shape) and a regular file stays
+// unclassified (matching the real run's own bare, unclassified mkdirat
+// failure). errCollectionsTreeNotUsable stands in for the genuine kernel
+// error classifyCollectionsRootError wants to embed, since this probe never
+// actually calls MkdirAll to produce one.
+func probeAnsibleCollectionsUsable(root *os.Root) error {
+	if info, err := root.Stat("ansible_collections"); err == nil && info.IsDir() {
+		return nil
+	}
+	if _, err := root.Lstat("ansible_collections"); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return classifyCollectionsRootError(root, "ansible_collections", errCollectionsTreeNotUsable)
 }
 
 // classifyCollectionsRootError runs only on the failure path of a root
@@ -203,6 +276,41 @@ func openCollectionsRoot(downloadPath string, create bool) (*os.Root, error) {
 // directory" message, and every run-level test asserting on
 // helpers.ErrCollectionsPathEscape - would silently stop firing for exactly
 // the case that matters most.
+//
+// Documented-uncovered: the branch below returning an escape error for a
+// component's own Lstat failing with neither fs.ErrNotExist nor
+// syscall.ENOTDIR has no test reaching it, and this file's two existing
+// tests do not come close - TestClassifyCollectionsRootErrorReturnsEscapeForSymlinkComponent
+// exercises the direct symlink-found branch beneath it, and
+// TestClassifyCollectionsRootErrorReturnsRawErrorForNonEscapeFailure
+// exercises the syscall.ENOTDIR carve-out this branch sits next to. There is
+// no deterministic, portable, non-racy way to trigger os.Root's own internal
+// escape detection (the unexported "path escapes from parent" refusal named
+// two paragraphs up) on a component this walk has already Lstat-ed and
+// already confirmed is not itself a symlink.
+//
+// What would be lost if this branch were removed depends on which of this
+// function's three callers hits it. For openCollectionsRoot's create=true
+// branch, nothing operationally: the write (root.MkdirAll) has already been
+// refused, atomically, by the kernel through os.Root's own containment
+// before this function is ever reached, so an unclassified error there only
+// changes a real run's error TEXT on a failure that was already certain -
+// the "not load-bearing for containment" paragraph above already says this
+// for the function as a whole. For dryRunNamespaceProbe (dryrun.go), also
+// little: its own doc comment already establishes that an escape-classified
+// and an unclassified failure fold identically behind
+// helpers.ErrInstallationFailed there, so the collection's own would-fail
+// verdict and exit class are unaffected either way - only the per-collection
+// cause's identity (whether errors.Is matches helpers.ErrCollectionsPathEscape)
+// and the "Would fail" reason text printed for it would change. For
+// probeAnsibleCollectionsUsable, by contrast, the stakes are real: unlike
+// the other two callers, it has no os.Root write of its own underneath it to
+// have already settled anything, so this classification is the only signal
+// available for a --dry-run run hitting this exact probe path, and an
+// unclassified result there falls through cmd/go-galaxy/exitcode's own
+// classification to a generic exit code instead of ExitInstall - fail-safe
+// (treat an unrecognized failure as a possible escape) trading for fail-open
+// (let it through unclassified) in a way that is not merely cosmetic there.
 func classifyCollectionsRootError(root *os.Root, rel string, err error) error {
 	var walked string
 	for component := range strings.SplitSeq(rel, "/") {

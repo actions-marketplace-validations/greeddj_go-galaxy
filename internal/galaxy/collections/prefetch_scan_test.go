@@ -77,6 +77,10 @@ func (a *concurrentProbeArtifacts) Has(ctx context.Context, _ string) (bool, err
 	return false, nil
 }
 
+func (a *concurrentProbeArtifacts) Meta(context.Context, string) (map[string]string, bool, error) {
+	return nil, false, errStubNotImplemented
+}
+
 func (a *concurrentProbeArtifacts) Fetch(context.Context, string) (cacheManager.ArtifactFile, error) {
 	return cacheManager.ArtifactFile{}, errStubNotImplemented
 }
@@ -150,6 +154,10 @@ func (a *presenceArtifacts) Has(_ context.Context, key string) (bool, error) {
 		return false, errStubHas
 	}
 	return a.present[key], nil
+}
+
+func (a *presenceArtifacts) Meta(context.Context, string) (map[string]string, bool, error) {
+	return nil, false, errStubNotImplemented
 }
 
 func (a *presenceArtifacts) Fetch(context.Context, string) (cacheManager.ArtifactFile, error) {

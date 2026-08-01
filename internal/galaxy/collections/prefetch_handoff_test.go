@@ -109,6 +109,14 @@ func (a *s3StyleArtifacts) Has(_ context.Context, key string) (bool, error) {
 	return false, err
 }
 
+// Meta is never exercised by this file's own tests (the prefetch handoff
+// never calls it); it mirrors Has's own presence check and reports no
+// metadata, consistent with this stub bucket never recording any.
+func (a *s3StyleArtifacts) Meta(ctx context.Context, key string) (map[string]string, bool, error) {
+	found, err := a.Has(ctx, key)
+	return nil, found, err
+}
+
 // TempFile stages a fresh temp file under tmpBase, mirroring the real S3
 // backend's own TempFile.
 func (a *s3StyleArtifacts) TempFile(_ context.Context, prefix string) (*os.File, func(), error) {

@@ -1736,6 +1736,10 @@ func (a *recordingArtifactStore) Has(context.Context, string) (bool, error) {
 	return false, errArtifactStoreStubNotImplemented
 }
 
+func (a *recordingArtifactStore) Meta(context.Context, string) (map[string]string, bool, error) {
+	return nil, false, errArtifactStoreStubNotImplemented
+}
+
 func (a *recordingArtifactStore) Fetch(context.Context, string) (cacheManager.ArtifactFile, error) {
 	return cacheManager.ArtifactFile{}, errArtifactStoreStubNotImplemented
 }

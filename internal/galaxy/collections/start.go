@@ -146,9 +146,16 @@ func warmWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra
 // the evidence to wipe the whole content-addressable store, with nothing on
 // disk to re-derive it from.
 //
-// The error deliberately matches warmWithState's real failure wrap
-// (ErrInstallationFailed, mapping to exitcode.ExitInstall) rather than
-// inventing a new class, so the preview and the real run exit identically.
+// The error deliberately reuses failureSummary.warmError - the identical
+// headline warmWithState's own real failure wrap builds - through the same
+// annotateSaveFailure helper, rather than a bespoke fmt.Errorf: the summary's
+// recorded causes are joined behind that headline exactly as they are on a
+// real run (see failureSummary.wrap), which is what lets the preview's exit
+// code track the real run's per underlying cause instead of a single fixed
+// class - ExitIntegrity when a recorded cause is helpers.ErrSHA256Mismatch
+// (dryRunPinVerdict's own verdict), ExitInstall otherwise (the offline case),
+// matching exactly what a real --frozen --offline warm would exit with for
+// the identical cause.
 //
 // SaveStore on this path still age-evicts expired APICache/DepsCache/
 // Versions/Warmed entries inside snapshotData(), exactly as every other
@@ -165,14 +172,11 @@ func warmDryRun(
 ) error {
 	warmed := state.store.WarmedArtifactSHAByKey()
 	probe := warmDryRunProbe(cfg, state.backend.Artifacts(), state.extractStore, warmed)
-	wouldFail := classifyDryRun(ctx, runtime, cfg, collections, warmDryRunVerbs, probe)
+	summary := classifyDryRun(ctx, runtime, cfg, collections, warmDryRunVerbs, probe)
 	saveErr := saveDryRunSnapshotIfPersisted(ctx, runtime, state)
-	writeRunMetrics(cfg, runtime, "warm", start, len(collections), wouldFail, cfg.Frozen)
-	if wouldFail > 0 {
-		return annotateSaveFailure(
-			fmt.Errorf("%w: %d collections cannot be warmed offline: %w", helpers.ErrInstallationFailed, wouldFail, helpers.ErrOfflineMode),
-			saveErr,
-		)
+	writeRunMetrics(cfg, runtime, "warm", start, len(collections), int(summary.count), cfg.Frozen)
+	if summary.count > 0 {
+		return annotateSaveFailure(summary.warmError(), saveErr)
 	}
 	return saveErr
 }
@@ -630,6 +634,18 @@ func installWithState(ctx context.Context, cfg *config.Config, runtime *infra.In
 // other command's tail - it self-suppresses under cfg.DryRun (see its own
 // doc comment), so this call site does not need to know that.
 //
+// The failure error reuses failureSummary.installError - the identical
+// headline finalizeInstall's own real failure wrap builds - through the same
+// annotateSaveFailure helper, rather than a bespoke fmt.Errorf: the
+// summary's recorded causes are joined behind that headline exactly as they
+// are on a real run (see failureSummary.wrap), which is what lets the
+// preview's exit code track the real run's per underlying cause instead of a
+// single fixed class - ExitIntegrity when a recorded cause is
+// helpers.ErrSHA256Mismatch (dryRunPinVerdict's own verdict), ExitInstall
+// otherwise (the offline case, or a collections-tree write a real install
+// would refuse), matching exactly what a real --frozen --offline install
+// would exit with for the identical cause.
+//
 // The snapshot is saved only when state.store.WasPersisted() was already
 // true when this run loaded it - i.e. only when a persisted snapshot already
 // existed. When it did, the resolve-side caches this run's fresh solve wrote
@@ -655,16 +671,13 @@ func installDryRun(
 	start time.Time,
 	root *os.Root,
 ) error {
-	wouldFail := classifyDryRun(
+	summary := classifyDryRun(
 		ctx, runtime, cfg, plan.collections, installDryRunVerbs, installDryRunProbe(cfg, state.store, state.backend.Artifacts(), root),
 	)
 	saveErr := saveDryRunSnapshotIfPersisted(ctx, runtime, state)
-	writeRunMetrics(cfg, runtime, "install", start, len(plan.collections), wouldFail, cfg.Frozen)
-	if wouldFail > 0 {
-		return annotateSaveFailure(
-			fmt.Errorf("%w: %d collections cannot be installed offline: %w", helpers.ErrInstallationFailed, wouldFail, helpers.ErrOfflineMode),
-			saveErr,
-		)
+	writeRunMetrics(cfg, runtime, "install", start, len(plan.collections), int(summary.count), cfg.Frozen)
+	if summary.count > 0 {
+		return annotateSaveFailure(summary.installError(), saveErr)
 	}
 	return saveErr
 }

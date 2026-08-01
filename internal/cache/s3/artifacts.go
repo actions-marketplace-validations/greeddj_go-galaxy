@@ -22,19 +22,29 @@ type Artifacts struct {
 	tmpBase string
 }
 
-// Has reports whether the artifact exists in S3.
+// Meta returns key's cached metadata via a single HEAD request, without ever
+// downloading the artifact body - see cacheManager.ArtifactStore's own doc
+// comment for the tri-state contract this implements. It shares its HEAD
+// with Has via headArtifact, so presence has exactly one implementation on
+// this backend, and only Meta itself pays for parsing the response headers.
+func (s *Artifacts) Meta(ctx context.Context, key string) (map[string]string, bool, error) {
+	headers, found, err := s.headArtifact(ctx, key)
+	if err != nil || !found {
+		return nil, found, err
+	}
+	return metaFromHeaders(headers), true, nil
+}
+
+// Has reports whether the artifact exists in S3, sharing headArtifact with
+// Meta so presence has exactly one implementation on this backend: a caller
+// that only needs presence (isCacheHit, the prefetch scan) pays for the same
+// one HEAD Meta issues, without also paying for the metadata-header parse
+// only Meta's own caller needs - an unconditional map allocation plus a
+// strings.ToLower per response header, on a hot path both isCacheHit and the
+// prefetch scan run for every collection.
 func (s *Artifacts) Has(ctx context.Context, key string) (bool, error) {
-	if s.client == nil {
-		return false, errS3ClientNil
-	}
-	_, err := s.client.headObject(ctx, s.objectKey(key))
-	if err == nil {
-		return true, nil
-	}
-	if errors.Is(err, errS3NotFound) {
-		return false, nil
-	}
-	return false, err
+	_, found, err := s.headArtifact(ctx, key)
+	return found, err
 }
 
 // Fetch downloads an artifact from S3 into a temporary file.
@@ -177,6 +187,22 @@ func (s *Artifacts) Delete(ctx context.Context, key string) error {
 		return errS3ClientNil
 	}
 	return s.client.deleteObject(ctx, s.objectKey(key))
+}
+
+// headArtifact issues the single HEAD both Has and Meta are built on, and is
+// the one place this backend decides what "present" means.
+func (s *Artifacts) headArtifact(ctx context.Context, key string) (map[string][]string, bool, error) {
+	if s.client == nil {
+		return nil, false, errS3ClientNil
+	}
+	headers, err := s.client.headObject(ctx, s.objectKey(key))
+	if err == nil {
+		return headers, true, nil
+	}
+	if errors.Is(err, errS3NotFound) {
+		return nil, false, nil
+	}
+	return nil, false, err
 }
 
 // objectKey builds a full S3 object key for an artifact key.

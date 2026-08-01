@@ -807,7 +807,7 @@ func TestWarmDryRunAndRunDisagreeOnAFrozenOfflineDriftedCacheHit(t *testing.T) {
 	if !bytes.Contains(stdout, []byte("0 would warm, 2 already warm, 0 would fail")) {
 		t.Errorf("expected a would-fail count of zero, got stdout=%q", stdout)
 	}
-	if !bytes.Contains(stderr, []byte("--frozen --offline: this preview checks that an artifact is cached")) {
+	if !bytes.Contains(stderr, []byte("--frozen --offline: this preview checks the cached artifact's recorded digest against the pin")) {
 		t.Errorf("expected the --frozen --offline warning on stderr, got stderr=%q", stderr)
 	}
 
@@ -939,5 +939,211 @@ func TestWarmDryRunBannerSurvivesQuiet(t *testing.T) {
 
 	if !bytes.Contains(stderr, []byte("--dry-run")) {
 		t.Errorf("expected the dry-run banner on stderr despite --quiet, got stderr=%q", stderr)
+	}
+}
+
+// assertFrozenOfflinePinMismatchExitsIntegrity is the fixture and assertion
+// sequence shared by TestInstallDryRunFrozenOfflinePinMismatchExitsIntegrity
+// and TestWarmDryRunFrozenOfflinePinMismatchExitsIntegrity, parametrized only
+// by which collections.* entry point they drive (both commands use it to
+// both seed the cache and run the preview, since a real, non-dry-run call to
+// either one already populates the cache with the real, correctly-hashed
+// artifact).
+//
+// It reproduces the measured pin/digest gap dryRunPinVerdict now closes: the
+// cache holds the real, correctly-hashed artifact, but the lockfile pins a
+// different, well-formed digest (corruptedAppSHA256), under --frozen
+// --offline. A real run fails closed with helpers.ErrSHA256Mismatch there
+// (verifyPinnedSHA/warmVerifyAndEnsure re-hash the actual cached bytes and
+// reject the mismatch); the preview must now report and fail the identical
+// way - "Would fail:", a nonzero would-fail count, and exitcode.ExitIntegrity
+// (7) - rather than the "would install/warm (artifact cached)" it reported
+// before dryRunPinVerdict existed. The positive control, on the same fixture
+// with the pin corrected back to the artifact's real digest, proves the
+// failure above is a genuine refusal: the identical preview then reports the
+// collection normally and a would-fail count of zero.
+func assertFrozenOfflinePinMismatchExitsIntegrity(t *testing.T, run func(context.Context, *config.Config, *infra.Infra) error) {
+	t.Helper()
+	f := newE2EFixture(t)
+
+	if err := run(context.Background(), f.cfg, f.runtime); err != nil {
+		t.Fatalf("seed (populate the cache with the real, correctly-hashed artifact): %v", err)
+	}
+
+	lockPath, lf := newFrozenPinFixture(t, f)
+	f.cfg.Offline = true
+	f.runtime.HTTP = fetch.NewOffline(f.cfg.Timeout)
+	f.cfg.DryRun = true
+
+	assertFrozenOfflinePreviewFailsOnCorruptedPin(t, f, run, lockPath, lf)
+	assertFrozenOfflinePreviewSucceedsOnCorrectedPin(t, f, run, lockPath, lf)
+}
+
+// assertFrozenOfflinePreviewFailsOnCorruptedPin corrupts acme.app's pin and
+// asserts the resulting preview fails closed with helpers.ErrSHA256Mismatch,
+// exitcode.ExitIntegrity, a "Would fail:" line, and a nonzero would-fail
+// count. Factored out of assertFrozenOfflinePinMismatchExitsIntegrity purely
+// to keep that function under the cyclomatic-complexity budget.
+func assertFrozenOfflinePreviewFailsOnCorruptedPin(
+	t *testing.T, f *e2eFixture, run func(context.Context, *config.Config, *infra.Infra) error, lockPath string, lf *lockfile.File,
+) {
+	t.Helper()
+	setAppPin(lf, corruptedAppSHA256)
+	if err := lockfile.Save(lockPath, lf); err != nil {
+		t.Fatalf("save corrupted lockfile: %v", err)
+	}
+
+	var dryErr error
+	stdout, stderr := captureStdIO(t, func() {
+		printer := progress.New(f.cfg.Verbose, f.cfg.Quiet)
+		defer printer.Close()
+		f.runtime.Output = printer
+		dryErr = run(context.Background(), f.cfg, f.runtime)
+	})
+
+	if dryErr == nil {
+		t.Fatal("expected the preview to fail closed on a pin/digest mismatch, got nil")
+	}
+	if !errors.Is(dryErr, helpers.ErrSHA256Mismatch) {
+		t.Errorf("expected errors.Is ErrSHA256Mismatch, got %v", dryErr)
+	}
+	if got := exitcode.FromError(dryErr); got != exitcode.ExitIntegrity {
+		t.Errorf("exitcode.FromError(err) = %d, want ExitIntegrity (%d)", got, exitcode.ExitIntegrity)
+	}
+	if !bytes.Contains(stderr, []byte("Would fail: acme.app@1.0.0")) {
+		t.Errorf("expected a \"Would fail: acme.app@1.0.0\" line on stderr, got stderr=%q", stderr)
+	}
+	if !bytes.Contains(stdout, []byte("1 would fail")) {
+		t.Errorf("expected the summary line to count exactly one would-fail collection, got stdout=%q", stdout)
+	}
+}
+
+// assertFrozenOfflinePreviewSucceedsOnCorrectedPin is the positive control
+// for assertFrozenOfflinePreviewFailsOnCorruptedPin: on the same fixture,
+// with the pin corrected back to the artifact's real digest, the identical
+// preview must succeed with a would-fail count of zero - proving the failure
+// above is a genuine refusal, not evidence the fixture could never succeed.
+func assertFrozenOfflinePreviewSucceedsOnCorrectedPin(
+	t *testing.T, f *e2eFixture, run func(context.Context, *config.Config, *infra.Infra) error, lockPath string, lf *lockfile.File,
+) {
+	t.Helper()
+	setAppPin(lf, f.appV1.SHA256)
+	if err := lockfile.Save(lockPath, lf); err != nil {
+		t.Fatalf("save corrected lockfile: %v", err)
+	}
+
+	var okErr error
+	okStdout, _ := captureStdIO(t, func() {
+		printer := progress.New(f.cfg.Verbose, f.cfg.Quiet)
+		defer printer.Close()
+		f.runtime.Output = printer
+		okErr = run(context.Background(), f.cfg, f.runtime)
+	})
+	if okErr != nil {
+		t.Fatalf("expected the preview to succeed once the pin matches the cached artifact, got %v", okErr)
+	}
+	if !bytes.Contains(okStdout, []byte("0 would fail")) {
+		t.Errorf("expected a would-fail count of zero once the pin is corrected, got stdout=%q", okStdout)
+	}
+}
+
+// TestInstallDryRunFrozenOfflinePinMismatchExitsIntegrity is
+// assertFrozenOfflinePinMismatchExitsIntegrity driven by collections.Start;
+// see that helper's own doc comment for the property being pinned.
+func TestInstallDryRunFrozenOfflinePinMismatchExitsIntegrity(t *testing.T) {
+	assertFrozenOfflinePinMismatchExitsIntegrity(t, collections.Start)
+}
+
+// TestWarmDryRunFrozenOfflinePinMismatchExitsIntegrity is
+// assertFrozenOfflinePinMismatchExitsIntegrity driven by collections.Warm,
+// proving warm's own dryRunPinVerdict call (warmDryRunProbe) closes the
+// identical gap on the warm command.
+func TestWarmDryRunFrozenOfflinePinMismatchExitsIntegrity(t *testing.T) {
+	assertFrozenOfflinePinMismatchExitsIntegrity(t, collections.Warm)
+}
+
+// driftCachedSidecarDigest overwrites the sha256 sidecar file next to the
+// cached artifact at cacheDir/artifactKey (helpers.ArtifactSHASidecarSuffix)
+// with sha, leaving the tarball's own bytes on disk completely untouched -
+// the recorded-digest-only drift dryRunPinVerdict's own doc comment
+// discloses, as distinct from driftCachedTarballBytes above, which drifts
+// the tarball's bytes and leaves the sidecar alone.
+func driftCachedSidecarDigest(t *testing.T, cacheDir, artifactKey, sha string) {
+	t.Helper()
+	sidecarPath := filepath.Join(cacheDir, artifactKey) + helpers.ArtifactSHASidecarSuffix
+	if err := os.WriteFile(sidecarPath, []byte(sha), helpers.FileMod); err != nil {
+		t.Fatalf("drift the cached artifact's sha256 sidecar: %v", err)
+	}
+}
+
+// TestInstallDryRunAndRunDisagreeOnAFrozenOfflineRecordedDigestDrift pins a
+// measured, deliberate, and disclosed honesty inversion - not a bug being
+// locked in, and not evidence that dryRunPinVerdict's verdict should be made
+// optimistic. Only the cached artifact's recorded digest is altered here; the
+// tarball's own bytes on disk, and the lockfile pin, are both left exactly as
+// the seeding warm produced them. Under --frozen --offline, a real install
+// still succeeds: resolveArtifactSHA re-hashes the actual cached bytes
+// whenever the pin is non-empty and never reads the recorded digest at all
+// (internal/galaxy/collections/install.go), so the drifted sidecar is never
+// consulted on the real path. This preview's dryRunPinVerdict, by contrast,
+// compares the pin against exactly that recorded digest and reports a
+// would-fail. Measured directly: the real install returns nil; the preview
+// returns helpers.ErrSHA256Mismatch at exitcode.ExitIntegrity. See
+// dryRunPinVerdict's own doc comment for why the verdict stays in this shape
+// anyway - a cached artifact whose recorded digest disagrees with its own
+// bytes is damaged either way - while no longer describing it as a certain
+// prediction of what the real run will do.
+func TestInstallDryRunAndRunDisagreeOnAFrozenOfflineRecordedDigestDrift(t *testing.T) {
+	f := newE2EFixture(t)
+
+	if err := collections.Warm(context.Background(), f.cfg, f.runtime); err != nil {
+		t.Fatalf("Warm (seed the artifact cache with the real, correctly-hashed artifact): %v", err)
+	}
+
+	newFrozenPinFixture(t, f) // pin stays correct; only the recorded digest drifts below.
+	driftCachedSidecarDigest(
+		t, f.cfg.CacheDir, helpers.ArtifactKey(f.cfg.Server, "acme-app-1.0.0.tar.gz"), corruptedAppSHA256,
+	)
+
+	f.cfg.Offline = true
+	f.runtime.HTTP = fetch.NewOffline(f.cfg.Timeout)
+
+	f.cfg.DryRun = true
+	var dryErr error
+	stdout, stderr := captureStdIO(t, func() {
+		printer := progress.New(f.cfg.Verbose, f.cfg.Quiet)
+		defer printer.Close()
+		f.runtime.Output = printer
+		dryErr = collections.Start(context.Background(), f.cfg, f.runtime)
+	})
+	if dryErr == nil {
+		t.Fatal("expected the preview to report a would-fail on the drifted recorded digest, got nil")
+	}
+	if !errors.Is(dryErr, helpers.ErrSHA256Mismatch) {
+		t.Errorf("expected errors.Is ErrSHA256Mismatch, got %v", dryErr)
+	}
+	if got := exitcode.FromError(dryErr); got != exitcode.ExitIntegrity {
+		t.Errorf("exitcode.FromError(err) = %d, want ExitIntegrity (%d)", got, exitcode.ExitIntegrity)
+	}
+	if !bytes.Contains(stderr, []byte("Would fail: acme.app@1.0.0")) {
+		t.Errorf("expected a \"Would fail: acme.app@1.0.0\" line on stderr, got stderr=%q", stderr)
+	}
+	if !bytes.Contains(stdout, []byte("1 would fail")) {
+		t.Errorf("expected the summary line to count exactly one would-fail collection, got stdout=%q", stdout)
+	}
+
+	f.cfg.DryRun = false
+	var realErr error
+	_, realStderr := captureStdIO(t, func() {
+		printer := progress.New(f.cfg.Verbose, f.cfg.Quiet)
+		defer printer.Close()
+		f.runtime.Output = printer
+		realErr = collections.Start(context.Background(), f.cfg, f.runtime)
+	})
+	if realErr != nil {
+		t.Fatalf(
+			"expected the real --frozen --offline install to succeed despite the drifted recorded digest, got %v (stderr=%q)",
+			realErr, realStderr,
+		)
 	}
 }

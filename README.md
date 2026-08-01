@@ -164,21 +164,44 @@ Clean unreachable collections:
   stderr warning that the caches it built are discarded - a preview must never leave behind a
   persisted-and-empty snapshot that a later `cleanup` would read as evidence that nothing is
   installed or warmed anywhere.
-  For `install` and `warm`, each collection is reported as would install/would warm, already up
-  to date/already warm, or would fail; a would-fail verdict means the artifact isn't cached and
-  `--offline` forbids downloading it, and a nonzero would-fail count exits with the
-  install-failure code (`5`) - the same code a real run would exit with, because that install or
-  warm would certainly fail. The dry-run banner is printed to stderr and survives `--quiet`,
-  because the flag is env-sourced (`$GO_GALAXY_DRY_RUN`) and an org-wide CI environment block
-  would otherwise turn every install, warm, or lock run into a silent no-op.
-  For `install` and `warm`, a dry run reports whether an artifact is cached, not whether it still
-  matches its lockfile pin. Under `--frozen --offline`, any line that reports the artifact as
-  cached - `Already warm`, `Would warm (artifact cached)`, or `Would install (artifact cached)` -
-  states presence only: a cached tarball whose bytes have drifted off their pin fails the real run
-  closed with a checksum-mismatch error, since it cannot refetch while offline. `Up to date` is
-  not affected, because a real install skips such a collection without ever opening its tarball.
-  The run prints a one-time stderr warning whenever both flags are set together, naming this exact
-  gap; it is a disclosure, not a fix.
+  For `install` and `warm`, each collection is reported as would install/would warm, already up to
+  date/already warm, or would fail. A would-fail verdict covers, for both commands, the artifact
+  not being cached while `--offline` forbids downloading it (exits with the install-failure code,
+  `5`), or the cached artifact's own recorded digest disagreeing with a well-formed lockfile pin
+  while `--offline` forbids refetching a replacement (exits with the dedicated integrity code,
+  `7`); `install` alone adds a third cause, since only it writes an install tree: the collection's
+  install directory sits under a namespace path a real install would refuse to write to - an
+  escaping symlink, or a regular file blocking it - and extraction would fail the identical way
+  (exits with `5`). A dangling namespace symlink is deliberately not a would-fail: a real install
+  removes it and creates the directory fresh, so the preview reports the collection normally. Each
+  cause exits with the code a real run hitting that same cause would. One asymmetry is deliberate,
+  and it depends on the cache backend: the recorded-digest cause can fire where the real run still
+  succeeds, because under a pin a real install re-hashes the tarball rather than trusting the
+  recorded digest - so on the local cache backend, a cache whose recorded digest was altered while
+  its bytes were left intact is refused by the preview and installed for real anyway. On the S3
+  backend that same cache fails the real run too, because it re-checks the recorded digest against
+  the freshly downloaded bytes before the pin is ever re-hashed - so there the preview's refusal
+  matches what actually happens. The preview refuses it either way, because that cache is damaged
+  either way. The dry-run banner is printed to stderr and survives `--quiet`, because the flag is
+  env-sourced (`$GO_GALAXY_DRY_RUN`) and an org-wide CI environment block would otherwise turn
+  every install, warm, or lock run into a silent no-op.
+  Before any collection is even resolved, `install --dry-run` also checks whether
+  `ansible_collections` itself is usable: a real directory, an in-root relative symlink to one, or
+  an absent entry are all fine; an escaping or dangling symlink is refused with the install-failure
+  code (`5`), and a regular file sitting there is refused unclassified (exit `1`) - matching a
+  real, non-dry-run install exit-for-exit on every one of those shapes, and aborting the whole
+  preview before resolution ever starts rather than reporting on any collection at all.
+  For `install` and `warm`, a dry run still reports a cached artifact's presence, not its actual
+  on-disk bytes: it does compare the artifact cache's own recorded digest against the lockfile pin
+  (the integrity would-fail cause above), but a tarball whose bytes silently drift while that
+  recorded digest is never updated cannot be detected without re-hashing it - a full object
+  download on the S3 backend, the exact cost this preview exists to avoid. Under `--frozen
+  --offline`, a collection in exactly that state is still reported cached - `Already warm`,
+  `Would warm (artifact cached)`, or `Would install (artifact cached)` - even though the real run
+  would fail closed with a checksum-mismatch error. `Up to date` is not affected, because a real
+  install skips such a collection without ever opening its tarball. The run prints a one-time
+  stderr warning whenever both flags are set together, naming this narrower residual; it is a
+  disclosure, not a fix.
   For `lock`, a dry run builds the lockfile in memory from a fresh resolve, loads whatever
   lockfile is already on disk, and reports how the two differ instead of writing anything. A
   `Would change: server <from> -> <to>` line prints first when the file-level `server` field
