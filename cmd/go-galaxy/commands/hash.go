@@ -42,10 +42,10 @@ func Hash() *cli.Command {
 
 // computeHash prefers the lockfile's canonical hash when one is present. A
 // missing lockfile falls back to hashing the requirements file (the historic
-// behavior, kept for repos that do not lock). A lockfile that exists but
-// fails to parse (corrupt YAML, missing/unsupported schema_version) is
-// surfaced as an error instead of silently falling back, since that would
-// hide a broken lockfile behind a hash that looks fine.
+// behavior, kept for repos that do not lock). Any other lockfile.Load
+// failure - the file exists but cannot be parsed or validated, whatever the
+// specific cause - is surfaced as an error instead of silently falling back,
+// since that would hide a broken lockfile behind a hash that looks fine.
 func computeHash(requirementsFile, lockPath string) (string, error) {
 	lf, err := lockfile.Load(lockPath)
 	switch {

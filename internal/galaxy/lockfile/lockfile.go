@@ -37,6 +37,15 @@ type Entry struct {
 
 // File is the on-disk lockfile structure.
 type File struct {
+	// Server records the Galaxy server this lockfile was generated against -
+	// provenance for a human reviewing a committed lockfile, never a source
+	// of truth an entry's own resolution defers to: indexLockfile defaults a
+	// source-less entry's Source from the consuming RUN's own cfg.Server, not
+	// from this field. It is nonetheless part of the file's identity: Hash
+	// covers it and Compare reports a change to it via Diff.Server, so a
+	// server_list reorder or edit that changes the effective default server
+	// counts as drift the same way a changed pin does, even when every
+	// collection entry is otherwise untouched.
 	Server        string  `yaml:"server,omitempty"`
 	Collections   []Entry `yaml:"collections"`
 	SchemaVersion int     `yaml:"schema_version"`
@@ -55,13 +64,34 @@ func ResolveDefaultPath(requirementsFile, override string) string {
 	return filepath.Join(filepath.Dir(requirementsFile), DefaultName)
 }
 
-// Load parses a lockfile from disk. Returns (nil, fs.ErrNotExist) if the
-// file does not exist so callers can branch on absence.
+// Load parses a lockfile from disk. Every error it returns means exactly one
+// of two things, and the two are mutually exclusive by construction: either
+// the file is not there (IsNotExist(err) is true - the original
+// fs.ErrNotExist, or an OS-specific variant like ENOTDIR that also satisfies
+// errors.Is(err, fs.ErrNotExist)), or the file is there and unusable in some
+// way (errors.Is(err, helpers.ErrLockfileInvalid) is true - unreadable,
+// unparseable, or internally inconsistent). Three consumers depend on that
+// dichotomy being exhaustive: resolveOrLoadLockfile and lockFrozen both
+// classify --frozen's behavior by which arm holds, and lockDryRunBaseline
+// treats anything that is not IsNotExist the same way (warn, then proceed as
+// if no baseline existed) - none of the three have a third case to fall
+// into.
 func Load(path string) (*File, error) {
 	//nolint:gosec // path is user-provided lockfile location.
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
+		// Wrapped with %s, not %w: the fs.ErrNotExist guard above already
+		// makes this arm and the one above mutually exclusive, so %w buys no
+		// additional exclusivity here. %s is chosen instead because it
+		// matches the sibling YAML-unmarshal arm two lines below, and
+		// because nothing in this program branches on the underlying errno,
+		// so keeping it reachable through errors.Is would buy nothing.
+		// err.Error() still carries the real OS error text for a human
+		// reading the message; it is simply not reachable through errors.Is.
+		return nil, fmt.Errorf("%w: %s", helpers.ErrLockfileInvalid, err.Error())
 	}
 	var f File
 	if err := yaml.Unmarshal(data, &f); err != nil {
@@ -123,10 +153,22 @@ func (f *File) canonicalClone() *File {
 	return &clone
 }
 
-// validate rejects lockfiles that are internally inconsistent. Duplicate
-// collection names would otherwise let indexLockfile silently drop an entry
-// and make a frozen install ambiguous. Save does not call this: buildLockfile
-// derives entries from an fqdn-keyed map, so it cannot produce duplicates.
+// validate rejects lockfiles that are internally inconsistent, on two
+// independent grounds: a duplicate collection name, which would otherwise
+// let indexLockfile silently drop an entry and make a frozen install
+// ambiguous, and an entry whose pinned version is not helpers.IsExactVersion
+// - a constraint string like "*" rather than a version anything can install.
+// The latter closes the route a --frozen install would otherwise take when a
+// lockfile entry carried an unresolved constraint: resolveFromLockfile would
+// build a collection from it, exactVersionFromConstraints would treat it as
+// unpinned, and the run would silently install the server's highest version
+// under a path built from the literal constraint text. Save does not call
+// this, and the two shapes it would have caught are ruled out at the
+// producer by two different mechanisms, not one: buildLockfile carries its
+// own helpers.IsExactVersion guard over the resolved map it builds a File
+// from, so it cannot hand Save a non-exact version; a duplicate name simply
+// cannot arise in the first place, because that same map is keyed by fqdn,
+// so two entries can never share a name to begin with.
 func (f *File) validate() error {
 	seen := make(map[string]struct{}, len(f.Collections))
 	for _, e := range f.Collections {
@@ -134,6 +176,9 @@ func (f *File) validate() error {
 			return fmt.Errorf("%w: duplicate collection name %q", helpers.ErrLockfileInvalid, e.Name)
 		}
 		seen[e.Name] = struct{}{}
+		if !helpers.IsExactVersion(e.Version) {
+			return fmt.Errorf("%w: %s: version %q is not an exact version", helpers.ErrLockfileInvalid, e.Name, e.Version)
+		}
 	}
 	return nil
 }

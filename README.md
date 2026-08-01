@@ -138,7 +138,7 @@ Clean unreachable collections:
 ### Commands
 
 - `install` (`i`) - install collections from `requirements.yml`.
-- `lock` (`l`) - resolve and write `requirements.lock.yml` for reproducible CI. `--frozen` has no effect on `lock` - `lock` always resolves fresh instead of consuming an existing lockfile, and the run warns on stderr; use `install --frozen` or `warm --frozen` to actually consume an existing lockfile. Under `--dry-run`, `lock` diffs a fresh resolve against whatever lockfile is already on disk and reports what would change, without writing a lockfile - see [install options](#install-options) for the full `--dry-run` semantics.
+- `lock` (`l`) - resolve and write `requirements.lock.yml` for reproducible CI. Under `--frozen`, `lock` becomes a drift gate instead of a writer: it still resolves fresh (`lock` always does), but compares that fresh resolve against the lockfile already on disk and fails the run instead of overwriting the file when they differ, exiting with the lockfile exit code (`6`). The gate mirrors `lock`'s own resolution per the exact flags in effect - what it compares against is whatever `lock --<those flags>` would write - so `lock --frozen` alone reuses a cached resolve when `requirements.yml` is unchanged, and a version merely published upstream is not drift by itself: it gates the requirements-to-lockfile relationship, not upstream publication. Add `--refresh` (`lock --frozen --refresh`) to gate upstream publication too: `--refresh` makes the fresh resolve reach the live servers instead of reusing the cached one, so a newer version published upstream with `requirements.yml` unchanged now shows up as drift. A missing lockfile and one that exists but cannot be loaded each fail with their own distinct error rather than being reported as drift. Under `--dry-run`, `lock` diffs a fresh resolve against whatever lockfile is already on disk and reports what would change, without writing a lockfile; `--frozen` and `--dry-run` compose (both suppress the write, `--frozen` supplies the stricter verdict) - see [install options](#install-options) for the full `--dry-run` semantics.
 - `warm` (`w`) - populate the artifact + extracted caches without installing (for CI image bake). Requires a cache: `--no-cache` is rejected as a usage error rather than downloading everything and discarding it. A warmed collection's extracted tree is protected from `cleanup` for 30 days after its last warm, so a machine that warms and then stops warming eventually reclaims the space. Under `--dry-run`, `warm` reports per collection whether it is already warm or would be warmed, downloads no artifact, and writes no warmed entry; it still rejects `--no-cache` as a usage error regardless of `--dry-run`, since `--no-cache` leaves warm nothing to do either way - see [install options](#install-options) for the full `--dry-run` semantics.
 - `hash` (`h`) - print a deterministic cache key (`sha256:…`) for use as a CI cache key.
 - `tree` (`t`) - print the resolved dependency tree from the lockfile; requires a lockfile and fails if one is absent.
@@ -255,12 +255,21 @@ Clean unreachable collections:
 - `--ansible-config` (`$GO_GALAXY_ANSIBLE_CONFIG`, `$ANSIBLE_CONFIG`)
 - `--workers` (`$GO_GALAXY_WORKERS`)
 - `--no-cache` (`$GO_GALAXY_NO_CACHE`)
-- `--refresh` (`$GO_GALAXY_REFRESH`)
+- `--refresh` (`$GO_GALAXY_REFRESH`) - re-resolve against the configured Galaxy servers instead of reusing
+  cached metadata or the previous resolution. It bypasses exactly the cached answers that name a collection
+  without naming a version - which versions exist, which is highest, and which versions the last run picked
+  for these requirements - never an answer that already names an exact version: that version's metadata,
+  its dependency map, its artifact bytes, and its extracted tree are all still served from cache, so a
+  refreshed re-resolve that lands on the same version downloads nothing new. `--offline` outranks
+  `--refresh` - cached state is the only source of truth offline, so there is nothing left to re-resolve
+  against - and the run warns once rather than silently dropping the flag. `--refresh` has no effect under
+  `--frozen` on `install`/`warm`, since neither ever resolves against the network in the first place; on
+  `lock --frozen` it does have an effect - see the `lock` command entry above.
 - `--clear-cache` (`$GO_GALAXY_CLEAR_CACHE`)
 - `--no-deps` (`$GO_GALAXY_NO_DEPS`)
 - `--offline` (`$GO_GALAXY_OFFLINE`) - fail on any network access (cached state only)
 - `--lock-file` (`$GO_GALAXY_LOCK_FILE`)
-- `--frozen` (`$GO_GALAXY_FROZEN`) - require a lockfile and verify each installed or cached artifact's SHA256 against its lockfile pin, aborting the run on any mismatch; no effect on lock, which always regenerates the lockfile (the run warns)
+- `--frozen` (`$GO_GALAXY_FROZEN`) - the lockfile is law, enforced differently by each command it applies to. `install`/`warm` resolve FROM the lockfile instead of the network: no version listing, no metadata fetch, just the pinned entries, with each installed or cached artifact's SHA256 verified against its lockfile pin and the run aborted on any mismatch. `lock` cannot resolve from a file it is about to write, so it instead resolves fresh - exactly as an unfrozen `lock` run does, including reusing a cached resolve - and COMPARES the result against the lockfile already on disk, failing the run rather than overwriting the file on any difference; `lock --frozen` is therefore not a network-free path the way install/warm `--frozen` is. See the `lock` command entry above for the comparison's exact contract.
 - `--metrics-file` (`$GO_GALAXY_METRICS_FILE`) - emit JSON run report
 
 S3 cache options (if `--s3-bucket` is set, S3 backend is used):
@@ -609,6 +618,48 @@ install_collections:
     - go-galaxy install --frozen --offline -p ./collections
 ```
 
+### Lockfile drift gate
+
+Fail a pull request when `requirements.lock.yml` no longer matches
+`requirements.yml` - a root added, removed, or repinned without regenerating
+the lockfile. `lock --frozen` is not a network-free path the way install/warm
+`--frozen` is - it still resolves fresh to compare against the file, and only
+a warm cache lets that resolve stay off the network - so this is a separate
+job from the frozen-offline install above, not a replacement for it. Add
+`--refresh` for a second, distinct gate on the same file: `lock --frozen`
+alone only catches a `requirements.yml` change, since it reuses the cached
+resolve; `lock --frozen --refresh` also catches a newer version simply
+having been published upstream, since `--refresh` makes the comparison's
+fresh resolve reach the live servers instead:
+
+```yaml
+name: lockfile-drift
+on: [pull_request]
+
+jobs:
+  lockfile-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install go-galaxy
+        run: |
+          curl -sSL https://github.com/greeddj/go-galaxy/releases/latest/download/go-galaxy-linux-amd64 \
+            -o /usr/local/bin/go-galaxy
+          chmod +x /usr/local/bin/go-galaxy
+
+      - name: Check requirements.lock.yml matches requirements.yml
+        run: go-galaxy lock --frozen
+
+      - name: Check requirements.lock.yml is not stale against upstream
+        run: go-galaxy lock --frozen --refresh
+```
+
+A nonzero exit from either step (code `6`, the lockfile class - see the
+exit-code table below) means the PR needs `go-galaxy lock` (optionally
+`--refresh`, to pick up the newer upstream version too) run and its updated
+`requirements.lock.yml` committed.
+
 ### Container image bake
 
 Pre-warm caches in your CI base image so jobs only hardlink into place:
@@ -633,7 +684,7 @@ pipelines can branch on failure type without parsing log output:
 |    3 | Dependency resolution failure (conflicts, missing candidates, cycle)                                                                                                                                                                                                                                                                     |
 |    4 | Network or Galaxy API failure (timeouts, stalled transfers, metadata and cache-state deadlines, a versions listing that exceeded its page ceiling, a response body that exceeded its size ceiling (an artifact, a metadata document, or a bucket listing), offline-mode violations, or an unreachable cache backend)                                                                        |
 |    5 | Install-time failure (unsafe archive/symlink content, empty file, missing artifact cache)                                                                                                                                                                                                                                                |
-|    6 | Lockfile error (missing, invalid, or mismatched with requirements)                                                                                                                                                                                                                                                                       |
+|    6 | Lockfile error (missing, invalid, mismatched with requirements, or out of date under `lock --frozen`)                                                                                                                                                                                                                                    |
 |    7 | Artifact-integrity failure (content does not authenticate against its naming sha256, or the digest is malformed)                                                                                                                                                                                                                         |
 |    8 | Cache contention (the cache lock is held elsewhere, or the S3 lock's wait ceiling elapsed after this run observed another holder)                                                                                                                                                                                                        |
 |    9 | Persisted cache state is corrupt or oversized and must be discarded (a project registry that fails to decode, or a state object that exceeds its size ceiling)                                                                                                                                                                           |
@@ -720,18 +771,20 @@ reads a partial JSON, and a symlink at the operator-specified path is replaced
 rather than followed.
 
 The report is written whenever a run reaches its finalize step - including a
-run that failed to install some collections and a run whose snapshot save
-itself failed - and is not written when the run aborts earlier (unreadable
-`requirements.yml`, a resolution failure, or a missing lockfile). Its
-existence is therefore not a success signal: gate automation on the process
-exit code (see the table above), never on whether the metrics file exists or
-looks clean. This matters most for `lock`: `failures` is always `0` in a
-`lock` report, so the report carries no failure signal at all for that
-command, and a `lock` run whose snapshot save failed still leaves a
-clean-looking report next to a nonzero exit code. `frozen` is also never set
-in a `lock` report, even when `--frozen` was passed: `lock` accepts the flag
-because it shares the same flag set as `install`/`warm`, but it never
-consumes the lockfile it writes, so the report never claims a frozen run.
+run that failed to install some collections, a run whose snapshot save itself
+failed, and a `lock --frozen` run that found drift - and is not written when
+the run aborts earlier (unreadable `requirements.yml`, a resolution failure,
+or a missing or unloadable lockfile). Its existence is therefore not a success
+signal: gate automation on the process exit code (see the table above), never
+on whether the metrics file exists or looks clean. This matters most for
+`lock`: `failures` is always `0` in a `lock` report, so the report carries no
+failure signal at all for that command, and a `lock` run whose snapshot save
+failed, or whose `--frozen` gate found drift, still leaves a clean-looking
+report next to a nonzero exit code. `frozen` is `true` exactly when the run
+honored `--frozen`, for every command that reads the flag, `lock` included:
+for `install`/`warm` that means resolving from the lockfile, and for `lock`
+it means gating the fresh resolve against the lockfile instead of overwriting
+it - not merely whether the flag was passed.
 
 `cache_hits`, `cache_misses`, and `bytes_downloaded` are artifact-level counters,
 not collection-level: a hit is one artifact served from the artifact cache and a

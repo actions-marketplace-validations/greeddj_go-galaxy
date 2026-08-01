@@ -99,8 +99,11 @@ func collectionBehaviorFlags() []cli.Flag {
 			Sources: cli.EnvVars("GO_GALAXY_NO_CACHE"),
 		},
 		&cli.BoolFlag{
-			Name:    "refresh",
-			Usage:   "Refresh all collections, ignoring cache",
+			Name: "refresh",
+			Usage: "Re-resolve against the Galaxy servers instead of reusing cached metadata or the previous " +
+				"resolution; a cached artifact and its own version-specific metadata are still reused even " +
+				"if the server changed them - use --no-cache to force those too. Ignored with --offline, " +
+				"and wherever resolution comes from the lockfile rather than the servers",
 			Sources: cli.EnvVars("GO_GALAXY_REFRESH"),
 		},
 		&cli.BoolFlag{

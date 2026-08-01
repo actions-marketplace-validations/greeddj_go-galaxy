@@ -275,6 +275,15 @@ var (
 	ErrLockfileMissing = errors.New("lockfile is required by --frozen but not found")
 	// ErrLockfileInvalid indicates the lockfile is malformed or unsupported.
 	ErrLockfileInvalid = errors.New("lockfile is invalid")
+	// ErrLockfileDrift indicates lock --frozen compared a fresh resolve
+	// against the lockfile already on disk and found a difference: the file
+	// that exists is not the file a real `lock` run would write right now.
+	// This is distinct from ErrLockfileMismatch (a lockfile that does not
+	// cover the requirements roots at all) the same way a malformed digest
+	// is kept distinct from a mismatched one - both pairs describe a
+	// different failure shape under the same exit class, not the same
+	// failure under two names.
+	ErrLockfileDrift = errors.New("lockfile is out of date")
 
 	// ErrInvalidTimeout indicates the --timeout value is neither a positive
 	// integer number of seconds nor a valid positive Go duration string.
@@ -288,6 +297,17 @@ var (
 	// name, or version) cannot be safely used as a single filesystem path
 	// element, e.g. it contains a path separator or is "..".
 	ErrUnsafeCollectionIdentifier = errors.New("unsafe collection identifier")
+	// ErrInvalidCollectionVersion indicates a resolved collection's version
+	// is not IsExactVersion - a constraint string like "*" or ">=1.0.0", or
+	// any other value that does not name one release - reaching a point in
+	// the pipeline that requires an already-resolved, installable version.
+	// This is deliberately distinct from ErrUnsafeCollectionIdentifier: an
+	// unsafe identifier describes a path-traversal shape, while this
+	// sentinel describes a version that is well-formed as a path element but
+	// still not a version anything could install - the same distinction
+	// ErrMalformedArtifactSHA256 draws against a syntactically fine but
+	// wrong-shaped digest.
+	ErrInvalidCollectionVersion = errors.New("collection version is not an exact version")
 	// ErrUnsafeRemovalPath indicates a computed removal path failed a
 	// containment check against its expected root directory.
 	ErrUnsafeRemovalPath = errors.New("unsafe removal path")

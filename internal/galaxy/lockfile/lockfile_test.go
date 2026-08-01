@@ -61,6 +61,92 @@ func TestLoadMissing(t *testing.T) {
 	}
 }
 
+// TestLoadWrapsUnreadableFileAsInvalid proves a lockfile path that exists but
+// cannot be read as a regular file - a directory sitting there - fails
+// closed with helpers.ErrLockfileInvalid rather than an unclassified error,
+// and is not also IsNotExist: the two are mutually exclusive by construction,
+// because Load's fs.ErrNotExist guard runs first and this arm is only
+// reached once that guard did not match (Load then wraps the os.ReadFile
+// cause with %s, never %w, in that arm - the %s choice matches the sibling
+// YAML-unmarshal arm and is not itself what keeps the two exclusive). A
+// directory is used rather than chmod 0000: EACCES never fires when tests
+// run as root, which is the normal case inside a CI container, so a
+// permission-denied fixture would silently pass there for the wrong reason;
+// ELOOP (a symlink cycle) is fiddly to construct portably and would prove
+// the identical arm anyway.
+//
+// The positive control removes the directory and writes a valid lockfile at
+// the identical path, proving Load can still succeed there - the failure
+// above is about what currently occupies the path, not about the path
+// itself being permanently unusable.
+func TestLoadWrapsUnreadableFileAsInvalid(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "lockfile-is-a-dir.yml")
+	if err := os.Mkdir(path, helpers.DirMod); err != nil {
+		t.Fatalf("mkdir %s: %v", path, err)
+	}
+
+	_, err := Load(path)
+	if !errors.Is(err, helpers.ErrLockfileInvalid) {
+		t.Fatalf("expected errors.Is helpers.ErrLockfileInvalid, got %v", err)
+	}
+	if IsNotExist(err) {
+		t.Fatalf("expected IsNotExist(err) == false, got true for %v", err)
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove directory: %v", err)
+	}
+	valid := &File{SchemaVersion: SchemaVersion, Collections: []Entry{{Name: "a.a", Version: "1.0.0"}}}
+	if err := Save(path, valid); err != nil {
+		t.Fatalf("save valid lockfile at the same path: %v", err)
+	}
+	if _, err := Load(path); err != nil {
+		t.Fatalf("Load after replacing the directory with a valid lockfile: %v", err)
+	}
+}
+
+// TestLoadAbsentFileIsNotInvalid states the exclusivity property Load's own
+// doc comment promises, from the other side of
+// TestLoadWrapsUnreadableFileAsInvalid: a genuinely absent path is
+// IsNotExist and never also helpers.ErrLockfileInvalid. This is what pins
+// the fs.ErrNotExist guard in Load - without it, every error the function
+// returns would satisfy helpers.ErrLockfileInvalid, absence included.
+//
+// Mutation (deleting the `if errors.Is(err, fs.ErrNotExist) { return nil,
+// err }` guard, so every os.ReadFile failure is wrapped) confirmed to fail
+// this test with:
+//
+//	lockfile_test.go:144: expected IsNotExist, got lockfile is invalid: open
+//	/.../missing.yml: no such file or directory
+//	--- FAIL: TestLoadAbsentFileIsNotInvalid (0.00s)
+//
+// The same mutation also fails the pre-existing TestLoadMissing, and - one
+// level up - collections.TestLockFrozenFailsOnAMissingLockfile, since
+// lockFrozen's own `if lockfile.IsNotExist(err)` branch stops seeing a
+// missing file as IsNotExist and falls through to the generic
+// helpers.ErrLockfileInvalid wrap instead of helpers.ErrLockfileMissing.
+// It also perturbs lockDryRunBaseline: a cold-cache `lock --dry-run` (no
+// lockfile on disk at all) newly emits "existing lockfile
+// .../requirements.lock.yml cannot be read (lockfile is invalid: ... no
+// such file or directory); reporting every collection as added" - a warning
+// about a file that was never there in the first place. That perturbation
+// is caught, not silent: collections.TestLockDryRunWritesNoLockfileAndReportsAdds
+// asserts the absence of exactly that warning, which is the silence half of
+// lockDryRunBaseline's documented policy.
+func TestLoadAbsentFileIsNotInvalid(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	_, err := Load(filepath.Join(dir, "missing.yml"))
+	if !IsNotExist(err) {
+		t.Fatalf("expected IsNotExist, got %v", err)
+	}
+	if errors.Is(err, helpers.ErrLockfileInvalid) {
+		t.Fatalf("expected errors.Is helpers.ErrLockfileInvalid == false, got true for %v", err)
+	}
+}
+
 func TestLoadInvalidSchema(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -80,6 +166,32 @@ func TestLoadRejectsDuplicateNames(t *testing.T) {
 	path := filepath.Join(dir, "dup.yml")
 	yamlContent := fmt.Sprintf(
 		"schema_version: %d\ncollections:\n  - name: a.a\n    version: 1.0.0\n  - name: a.a\n    version: 2.0.0\n",
+		SchemaVersion,
+	)
+	if err := os.WriteFile(path, []byte(yamlContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if !errors.Is(err, helpers.ErrLockfileInvalid) {
+		t.Fatalf("expected ErrLockfileInvalid, got %v", err)
+	}
+}
+
+// TestLoadRejectsNonExactVersion proves Load refuses a lockfile entry whose
+// version is a constraint rather than an exact version - "*" here, a shape
+// that reads as unpinned to exactVersionFromConstraints, so a --frozen
+// install would otherwise resolve it against the server's highest available
+// version instead of the pin the operator wrote. TestSaveLoadRoundTrip is
+// this test's positive control on the same Load/validate path: it already
+// proves an exact version ("11.1.0", "2.0.0") round-trips cleanly, so this
+// test only needs to show the constraint shape specifically is what
+// validate refuses.
+func TestLoadRejectsNonExactVersion(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wildcard.yml")
+	yamlContent := fmt.Sprintf(
+		"schema_version: %d\ncollections:\n  - name: a.a\n    version: \"*\"\n",
 		SchemaVersion,
 	)
 	if err := os.WriteFile(path, []byte(yamlContent), 0o600); err != nil {

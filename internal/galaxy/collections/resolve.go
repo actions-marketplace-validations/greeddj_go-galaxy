@@ -18,6 +18,37 @@ import (
 )
 
 // resolveCollectionsInternal resolves versions and dependencies for roots.
+//
+// --refresh bypasses exactly those cached answers that name a collection
+// WITHOUT naming a version - "which versions exist", "which is highest", and
+// "given these requirements, which versions did the last run pick". It does
+// not bypass an answer that already names an exact version: that version's
+// metadata document, its declared dependency map, its artifact bytes, or its
+// extracted tree - all of those are still served from cache under --refresh,
+// exactly as without it. A version-scoped answer is treated as fixed, and
+// for a PINNED collection a server that changes one anyway is caught by the
+// pin/hash path (verifyPinnedSHA, resolveArtifactSHA re-hashes the actual
+// bytes whenever a pin is present), not by cache freshness. For an unpinned
+// collection that guarantee does not hold: resolveArtifactSHA trusts the
+// cached metadata sha (or the store's recorded sidecar sha) instead of
+// re-hashing, so a republished version's changed bytes are never even
+// requested, and canSkipInstall/installEntryMatches accepts the cached
+// install outright once a matching hash is on record - --refresh changes
+// none of that, since the mechanism it bypasses lives entirely upstream of
+// this exact-version fetch. Reusing a cached artifact and its cached
+// exact-version metadata this way is the safe direction (an unpinned run
+// keeps its first-seen bytes rather than adopting new ones sight unseen),
+// but it is a real remediation gap, not merely a cache-freshness one: after
+// a "we republished this version with a fix" advisory, --refresh alone does
+// not force a re-fetch of it. --no-cache (or --clear-cache) is what forces
+// that. This function's own snapshotAllowed guard (see
+// refreshBypassesSnapshot) is the version-free half of the cache split for
+// the resolve snapshot specifically - "given these requirements, which
+// versions did the last run pick" is exactly what
+// loadResolvedFromSnapshot/tryIncrementalResolve answer from st, below;
+// cache.PolicyForConstraint's own exact/non-exact split (policy.go) is the
+// identical predicate applied to every HTTP-layer metadata fetch this
+// function's fallback solve makes.
 func resolveCollectionsInternal(
 	ctx context.Context,
 	deps collectionDeps,
@@ -31,7 +62,26 @@ func resolveCollectionsInternal(
 	reqSpec := buildRequirementsSpec(roots)
 	reqHash := requirementsSignatureFromSpec(reqSpec, cfg.NoDeps, serversSignature(cfg))
 
-	snapshotAllowed := allowSnapshot && st != nil
+	// The veto is layered over allowSnapshot, not merged into a single
+	// expression callers compute themselves: allowSnapshot keeps its
+	// existing meaning ("this caller permits reuse"), while
+	// refreshBypassesSnapshot is a run-wide policy this function itself
+	// enforces regardless of caller, so a future fourth caller of this
+	// function cannot forget it - the same structural argument
+	// cacheManager.WithStateDeadline's own doc comment makes for wrapping a
+	// Backend once instead of guarding nine call sites.
+	//
+	// Documented-uncovered: warm has no --refresh e2e test of its own, and
+	// none is needed to trust this veto for warm specifically. warmWithState
+	// reaches this exact call through resolveOrLoadLockfile, the single
+	// un-branched entry point install's prepareInstallPlan goes through too;
+	// neither caller wraps or special-cases refreshBypassesSnapshot, and the
+	// check itself is made once, here, not per caller. A warm-specific test
+	// would therefore exercise the identical code path
+	// TestRefreshReSolvesInsteadOfReplayingTheSnapshot (e2e_test.go) already
+	// does for install, proving nothing a shared call site does not already
+	// establish structurally.
+	snapshotAllowed := allowSnapshot && st != nil && !refreshBypassesSnapshot(cfg)
 	if snapshotAllowed {
 		resolvedSnap, graphSnap, ok, err := resolveFromSnapshots(ctx, deps, roots, reqSpec, reqHash)
 		if shouldReturnSnapshot(ok, err) {
@@ -49,6 +99,26 @@ func resolveCollectionsInternal(
 
 func shouldReturnSnapshot(ok bool, err error) bool {
 	return ok || err != nil
+}
+
+// refreshBypassesSnapshot reports whether cfg's --refresh should veto
+// resolveCollectionsInternal's resolve-snapshot reuse path: the persisted
+// "given these requirements, which versions did the last run pick" answer -
+// see that function's own doc comment for the full version-free/
+// version-scoped predicate this implements one half of. A nil cfg never
+// vetoes: resolveCollectionsInternal's own callers always hand it a real
+// *config.Config, but this predicate is cheap to make total anyway, rather
+// than adding a nil check at its one call site.
+//
+// --offline outranks --refresh here, not merely by incidental short-circuit
+// order: cache.PolicyForConstraint (policy.go) checks IsOffline() before
+// IsRefresh() for the identical reason - offline, cached state is the only
+// source of truth there is, so refresh has nothing left to re-resolve
+// against - and this veto has to agree with that precedence, or the two
+// halves of one flag (this snapshot veto and the HTTP-layer policy refresh
+// already governs) would disagree about what --refresh --offline means.
+func refreshBypassesSnapshot(cfg *config.Config) bool {
+	return cfg != nil && cfg.Refresh && !cfg.Offline
 }
 
 func recordResolutionIfNeeded(

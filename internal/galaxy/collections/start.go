@@ -300,22 +300,19 @@ func Lock(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
 // owns the actual work once state is initialized. Same lifecycle/work
 // boundary runInstall and runWarm already draw.
 func runLock(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
-	// --frozen is registered on lock only because lock shares
-	// helpers.CollectionFlags with install and warm; lock never consumes a
-	// lockfile - it always resolves fresh - so the flag cannot be honored
-	// here. This warns rather than failing the run: the realistic way the
-	// flag reaches a lock invocation is an ambient GO_GALAXY_FROZEN in a CI
-	// environment block shared by every job, and failing a lock job that is
-	// otherwise exactly right is a worse trade than one line on stderr.
-	// Warnf, not Printf: it must survive --quiet and must not touch stdout.
-	// The wording states what lock does not do (consume a lockfile) rather
-	// than what it does to the file on disk, so it stays true under
-	// --dry-run too, which resolves fresh and writes nothing at all.
-	if cfg.Frozen {
-		runtime.Output.Warnf("--frozen has no effect on lock: lock always resolves fresh instead of consuming an existing lockfile. " +
-			"Use install --frozen or warm --frozen to consume one.")
-	}
-	runtime.Output.Printf("🔒 Generating lockfile")
+	// --frozen is registered on lock because it shares helpers.CollectionFlags
+	// with install and warm, and on lock it means something coherent with
+	// what it means on those two: the lockfile is law. install/warm --frozen
+	// resolve FROM the lockfile instead of the network; lock --frozen instead
+	// resolves fresh (lockWithState always does, --frozen or not) and refuses
+	// to overwrite the file when that fresh resolve disagrees with what is
+	// already there - see lockFrozen's own doc comment for the gate itself.
+	// The banner names only the one thing every run does regardless of mode -
+	// resolve - rather than what happens to the result, which is exactly
+	// where "Checking" and "Generating" diverge: a plain run overwrites the
+	// file, a frozen one only compares against it, and a single banner cannot
+	// truthfully claim either without branching on cfg.Frozen.
+	runtime.Output.Printf("🔒 Resolving for lockfile")
 	start := time.Now()
 	state, err := initInstall(ctx, cfg, runtime)
 	if err != nil {
@@ -336,10 +333,18 @@ func runLock(ctx context.Context, cfg *config.Config, runtime *infra.Infra) erro
 }
 
 // lockWithState performs lock's actual work against an already-initialized
-// state: resolve requirements, build and write the lockfile, save the
-// resulting snapshot, and write the run metrics report. It assumes the
-// backend is already open and locked - runLock holds that lifecycle - so it
-// never touches state.release or state.backend.Close.
+// state: resolve requirements, then either write the lockfile, preview it, or
+// gate on it, depending on cfg.Frozen and cfg.DryRun. It assumes the backend
+// is already open and locked - runLock holds that lifecycle - so it never
+// touches state.release or state.backend.Close.
+//
+// cfg.Frozen is checked before cfg.DryRun, not merely in some order: the two
+// flags are orthogonal rather than conflicting - both suppress the write, so
+// they only ever disagree on the verdict a suppressed write would have had -
+// and checking frozen first is what makes lockFrozen itself the one that
+// decides whether to preview or really save its own snapshot (see
+// saveLockSnapshot), the stricter of the two verdicts winning by construction
+// rather than by which branch happens to run first.
 func lockWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra, state *installState, start time.Time) error {
 	prep, err := loadRoots(cfg, runtime)
 	if err != nil {
@@ -355,6 +360,9 @@ func lockWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra
 		return err
 	}
 	path := lockfile.ResolveDefaultPath(cfg.RequirementsFile, cfg.LockFile)
+	if cfg.Frozen {
+		return lockFrozen(ctx, cfg, runtime, state, lf, path, start)
+	}
 	if cfg.DryRun {
 		return lockDryRun(ctx, cfg, runtime, state, lf, path, start)
 	}
@@ -377,10 +385,13 @@ func lockWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra
 	// and lock has no per-collection failure that could ever reach this line -
 	// a resolve or lockfile-build failure returns before writeRunMetrics runs
 	// at all. A save failure is not encoded in this field either, matching
-	// install and warm - do not add one here. The literal false is not a
-	// placeholder: it is the truth for this command, which never reads
-	// cfg.Frozen (see runLock's warning above, printed instead of honoring it).
-	writeRunMetrics(cfg, runtime, "lock", start, len(lf.Collections), 0, false)
+	// install and warm - do not add one here. cfg.Frozen is passed rather than
+	// a literal false purely for uniformity with lockFrozen's own call: this
+	// line is reachable only when cfg.Frozen is already false (the branch
+	// above returns through lockFrozen otherwise), so the value read here is
+	// always false in practice, but it is read as the truth rather than
+	// asserted as one.
+	writeRunMetrics(cfg, runtime, "lock", start, len(lf.Collections), 0, cfg.Frozen)
 	return saveErr
 }
 
@@ -389,22 +400,23 @@ func lockWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra
 // own result - differs from whatever is already on disk at path, and writes
 // no lockfile at all. The announcement is not merely relocated but
 // suppressed outright: under --dry-run no file was written, so printing that
-// line would be a false statement about this run.
+// line would be a false statement about this run. Reached only when
+// cfg.Frozen is false - lockWithState checks that flag first and returns
+// through lockFrozen otherwise, which performs its own, stricter preview
+// instead of this one.
 //
-// The snapshot is still saved, through the same saveDryRunSnapshotIfPersisted
-// guard install and warm use rather than a bare SaveStore: lock's resolve-side
-// metadata caches are pure, reconstructible cache, not lock's product (the
-// lockfile is), so a dry run keeps them - while the guard still refuses to
-// manufacture a persisted snapshot where none existed. See installDryRun's own
-// doc comment for what a later cleanup run would read into a fabricated one;
-// the same reasoning applies here unchanged.
+// The snapshot is still saved, through saveLockSnapshot - the single rule
+// this function shares with lockFrozen for what "save the snapshot" means
+// under cfg.DryRun. See installDryRun's own doc comment for what a later
+// cleanup run would read into a fabricated snapshot; the same reasoning
+// applies here unchanged.
 //
 // writeRunMetrics is called unconditionally, matching every other command's
 // tail; it self-suppresses under cfg.DryRun (see its own doc comment), so this
 // call site does not need to know that. Its arguments are the same ones the
 // real path passes: the resolved collection count, a truthful zero failure
-// count (lock has no per-collection failure), and frozen=false, since lock
-// never consumes a lockfile regardless of --dry-run.
+// count (lock has no per-collection failure), and cfg.Frozen, which is always
+// false here for the identical reason lockWithState's own call site is.
 func lockDryRun(
 	ctx context.Context,
 	cfg *config.Config,
@@ -414,10 +426,103 @@ func lockDryRun(
 	path string,
 	start time.Time,
 ) error {
-	reportLockfileDiff(runtime, lf, path, lockfile.Compare(lockDryRunBaseline(runtime, path), lf))
-	saveErr := saveDryRunSnapshotIfPersisted(ctx, runtime, state)
-	writeRunMetrics(cfg, runtime, "lock", start, len(lf.Collections), 0, false)
+	reportLockfileDiff(runtime, lf, path, dryRunDiffPrefix, lockfile.Compare(lockDryRunBaseline(runtime, path), lf))
+	saveErr := saveLockSnapshot(ctx, cfg, runtime, state)
+	writeRunMetrics(cfg, runtime, "lock", start, len(lf.Collections), 0, cfg.Frozen)
 	return saveErr
+}
+
+// lockFrozen implements lock --frozen's drift gate: instead of writing lf -
+// the fresh resolve's own result, identical to what a plain `lock` run would
+// have written - it compares lf against whatever lockfile already exists at
+// path and fails the run when they differ, rather than overwriting the file.
+// This is "the lockfile is law" applied to the one command that would
+// otherwise rewrite it: install/warm --frozen already refuse to install
+// anything the lockfile does not name; lock --frozen refuses to change what
+// the lockfile names in the first place.
+//
+// A missing lockfile is not drift and is reported as a different sentinel,
+// helpers.ErrLockfileMissing: lockfile.Compare(nil, lf) would report every
+// collection as Added, which reads exactly like "every pin just changed"
+// even though the real fact is "this project has never run `lock`" - and
+// Compare's own doc comment requires a caller to draw that distinction
+// itself before ever calling it with a nil before, rather than trying to
+// recover it from a nil argument after the fact. This is the identical
+// sentinel resolveOrLoadLockfile already raises for install/warm --frozen
+// against an absent lockfile, so the same flag fails the same way across all
+// three commands. A lockfile that exists but fails to load (a bad schema
+// version, unparseable YAML, or any other lockfile.Load failure) fails closed
+// with helpers.ErrLockfileInvalid via that same Load call - deliberately not
+// through lockDryRunBaseline's lenient "treat as no baseline" policy. That
+// policy is sound only for a command whose product is to overwrite this file
+// and therefore never reads it for real; lockFrozen's entire verdict is what
+// is already on disk, so treating an unloadable file as "no baseline" here
+// would let a corrupt lockfile pass the gate it exists to enforce.
+//
+// The gate deliberately mirrors lock's own resolution rather than checking
+// against upstream publication: lf comes from the identical
+// resolveCollectionsInternal call lockWithState always makes, which reuses
+// the persisted resolve snapshot whenever requirements.yml and the effective
+// server list are unchanged since the last resolve. So publishing a newer
+// upstream version without touching requirements.yml leaves this gate
+// reporting "up to date" - deliberately: this gate's contract is "running
+// `lock` right now would not change this file", not "every locked collection
+// is still the newest one available", which is what the outdated command
+// answers instead. A policy that instead forced a network re-resolve here
+// would be a gate `lock` itself could not satisfy, since reusing an
+// unchanged resolve is lock's own established behavior, not a bug this gate
+// exists to route around.
+//
+// The reported drift error carries no counts of its own, matching
+// reportLockfileDiff's own summary (see its doc comment): a file-level server
+// change alone leaves every per-collection count at zero, and a message built
+// from counts would misreport that as "nothing changed" even though it would
+// still rewrite the file. reportLockfileDiff and its Okf/PersistentPrintf
+// lines already state what changed in full; this error only states that
+// something did, plus how to fix it.
+func lockFrozen(
+	ctx context.Context,
+	cfg *config.Config,
+	runtime *infra.Infra,
+	state *installState,
+	lf *lockfile.File,
+	path string,
+	start time.Time,
+) error {
+	existing, err := lockfile.Load(path)
+	if err != nil {
+		if lockfile.IsNotExist(err) {
+			return fmt.Errorf("%w: %s", helpers.ErrLockfileMissing, path)
+		}
+		return fmt.Errorf("load lockfile %s: %w", path, err)
+	}
+
+	diff := lockfile.Compare(existing, lf)
+	reportLockfileDiff(runtime, lf, path, frozenDiffPrefix, diff)
+	saveErr := saveLockSnapshot(ctx, cfg, runtime, state)
+	writeRunMetrics(cfg, runtime, "lock", start, len(lf.Collections), 0, cfg.Frozen)
+	if !diff.Empty() {
+		return annotateSaveFailure(
+			fmt.Errorf("%w: %s: run `go-galaxy lock` to update it", helpers.ErrLockfileDrift, path),
+			saveErr,
+		)
+	}
+	return saveErr
+}
+
+// saveLockSnapshot saves state.store the same way lockDryRun and lockFrozen
+// both need it saved: through saveDryRunSnapshotIfPersisted under cfg.DryRun,
+// or a plain SaveStore otherwise. It exists as one rule with two callers
+// specifically so they cannot diverge: lockFrozen can itself run under
+// --dry-run (the two flags are orthogonal - see lockWithState's own doc
+// comment), and its save behavior under that combination must be identical
+// to lockDryRun's own, by construction, not by two call sites happening to
+// agree today.
+func saveLockSnapshot(ctx context.Context, cfg *config.Config, runtime *infra.Infra, state *installState) error {
+	if cfg.DryRun {
+		return saveDryRunSnapshotIfPersisted(ctx, runtime, state)
+	}
+	return state.backend.SaveStore(ctx, state.store)
 }
 
 // runInstall owns the backend lifecycle for the install command: it opens
@@ -633,10 +738,35 @@ func prepareInstallPlan(
 // dry-run mode must pass through, so emitting dryRunBanner here makes "no
 // command is in dry-run mode silently" a structural property rather than a
 // per-call-site convention - install, warm, and lock all reach the banner
-// through this one call site, with nothing per-command to remember.
+// through this one call site, with nothing per-command to remember. The
+// --refresh/--offline warning right below sits on the identical argument:
+// --offline outranks --refresh (see refreshBypassesSnapshot's own doc
+// comment for why), and emitting the disclosure from this one funnel is what
+// makes "no run silently drops a flag" structural here too, rather than a
+// convention install/warm/lock would each have to remember on their own.
 func initInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) (*installState, error) {
 	if cfg.DryRun {
 		dryRunBanner(runtime)
+	}
+	// This is not a usage error: --refresh (GO_GALAXY_REFRESH) and --offline
+	// (GO_GALAXY_OFFLINE) both realistically arrive from an ambient CI
+	// environment block, and failing an otherwise-correct offline run over a
+	// flag combination that resolves unambiguously is a worse trade than one
+	// line on stderr. The condition below reads --refresh and --offline only,
+	// deliberately never cfg.Frozen, because --frozen --refresh (without
+	// --offline) must never warn here, for two different reasons depending on
+	// which command it reaches: on install/warm, resolveOrLoadLockfile takes
+	// the cfg.Frozen branch straight to the lockfile and never calls
+	// resolveCollectionsInternal, so --refresh truly has nothing to affect
+	// there - not a case this warning needs to disclose, since nothing is
+	// being silently dropped. On lock, lockWithState always calls
+	// resolveCollectionsInternal regardless of cfg.Frozen, so --refresh keeps
+	// vetoing the resolve snapshot exactly as it does unfrozen - warning
+	// "skipping --refresh" there would be an outright false statement about
+	// what lock --frozen --refresh does (see lockFrozen's own doc comment for
+	// what that combination means).
+	if cfg.Refresh && cfg.Offline {
+		runtime.Output.Warnf("--offline: skipping --refresh; cached state is the only source of truth offline")
 	}
 	runtime.Output.Printf("🚀 init cache backend")
 	backend, err := cacheBackend.New(cfg, runtime)
@@ -787,10 +917,14 @@ func sweepDeadRunTemps(ctx context.Context, runtime *infra.Infra, backend cacheM
 // report's frozen field states what the run HONORED, not what was
 // CONFIGURED: install and warm route resolution through
 // resolveOrLoadLockfile, which branches on cfg.Frozen, so they pass it
-// through; lock accepts the flag (it shares the collection flag set) but
-// never consumes a lockfile, so it passes false. Offline stays cfg-derived ON
-// PURPOSE - it governs the HTTP transport for every command, lock included -
-// so cfg.Offline is always the truth there.
+// through; lock honors the flag too - lockFrozen gates a fresh resolve
+// against the on-disk lockfile instead of consuming it over the network the
+// way install/warm do, but it is still --frozen actually changing what this
+// run does - so its call sites pass cfg.Frozen through as well, and honored
+// and configured coincide there exactly as they do for install and
+// warm. Offline stays cfg-derived ON PURPOSE - it governs the HTTP transport
+// for every command, lock included - so cfg.Offline is always the truth
+// there.
 func writeRunMetrics(
 	cfg *config.Config,
 	runtime *infra.Infra,
@@ -913,23 +1047,46 @@ func loadRoots(cfg *config.Config, runtime *infra.Infra) (*rootPreparation, erro
 }
 
 // buildCollectionsMap folds the resolved requirements into a key-addressed
-// map, rejecting two failure shapes before any install work starts: a
-// duplicate key (ErrDuplicateCollectionKey, pre-existing) and, now, an unsafe
-// identifier (ErrUnsafeCollectionIdentifier). The latter guard exists because
-// helpers.SplitFQDN performs no path-safety validation of its own - see
-// TestSplitFQDNDoesNotValidatePathSafety in helpers - so a namespace or name
-// like "foo/../.." reaches here unvalidated from every caller that only
-// checked it parses as a two-part FQDN. newInstallTarget validates the same
-// three components again, later, per collection - keeping this guard here as
-// well is deliberate, matching the pattern writeExtractMarker's own doc
-// comment already documents for this file: a caller's check does not make a
-// callee's own guard redundant.
+// map, rejecting three failure shapes before any install work starts: an
+// unsafe namespace/name identifier (ErrUnsafeCollectionIdentifier), a version
+// that is not helpers.IsExactVersion (ErrInvalidCollectionVersion), and a
+// duplicate key (ErrDuplicateCollectionKey). The namespace/name guard exists
+// because helpers.SplitFQDN performs no path-safety validation of its own -
+// see TestSplitFQDNDoesNotValidatePathSafety in helpers - so a namespace or
+// name like "foo/../.." reaches here unvalidated from every caller that only
+// checked it parses as a two-part FQDN. newInstallTarget validates all three
+// components again, later, per collection - keeping this guard here as well
+// is deliberate, matching the pattern writeExtractMarker's own doc comment
+// already documents for this file: a caller's check does not make a callee's
+// own guard redundant.
+//
+// The version check is IsExactVersion rather than a second IsPathElement
+// call, replacing it rather than stacking alongside it:
+// TestIsExactVersionImpliesIsPathElementExhaustive (internal/galaxy/helpers)
+// proves every value IsExactVersion accepts also satisfies IsPathElement -
+// exhaustively over an alphabet covering every character class either
+// vendored semver grammar treats specially, under both settings of
+// semver.CoerceNewVersion, not merely a handful of sampled fixtures - so an
+// IsPathElement check on a version that already passed IsExactVersion could
+// never fire; keeping it would only cost a redundant call, never add
+// coverage. Rejecting it under its own sentinel rather than folding it into
+// ErrUnsafeCollectionIdentifier also gives a poisoned or lockfile-sourced
+// constraint string like "*" its own classification instead of reading as a
+// path-traversal attempt, which it is not: it is syntactically safe as a
+// path element and still not a version anything could install.
 func buildCollectionsMap(resolved map[string]collection) (map[string]collection, error) {
 	collections := make(map[string]collection, len(resolved))
 	for _, col := range resolved {
-		if !helpers.IsPathElement(col.Namespace) || !helpers.IsPathElement(col.Name) || !helpers.IsPathElement(col.Version) {
+		if !helpers.IsPathElement(col.Namespace) || !helpers.IsPathElement(col.Name) {
+			// version is reported here as identity context - which collection
+			// this is - never as a checked field: this branch's own condition
+			// never looks at col.Version, so an unsafe namespace or name is
+			// what triggers it regardless of what the version says.
 			return nil, fmt.Errorf("%w: ns=%q name=%q version=%q",
 				helpers.ErrUnsafeCollectionIdentifier, col.Namespace, col.Name, col.Version)
+		}
+		if !helpers.IsExactVersion(col.Version) {
+			return nil, fmt.Errorf("%w: %s.%s: %q", helpers.ErrInvalidCollectionVersion, col.Namespace, col.Name, col.Version)
 		}
 		key := col.key()
 		if _, ok := collections[key]; ok {

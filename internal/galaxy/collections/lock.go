@@ -24,6 +24,24 @@ func buildLockfile(
 	cfg := deps.cfg
 	entries := make([]lockfile.Entry, 0, len(resolved))
 	for fqdn, col := range resolved {
+		// col.Version crosses the identical snapshot trust boundary the sha
+		// guard below does: it comes from a resolved map that a fresh solve
+		// always fills with an exact version, but can also come from a
+		// persisted snapshot's ResolvedEntry (see buildResolvedSnapshot,
+		// deliberately left lenient) reused across a run with an unchanged
+		// requirements hash. Rejecting a non-exact value here, before it is
+		// ever written to the lockfile, means a poisoned snapshot can never
+		// get a constraint string like "*" committed as a pin every later
+		// --frozen install would then treat as an unresolved collection and
+		// silently install the server's highest version instead. Checked
+		// before loadCollectionMetadata, not after: buildCollectionsMap's own
+		// validate-before-you-act ordering applies here too, since col.Version
+		// is already known and does not need a network round trip to check -
+		// a poisoned snapshot entry buys no metadata fetches, under the
+		// backend's whole-run exclusive lock, before this fails closed.
+		if !helpers.IsExactVersion(col.Version) {
+			return nil, fmt.Errorf("lockfile: %s: %w: %q", fqdn, helpers.ErrInvalidCollectionVersion, col.Version)
+		}
 		meta, err := loadCollectionMetadata(ctx, deps, col)
 		if err != nil {
 			return nil, fmt.Errorf("lockfile: %s: %w", fqdn, err)
@@ -39,7 +57,9 @@ func buildLockfile(
 		// went wrong. An empty sha is left alone: verifyPinnedSHA treats an
 		// empty pin as no pin at all, which is what keeps a server that
 		// does not publish digests usable, and weakening that here would
-		// break every such server.
+		// break every such server. This guard cannot be hoisted above
+		// loadCollectionMetadata the way the version guard above was: sha
+		// comes from meta, which the network call itself produces.
 		sha := strings.TrimSpace(meta.Artifact.Sha256)
 		if sha != "" && !helpers.IsSHA256Hex(sha) {
 			return nil, fmt.Errorf("lockfile: %s: %w: %q", fqdn, helpers.ErrMalformedArtifactSHA256, sha)
@@ -184,10 +204,13 @@ func lockfileDepsToKeys(deps []string, byFQDN map[string]lockfile.Entry) []strin
 // reach stderr, matching every other dry-run disclosure in this package.
 //
 // This is `lock`'s own preview policy, specific to a command whose product is
-// to replace this file wholesale - it is deliberately not shared with a
-// future command that instead consumes the lockfile: that caller has to call
-// lockfile.Load itself and fail closed on an unusable file, the same way
-// resolveOrLoadLockfile already does for --frozen.
+// to replace this file wholesale - it is deliberately not shared with
+// lockFrozen, which consumes this same on-disk file instead of previewing a
+// replacement for it: a command that only ever overwrites the lockfile can
+// treat an unusable one as "no baseline yet" without misleading anyone, while
+// a command whose entire verdict depends on what is already there cannot -
+// see lockFrozen's own doc comment for why it fails closed on the identical
+// failure this function forgives.
 func lockDryRunBaseline(runtime *infra.Infra, path string) *lockfile.File {
 	lf, err := lockfile.Load(path)
 	if err == nil {
@@ -199,10 +222,31 @@ func lockDryRunBaseline(runtime *infra.Infra, path string) *lockfile.File {
 	return nil
 }
 
+// dryRunDiffPrefix and frozenDiffPrefix are reportLockfileDiff's two callers'
+// own leading terms for its trailing summary: "Dry run: lockfile would
+// change; ..." for lockDryRun's preview, "Frozen: lockfile would change; ..."
+// for lockFrozen's drift gate. Declared once here rather than left as bare
+// literals at each call site, since both name the same summary line under a
+// different mode.
+const (
+	dryRunDiffPrefix = "Dry run"
+	frozenDiffPrefix = "Frozen"
+)
+
 // reportLockfileDiff prints what `lock` would write for lf at path: the
 // file-level server line first (if any), then one line per changed
-// collection, then a single trailing summary - and nothing else on a diff
-// with no changes at all.
+// collection, then a single trailing summary carrying the caller-supplied
+// prefix - and nothing else on a diff with no changes at all.
+//
+// prefix names only the trailing summary's leading term, never a per-entry
+// line: every "Would add/update/remove/change" line above it reads
+// identically regardless of which caller is asking, because the fact each
+// one states - what a real `lock` run would do to this collection - is the
+// same fact in both registers. Only the summary's own framing differs:
+// lockDryRun's "Dry run: ..." states what a real run would additionally do
+// on top of this one, while lockFrozen's "Frozen: ..." states what makes
+// this run itself fail. Baking the prefix into a shared per-entry line would
+// make it counterfactual in one of the two registers.
 //
 // Every per-entry line goes through Okf, matching classifyDryRun's own
 // register: a server change, an add, an update, and a removal are all work
@@ -223,7 +267,9 @@ func lockDryRunBaseline(runtime *infra.Infra, path string) *lockfile.File {
 // file. Deriving the verdict from Empty() instead means any future field
 // Diff gains cannot reintroduce that bug: whatever makes Empty() false also
 // flips the verdict, by construction, with no second place to remember to
-// update.
+// update. This is also why lockFrozen's own drift error carries no counts of
+// its own: a server-only change leaves every count at zero, which the counts
+// alone would misreport as "nothing changed".
 //
 // The unchanged count is derived - len(lf.Collections) minus the added and
 // updated counts - rather than carried on Diff itself. That subtraction is
@@ -231,7 +277,7 @@ func lockDryRunBaseline(runtime *infra.Infra, path string) *lockfile.File {
 // come from an fqdn-keyed map, so a name can never repeat within lf, and
 // every one of lf's entries is therefore counted by Compare as exactly one of
 // Added, Updated, or neither (unchanged) - never more than once.
-func reportLockfileDiff(runtime *infra.Infra, lf *lockfile.File, path string, diff lockfile.Diff) {
+func reportLockfileDiff(runtime *infra.Infra, lf *lockfile.File, path, prefix string, diff lockfile.Diff) {
 	if diff.Server != nil {
 		runtime.Output.Okf("Would change: %s", renderFieldChange(*diff.Server))
 	}
@@ -250,8 +296,8 @@ func reportLockfileDiff(runtime *infra.Infra, lf *lockfile.File, path string, di
 		verdict = "lockfile is up to date"
 	}
 	runtime.Output.PersistentPrintf(
-		"Dry run: %s; %d would be added, %d would be updated, %d would be removed, %d unchanged (%s)",
-		verdict, len(diff.Added), len(diff.Updated), len(diff.Removed), unchanged, path,
+		"%s: %s; %d would be added, %d would be updated, %d would be removed, %d unchanged (%s)",
+		prefix, verdict, len(diff.Added), len(diff.Updated), len(diff.Removed), unchanged, path,
 	)
 }
 

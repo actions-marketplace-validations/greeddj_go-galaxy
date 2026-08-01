@@ -113,6 +113,57 @@ func TestBuildLockfileRejectsNonCanonicalDigest(t *testing.T) {
 	}
 }
 
+// TestBuildLockfileRejectsNonExactVersion proves buildLockfile's version
+// guard: a resolved collection whose Version is not helpers.IsExactVersion -
+// "*" here, the shape a poisoned persisted snapshot's ResolvedEntry can carry
+// (buildResolvedSnapshot only rejects an empty Version, deliberately not this
+// shape - see its own doc comment) - fails closed with
+// helpers.ErrInvalidCollectionVersion and produces no lockfile at all, rather
+// than committing a pin no --frozen install could ever consume as a real
+// version. TestBuildLockfileAcceptsEmptyDigest below is this test's positive
+// control on the same buildLockfile call: it already proves an exact version
+// ("1.0.0") produces a lockfile.
+//
+// srv.Total() == 0 additionally pins the guard's position: it runs before
+// loadCollectionMetadata, not after, so a poisoned entry buys zero metadata
+// round trips - each one otherwise spent under the backend's whole-run
+// exclusive lock - before this fails closed, rather than paying for one
+// request per poisoned collection first and only then rejecting it.
+//
+// Mutation (swapping the two blocks, so loadCollectionMetadata runs before
+// the version check) confirmed to fail this test with:
+//
+//	lock_build_test.go:163: srv.Total() = 2, want 0 (the version guard must
+//	reject before any metadata fetch)
+//	--- FAIL: TestBuildLockfileRejectsNonExactVersion (0.00s)
+//
+// which does not fail the sentinel/nil-lockfile checks above it: with "*"
+// unresolved, loadCollectionMetadata treats it as unpinned and fetches the
+// server's highest version (1.0.0 here) successfully, so buildLockfile
+// still reaches and returns the same rejection - just two requests later.
+func TestBuildLockfileRejectsNonExactVersion(t *testing.T) {
+	t.Parallel()
+	srv := fakegalaxy.New(t)
+	srv.AddVersion("acme", "widgets", testVersion100, nil)
+	cfg := &config.Config{Server: srv.URL(), Workers: 1}
+	runtime := infra.New(noopPrinter{}, srv.Client())
+	st := store.New()
+	col := collection{Namespace: "acme", Name: "widgets", Version: "*"}
+	resolved := map[string]collection{testWidgetsFQDN: col}
+	graph := map[string][]string{col.key(): {}}
+
+	lf, err := buildLockfile(context.Background(), newCollectionDeps(cfg, runtime, st), resolved, graph)
+	if !errors.Is(err, helpers.ErrInvalidCollectionVersion) {
+		t.Fatalf("buildLockfile error = %v, want errors.Is helpers.ErrInvalidCollectionVersion", err)
+	}
+	if lf != nil {
+		t.Fatalf("buildLockfile lockfile = %+v, want nil: no lockfile must be written on rejection", lf)
+	}
+	if got := srv.Total(); got != 0 {
+		t.Errorf("srv.Total() = %d, want 0 (the version guard must reject before any metadata fetch)", got)
+	}
+}
+
 // TestBuildLockfileAcceptsEmptyDigest proves an empty meta.Artifact.Sha256 -
 // a server that simply does not publish digests - still produces a lockfile
 // entry with an empty pin and no error: verifyPinnedSHA treats an empty pin

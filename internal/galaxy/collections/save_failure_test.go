@@ -102,6 +102,12 @@ var errSaveFailSentinel = errors.New("simulated SaveStore failure")
 // being a stable, comparable value.
 var errPrimarySentinel = errors.New("simulated primary failure")
 
+// metricsCommandLock is the metrics report's "command" field value a lock
+// run writes, shared across every test in this package that asserts on it
+// (readMetricsCommand's own callers here and in lock_command_test.go) so the
+// literal exists in exactly one place.
+const metricsCommandLock = "lock"
+
 // saveFailBackend wraps a real cacheManager.Backend - a real *local.Backend
 // in every test below - and overrides only SaveStore to always fail, so
 // Open/Lock/LoadStore/Artifacts/SweepTemp/RecordProject all behave exactly
@@ -374,8 +380,85 @@ func TestLockWithStateSaveFailureWritesMetricsAndKeepsLockfile(t *testing.T) {
 
 	// (d) last: readMetricsCommand t.Fatalf's on a missing file, which would
 	// otherwise mask a real failure in (b) or (c) above.
-	if got := readMetricsCommand(t, metricsPath); got != "lock" {
-		t.Errorf("metrics file not written despite the save failure: command = %q, want %q", got, "lock")
+	if got := readMetricsCommand(t, metricsPath); got != metricsCommandLock {
+		t.Errorf("metrics file not written despite the save failure: command = %q, want %q", got, metricsCommandLock)
+	}
+}
+
+// TestLockFrozenSaveFailureJoinsBehindDrift asserts lockFrozen's own tail
+// draws the identical save-failure contract lockWithState's plain write path
+// already has, over a different pair of outcomes: a drifted lockfile (the
+// fresh resolve disagreeing with a stale file already on disk) and a failing
+// SaveStore both hold at once, through the real lockFrozen -> saveLockSnapshot
+// -> annotateSaveFailure(driftErr, saveErr) path - not the hand-constructed
+// error tree exitcode_test.go's TestLockDriftOutranksSaveFailure builds to
+// pin the classification alone. The lockfile itself is never touched: unlike
+// lockWithState's plain path (which writes the file before the save even
+// runs), lockFrozen's whole point is to compare against what is already
+// there, so the stale file on disk must survive byte-for-byte regardless of
+// whether the save also failed.
+func TestLockFrozenSaveFailureJoinsBehindDrift(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cacheDir := filepath.Join(root, "cache")
+	if err := os.MkdirAll(cacheDir, helpers.DirMod); err != nil {
+		t.Fatalf("mkdir cacheDir: %v", err)
+	}
+	reqPath := filepath.Join(root, "requirements.yml")
+	mustWriteFile(t, reqPath, []byte("collections:\n  - name: acme.widgets\n    version: \"*\"\n"))
+	metricsPath := filepath.Join(root, "metrics.json")
+
+	srv := fakegalaxy.New(t)
+	srv.AddVersion("acme", "widgets", "1.0.0", nil)
+
+	cfg := &config.Config{
+		Server:           srv.URL(),
+		CacheDir:         cacheDir,
+		RequirementsFile: reqPath,
+		MetricsFile:      metricsPath,
+		Workers:          1,
+		Frozen:           true,
+	}
+
+	// A stale lockfile pinning a version the live server's fresh resolve
+	// (1.0.0, the only version registered) will disagree with - the drift
+	// lockFrozen must report before saveLockSnapshot even runs.
+	path := lockfile.ResolveDefaultPath(cfg.RequirementsFile, cfg.LockFile)
+	stale := &lockfile.File{
+		SchemaVersion: lockfile.SchemaVersion,
+		Server:        cfg.Server,
+		Collections:   []lockfile.Entry{{Name: "acme.widgets", Version: "0.9.0", Source: cfg.Server}},
+	}
+	if err := lockfile.Save(path, stale); err != nil {
+		t.Fatalf("save stale lockfile: %v", err)
+	}
+	before := mustReadFile(t, path)
+
+	state := newSaveFailState(t, cfg)
+	printer := &capturingPrinter{}
+	runtime := infra.New(printer, srv.Client())
+
+	err := lockWithState(context.Background(), cfg, runtime, state, time.Now())
+
+	// (a) both the drift verdict and the save failure are reachable through
+	// the same returned error.
+	if !errors.Is(err, helpers.ErrLockfileDrift) {
+		t.Fatalf("expected errors.Is helpers.ErrLockfileDrift, got %v", err)
+	}
+	if !errors.Is(err, errSaveFailSentinel) {
+		t.Fatalf("expected errors.Is errSaveFailSentinel, got %v", err)
+	}
+
+	// (b) the lockfile on disk is untouched: lockFrozen never writes it,
+	// drift or not, save failure or not.
+	after := mustReadFile(t, path)
+	if string(before) != string(after) {
+		t.Fatalf("lockFrozen rewrote the lockfile despite drift:\n%s", after)
+	}
+
+	// (c) writeRunMetrics still ran despite both failures.
+	if got := readMetricsCommand(t, metricsPath); got != metricsCommandLock {
+		t.Errorf("metrics file not written despite drift and the save failure: command = %q, want %q", got, metricsCommandLock)
 	}
 }
 
@@ -421,8 +504,8 @@ func TestLockWithStateWritesLockfileAndMetrics(t *testing.T) {
 		t.Fatalf("unexpected lockfile collections: %+v", lf.Collections)
 	}
 
-	if got := readMetricsCommand(t, metricsPath); got != "lock" {
-		t.Errorf("metrics command = %q, want %q", got, "lock")
+	if got := readMetricsCommand(t, metricsPath); got != metricsCommandLock {
+		t.Errorf("metrics command = %q, want %q", got, metricsCommandLock)
 	}
 	if !printer.hasPersistentPrintContaining("Lockfile written") {
 		t.Errorf("expected a persistent \"Lockfile written\" line, got %v", printer.persists)

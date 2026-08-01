@@ -226,11 +226,21 @@ func isIntegrityError(err error) bool {
 		errors.Is(err, helpers.ErrMalformedArtifactSHA256)
 }
 
-// isLockError reports whether err is a lockfile-related sentinel.
+// isLockError reports whether err is a lockfile-related sentinel:
+// helpers.ErrLockfileMismatch (a lockfile that does not cover the
+// requirements roots), helpers.ErrLockfileMissing, helpers.ErrLockfileInvalid,
+// or helpers.ErrLockfileDrift - lock --frozen's own verdict that a fresh
+// resolve disagrees with the lockfile already on disk. The last one is kept
+// distinct from ErrLockfileMismatch even though both name a lockfile that
+// disagrees with reality, because they describe different disagreements
+// (missing coverage vs. stale content) - matching the precedent that keeps
+// ErrMalformedArtifactSHA256 and ErrSHA256Mismatch apart under one exit
+// class rather than folding them into a single sentinel.
 func isLockError(err error) bool {
 	return errors.Is(err, helpers.ErrLockfileMismatch) ||
 		errors.Is(err, helpers.ErrLockfileMissing) ||
-		errors.Is(err, helpers.ErrLockfileInvalid)
+		errors.Is(err, helpers.ErrLockfileInvalid) ||
+		errors.Is(err, helpers.ErrLockfileDrift)
 }
 
 // isCacheBusyError reports whether err is a cache-contention sentinel: the
@@ -549,20 +559,30 @@ func isCollectionNameUsageError(err error) bool {
 }
 
 // isCollectionListUsageError reports whether err is an invalid-collections-list
-// sentinel. helpers.ErrUnsafeCollectionIdentifier sits here alongside
-// ErrDuplicateCollectionKey: buildCollectionsMap raises both while building
-// the collections map from resolved requirements, before any install work
-// starts, over malformed resolution input rather than anything the network or
-// the install pipeline did - the same reasoning that makes an empty
-// col.Version (never rejected by lockfile.validate) a usage error too, not a
-// crash or a silent install-time surprise.
+// sentinel. helpers.ErrUnsafeCollectionIdentifier and
+// helpers.ErrInvalidCollectionVersion sit here alongside
+// ErrDuplicateCollectionKey: buildCollectionsMap raises all three while
+// folding a resolved set into a key-addressed identity map, before any
+// install or warm work starts, over malformed resolution input rather than
+// anything the network or the install pipeline did.
+// helpers.ErrInvalidCollectionVersion has a second producer with the
+// identical shape but a different caller: buildLockfile
+// (internal/galaxy/collections/lock.go) raises it while assembling a
+// lockfile from an already-resolved map, checked before that entry's own
+// metadata fetch runs. Both producers run before any of their command's own
+// per-collection work begins - a worker in install/warm's case, buildLockfile's
+// own iteration in lock's case, which has no worker pool at all - which is
+// what keeps the sentinel out of helpers.ErrInstallationFailed's aggregation
+// and therefore out of isInstallError above, checked earlier in FromError's
+// own switch.
 func isCollectionListUsageError(err error) bool {
 	return errors.Is(err, helpers.ErrInvalidCollectionsList) ||
 		errors.Is(err, helpers.ErrInvalidCollectionEntry) ||
 		errors.Is(err, helpers.ErrMissingCollection) ||
 		errors.Is(err, helpers.ErrDuplicateCollectionRequirement) ||
 		errors.Is(err, helpers.ErrDuplicateCollectionKey) ||
-		errors.Is(err, helpers.ErrUnsafeCollectionIdentifier)
+		errors.Is(err, helpers.ErrUnsafeCollectionIdentifier) ||
+		errors.Is(err, helpers.ErrInvalidCollectionVersion)
 }
 
 // FromSignal converts an OS signal into a shell-convention exit code

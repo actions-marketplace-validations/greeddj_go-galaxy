@@ -60,6 +60,14 @@ var fromErrorCases = []exitCase{
 		wantCode: ExitLock,
 	},
 	{
+		// lock --frozen's own drift-gate verdict: a fresh resolve disagrees
+		// with the lockfile already on disk. Exit 6 is the same class as
+		// every other lockfile sentinel, per ExitLock's own doc comment.
+		name:     "lockfile drift",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrLockfileDrift),
+		wantCode: ExitLock,
+	},
+	{
 		name:     "installation failed",
 		err:      fmt.Errorf("%w: ctx", helpers.ErrInstallationFailed),
 		wantCode: ExitInstall,
@@ -131,6 +139,16 @@ var fromErrorCases = []exitCase{
 	{
 		name:     "duplicate collection key",
 		err:      fmt.Errorf("%w: ctx", helpers.ErrDuplicateCollectionKey),
+		wantCode: ExitUsage,
+	},
+	{
+		// buildCollectionsMap raises this over a resolved version that is not
+		// helpers.IsExactVersion (a constraint string like "*"), before any
+		// install work starts - the identical plan-build-time reasoning the
+		// row above already states for ErrUnsafeCollectionIdentifier, kept as
+		// its own sentinel rather than folded into that one.
+		name:     "invalid collection version",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrInvalidCollectionVersion),
 		wantCode: ExitUsage,
 	},
 	{
@@ -439,6 +457,22 @@ func TestSaveFailureDoesNotMaskIntegrity(t *testing.T) {
 	err := fmt.Errorf("%w; snapshot save failed: %w", joinedInstall, errTestSaveFailure)
 	if got := FromError(err); got != ExitIntegrity {
 		t.Errorf("FromError(err) = %d, want %d", got, ExitIntegrity)
+	}
+}
+
+// TestLockDriftOutranksSaveFailure proves the annotateSaveFailure-shaped wrap
+// lockFrozen builds ("%w; snapshot save failed: %w") still classifies as
+// ExitLock when its primary side already carries helpers.ErrLockfileDrift,
+// matching the real shape a frozen lock run that found drift and then also
+// failed its tail snapshot save would produce - the drift verdict, not the
+// save failure's own network-class sentinel, is what the operator must act
+// on.
+func TestLockDriftOutranksSaveFailure(t *testing.T) {
+	drift := fmt.Errorf("%w: requirements.lock.yml: run `go-galaxy lock` to update it", helpers.ErrLockfileDrift)
+
+	err := fmt.Errorf("%w; snapshot save failed: %w", drift, helpers.ErrStateObjectDeadline)
+	if got := FromError(err); got != ExitLock {
+		t.Errorf("FromError(err) = %d, want %d", got, ExitLock)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 )
 
@@ -120,5 +121,33 @@ func TestRequirementsSignatureModePartition(t *testing.T) {
 
 	if depsSigForward == noDepsSigForward {
 		t.Fatalf("expected --no-deps and deps-following signatures to differ, both got %q", depsSigForward)
+	}
+}
+
+// TestRefreshBypassesSnapshot pins refreshBypassesSnapshot's own accept/veto
+// table, including the nil-cfg case no e2e fixture ever reaches (every e2e
+// test builds a real *config.Config), and the precedence its own doc comment
+// states: --offline outranks --refresh, matching
+// cache.PolicyForConstraint's identical IsOffline()-before-IsRefresh() order.
+func TestRefreshBypassesSnapshot(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		cfg  *config.Config
+		name string
+		want bool
+	}{
+		{name: "nil cfg never vetoes", cfg: nil, want: false},
+		{name: "refresh off", cfg: &config.Config{Refresh: false, Offline: false}, want: false},
+		{name: "refresh on, online", cfg: &config.Config{Refresh: true, Offline: false}, want: true},
+		{name: "refresh on, offline: offline outranks refresh", cfg: &config.Config{Refresh: true, Offline: true}, want: false},
+		{name: "refresh off, offline: still no veto", cfg: &config.Config{Refresh: false, Offline: true}, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := refreshBypassesSnapshot(tc.cfg); got != tc.want {
+				t.Errorf("refreshBypassesSnapshot(%+v) = %v, want %v", tc.cfg, got, tc.want)
+			}
+		})
 	}
 }

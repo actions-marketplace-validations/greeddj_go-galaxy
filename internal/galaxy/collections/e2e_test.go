@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/greeddj/go-galaxy/cmd/go-galaxy/exitcode"
 	"github.com/greeddj/go-galaxy/internal/galaxy/collections"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/fetch"
@@ -36,6 +38,12 @@ const e2eTimeout = 30 * time.Second
 // string, used to simulate a lockfile whose pin no longer matches the
 // artifact it names.
 const corruptedAppSHA256 = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+// testVersion100 is the version every fixture in this file registers first,
+// mirroring the internal collections package's own constant of the same
+// name (unreachable from here across the package boundary, hence the
+// duplicate declaration rather than a shared import).
+const testVersion100 = "1.0.0"
 
 // noopPrinter is a minimal output.Printer stub, mirroring the one the
 // collections package's own internal tests use, so this external test
@@ -78,8 +86,8 @@ func newE2EFixture(t *testing.T) *e2eFixture {
 	writeRequirements(t, reqPath, "acme.app")
 
 	s := fakegalaxy.New(t)
-	appV1 := s.AddVersion("acme", "app", "1.0.0", map[string]string{"acme.lib": ">=1.0.0"})
-	libV1 := s.AddVersion("acme", "lib", "1.0.0", nil)
+	appV1 := s.AddVersion("acme", "app", testVersion100, map[string]string{"acme.lib": ">=1.0.0"})
+	libV1 := s.AddVersion("acme", "lib", testVersion100, nil)
 
 	cfg := &config.Config{
 		Server:           s.URL(),
@@ -244,8 +252,8 @@ func newFrozenPinFixture(t *testing.T, f *e2eFixture) (string, *lockfile.File) {
 		SchemaVersion: lockfile.SchemaVersion,
 		Server:        f.cfg.Server,
 		Collections: []lockfile.Entry{
-			{Name: "acme.app", Version: "1.0.0", Source: f.cfg.Server, SHA256: f.appV1.SHA256, Deps: []string{"acme.lib"}},
-			{Name: "acme.lib", Version: "1.0.0", Source: f.cfg.Server, SHA256: f.libV1.SHA256},
+			{Name: "acme.app", Version: testVersion100, Source: f.cfg.Server, SHA256: f.appV1.SHA256, Deps: []string{"acme.lib"}},
+			{Name: "acme.lib", Version: testVersion100, Source: f.cfg.Server, SHA256: f.libV1.SHA256},
 		},
 	}
 	if err := lockfile.Save(lockPath, lf); err != nil {
@@ -269,10 +277,12 @@ func setAppPin(lf *lockfile.File, sha string) {
 // installs the lockfile's pinned acme.app@1.0.0 - not the higher 2.0.0 also
 // registered on the server - without ever listing versions, and that a
 // successful frozen install's metrics report still claims "frozen": true.
-// Nothing else in the suite pins this: install and warm pass cfg.Frozen
-// through to writeRunMetrics, and this is the regression net proving that
-// still happens, mirrored by TestLockFrozenIsIgnoredAndNotReported's negative
-// counterpart in lock_command_test.go, which proves lock never does.
+// Nothing else in the suite pins this for install specifically: install and
+// warm pass cfg.Frozen through to writeRunMetrics, and this is the
+// regression net proving that still happens for the install path;
+// TestLockFrozenPassesOnAnUpToDateLockfile (lock_command_test.go) pins the
+// identical claim for lock, which honors --frozen too, through a different
+// mechanism (a drift gate rather than consuming the lockfile).
 func assertFrozenPinOverridesHighestVersion(t *testing.T, f *e2eFixture) {
 	t.Helper()
 	// f.cfg is shared with the corrupted-pin subtest that runs right after
@@ -286,8 +296,8 @@ func assertFrozenPinOverridesHighestVersion(t *testing.T, f *e2eFixture) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	if got := readManifestVersion(t, f.downloadPath, "app"); got != "1.0.0" {
-		t.Errorf("installed acme.app collection_info.version = %q, want %q (lockfile pin over the 2.0.0 highest)", got, "1.0.0")
+	if got := readManifestVersion(t, f.downloadPath, "app"); got != testVersion100 {
+		t.Errorf("installed acme.app collection_info.version = %q, want %q (lockfile pin over the 2.0.0 highest)", got, testVersion100)
 	}
 	if got := f.server.Count(fakegalaxy.EndpointVersionsList); got != 0 {
 		t.Errorf("EndpointVersionsList count = %d, want 0 (frozen resolution never consults the versions listing)", got)
@@ -344,6 +354,291 @@ func assertFrozenCorruptedPinFailsClosed(t *testing.T, f *e2eFixture, lockPath s
 		t.Fatalf("expected errors.Is ErrSHA256Mismatch, got %v", err)
 	}
 	assertPathAbsent(t, installPathFor(f.downloadPath, "app"))
+}
+
+// TestFrozenInstallRejectsWildcardLockfilePin proves install --frozen fails
+// closed on a lockfile entry whose pinned version is not an exact version -
+// "*" here - with helpers.ErrLockfileInvalid and the lockfile exit class (6),
+// rather than treating it as unpinned and silently installing the server's
+// highest available version under a directory literally named
+// "acme.app-*.info". TestLoadRejectsNonExactVersion (internal/galaxy/lockfile)
+// is the unit-level proof that lockfile.Load itself refuses this shape; this
+// test proves the resulting error and exit class survive up through
+// install --frozen end to end, and that no manifest and specifically no
+// glob-named ".info" sidecar directory are ever created.
+//
+// What this test does NOT prove on its own: that the wrong-version-install
+// consequence is unreachable. buildCollectionsMap carries an independent
+// helpers.IsExactVersion guard over the same shape (see its own doc
+// comment), reached from a resolved-snapshot path that never touches a
+// lockfile at all, so reverting lockfile.validate's check alone still fails
+// this test closed - just under a different sentinel
+// (helpers.ErrInvalidCollectionVersion, exit 2) and never reaching the
+// point where a wrong version could install. What this test pins is
+// specifically lockfile.validate's own sentinel and exit class on the
+// --frozen lockfile path; TestPoisonedResolvedSnapshotVersionRejectsInstall
+// (poisoned_version_test.go) is the analogous pin for buildCollectionsMap's
+// own guard on the snapshot path.
+//
+// The two subtests share one fixture and run in a fixed order, not in
+// parallel with each other, since the second overwrites the lockfile the
+// first wrote.
+func TestFrozenInstallRejectsWildcardLockfilePin(t *testing.T) {
+	f := newE2EFixture(t)
+	f.server.AddVersion("acme", "app", "2.0.0", nil)
+	lockPath := lockfile.ResolveDefaultPath(f.cfg.RequirementsFile, f.cfg.LockFile)
+	f.cfg.Frozen = true
+	wildcardInfoDir := filepath.Join(f.downloadPath, "ansible_collections", "acme.app-*.info")
+
+	t.Run("wildcard pin fails closed and creates nothing", func(t *testing.T) {
+		lf := &lockfile.File{
+			SchemaVersion: lockfile.SchemaVersion,
+			Server:        f.cfg.Server,
+			Collections:   []lockfile.Entry{{Name: "acme.app", Version: "*", Source: f.cfg.Server}},
+		}
+		if err := lockfile.Save(lockPath, lf); err != nil {
+			t.Fatalf("save wildcard-pinned lockfile: %v", err)
+		}
+
+		err := collections.Start(context.Background(), f.cfg, f.runtime)
+		if err == nil {
+			t.Fatal("expected an error from a wildcard-pinned lockfile under --frozen, got nil")
+		}
+		if !errors.Is(err, helpers.ErrLockfileInvalid) {
+			t.Fatalf("Start error = %v, want errors.Is helpers.ErrLockfileInvalid", err)
+		}
+		if got := exitcode.FromError(err); got != exitcode.ExitLock {
+			t.Errorf("exitcode.FromError(err) = %d, want %d", got, exitcode.ExitLock)
+		}
+		assertPathAbsent(t, manifestPathFor(f.downloadPath, "app"))
+		// The glob-shaped sidecar a pre-fix binary would have created from the
+		// literal "*" version text - see newInstallTarget's ".info" naming.
+		assertPathAbsent(t, wildcardInfoDir)
+	})
+
+	t.Run("exact pin on the identical fixture installs cleanly", func(t *testing.T) {
+		lf := &lockfile.File{
+			SchemaVersion: lockfile.SchemaVersion,
+			Server:        f.cfg.Server,
+			Collections: []lockfile.Entry{
+				{Name: "acme.app", Version: testVersion100, Source: f.cfg.Server, SHA256: f.appV1.SHA256},
+			},
+		}
+		if err := lockfile.Save(lockPath, lf); err != nil {
+			t.Fatalf("save exact-pinned lockfile: %v", err)
+		}
+
+		if err := collections.Start(context.Background(), f.cfg, f.runtime); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		assertManifestInstalled(t, f.downloadPath, "app")
+		if got := readManifestVersion(t, f.downloadPath, "app"); got != testVersion100 {
+			t.Errorf("installed acme.app collection_info.version = %q, want %q", got, testVersion100)
+		}
+	})
+}
+
+// warnCapturingPrinter is a minimal output.Printer stub for this package's
+// own use: every method is a no-op (inherited from noopPrinter) except
+// Warnf, which records each call so TestOfflineOutranksRefresh can assert on
+// it. The internal collections package has its own, richer capturingPrinter
+// (start_test.go), but that type lives in a _test.go file and is therefore
+// invisible across the package boundary this file's own package
+// (collections_test) sits on the other side of.
+type warnCapturingPrinter struct {
+	noopPrinter
+
+	warns []string
+}
+
+func (p *warnCapturingPrinter) Warnf(format string, args ...any) {
+	p.warns = append(p.warns, fmt.Sprintf(format, args...))
+}
+
+// hasWarnContaining reports whether any recorded Warnf line contains substr.
+func (p *warnCapturingPrinter) hasWarnContaining(substr string) bool {
+	for _, line := range p.warns {
+		if strings.Contains(line, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// installOnceAndPublishNewerVersion runs a cold install (populating the
+// cache and the download path with acme.app@1.0.0), then publishes
+// acme.app@2.0.0 on the same server - with the identical acme.lib dependency
+// the fixture's own 1.0.0 already declares, so the published version changes
+// only the version number, not the dependency graph - and wipes the
+// download path, leaving a warm cache whose persisted resolve snapshot still
+// names 1.0.0. This is the fixture every --refresh e2e test in this file
+// shares; the server's call counts are reset just before returning so a
+// caller's own assertions start counting from the second Start alone.
+func installOnceAndPublishNewerVersion(t *testing.T) *e2eFixture {
+	t.Helper()
+	f := newE2EFixture(t)
+	if err := collections.Start(context.Background(), f.cfg, f.runtime); err != nil {
+		t.Fatalf("first Start (populate the cache): %v", err)
+	}
+	f.server.AddVersion("acme", "app", "2.0.0", map[string]string{"acme.lib": ">=1.0.0"})
+	if err := os.RemoveAll(f.downloadPath); err != nil {
+		t.Fatalf("remove downloadPath before the refresh run: %v", err)
+	}
+	f.server.ResetCounts()
+	return f
+}
+
+// TestRefreshReSolvesInsteadOfReplayingTheSnapshot proves --refresh's whole
+// point: with it unset, a second install against a warm cache replays the
+// persisted resolve snapshot and installs the same 1.0.0 it always would,
+// entirely from cache (Total() == 0); with it set, the run bypasses that
+// snapshot, re-resolves against the live server, and picks up the newly
+// published acme.app@2.0.0 instead, making at least one real HTTP request
+// (Total() > 0). The two rows are mutual controls: --refresh is the only
+// variable between them, and it flips both the installed version and
+// whether the network was touched at all.
+//
+// Mutation (dropping `&& !refreshBypassesSnapshot(cfg)` from
+// resolveCollectionsInternal's snapshotAllowed expression) confirmed to fail
+// the "with refresh" row with:
+//
+//	e2e_test.go:531: installed acme.app collection_info.version = "1.0.0",
+//	want "2.0.0"
+//	e2e_test.go:535: server.Total() > 0 = false, want true (Total() = 0)
+//	--- FAIL: TestRefreshReSolvesInsteadOfReplayingTheSnapshot/with_refresh:_re-resolves,_picks_up_the_new_version (0.08s)
+func TestRefreshReSolvesInsteadOfReplayingTheSnapshot(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		wantVersion string
+		refresh     bool
+		wantNetwork bool
+	}{
+		{name: "without refresh: replays the snapshot, no network", wantVersion: testVersion100, refresh: false, wantNetwork: false},
+		{name: "with refresh: re-resolves, picks up the new version", wantVersion: "2.0.0", refresh: true, wantNetwork: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := installOnceAndPublishNewerVersion(t)
+			f.cfg.Refresh = tc.refresh
+
+			if err := collections.Start(context.Background(), f.cfg, f.runtime); err != nil {
+				t.Fatalf("second Start (refresh=%v): %v", tc.refresh, err)
+			}
+
+			if got := readManifestVersion(t, f.downloadPath, "app"); got != tc.wantVersion {
+				t.Errorf("installed acme.app collection_info.version = %q, want %q", got, tc.wantVersion)
+			}
+			gotNetwork := f.server.Total() > 0
+			if gotNetwork != tc.wantNetwork {
+				t.Errorf("server.Total() > 0 = %v, want %v (Total() = %d)", gotNetwork, tc.wantNetwork, f.server.Total())
+			}
+		})
+	}
+}
+
+// TestRefreshDoesNotRedownloadCachedArtifacts proves the content-addressed
+// carve-out --refresh leaves alone: with nothing new published upstream,
+// --refresh still re-fetches root metadata (the version-free cached answer
+// it exists to bypass) but the artifact itself - already cached from the
+// first install, and named by a version this run resolves to the identical
+// 1.0.0 - is never re-downloaded. isCacheHit and the extracted store are
+// correct here only by omission (neither one consults cfg.Refresh at all),
+// and that omission is exactly what this test pins.
+//
+// Mutation (adding `|| deps.cfg.Refresh` to isCacheHit's own early-return
+// condition, so refresh forces a cache miss the way forceDownload already
+// does) confirmed to fail with:
+//
+//	e2e_test.go:577: EndpointArtifact count = 2, want 0 (a cached artifact
+//	must not be re-downloaded)
+//	--- FAIL: TestRefreshDoesNotRedownloadCachedArtifacts (0.07s)
+func TestRefreshDoesNotRedownloadCachedArtifacts(t *testing.T) {
+	t.Parallel()
+	f := newE2EFixture(t)
+	if err := collections.Start(context.Background(), f.cfg, f.runtime); err != nil {
+		t.Fatalf("first Start (populate the cache): %v", err)
+	}
+	if err := os.RemoveAll(f.downloadPath); err != nil {
+		t.Fatalf("remove downloadPath before the refresh run: %v", err)
+	}
+	f.server.ResetCounts()
+	f.cfg.Refresh = true
+
+	if err := collections.Start(context.Background(), f.cfg, f.runtime); err != nil {
+		t.Fatalf("second Start (refresh): %v", err)
+	}
+
+	if got := f.server.Count(fakegalaxy.EndpointRootMetadata); got == 0 {
+		t.Errorf("EndpointRootMetadata count = %d, want > 0 (refresh must bypass the version-free cached answer)", got)
+	}
+	if got := f.server.Count(fakegalaxy.EndpointArtifact); got != 0 {
+		t.Errorf("EndpointArtifact count = %d, want 0 (a cached artifact must not be re-downloaded)", got)
+	}
+	if got := readManifestVersion(t, f.downloadPath, "app"); got != testVersion100 {
+		t.Errorf("installed acme.app collection_info.version = %q, want %q", got, testVersion100)
+	}
+}
+
+// TestOfflineOutranksRefresh proves --offline wins when both are set:
+// resolution replays the persisted snapshot exactly as an unrefreshed
+// offline run would (Total() == 0, installs the pinned 1.0.0 despite
+// acme.app@2.0.0 being available upstream), and the operator is warned that
+// --refresh was skipped rather than the run silently dropping it.
+// TestRefreshReSolvesInsteadOfReplayingTheSnapshot's own "with refresh" row
+// is this test's positive control on the identical fixture shape: the same
+// --refresh, without --offline, does reach the network and does pick up
+// 2.0.0 - proving --offline is what changes the outcome here, not some
+// other difference between the two fixtures.
+//
+// The count assertions are checked before the warning one deliberately.
+// Mutation (dropping the `runtime.Output.Warnf` call from initInstall's
+// `if cfg.Refresh && cfg.Offline` block, keeping the veto itself) confirmed
+// to fail only the warning assertion, with the counts and installed version
+// above it still passing:
+//
+//	e2e_test.go:640: expected a --refresh-skipped warning on stderr, got []
+//	--- FAIL: TestOfflineOutranksRefresh (0.08s)
+//
+// A second mutation was also tried and did NOT kill this test: dropping the
+// `!cfg.Offline` term from refreshBypassesSnapshot (so it vetoes the
+// snapshot on --refresh alone, offline or not) still resolves 1.0.0 with
+// Total() == 0. cache.PolicyForConstraint's own IsOffline()-first check is
+// why: with the resolve snapshot no longer consulted, the fallback solve's
+// root-metadata read still goes through that policy, which forces
+// Read: true, Write: false under --offline regardless of --refresh - so it
+// serves the already-cached (pre-2.0.0) root metadata document from the API
+// cache instead of reaching the network, landing on 1.0.0 again by a
+// different route. This fixture's API cache is warm purely as a side effect
+// of installOnceAndPublishNewerVersion's own seeding install, not because
+// the offline check fired - so this test cannot pin the `!cfg.Offline` term
+// itself. internal/galaxy/collections' own
+// TestRefreshOfflinePreservesResolveWithStaleMetadataCaches (package
+// collections, not collections_test) seeds the state where the metadata
+// caches are empty and the resolve snapshot is the only thing that can
+// answer, and that test does kill on the identical mutation.
+func TestOfflineOutranksRefresh(t *testing.T) {
+	t.Parallel()
+	f := installOnceAndPublishNewerVersion(t)
+	f.cfg.Refresh = true
+	f.cfg.Offline = true
+	printer := &warnCapturingPrinter{}
+	runtime := infra.New(printer, f.server.Client())
+
+	if err := collections.Start(context.Background(), f.cfg, runtime); err != nil {
+		t.Fatalf("Start (refresh + offline): %v", err)
+	}
+
+	if got := f.server.Total(); got != 0 {
+		t.Errorf("server.Total() = %d, want 0 (offline must never reach the network)", got)
+	}
+	if got := readManifestVersion(t, f.downloadPath, "app"); got != testVersion100 {
+		t.Errorf("installed acme.app collection_info.version = %q, want %q", got, testVersion100)
+	}
+	if !printer.hasWarnContaining("--offline: skipping --refresh") {
+		t.Errorf("expected a --refresh-skipped warning on stderr, got %v", printer.warns)
+	}
 }
 
 // TestOfflineInstall asserts --offline refuses to reach the network on a
@@ -412,7 +707,7 @@ func TestNoDepsUnpinnedInstallsResolvedVersion(t *testing.T) {
 	writeRequirements(t, reqPath, "acme.solo")
 
 	s := fakegalaxy.New(t)
-	s.AddVersion("acme", "solo", "1.0.0", nil)
+	s.AddVersion("acme", "solo", testVersion100, nil)
 	s.AddVersion("acme", "solo", "2.0.0", nil)
 
 	cfg := &config.Config{
@@ -768,7 +1063,7 @@ func TestArtifactMetricsLockCountsNothing(t *testing.T) {
 func TestNoDepsSnapshotNotReusedIncrementally(t *testing.T) {
 	t.Parallel()
 	f := newE2EFixture(t)
-	f.server.AddVersion("acme", "tool", "1.0.0", nil)
+	f.server.AddVersion("acme", "tool", testVersion100, nil)
 	f.cfg.NoDeps = true
 
 	if err := collections.Start(context.Background(), f.cfg, f.runtime); err != nil {

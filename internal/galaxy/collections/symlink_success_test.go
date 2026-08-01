@@ -165,3 +165,23 @@ func TestBuildCollectionsMapRejectsUnsafeNamespace(t *testing.T) {
 		t.Fatalf("buildCollectionsMap error = %v, want errors.Is helpers.ErrUnsafeCollectionIdentifier", err)
 	}
 }
+
+// TestBuildCollectionsMapRejectsInvalidVersion proves buildCollectionsMap's
+// version guard fires under its own sentinel, helpers.ErrInvalidCollectionVersion,
+// distinct from ErrUnsafeCollectionIdentifier above: "*" is a syntactically
+// safe path element (helpers.IsPathElement("*") is true) but not a version
+// anything could install, which is exactly the shape a poisoned snapshot or
+// an unvalidated lockfile entry can carry. TestSolverResultSlotsIntoInstallLevels
+// (solve_test.go) is this test's positive control on the same function: an
+// exact version reaches buildInstallLevels successfully through the
+// identical call.
+func TestBuildCollectionsMapRejectsInvalidVersion(t *testing.T) {
+	t.Parallel()
+	resolved := map[string]collection{
+		"x": {Namespace: "acme", Name: "widgets", Version: "*"},
+	}
+	_, err := buildCollectionsMap(resolved)
+	if !errors.Is(err, helpers.ErrInvalidCollectionVersion) {
+		t.Fatalf("buildCollectionsMap error = %v, want errors.Is helpers.ErrInvalidCollectionVersion", err)
+	}
+}
