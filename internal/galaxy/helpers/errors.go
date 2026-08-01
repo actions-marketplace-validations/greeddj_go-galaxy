@@ -460,4 +460,11 @@ var (
 	// exclusion of its own (isDestinationSideFailure) that has nothing to do
 	// with this sentinel; see prepareWithRecovery's doc comment for that one.
 	ErrMalformedArtifactSHA256 = errors.New("artifact sha256 is not a 64-character lowercase hex digest")
+
+	// ErrLatestVersionLookupFailed is the headline for an `outdated` run in
+	// which at least one lockfile entry's latest-version lookup failed. Named
+	// for the lookup rather than for the command so it does not read as a
+	// sibling of ErrOutdatedSchemaVersion above, which uses "outdated" in the
+	// unrelated sense of a stale snapshot schema.
+	ErrLatestVersionLookupFailed = errors.New("latest version lookup failed")
 )

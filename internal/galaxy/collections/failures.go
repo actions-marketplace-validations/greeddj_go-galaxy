@@ -93,6 +93,17 @@ func (s failureSummary) warmError() error {
 	return s.wrap(fmt.Errorf("%w: warm failed for %d collections", helpers.ErrInstallationFailed, s.count))
 }
 
+// outdatedError builds the run's headline error for the outdated command. The
+// literal "%w for %d collections" wording matches installError's own bare
+// shape: both name their sentinel and a count with no extra verb, because
+// the sentinel alone already says what failed (helpers.ErrInstallationFailed,
+// helpers.ErrLatestVersionLookupFailed). warmError prefixes "warm failed"
+// instead, since helpers.ErrInstallationFailed alone would not say warm was
+// the command that failed.
+func (s failureSummary) outdatedError() error {
+	return s.wrap(fmt.Errorf("%w for %d collections", helpers.ErrLatestVersionLookupFailed, s.count))
+}
+
 // wrap folds headline together with the summary's recorded causes: nil when
 // nothing failed, headline unchanged when there is no cause to attach, and a
 // *summaryError joining both otherwise.

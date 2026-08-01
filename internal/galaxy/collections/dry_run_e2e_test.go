@@ -394,13 +394,23 @@ func TestInstallDryRunBannerSurvivesQuiet(t *testing.T) {
 	}
 }
 
-// TestOutdatedDryRunMutatesNothing pins that `outdated` - which has no
-// product at all - is left completely unaffected by --dry-run: the lockfile
-// it reads is untouched, no cache directory is ever created even though one
-// is configured, no metrics file is ever written even though one is
-// configured, and toggling cfg.DryRun changes nothing about its result. This
-// is deliberate: `outdated` must never grow a cfg.DryRun branch, since it has
-// nothing for --dry-run to suppress.
+// TestOutdatedDryRunMutatesNothing pins that `outdated` - which writes no
+// product of its own - is left unaffected by --dry-run in every way that
+// matters: the lockfile it reads is untouched, no cache directory is ever
+// created even though one is configured, and toggling cfg.DryRun changes
+// nothing about its result. `outdated` grows no cfg.DryRun branch of its
+// own to produce any of this: the lockfile read and the cache-directory
+// absence are simply true regardless of the flag, since `outdated` opens no
+// cache backend and has nothing else to suppress.
+//
+// The one exception is the metrics file, and it is not evidence of a branch
+// in `outdated` either: it stays unwritten here because writeRunMetrics
+// itself self-suppresses under cfg.DryRun (see its own doc comment) - the
+// identical shared guard install, warm, and lock's own dry runs go through -
+// not because `outdated` treats --metrics-file specially. See
+// TestOutdatedWritesMetricsReport and TestOutdatedDryRunSuppressesMetricsReport
+// in outdated_e2e_test.go for the report itself, honored on a real run and
+// suppressed (with a stderr warning) under --dry-run.
 func TestOutdatedDryRunMutatesNothing(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

@@ -301,6 +301,38 @@ var fromErrorCases = []exitCase{
 		),
 		wantCode: ExitInstall,
 	},
+	{
+		// outdated's own aggregation headline, bare: every lookup that failed
+		// was a metadata-fetch failure (a 404, a 5xx, a timeout), none of them
+		// a lockfile-shape problem, so this classifies through
+		// isMetadataFetchError like every other member of that set.
+		//
+		// Mutation: removing helpers.ErrLatestVersionLookupFailed from
+		// isMetadataFetchError makes this row fail with
+		// "FromError(latest version lookup failed for 1 collections) = 1,
+		// want 4" - run and confirmed. The paired "joined with an invalid
+		// lockfile entry name" row below is unaffected by that same mutation,
+		// since isLockError claims that tree first regardless.
+		name:     "latest version lookup failed, bare",
+		err:      fmt.Errorf("%w for 1 collections", helpers.ErrLatestVersionLookupFailed),
+		wantCode: ExitNetwork,
+	},
+	{
+		// Paired with the bare row above: the identical headline, this time
+		// joined with a cause that must classify differently - a lockfile
+		// entry whose name is not a "namespace.name" FQDN. isLockError is
+		// checked ahead of isNetworkError in FromError's own switch, so it
+		// claims the whole joined tree even though the headline alone would
+		// have classified ExitNetwork. This is the predicate isMetadataFetchError's
+		// own doc comment describes: which cause is joined determines the
+		// class, not which command produced the headline.
+		name: "latest version lookup failed, joined with an invalid lockfile entry name",
+		err: errors.Join(
+			fmt.Errorf("%w for 2 collections", helpers.ErrLatestVersionLookupFailed),
+			fmt.Errorf("%w: invalid name %q", helpers.ErrLockfileInvalid, "nodothere"),
+		),
+		wantCode: ExitLock,
+	},
 }
 
 // TestFromError walks fromErrorCases, checking one representative error per
@@ -396,7 +428,7 @@ func TestIntegritySentinelsMapToExitIntegrity(t *testing.T) {
 // moving the isIntegrityError case below isLockError/isInstallError in
 // FromError, which makes isInstallError claim the headline first; verified,
 // that mutation makes this test fail with:
-// "exitcode_test.go:246: FromError(integrity join) = 5, want 7".
+// "exitcode_test.go:437: FromError(integrity join) = 5, want 7".
 func TestIntegrityOutranksInstallFailureHeadline(t *testing.T) {
 	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
 
@@ -744,7 +776,7 @@ func TestStateObjectDeadlineClassification(t *testing.T) {
 // fromErrorTail above isInstallError's case in FromError makes this test
 // fail with:
 //
-//	exitcode_test.go:628: FromError(joined) = 8, want 5
+//	exitcode_test.go:784: FromError(joined) = 8, want 5
 func TestCacheBusyFoldedBehindInstallFailureClassifiesAsInstall(t *testing.T) {
 	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
 	joined := errors.Join(headline, helpers.ErrCacheBusy)

@@ -46,6 +46,13 @@ func TestCleanTable(t *testing.T) {
 		{"raw byte 0x80 (invalid UTF-8)", "a\x80b", "a" + replacement + "b"},
 		{"truncated 0xc2 lead byte at end of string", "a\xc2", "a" + replacement},
 		{"U+00A0 NBSP kept (just above the C1 boundary)", "a\u00a0b", "a\u00a0b"},
+		// U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR are replaced,
+		// not kept, despite sitting outside every control range above and
+		// resembling the bidi/format group Clean's own doc comment keeps: see
+		// that doc comment for why the directionality justification does not
+		// reach these two.
+		{"U+2028 LINE SEPARATOR replaced", "a\u2028b", "a" + replacement + "b"},
+		{"U+2029 PARAGRAPH SEPARATOR replaced", "a\u2029b", "a" + replacement + "b"},
 		{"legitimately encoded U+FFFD passes through unchanged", "a" + replacement + "b", "a" + replacement + "b"},
 		{"box-drawing runes kept", "\u2502\u251c\u2500\u2500", "\u2502\u251c\u2500\u2500"},
 		{"emoji kept", "hello \U0001F600", "hello \U0001F600"},

@@ -143,7 +143,7 @@ Clean unreachable collections:
 - `hash` (`h`) - print a deterministic cache key (`sha256:…`) for use as a CI cache key.
 - `tree` (`t`) - print the resolved dependency tree from the lockfile; requires a lockfile and fails if one is absent.
 - `explain` (`why`) - takes `<namespace.name>`; prints the locked version, source, and sha256, what requires it, and what it depends on, all read from the lockfile.
-- `outdated` (`o`) - compare each lockfile entry against the latest version on its Galaxy server; requires network and is refused under `--offline`.
+- `outdated` (`o`) - compare each lockfile entry against the latest version on its Galaxy server; requires network and is refused under `--offline`. It deliberately opens no cache backend, so it never takes the exclusive cache lock (it can run alongside an `install` or `warm` against the same cache) and every version it reports is a live answer rather than a cached one. That is also why `--no-cache`, `--refresh`, `--clear-cache`, `--cache-dir` and `--s3-bucket` have nothing to act on; `--no-deps` and `--download-path` likewise, since it resolves no dependency graph and writes nothing to the collections tree, and `--frozen` likewise, since the lockfile is already the only source of the locked side and the servers are always asked for the latest. Setting any of those (except the two path flags, which cannot be told apart from their defaults) prints one stderr warning naming them; the other `--s3-*` flags are not individually named, since none of them do anything for any command unless `--s3-bucket` is also set. It honors `--metrics-file`: the report's `collections` is the number of entries checked and `failures` is the number of lookups that failed, while `frozen` is always absent, since no `outdated` run ever honors that flag. A run in which any lookup failed exits with the network code (`4`). One failure shape is classified more specifically: a lockfile entry whose `name` does not split into exactly two non-empty dot-separated parts is a malformed lockfile rather than a network problem, so it takes the lockfile code (`6`) instead. A name that does split into two parts is not otherwise validated - one carrying characters a URL cannot contain fails when the request is built and takes the network code (`4`) like any other lookup failure, even though no retry repairs that either.
 - `cleanup` (`c`) - remove unused cached collections across projects.
 
 ### Global options
@@ -205,8 +205,10 @@ Clean unreachable collections:
   branches on the exit code alone will not notice. If a shared `$GO_GALAXY_DRY_RUN` CI environment
   variable is set, scope it to the jobs that actually want it, or unset it for `install`, `warm`,
   and `lock` jobs where it must not silently do nothing. `cleanup` implements its own `--dry-run`
-  (see [cleanup options](#cleanup-options)); the read-only commands (`hash`, `tree`, `explain`,
-  `outdated`) ignore the flag, since they have no product for `--dry-run` to suppress.
+  (see [cleanup options](#cleanup-options)). `hash`, `tree` and `explain` ignore the flag, since
+  they have no product and write nothing for it to suppress. `outdated` writes no product either,
+  but it does write one externally consumed report - the metrics file - so `--dry-run` suppresses
+  that report and prints a stderr warning naming the path, and changes nothing else about the run.
 - `--cache-dir` (`$GO_GALAXY_CACHE_DIR`, `$ANSIBLE_GALAXY_CACHE_DIR`)
 - `--server` (`$GO_GALAXY_SERVER`, `$ANSIBLE_GALAXY_SERVER`)
 - `--token` (`$GO_GALAXY_TOKEN`) - Galaxy API token for the single effective server;
@@ -542,6 +544,17 @@ messages to grep for.
   every serialization path (`fmt`, JSON, YAML), and its plaintext is reachable
   through exactly one call site in the whole program, immediately before it is
   attached to an outgoing request.
+- **Operator-facing output is sanitized before it reaches stdout or stderr.**
+  Text this program did not generate itself - a Galaxy server's HTTP reason
+  phrase, an S3 error body, a lockfile entry's `name`, a manifest, a
+  filesystem path - can carry ANSI escape sequences or other control bytes a
+  terminal or log processor would act on; every such byte is replaced with
+  `U+FFFD` (newline and tab are kept) before printing. `outdated`'s own
+  report is sanitized on the identical boundary as every other command's
+  output: a hostile server's HTTP reason phrase, printed on its `Lookup
+  failed:` line, and a lockfile entry's `name`, printed on every line that
+  names it, are both neutralized before printing rather than reaching the
+  terminal raw.
 
 ## Reproducible CI
 
@@ -676,19 +689,19 @@ RUN go-galaxy warm --frozen
 `go-galaxy` exits with a class-specific code instead of a flat `1`, so CI
 pipelines can branch on failure type without parsing log output:
 
-| Code | Meaning                                                                                                                                                                                                                                                                                                                                  |
-|-----:|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-|    0 | Success                                                                                                                                                                                                                                                                                                                                  |
-|    1 | Generic failure (does not match any class below)                                                                                                                                                                                                                                                                                         |
-|    2 | Usage or configuration error (invalid flags, requirements, `ansible.cfg`, an unsupported collection source, an explicit namespace conflicting with a dotted collection name, an unsupported cache-snapshot schema version, an unreadable or unparseable project requirements file, or a cache backend that cannot be used as configured) |
-|    3 | Dependency resolution failure (conflicts, missing candidates, cycle)                                                                                                                                                                                                                                                                     |
-|    4 | Network or Galaxy API failure (timeouts, stalled transfers, metadata and cache-state deadlines, a versions listing that exceeded its page ceiling, a response body that exceeded its size ceiling (an artifact, a metadata document, or a bucket listing), offline-mode violations, or an unreachable cache backend)                                                                        |
-|    5 | Install-time failure (unsafe archive/symlink content, empty file, missing artifact cache)                                                                                                                                                                                                                                                |
-|    6 | Lockfile error (missing, invalid, mismatched with requirements, or out of date under `lock --frozen`)                                                                                                                                                                                                                                    |
-|    7 | Artifact-integrity failure (content does not authenticate against its naming sha256, or the digest is malformed)                                                                                                                                                                                                                         |
-|    8 | Cache contention (the cache lock is held elsewhere, or the S3 lock's wait ceiling elapsed after this run observed another holder)                                                                                                                                                                                                        |
-|    9 | Persisted cache state is corrupt or oversized and must be discarded (a project registry that fails to decode, or a state object that exceeds its size ceiling)                                                                                                                                                                           |
-|  130 | Interrupted (a caught SIGINT, or the caller's own context canceled)                                                                                                                                                                                                                                                                      |
+| Code | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+|-----:|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------                                                                                                                         |
+|    0 | Success                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+|    1 | Generic failure (does not match any class below)                                                                                                                                                                                                                                                                                                                                                                                                                  |
+|    2 | Usage or configuration error (invalid flags, requirements, `ansible.cfg`, an unsupported collection source, an explicit namespace conflicting with a dotted collection name, an unsupported cache-snapshot schema version, an unreadable or unparseable project requirements file, or a cache backend that cannot be used as configured)                                                                                                                          |
+|    3 | Dependency resolution failure (conflicts, missing candidates, cycle)                                                                                                                                                                                                                                                                                                                                                                                              |
+|    4 | Network or Galaxy API failure (timeouts, stalled transfers, metadata and cache-state deadlines, a versions listing that exceeded its page ceiling, a response body that exceeded its size ceiling (an artifact, a metadata document, or a bucket listing), offline-mode violations, an unreachable cache backend, or an `outdated` run in which at least one latest-version lookup failed)                                                                        |
+|    5 | Install-time failure (unsafe archive/symlink content, empty file, missing artifact cache)                                                                                                                                                                                                                                                                                                                                                                         |
+|    6 | Lockfile error (missing, invalid, mismatched with requirements, or out of date under `lock --frozen`)                                                                                                                                                                                                                                                                                                                                                             |
+|    7 | Artifact-integrity failure (content does not authenticate against its naming sha256, or the digest is malformed)                                                                                                                                                                                                                                                                                                                                                  |
+|    8 | Cache contention (the cache lock is held elsewhere, or the S3 lock's wait ceiling elapsed after this run observed another holder)                                                                                                                                                                                                                                                                                                                                 |
+|    9 | Persisted cache state is corrupt or oversized and must be discarded (a project registry that fails to decode, or a state object that exceeds its size ceiling)                                                                                                                                                                                                                                                                                                    |
+|  130 | Interrupted (a caught SIGINT, or the caller's own context canceled)                                                                                                                                                                                                                                                                                                                                                                                               |
 
 Exit `7` covers content that failed to authenticate against the sha256 that
 named it - a lockfile pin, a Galaxy server's declared digest, a cache sidecar,
@@ -745,8 +758,8 @@ on.
 
 ## Metrics
 
-Pass `--metrics-file path/to/run.json` to install/warm/lock to emit a JSON report
-suitable for CI dashboards:
+Pass `--metrics-file path/to/run.json` to install/warm/lock/outdated to emit a
+JSON report suitable for CI dashboards:
 
 ```json
 {
@@ -784,7 +797,9 @@ report next to a nonzero exit code. `frozen` is `true` exactly when the run
 honored `--frozen`, for every command that reads the flag, `lock` included:
 for `install`/`warm` that means resolving from the lockfile, and for `lock`
 it means gating the fresh resolve against the lockfile instead of overwriting
-it - not merely whether the flag was passed.
+it - not merely whether the flag was passed. `outdated` never honors
+`--frozen`, so its report always omits `frozen`, whatever the flag or
+`$GO_GALAXY_FROZEN` said.
 
 `cache_hits`, `cache_misses`, and `bytes_downloaded` are artifact-level counters,
 not collection-level: a hit is one artifact served from the artifact cache and a

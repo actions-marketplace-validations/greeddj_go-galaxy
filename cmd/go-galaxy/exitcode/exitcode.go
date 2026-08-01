@@ -411,7 +411,22 @@ func isTransportError(err error) bool {
 // sentinel: metadata that could not be fetched (including one whose fetch
 // exceeded its own deadline, or whose versions list kept reporting more
 // pages than the page ceiling allows) or parsed into the shape this tool
-// expects.
+// expects. helpers.ErrLatestVersionLookupFailed belongs here on the same
+// basis as every other member: `outdated`'s own per-entry lookup is itself a
+// root-metadata fetch, so the headline's bare, unaggregated shape - no cause
+// joined behind it - names a metadata-fetch failure.
+//
+// helpers.ErrLatestVersionLookupFailed is also an aggregation headline whose
+// per-entry causes are joined behind it via errors.Join, exactly like
+// helpers.ErrInstallationFailed elsewhere in this package - so this function
+// matching the bare headline is not the last word once a cause is joined
+// in. Whenever a joined cause must classify differently, the rule is a
+// predicate on the error tree, not an enumeration of which command produced
+// it: a lockfile entry whose name is not a "namespace.name" FQDN carries
+// helpers.ErrLockfileInvalid instead, and isLockError is checked ahead of
+// isNetworkError in FromError's own switch, so errors.Is walking the joined
+// tree lets isLockError claim it first regardless of what else is joined
+// alongside it.
 func isMetadataFetchError(err error) bool {
 	return errors.Is(err, helpers.ErrMetadataUnavailable) ||
 		errors.Is(err, helpers.ErrMetadataIsNil) ||
@@ -419,7 +434,8 @@ func isMetadataFetchError(err error) bool {
 		errors.Is(err, helpers.ErrVersionsPayloadEmpty) ||
 		errors.Is(err, helpers.ErrVersionsPayloadUnsupported) ||
 		errors.Is(err, helpers.ErrVersionsPagingExceeded) ||
-		errors.Is(err, helpers.ErrMetadataFetchDeadline)
+		errors.Is(err, helpers.ErrMetadataFetchDeadline) ||
+		errors.Is(err, helpers.ErrLatestVersionLookupFailed)
 }
 
 // isResolutionError reports whether err is a dependency-resolution sentinel

@@ -898,10 +898,12 @@ func sweepDeadRunTemps(ctx context.Context, runtime *infra.Infra, backend cacheM
 // writeRunMetrics persists a JSON metrics report when cfg.MetricsFile is set.
 // Best-effort: failures are logged but never fail the run.
 //
-// For the "lock" command, CacheHits/CacheMisses/BytesDownloaded always report
-// 0/0/0: runLock resolves and writes a lockfile without ever touching an
-// ArtifactStore, so runtime.Metrics genuinely accumulates nothing during that
-// path - a truthful zero, not a gap in this report.
+// CacheHits/CacheMisses/BytesDownloaded report 0/0/0 for any run that never
+// touched an ArtifactStore, which is every "lock" and "outdated" run by
+// construction: neither command opens one - runLock resolves and writes a
+// lockfile, and Outdated only reads the lockfile and queries each server's
+// metadata, so runtime.Metrics genuinely accumulates nothing during either
+// path. This is a truthful zero, not a gap in this report.
 //
 // The totals read here are best-effort on a failed run. runInstall registers
 // `defer plan.prefetch.Close()`, so on a successful run every prefetch task
@@ -921,10 +923,14 @@ func sweepDeadRunTemps(ctx context.Context, runtime *infra.Infra, backend cacheM
 // against the on-disk lockfile instead of consuming it over the network the
 // way install/warm do, but it is still --frozen actually changing what this
 // run does - so its call sites pass cfg.Frozen through as well, and honored
-// and configured coincide there exactly as they do for install and
-// warm. Offline stays cfg-derived ON PURPOSE - it governs the HTTP transport
-// for every command, lock included - so cfg.Offline is always the truth
-// there.
+// and configured coincide there exactly as they do for install and warm.
+// Outdated is the opposite case: it passes a literal false unconditionally,
+// because it never honors --frozen at all - the lockfile is already its only
+// source of the locked side and the server is always asked for the latest,
+// with or without the flag - so honored and configured genuinely differ
+// there, unlike every other caller of this function. Offline stays
+// cfg-derived ON PURPOSE - it governs the HTTP transport for every command,
+// lock and outdated included - so cfg.Offline is always the truth there.
 func writeRunMetrics(
 	cfg *config.Config,
 	runtime *infra.Infra,

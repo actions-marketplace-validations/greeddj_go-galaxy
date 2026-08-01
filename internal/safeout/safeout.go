@@ -53,6 +53,15 @@ type Text string
 // a partial defense would invite belief in a guarantee this function does
 // not provide.
 //
+// Replaced, not kept, despite superficially resembling the bidi/format
+// group above: U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR. The
+// justification one paragraph up does not reach them - they are category
+// Zl/Zp, not Cf, and they are not directionality at all - because each one
+// terminates a line for a Unicode-aware consumer the way \n does for this
+// program's own terminal-facing output: Python's str.splitlines(), reached
+// by CI tooling written in Python constantly, splits on both. A
+// directionality mark can never do that; these two can.
+//
 // Nothing is ever deleted outright: a removed character becomes U+FFFD
 // rather than vanishing, because silent deletion can itself mislead -
 // "good\rbad" deleting down to "goodbad" reads as a sensible word, which
@@ -63,12 +72,19 @@ func Clean(s string) Text {
 
 // Boundaries of the character ranges sanitizeRune replaces: the C0 control
 // range is everything below controlC0Max, del is DEL (U+007F), and the C1
-// control range is [controlC1Min, controlC1Max].
+// control range is [controlC1Min, controlC1Max]. lineSeparator and
+// paragraphSeparator are the two line-terminating Unicode space characters
+// (category Zl and Zp) that are not part of any control range above but
+// are replaced anyway - see Clean's own doc comment for why they do not
+// belong in the kept bidi/format group despite sitting nearby in the
+// codepoint chart.
 const (
-	controlC0Max = 0x20
-	del          = 0x7f
-	controlC1Min = 0x80
-	controlC1Max = 0x9f
+	controlC0Max       = 0x20
+	del                = 0x7f
+	controlC1Min       = 0x80
+	controlC1Max       = 0x9f
+	lineSeparator      = '\u2028'
+	paragraphSeparator = '\u2029'
 )
 
 // sanitizeRune is strings.Map's per-rune callback for Clean.
@@ -76,7 +92,7 @@ func sanitizeRune(r rune) rune {
 	switch {
 	case r == '\n' || r == '\t':
 		return r
-	case r < controlC0Max, r == del, r >= controlC1Min && r <= controlC1Max:
+	case r < controlC0Max, r == del, r >= controlC1Min && r <= controlC1Max, r == lineSeparator, r == paragraphSeparator:
 		return utf8.RuneError
 	default:
 		return r

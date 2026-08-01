@@ -55,6 +55,9 @@ var (
 	errTestWarmCause0 = errors.New("warm cause 0")
 	errTestWarmCause1 = errors.New("warm cause 1")
 
+	errTestOutdatedCause0 = errors.New("outdated cause 0")
+	errTestOutdatedCause1 = errors.New("outdated cause 1")
+
 	errTestSaveFailure     = errors.New("simulated save failure")
 	errTestCollectionCause = errors.New("collection cause")
 )
@@ -183,6 +186,35 @@ func TestWarmErrorKeepsItsOwnHeadline(t *testing.T) {
 	}
 	if !errors.Is(err, helpers.ErrInstallationFailed) {
 		t.Fatalf("expected errors.Is helpers.ErrInstallationFailed, got %v", err)
+	}
+	for i, c := range causes {
+		if !errors.Is(err, c) {
+			t.Fatalf("expected errors.Is causes[%d] = %v, got %v", i, c, err)
+		}
+	}
+}
+
+// TestOutdatedErrorKeepsItsOwnHeadline pins outdatedError's distinct
+// headline wording, byte for byte, alongside the same one-line-message /
+// full-cause-tree contract TestSummaryErrorRendersHeadlineOnly pins for
+// installError and TestWarmErrorKeepsItsOwnHeadline pins for warmError.
+func TestOutdatedErrorKeepsItsOwnHeadline(t *testing.T) {
+	t.Parallel()
+	var r failureRecorder
+	causes := []error{errTestOutdatedCause0, errTestOutdatedCause1}
+	for _, c := range causes {
+		r.record(c)
+	}
+
+	summary := r.summary()
+	err := summary.outdatedError()
+
+	const want = "latest version lookup failed for 2 collections"
+	if got := err.Error(); got != want {
+		t.Fatalf("outdatedError().Error() = %q, want %q", got, want)
+	}
+	if !errors.Is(err, helpers.ErrLatestVersionLookupFailed) {
+		t.Fatalf("expected errors.Is helpers.ErrLatestVersionLookupFailed, got %v", err)
 	}
 	for i, c := range causes {
 		if !errors.Is(err, c) {

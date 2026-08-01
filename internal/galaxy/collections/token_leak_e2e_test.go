@@ -182,8 +182,9 @@ func assertNoTokenInFile(t *testing.T, path, token string) {
 //
 // This test and TestTokenNeverLeaksOnAuthFailure both swap the process-wide
 // os.Stdout/os.Stderr (see captureStdIO) and so deliberately do not run in
-// parallel - with each other or, since no other test in this package
-// constructs a real progress.Progress, with anything else.
+// parallel - with each other, or with any other test in this package: every
+// test that constructs a real progress.Progress (several now live in
+// outdated_e2e_test.go) stays serial for the identical reason.
 func TestTokenNeverLeaksDuringVerboseInstall(t *testing.T) {
 	srv := fakegalaxy.New(t)
 	srv.RequireAuth("Token " + leakToken)
