@@ -176,6 +176,59 @@ var (
 	// so silently substituting an empty registry would make it believe
 	// nothing is reachable and delete every installed collection.
 	ErrCorruptProjectRegistry = errors.New("corrupt project registry")
+	// ErrCorruptSnapshotStore indicates the local Bolt snapshot file failed
+	// one of bbolt's own integrity checks on open (see openBolt in
+	// internal/galaxy/store for the closed set): this binary cannot read
+	// it, no retry changes that, and the remedy is discarding the file and
+	// letting the cache rebuild cold.
+	//
+	// bolterrors.ErrInvalid, the broadest member of that set, does not mean
+	// only "a meta page was read and then failed validation". Verified in
+	// the vendored bbolt: db.getPageSize (by way of
+	// getPageSizeFromFirstMeta/getPageSizeFromSecondMeta) returns this same
+	// sentinel when NEITHER meta page could be read at all - a failing-media
+	// ReadAt, or a file truncated below where the meta pages live - folding
+	// that case into the identical "damaged bytes" label as a meta page that
+	// was read successfully but failed its own checksum or version check.
+	//
+	// This is accepted rather than split into a fourth class: the remedy
+	// this sentinel advises (discard the file, let the cache rebuild cold)
+	// is correct for every one of these shapes, since a Bolt snapshot is a
+	// reconstructible cache and never holds data this program cannot
+	// regenerate - and the shape that actually occurs in practice, a
+	// truncated or otherwise short file, genuinely is corruption in the
+	// ordinary sense of the word.
+	//
+	// What this still does not reach, and must not be read as reaching: a
+	// permissions failure. bolt.Open fails at its own os.OpenFile call
+	// before the page-size probe above ever runs, so a permission-denied
+	// path never reaches ErrInvalid, ErrVersionMismatch, or ErrChecksum at
+	// all - it stays unclassified, exactly as openBolt's own doc comment
+	// states for the closed set this sentinel maps from.
+	//
+	// One member of that set carries a residual worth naming rather than
+	// glossing over: bbolt's ErrVersionMismatch names its own vendored
+	// on-disk FORMAT version, not go-galaxy's snapshot schema
+	// (helpers.StoreSnapshotSchemaVersion) - a binary built against a
+	// different bbolt release genuinely could read a file that trips it
+	// here. This program only ever writes with the one bbolt version it
+	// vendors, so today a mismatch still means a foreign or damaged file
+	// relative to what this binary itself could have written - but that is
+	// a fact about this codebase's dependency, not a property this
+	// sentinel's own name guarantees forever.
+	//
+	// This is distinct from ErrUnsupportedSchemaVersion, which is about a
+	// different version entirely - go-galaxy's own snapshot schema, not
+	// bbolt's on-disk format - and describes a snapshot a newer go-galaxy
+	// binary wrote correctly and this one cannot yet read: there the bytes
+	// are fine and the fix is an environment change (a newer binary, or
+	// pointing at a different cache), never discarding data another
+	// runner still depends on. ErrCorruptSnapshotStore carries none of the
+	// three cache-backend classes (ErrCacheBackendUnavailable,
+	// ErrCacheBackendUnusable, ErrCacheBusy): those describe a backend's
+	// ability to reach or serve its store, not whether the bytes it did
+	// reach are usable once read.
+	ErrCorruptSnapshotStore = errors.New("corrupt snapshot store")
 	// ErrStateObjectTooLarge indicates a persisted cache-state object (the S3
 	// snapshot or project registry) could not be read within its declared
 	// size ceiling - StateObjectMaxCompressedSize on the wire,
@@ -312,11 +365,14 @@ var (
 	// containment check against its expected root directory.
 	ErrUnsafeRemovalPath = errors.New("unsafe removal path")
 	// ErrProjectRequirementsUnreadable indicates a recorded project's
-	// requirements file could not be read or parsed even though the
-	// project's workspace is present on disk. Cleanup must abort rather
-	// than silently treat it as contributing zero reachability roots,
-	// since that would make every uniquely-installed collection under
-	// that project look unreachable and get deleted.
+	// requirements file failed to load for any reason other than a plain
+	// fs.ErrNotExist - as opposed to a genuinely absent file, which is a
+	// stale registry entry cleanup tolerates instead (a warning,
+	// contributing no reachability roots). Cleanup must abort rather than
+	// silently treat this as contributing zero reachability roots, since the
+	// roots that file would have contributed cannot be determined and could
+	// have been protecting any project's on-disk copies, not only this
+	// one's.
 	ErrProjectRequirementsUnreadable = errors.New("project requirements file is unreadable")
 	// ErrCorruptManifest indicates a MANIFEST.json file exists but could
 	// not be parsed as JSON. The install it describes cannot be

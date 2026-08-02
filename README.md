@@ -325,7 +325,7 @@ S3 cache options (if `--s3-bucket` is set, S3 backend is used):
 - `--s3-session-token` (`$GO_GALAXY_S3_SESSION_TOKEN`, `$AWS_SESSION_TOKEN`)
 - `--s3-path-style-disabled` (`$GO_GALAXY_S3_PATH_STYLE_DISABLED`)
 
-`cleanup` aborts with a non-zero exit and deletes nothing if a recorded project's `requirements.yml` is present but cannot be read or parsed. A project whose `ansible_collections` entry does not resolve to a real directory inside its collections path - most commonly because that entry itself is a symlink escaping that path - is skipped instead, with a warning naming the project: nothing under it is scanned or removed, every other project's cleanup still proceeds, and `--dry-run` never previews a removal for it either, since a real run could not perform one. Within a project that does get scanned, an individual collection whose `MANIFEST.json` is not a regular file - a symlink, a directory, or anything else in its place - is skipped with its own warning naming the path, while the rest of that project's collections are still scanned and cleaned up normally.
+`cleanup` aborts with a non-zero exit and deletes nothing if a recorded project's `requirements.yml` fails to load for any reason other than the file no longer existing at all. A recorded requirements file that no longer exists at all is treated differently: it is a tolerated stale registry entry, reported with a single warning naming the project and contributing no reachability roots this run, rather than a load failure. A project whose `ansible_collections` entry does not resolve to a real directory inside its collections path - most commonly because that entry itself is a symlink escaping that path - is skipped for scanning instead, with its own warning naming the project: nothing under it is scanned or removed, and every other project's cleanup still proceeds unless some recorded project's `requirements.yml` fails to load for any reason other than the file no longer existing at all, which aborts the whole run for every project at once. A skipped project's `requirements.yml` is still resolved against every other recorded project's installed collections, though, so its roots can keep another project's on-disk copy alive even though nothing under the skipped project itself was scanned or removed this run; `--dry-run` still never previews a removal for the skipped project's own collections, since a real run could not perform one there either. Within a project that does get scanned, an individual collection whose `MANIFEST.json` is not a regular file - a symlink, a directory, or anything else in its place - is skipped with its own warning naming the path, while the rest of that project's collections are still scanned and cleaned up normally.
 
 `cleanup`'s extracted-cache sweep keeps a collection warmed within the last 30 days even if no project currently installs it, so a `warm`-only machine does not lose the extracted trees it exists to produce; a warmed entry that goes stale (no warm run for 30 days) is swept like any other unreferenced entry.
 
@@ -723,7 +723,7 @@ pipelines can branch on failure type without parsing log output:
 |    6 | Lockfile error (missing, invalid, mismatched with requirements, or out of date under `lock --frozen`)                                                                                                                                                                                                                                                                                                                                                             |
 |    7 | Artifact-integrity failure (content does not authenticate against its naming sha256, or the digest is malformed)                                                                                                                                                                                                                                                                                                                                                  |
 |    8 | Cache contention (the cache lock is held elsewhere, or the S3 lock's wait ceiling elapsed after this run observed another holder)                                                                                                                                                                                                                                                                                                                                 |
-|    9 | Persisted cache state is corrupt or oversized and must be discarded (a project registry that fails to decode, or a state object that exceeds its size ceiling)                                                                                                                                                                                                                                                                                                    |
+|    9 | Persisted cache state is corrupt or oversized and must be discarded (a project registry that fails to decode, a state object that exceeds its size ceiling, or - local backend only - a Bolt snapshot file that fails one of its own corruption checks)                                                                                                                                                                                                           |
 |  130 | Interrupted (a caught SIGINT, or the caller's own context canceled)                                                                                                                                                                                                                                                                                                                                                                                               |
 
 Exit `7` covers content that failed to authenticate against the sha256 that
@@ -768,16 +768,19 @@ contradicts itself about whether the lock object exists - exits `4` with
 
 Exit `9` means the persisted cache state itself - not this reader's ability
 to interpret it - cannot be trusted by anyone and must be discarded before the
-run can proceed: grep the run's output for `corrupt project registry` or
-`cache state object exceeds the maximum allowed size` to tell which one fired.
-The remedy is mechanical and safe to automate: delete the offending object (or
-the whole cache directory / bucket prefix), or rerun with `--clear-cache`,
-then rerun the command. This is deliberately distinct from exit `2`: a
-snapshot a newer binary wrote in a schema this one cannot safely interpret
-(`unsupported snapshot schema version`) exits `2` instead, since the snapshot
-itself is not damaged, only unreadable by this particular binary, and
-discarding it would destroy a shared cache other, newer runners still depend
-on.
+run can proceed: grep the run's output for `corrupt project registry`,
+`cache state object exceeds the maximum allowed size`, or `corrupt snapshot
+store` to tell which one fired. The last of the three is local-backend only:
+it means the local cache directory's Bolt snapshot file itself failed one of
+its own corruption checks, not merely that this run's own reader could not
+make sense of it. The remedy is mechanical and safe to automate: delete the
+offending object (or the whole cache directory / bucket prefix), or rerun
+with `--clear-cache`, then rerun the command. This is deliberately distinct
+from exit `2`: a snapshot a newer binary wrote in a schema this one cannot
+safely interpret (`unsupported snapshot schema version`) exits `2` instead,
+since the snapshot itself is not damaged, only unreadable by this particular
+binary, and discarding it would destroy a shared cache other, newer runners
+still depend on.
 
 ## Metrics
 

@@ -87,12 +87,63 @@ const (
 	paragraphSeparator = '\u2029'
 )
 
+// isControl reports whether r is one of the control ranges Clean replaces:
+// C0 (below controlC0Max), DEL, or C1 ([controlC1Min, controlC1Max]). It is
+// one of the two named halves of IsUnsafeRune's union (see isLineTerminator
+// below for the other), kept separate rather than folded into one function
+// so that neither name has to lie about the other's members: a caller
+// asking "is this a control character" deserves the true answer, not one
+// skewed by a rule about line terminators. Nothing outside this package
+// consults isControl directly - a caller with that need goes through
+// IsUnsafeRune, the exported union, or exports this half itself once it has
+// an actual reason to.
+func isControl(r rune) bool {
+	return r < controlC0Max || r == del || (r >= controlC1Min && r <= controlC1Max)
+}
+
+// isLineTerminator reports whether r is one of the two Unicode space
+// characters Clean also replaces despite neither being a control character:
+// U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR. See Clean's own doc
+// comment for why these two - and only these two, out of the wider
+// bidi/format group that survives Clean untouched - are replaced anyway:
+// each terminates a line for a Unicode-aware consumer (Python's
+// str.splitlines(), notably) exactly as \n does for this program's own
+// terminal-facing output. It is the other named half of IsUnsafeRune's
+// union, kept separate from isControl for the identical reason that
+// function's own doc states, and nothing outside this package consults it
+// directly either.
+func isLineTerminator(r rune) bool {
+	return r == lineSeparator || r == paragraphSeparator
+}
+
+// IsUnsafeRune reports whether r is isControl or isLineTerminator - the full
+// set Clean replaces once \n and \t are set aside (sanitizeRune below adds
+// that exception on top). This union, not either predicate alone, is what a
+// caller wanting Clean's whole "would this forge a line or drive a
+// terminal" judgment should consult: helpers.IsPathElement is exactly such
+// a caller, rejecting every rune this reports true without carrying the
+// \n/\t exception a single path element has no use for.
+//
+// This is the one place a new codepoint class must be added for Clean to
+// act on it: sanitizeRune consults only this union, never isControl or
+// isLineTerminator directly, so a class added here reaches Clean, NewWriter,
+// and helpers.IsPathElement together, with nothing else to remember to
+// update. The reverse is not guaranteed and is not a defect: IsPathElement
+// stopping short of a class Clean gains is not the drift this note
+// forecloses, only a caller here forgetting to update it - Clean would
+// still replace the character before it ever reached a terminal, so the
+// printing invariant IsPathElement documents would survive unchanged
+// either way.
+func IsUnsafeRune(r rune) bool {
+	return isControl(r) || isLineTerminator(r)
+}
+
 // sanitizeRune is strings.Map's per-rune callback for Clean.
 func sanitizeRune(r rune) rune {
 	switch {
 	case r == '\n' || r == '\t':
 		return r
-	case r < controlC0Max, r == del, r >= controlC1Min && r <= controlC1Max, r == lineSeparator, r == paragraphSeparator:
+	case IsUnsafeRune(r):
 		return utf8.RuneError
 	default:
 		return r

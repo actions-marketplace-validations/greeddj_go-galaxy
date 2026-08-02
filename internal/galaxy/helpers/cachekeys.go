@@ -77,3 +77,31 @@ func ArtifactKey(serverBase, filename string) string {
 	fp := hex.EncodeToString(sum[:])[:ArtifactKeyFingerprintLen]
 	return fp + "." + url.QueryEscape(filename)
 }
+
+// IsScopedArtifactKey reports whether key already has the shape ArtifactKey
+// produces: ArtifactKeyFingerprintLen lowercase hex characters followed by
+// ".". This must move in lockstep with ArtifactKey - any change to that
+// function's key shape (the fingerprint length, its hex case, or the "."
+// separator) has to be mirrored here, since this is the only other place
+// that asserts what ArtifactKey's output looks like.
+//
+// It exists because ArtifactKey's shape is not exclusive to keys ArtifactKey
+// itself produced: url.QueryEscape leaves both "." and "-" unescaped, so a
+// filename built from a walked namespace/name/version - none of which this
+// codebase restricts to excluding "." - can coincide with it byte for byte.
+// A caller comparing a candidate key against a live, server-scoped
+// ArtifactKey entry (rather than merely checking its own construction)
+// should use this predicate to recognize that shape before treating the
+// candidate as safe to act on unconditionally.
+func IsScopedArtifactKey(key string) bool {
+	if len(key) <= ArtifactKeyFingerprintLen || key[ArtifactKeyFingerprintLen] != '.' {
+		return false
+	}
+	for i := range ArtifactKeyFingerprintLen {
+		c := key[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}

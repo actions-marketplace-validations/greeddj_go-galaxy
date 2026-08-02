@@ -73,6 +73,97 @@ func TestCleanTable(t *testing.T) {
 	}
 }
 
+// TestIsControlTable pins isControl's exact boundary, independent of Clean:
+// every C0 character, DEL, and every C1 character report true, while a
+// character just outside each boundary (and the two Unicode line
+// terminators isLineTerminator covers instead) report false.
+func TestIsControlTable(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		r    rune
+		want bool
+	}{
+		{"NUL", '\x00', true},
+		{"unit separator (C0 high boundary)", '\x1f', true},
+		{"space (just past the C0 boundary)", ' ', false},
+		{"newline", '\n', true},
+		{"tab", '\t', true},
+		{"DEL", '\x7f', true},
+		{"C1 low boundary U+0080", '\u0080', true},
+		{"C1 high boundary U+009f", '\u009f', true},
+		{"NBSP U+00a0 (just past the C1 boundary)", '\u00a0', false},
+		{"line separator U+2028 (isLineTerminator's concern, not this one)", '\u2028', false},
+		{"paragraph separator U+2029 (isLineTerminator's concern, not this one)", '\u2029', false},
+		{"ordinary ASCII letter", 'a', false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isControl(tc.r); got != tc.want {
+				t.Errorf("isControl(%U) = %v, want %v", tc.r, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIsLineTerminatorTable pins isLineTerminator to exactly the two runes
+// it exists for, rejecting a handful of neighbors that could plausibly be
+// mistaken for it.
+func TestIsLineTerminatorTable(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		r    rune
+		want bool
+	}{
+		{"line separator U+2028", '\u2028', true},
+		{"paragraph separator U+2029", '\u2029', true},
+		{"just below U+2028", '\u2027', false},
+		{"just above U+2029", '\u202a', false},
+		{"newline is not a line terminator by this predicate", '\n', false},
+		{"NUL is not a line terminator by this predicate", '\x00', false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isLineTerminator(tc.r); got != tc.want {
+				t.Errorf("isLineTerminator(%U) = %v, want %v", tc.r, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIsUnsafeRuneTable pins IsUnsafeRune to exactly the union of isControl
+// and isLineTerminator: every rune either alone reports true carries through
+// to the union, and a rune neither reports true on stays false here too.
+func TestIsUnsafeRuneTable(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		r    rune
+		want bool
+	}{
+		{"NUL (isControl's concern)", '\x00', true},
+		{"DEL (isControl's concern)", '\x7f', true},
+		{"C1 low boundary U+0080 (isControl's concern)", '\u0080', true},
+		{"line separator U+2028 (isLineTerminator's concern)", '\u2028', true},
+		{"paragraph separator U+2029 (isLineTerminator's concern)", '\u2029', true},
+		{"newline (neither predicate's concern)", '\n', true},
+		{"tab (neither predicate's concern)", '\t', true},
+		{"NBSP U+00a0 (neither predicate's concern)", '\u00a0', false},
+		{"ordinary ASCII letter", 'a', false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsUnsafeRune(tc.r); got != tc.want {
+				t.Errorf("IsUnsafeRune(%U) = %v, want %v", tc.r, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestCleanRawC1ByteVersusEncodedC1Rune documents why the table above
 // carries both a raw-byte C1 row and a validly-encoded C1 row for the
 // same codepoint, rather than treating one as redundant with the other: a

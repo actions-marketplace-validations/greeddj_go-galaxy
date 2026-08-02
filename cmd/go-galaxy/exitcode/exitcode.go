@@ -64,12 +64,13 @@ const (
 	// one disclosed residual.
 	ExitCacheBusy = 8
 	// ExitCacheCorrupt indicates the persisted cache state itself - a project
-	// registry that exists but fails to decode, or a state object that could
-	// not be read within its declared size ceiling - cannot be used by
-	// anyone and must be discarded before the run can proceed. The remedy is
-	// mechanical and safe to automate: delete the offending object (or the
-	// whole cache directory / bucket prefix) or rerun with --clear-cache,
-	// then rerun the command.
+	// registry that exists but fails to decode, a state object that could
+	// not be read within its declared size ceiling, or (local backend only)
+	// a Bolt snapshot file whose bytes fail one of bbolt's own corruption
+	// checks - cannot be used by anyone and must be discarded before the run
+	// can proceed. The remedy is mechanical and safe to automate: delete the
+	// offending object (or the whole cache directory / bucket prefix) or
+	// rerun with --clear-cache, then rerun the command.
 	//
 	// This is deliberately distinct from ExitUsage: helpers.ErrUnsupportedSchemaVersion
 	// - a snapshot a newer binary wrote in a shape this one cannot safely
@@ -190,32 +191,43 @@ func fromErrorTail(err error) int {
 }
 
 // isCacheCorruptError reports whether err says the persisted cache state
-// itself - not this reader's ability to interpret it - cannot be used by
-// anyone and must be discarded before the run can proceed: a project
-// registry that exists but fails to decode (helpers.ErrCorruptProjectRegistry),
-// or a state object that could not be read within its declared size ceiling
-// (helpers.ErrStateObjectTooLarge). helpers.ErrUnsupportedSchemaVersion is
-// deliberately not a member: a schema version newer than this binary
-// understands means the snapshot was written correctly by a newer binary,
-// not that its bytes are damaged, so isRecordedStateUsageError classifies it
-// instead - see that function's own doc comment for the flip side of this
-// distinction.
+// itself - not this reader's ability to interpret it, and not a backend's
+// ability to reach it - cannot be used by anyone and must be discarded
+// before the run can proceed: a project registry that exists but fails to
+// decode (helpers.ErrCorruptProjectRegistry), a state object that could not
+// be read within its declared size ceiling (helpers.ErrStateObjectTooLarge),
+// or the local Bolt snapshot file itself failing one of bbolt's own
+// corruption checks (helpers.ErrCorruptSnapshotStore - see openBolt in
+// internal/galaxy/store for the closed set of bbolt sentinels this maps
+// from). helpers.ErrUnsupportedSchemaVersion is deliberately not a member: a
+// schema version newer than this binary understands means the snapshot was
+// written correctly by a newer binary, not that its bytes are damaged, so
+// isRecordedStateUsageError classifies it instead - see that function's own
+// doc comment for the flip side of this distinction. This class is scoped to
+// the local backend only for helpers.ErrCorruptSnapshotStore specifically:
+// the S3 backend's state object is gzipped JSON with its own sentinels
+// (helpers.ErrCorruptProjectRegistry, helpers.ErrStateObjectTooLarge), so it
+// reaches this class through those two instead, never through
+// helpers.ErrCorruptSnapshotStore, which only ever originates from opening a
+// local Bolt file.
 //
 // No error tree produced by this program carries both this class and the
 // network class today: a size-ceiling failure is only ever detected after
 // its GET has already answered with a 200 (Client.getObject returns a
 // response to readObject only on that status; every other status or
-// transport failure returns an error before readAllCapped ever runs), and a
-// decode failure never touches the network at all. Neither sentinel carries
-// a context.DeadlineExceeded/context.Canceled cause either, so
+// transport failure returns an error before readAllCapped ever runs), and
+// neither a decode failure nor a local Bolt file open ever touches the
+// network at all. No member of this class carries a
+// context.DeadlineExceeded/context.Canceled cause either, so
 // cache.deadlineError (the StateObjectDeadline decorator's normalizer) never
 // relabels one into helpers.ErrStateObjectDeadline - its own precondition
 // requires the error being normalized to already carry one of those two
-// signals, which a size-cap rejection or a corrupt-registry decode error
-// never does.
+// signals, which none of a size-cap rejection, a corrupt-registry decode
+// error, or a local Bolt open failure ever does.
 func isCacheCorruptError(err error) bool {
 	return errors.Is(err, helpers.ErrCorruptProjectRegistry) ||
-		errors.Is(err, helpers.ErrStateObjectTooLarge)
+		errors.Is(err, helpers.ErrStateObjectTooLarge) ||
+		errors.Is(err, helpers.ErrCorruptSnapshotStore)
 }
 
 // isIntegrityError reports whether err is an artifact-digest authentication
@@ -509,12 +521,15 @@ func isEnvironmentUsageError(err error) bool {
 //
 // helpers.ErrProjectRequirementsUnreadable belongs here on the same
 // predicate: a recorded project's requirements file this program cannot
-// read or parse, whatever the underlying cause, is something an operator
-// must fix by hand - editing or restoring the file - not something retrying
-// the same run can repair. A missing file and a malformed one both classify
-// here: isEnvironmentUsageError's fs.ErrNotExist arm already covers the
-// former, and this arm covers every other unreadable-or-unparseable cause
-// the same way, so both converge on the same exit code.
+// load, whatever the underlying cause, is something an operator must fix by
+// hand - editing or restoring the file - not something retrying the same
+// run can repair. A load failure matching errors.Is(err, fs.ErrNotExist) is
+// not this sentinel's concern at all: cleanup treats a recorded
+// requirements file that fails to load that way as a stale registry entry -
+// a single warning, contributing no reachability roots - rather than a load
+// failure, so that case never reaches FromError as an error in the first
+// place. This sentinel, and therefore this exit code, is reserved for any
+// other load failure.
 func isRecordedStateUsageError(err error) bool {
 	return errors.Is(err, helpers.ErrUnsupportedSchemaVersion) ||
 		errors.Is(err, helpers.ErrProjectRequirementsUnreadable)

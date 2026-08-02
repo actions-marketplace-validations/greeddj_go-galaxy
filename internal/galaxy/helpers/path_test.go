@@ -22,6 +22,30 @@ func TestIsPathElement(t *testing.T) {
 		{"traversal", "../../../../tmp/pwn", false},
 		{"traversal single segment", "..", false},
 		{"dotted name", "my.collection", true},
+
+		// Rejected: every rune safeout.IsUnsafeRune reports true for -
+		// every control character Clean replaces, plus the two Unicode
+		// line terminators - none of them belongs inside a single path
+		// element, even the two (\n, \t) Clean itself keeps for
+		// whole-line output.
+		{"newline", "1.0.0\nX", false},
+		{"tab", "1.0.0\tX", false},
+		{"carriage return", "1.0.0\rX", false},
+		{"escape", "1.0.0\x1bX", false},
+		{"delete", "1.0.0\x7fX", false},
+		{"C1 control byte", "1.0.0\u0080X", false},
+		{"unicode line separator", "1.0.0\u2028X", false},
+		{"unicode paragraph separator", "1.0.0\u2029X", false},
+
+		// Positive control, in the same table as the rejections above:
+		// ordinary, legitimate identifiers this project actually writes
+		// still pass, proving the control-character check does not
+		// overreach into rejecting harmless input.
+		{"namespace", "ns", true},
+		{"name", "name", true},
+		{"exact version", "1.0.0", true},
+		{"version with prerelease and build metadata", "1.0.0-rc.1+build", true},
+		{"printable non-ASCII name", "café", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

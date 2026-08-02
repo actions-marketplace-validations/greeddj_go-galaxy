@@ -67,6 +67,56 @@ func TestArtifactKeyFingerprintLength(t *testing.T) {
 	}
 }
 
+// TestIsScopedArtifactKeyRecognizesArtifactKeyOutput proves IsScopedArtifactKey
+// accepts every key ArtifactKey can actually produce, across bases and
+// filenames that would themselves need percent-encoding.
+func TestIsScopedArtifactKeyRecognizesArtifactKeyOutput(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		base     string
+		filename string
+	}{
+		{"https://galaxy.example.com", "ns-name-1.0.0.tar.gz"},
+		{"https://a.example.com/api", "acme-app-1.0.0.tar.gz"},
+		{"", "weird name/with spaces-1.0.0.tar.gz"},
+	}
+	for _, tc := range cases {
+		key := ArtifactKey(tc.base, tc.filename)
+		if !IsScopedArtifactKey(key) {
+			t.Fatalf("IsScopedArtifactKey(%q) = false, want true for ArtifactKey(%q, %q)'s own output", key, tc.base, tc.filename)
+		}
+	}
+}
+
+// TestIsScopedArtifactKeyRejectsUnscopedShapes proves IsScopedArtifactKey
+// rejects every shape that is not exactly ArtifactKeyFingerprintLen
+// lowercase hex characters followed by ".", including the pre-multi-server
+// flat key shape (a legacy artifact key carries no fingerprint prefix at
+// all) and a handful of near-miss shapes that must not be mistaken for it.
+func TestIsScopedArtifactKeyRejectsUnscopedShapes(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		key  string
+	}{
+		{"empty", ""},
+		{"legacy flat key, no prefix at all", "ns-name-1.0.0.tar.gz"},
+		{"too short to hold a fingerprint", "abc.def"},
+		{"exactly fingerprint length, no separator at all", "0123456789ab"},
+		{"fingerprint length with a non-dot separator", "0123456789ab-file.tar.gz"},
+		{"uppercase hex fingerprint", "0123456789AB.file.tar.gz"},
+		{"non-hex character in fingerprint", "0123456789ag.file.tar.gz"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if IsScopedArtifactKey(tc.key) {
+				t.Fatalf("IsScopedArtifactKey(%q) = true, want false", tc.key)
+			}
+		})
+	}
+}
+
 // TestScopedDepsCacheKeyNeverCollidesWithOldFormat proves the pre-scoping key
 // shape ("<ns>.<name>@<version>", no server prefix at all) can never be
 // produced by ScopedDepsCacheKey for any server base: every scoped key

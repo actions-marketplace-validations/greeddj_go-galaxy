@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/Masterminds/semver/v3"
@@ -20,15 +22,26 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 	"github.com/greeddj/go-galaxy/internal/galaxy/output"
+	"github.com/greeddj/go-galaxy/internal/galaxy/requirements"
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
 	"github.com/psvmcc/hub/pkg/types"
 )
 
 // installedCollection tracks an installed collection discovered on disk.
+// Namespace and Name are the two ansible_collections/<namespace>/<name>
+// directory components the scan walked through to find this record's
+// manifest, never a value the manifest itself declared, so no MANIFEST.json
+// content can ever redirect a path this package builds from Namespace/Name
+// at a different collection's directory. See buildInstalledRecord's doc
+// comment for the one field that is still manifest-derived (Version) and
+// for why its own blast radius stays bounded to this same Namespace/Name
+// pair rather than ever reaching a different collection.
 type installedCollection struct {
 	Parsed         *semver.Version
 	Key            string
 	FQDN           string
+	Namespace      string
+	Name           string
 	Version        string
 	InstallPath    string
 	CollectionsDir string
@@ -155,6 +168,44 @@ func initCleanup(ctx context.Context, cfg *config.Config, runtime *infra.Infra) 
 	}, nil
 }
 
+// buildReachable computes, for every project recorded in the registry, the
+// set of installed collection keys (ns.name@version) reachable from that
+// project's requirements.yml, transitively through each installed
+// collection's own declared dependencies, plus installedByKey - the full
+// index of every on-disk copy that removeUnused and sweepLegacyArtifacts
+// iterate afterward.
+//
+// This runs as two full passes over one sorted project-path list
+// (projectPaths), never interleaved per project:
+//
+//   - Phase 1 scans every recorded project's on-disk workspace into the
+//     shared installedIndex/installedByKey/depsByKey maps, before any
+//     project's requirements are resolved against them.
+//   - Phase 2 resolves every recorded project's requirements roots
+//     (projectRequirementRoots) against that now-complete index.
+//
+// The split is load-bearing, not cosmetic. A single-phase implementation
+// that scans one project's workspace and immediately resolves that same
+// project's roots against the index built so far would only ever see
+// collections scanned by projects processed earlier: project A's
+// requirements.yml naming a collection only project B installs would find
+// nothing whenever B happens to be scanned after A - purely a function of
+// iteration order, not of what either project actually declares. Splitting
+// into two full passes removes that ordering dependency entirely: every
+// root, from every project, is resolved against every project's scanned
+// collections, regardless of which project the registry yields first.
+//
+// projectPaths is sorted (slices.Sorted over the registry's map keys) for
+// three reasons, all load-bearing:
+//
+//   - it makes a phase-2 abort deterministic - the same unreadable project's
+//     requirements file names itself in the returned error on every run,
+//     rather than whichever project the map's randomized iteration order
+//     happened to yield first;
+//   - it makes warning order deterministic for the identical reason; and
+//   - it lets a test fixture pin a genuine ordering bug with a single run
+//     instead of a statistical loop that only sometimes iterates the
+//     registry in the order that exposes it.
 func buildReachable(runtime *infra.Infra, registry *store.ProjectRegistry) (map[string]bool, map[string][]installedCollection, error) {
 	reachable := make(map[string]bool)
 	installedIndex := make(map[string][]installedCollection)
@@ -171,24 +222,23 @@ func buildReachable(runtime *infra.Infra, registry *store.ProjectRegistry) (map[
 	// at most once instead of once per edge.
 	constraints := make(map[string]*semver.Constraints)
 
-	for projectPath, project := range registry.Projects {
-		scanned, err := scanProjectWorkspace(runtime.Output, projectPath, project, installedIndex, installedByKey, depsByKey)
-		if err != nil {
+	projectPaths := slices.Sorted(maps.Keys(registry.Projects))
+
+	// Phase 1: every project's workspace into the shared index, before any
+	// root resolves against it.
+	for _, projectPath := range projectPaths {
+		if err := scanProjectWorkspace(
+			runtime.Output, projectPath, registry.Projects[projectPath], installedIndex, installedByKey, depsByKey,
+		); err != nil {
 			return nil, nil, err
 		}
-		if !scanned {
-			continue
-		}
-		// scanned is true only when this project's workspace was opened and
-		// walked, so installedByKey already carries its installed collections
-		// as deletion candidates. A requirements file that cannot be read or
-		// parsed here must abort the whole run rather than silently
-		// contributing zero reachability roots: the latter would make every
-		// uniquely-installed collection under this project look unreachable
-		// and get deleted.
-		roots, err := loadRequirements(project.RequirementsFile, "")
+	}
+
+	// Phase 2: every recorded project's roots, against the complete index.
+	for _, projectPath := range projectPaths {
+		roots, err := projectRequirementRoots(runtime.Output, projectPath, registry.Projects[projectPath])
 		if err != nil {
-			return nil, nil, fmt.Errorf("%w: %s: %w", helpers.ErrProjectRequirementsUnreadable, project.RequirementsFile, err)
+			return nil, nil, err
 		}
 		for _, root := range roots {
 			fqdn := fmt.Sprintf("%s.%s", root.Namespace, root.Name)
@@ -198,6 +248,40 @@ func buildReachable(runtime *infra.Infra, registry *store.ProjectRegistry) (map[
 		}
 	}
 	return reachable, installedByKey, nil
+}
+
+// projectRequirementRoots loads projectPath's requirements roots for
+// reachability. It runs for every recorded project in phase 2, regardless of
+// whether that project's own workspace was scanned in phase 1: phase 1 and
+// phase 2 are deliberately independent (see buildReachable's own doc
+// comment), so a project skipped in phase 1 - an absent or escaping
+// workspace - still contributes whatever roots its own requirements.yml
+// declares here, potentially keeping another project's on-disk copy alive.
+//
+// Only two states about a project's requirements are honest, and this
+// function distinguishes exactly those two by testing the load failure
+// against fs.ErrNotExist: "this project declares nothing" (loadRequirements
+// failed with a plain fs.ErrNotExist - zero roots, no error) and "this
+// project's declarations are unknown" (loadRequirements failed with
+// anything else - the roots it would have contributed cannot be
+// determined). The first is a single warning naming the project,
+// contributing no roots and letting the run proceed; the second aborts the
+// whole run before removeUnused deletes anything, since an unknown set of
+// roots could have been protecting any project's on-disk copies, not only
+// this one's.
+func projectRequirementRoots(
+	out output.Printer, projectPath string, project store.ProjectRecord,
+) ([]requirements.CollectionRequirement, error) {
+	roots, err := loadRequirements(project.RequirementsFile, "")
+	if err == nil {
+		return roots, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		out.Warnf("project %q: requirements file %q no longer exists; it contributes no reachability roots this run",
+			projectPath, project.RequirementsFile)
+		return nil, nil
+	}
+	return nil, fmt.Errorf("%w: %s: %w", helpers.ErrProjectRequirementsUnreadable, project.RequirementsFile, err)
 }
 
 func removeUnused(
@@ -210,11 +294,25 @@ func removeUnused(
 	installedByKey map[string][]installedCollection,
 ) (int, error) {
 	var removed int
-	for key, insts := range installedByKey {
+	// Sorted rather than ranged directly: this loop returns on the first
+	// removal failure below, so which subset of installedByKey was already
+	// deleted before that return must not depend on Go's randomized map
+	// iteration order - the same failure, on the same recorded keys, must
+	// leave the same partial result on disk every time.
+	for _, key := range slices.Sorted(maps.Keys(installedByKey)) {
+		insts := installedByKey[key]
 		if reachable[key] {
 			continue
 		}
 		removed++
+		// key is "<ns>.<name>@<version>", built by buildInstalledRecord only
+		// after ns, name, and version each pass helpers.IsPathElement - which
+		// rejects every control character, \n and \t included (see
+		// IsPathElement's own doc comment). key therefore can never carry a
+		// character able to forge an extra line or a terminal command, so
+		// this and the "removed" line below print it with a bare %s rather
+		// than %q: quoting would change the exact, greppable shape CI
+		// tooling matches against (e.g. "🧹 removed ns.name@1.0.0").
 		if cfg.DryRun {
 			runtime.Output.Printf("🧹 would remove %s", key)
 			continue
@@ -439,15 +537,26 @@ func openProjectWorkspace(projectPath string, project store.ProjectRecord) (work
 }
 
 // scanProjectWorkspace opens projectPath's collections workspace and, if
-// usable, scans it into index/byKey/deps, returning scanned=true. It is the
-// per-project step buildReachable's registry loop drives.
+// usable, scans it into index/byKey/deps. It is buildReachable's phase-1
+// per-project step, and is deliberately independent of whether this
+// project's own requirements load successfully - see projectRequirementRoots,
+// buildReachable's phase-2 step, for that half. Its only signal to the
+// caller is success or failure: it does not report whether anything was
+// actually scanned, since phase 2 resolves every recorded project's roots
+// regardless of what phase 1 found for that same project.
 //
-//   - No candidate has an ansible_collections directory: (false, nil), the
-//     ordinary skip - identical to today's absent-workspace behavior.
+//   - No candidate has an ansible_collections directory: nil error, nothing
+//     scanned - the ordinary skip, identical to today's absent-workspace
+//     behavior.
 //   - A candidate's ansible_collections entry escapes its root: a single
-//     operator warning naming the project is emitted and (false, nil) is
-//     returned, so nothing under this project is scanned or removed this run
-//     but every other project's cleanup proceeds unaffected.
+//     operator warning naming the project is emitted and nil is returned, so
+//     nothing under this project is scanned or removed this run but every
+//     other project's cleanup proceeds unaffected. This is phase 1 only: the
+//     project's own requirements.yml is still resolved in phase 2
+//     (projectRequirementRoots runs for every recorded project regardless of
+//     this outcome), so its roots can still keep another project's on-disk
+//     copy reachable even though nothing under this project itself was
+//     scanned or removed.
 //   - A usable workspace fails to scan (a genuine IO error, not an escape):
 //     the error is wrapped with the collections path and returned, aborting
 //     the whole run. Every path inside the scan is root-relative once ws is
@@ -482,21 +591,21 @@ func scanProjectWorkspace(
 	index map[string][]installedCollection,
 	byKey map[string][]installedCollection,
 	deps map[string]map[string]string,
-) (bool, error) {
+) error {
 	ws, err := openProjectWorkspace(projectPath, project)
 	if err != nil {
 		out.Warnf("skipping project %q: %v; nothing under it was scanned or removed", projectPath, err)
-		return false, nil
+		return nil
 	}
 	if ws.root == nil {
-		return false, nil
+		return nil
 	}
 	defer func() { _ = ws.root.Close() }()
 
 	if err := scanInstalledCollections(out, ws, index, byKey, deps); err != nil {
-		return false, fmt.Errorf("failed to scan %q: %w", ws.path, err)
+		return fmt.Errorf("failed to scan %q: %w", ws.path, err)
 	}
-	return true, nil
+	return nil
 }
 
 // scanInstalledCollections indexes installed collections under ws. Installed
@@ -667,14 +776,25 @@ func scanCollectionDir(
 			// all: it is neither a reachability source nor a deletion
 			// candidate, so it is reported (visible warning) but its
 			// on-disk tree is left untouched rather than aborting the scan.
-			out.Warnf("skipping corrupt manifest at %s: %v", manifestPath, err)
+			// manifestPath is built from ns/name straight off fs.ReadDir,
+			// before either has ever reached an IsPathElement check (that
+			// check runs inside buildInstalledRecord, which this branch
+			// never calls), so it is rendered %q rather than %s: unlike
+			// the identifiers this package prints elsewhere, it is not yet
+			// known to be free of a line-forging character.
+			out.Warnf("skipping corrupt manifest at %q: %v", manifestPath, err)
 			return nil
 		}
 		return err
 	}
-	record, key, ok, err := buildInstalledRecord(ws.path, manifestPath, manifest)
+	record, key, ok, err := buildInstalledRecord(ws.path, manifestPath, ns, name, manifest)
 	if err != nil {
-		out.Warnf("skipping install with unsafe identifier at %s: %v", manifestPath, err)
+		// manifestPath carries the identical exposure the ErrCorruptManifest
+		// branch above documents - built from raw, unvalidated ns/name - and
+		// err's own %q rendering of ns/name/version (buildInstalledRecord's
+		// own error) does not cover manifestPath, a separately built string.
+		// %q for the same reason.
+		out.Warnf("skipping install with unsafe identifier at %q: %v", manifestPath, err)
 		return nil
 	}
 	if !ok {
@@ -707,21 +827,61 @@ func readManifest(root *os.Root, rel, display string) (types.GalaxyCollectionVer
 	return manifest, nil
 }
 
-// buildInstalledRecord builds an installedCollection from a parsed manifest.
+// buildInstalledRecord builds an installedCollection from ns and name - the
+// ansible_collections/<ns>/<name> directory pair scanCollectionDir just
+// walked to reach manifestPath - and the version parsed out of manifest.
+// This is the governing identity invariant for this package: a scanned
+// collection's namespace and name are always the two path components the
+// scan walked through, never a value the manifest declares, so no MANIFEST.json
+// content - however it got there - can ever redirect this record, or any
+// deletion built from it, at a different collection's directory. ns and name
+// are single filesystem path elements by construction, since fs.ReadDir
+// never yields an entry containing "/" or a bare "." / "..", so the
+// IsPathElement checks below are defensive-only for those two arguments in
+// every call this package itself makes; they are kept anyway as
+// belt-and-suspenders, and TestBuildInstalledRecordRejectsSeparators is what
+// actually exercises that arm, by calling this function directly with values
+// the real scan could never produce.
+//
+// version is the one identity component still read from the manifest:
+// nothing else on disk records it. Recovering it from the persisted
+// snapshot's InstalledEntry.InstallPath instead was considered and rejected:
+// Store.SetInstalled keys by ns.name@version and never prunes an older entry
+// on upgrade, so two entries can legitimately share one InstallPath, making
+// the reverse (path -> version) lookup ambiguous. The .info sidecar
+// directory name was rejected too, as a third source of truth for a value
+// the manifest already names.
+//
+// A lying version's blast radius is bounded to a fixed prefix, not to a
+// unique target: ns and name are fixed by the walk before version is ever
+// consulted, so the two names a lying version can mistarget are always
+// <ns>.<name>-<lying-version>.info (the sidecar) and
+// <ns>-<name>-<lying-version>.tar.gz (the artifact filename) - never some
+// other collection's own ns/name. But "-" and "." are both legal inside a
+// walked path element, which makes both of those concatenations ambiguous:
+// walking namespace "a", name "b", with a manifest lying that its version is
+// "c-1.0.0" produces the sidecar name "a.b-c-1.0.0.info" and the artifact
+// filename "a-b-c-1.0.0.tar.gz" - byte-identical to what a genuinely,
+// legitimately installed a.b-c@1.0.0 would itself produce. The impact stays
+// narrow regardless: the sidecar RemoveAll failure this could cause is
+// already ignored (removeInfoDir is best-effort), and an artifact cache-slot
+// eviction self-heals on the next refetch. Containment is unaffected either
+// way - removeInstallPath joins only Namespace and Name, so the version
+// never participates in a directory path at all.
+//
 // An incomplete manifest (missing namespace, name, or version) is a benign
-// skip: ok is false and err is nil. A manifest with all three fields present
-// but where any of them cannot be safely used as a single filesystem path
-// element (e.g. it contains "/" or is "..") is rejected with
+// skip: ok is false and err is nil. A manifest whose namespace, name, or
+// version cannot be safely used as a single filesystem path element (e.g. it
+// contains "/" or is "..") is rejected with
 // helpers.ErrUnsafeCollectionIdentifier rather than silently building a
 // record whose Version would later escape the collections tree in
 // removeInstalled.
 func buildInstalledRecord(
 	collectionsPath string,
 	manifestPath string,
+	ns, name string,
 	manifest types.GalaxyCollectionVersionInfoManifest,
 ) (installedCollection, string, bool, error) {
-	ns := manifest.CollectionInfo.Namespace
-	name := manifest.CollectionInfo.Name
 	version := manifest.CollectionInfo.Version
 	if ns == "" || name == "" || version == "" {
 		return installedCollection{}, "", false, nil
@@ -743,6 +903,8 @@ func buildInstalledRecord(
 	return installedCollection{
 		Key:            key,
 		FQDN:           fqdn,
+		Namespace:      ns,
+		Name:           name,
 		Version:        version,
 		InstallPath:    installPath,
 		CollectionsDir: collectionsPath,
@@ -824,6 +986,12 @@ func markReachable(
 
 // removeInstalled deletes collection files and cached artifacts.
 //
+// namespace and name below are read directly from inst.Namespace/inst.Name -
+// the ansible_collections/<ns>/<name> directory pair the scan walked through
+// to find this record's manifest, never anything the manifest itself
+// declared - so nothing a hostile MANIFEST.json contains can retarget this
+// removal at a different collection's directory.
+//
 // The WithinDir checks in removeInstallPath/removeInfoDir are
 // defense-in-depth: buildInstalledRecord already rejects any
 // namespace/name/version that cannot be safely used as a path element at
@@ -862,12 +1030,8 @@ func markReachable(
 // since a legacy-keyed entry can never be reached by a fresh install again
 // regardless of whether its collection is being removed.
 func removeInstalled(ctx context.Context, inst installedCollection, artifacts cacheManager.ArtifactStore, source string) error {
-	parts := strings.Split(inst.FQDN, ".")
-	if len(parts) != helpers.CollectionNameParts {
-		return nil
-	}
-	namespace := parts[0]
-	name := parts[1]
+	namespace := inst.Namespace
+	name := inst.Name
 	if !helpers.IsPathElement(namespace) || !helpers.IsPathElement(name) || !helpers.IsPathElement(inst.Version) {
 		return fmt.Errorf("%w: ns=%q name=%q version=%q", helpers.ErrUnsafeRemovalPath, namespace, name, inst.Version)
 	}
@@ -913,9 +1077,22 @@ func removeWorkspaceFiles(inst installedCollection, namespace, name string) erro
 // inst.CollectionsDir, so a symlink swap of either the ansible_collections
 // directory or the namespace component cannot make the removal escape the
 // collections tree. namespace and name are the already-validated path
-// elements from removeInstalled's caller, not derived from inst.InstallPath,
-// so this is what root actually resolves regardless of what InstallPath's
-// raw string looks like.
+// elements from removeInstalled's caller - the same ansible_collections/<ns>/
+// <name> pair buildInstalledRecord read inst.InstallPath from in the first
+// place (installPath := filepath.Dir(manifestPath), where manifestPath is
+// exactly ansible_collections/<ns>/<name>/MANIFEST.json). The walked identity
+// and the recorded InstallPath name the identical on-disk location by
+// construction, not two independently-derived values that merely happen to
+// agree.
+//
+// The InstallPath == "" and WithinDir guards below are belt-and-suspenders
+// over that construction, not the load-bearing check: they exist for a
+// record that never went through the normal scan at all - one built
+// directly, as several tests in this package do - where InstallPath could
+// disagree with namespace/name.
+// TestRemoveInstalledRejectsInstallPathEscape pins exactly that
+// directly-constructed case: the last lexical check before a RemoveAll that
+// a record produced by the real scan can never actually trigger.
 func removeInstallPath(root *os.Root, inst installedCollection, namespace, name string) error {
 	if inst.InstallPath == "" {
 		return nil
@@ -986,7 +1163,14 @@ func sweepLegacyArtifacts(
 	if artifacts == nil {
 		return
 	}
-	for _, insts := range installedByKey {
+	// Sorted rather than ranged directly, mirroring removeUnused's own
+	// ordering fix, even though this loop never returns early: a Delete
+	// failure is ignored below rather than propagated, so map order here
+	// cannot randomize which entries actually get swept - only the order
+	// dry-run report lines are printed in, and the order a test fixture
+	// asserting on those lines would otherwise have to tolerate.
+	for _, mapKey := range slices.Sorted(maps.Keys(installedByKey)) {
+		insts := installedByKey[mapKey]
 		if len(insts) == 0 {
 			continue
 		}
@@ -994,16 +1178,28 @@ func sweepLegacyArtifacts(
 		// version, and therefore the same legacy key, regardless of which
 		// project installed it - so only the first copy needs inspecting.
 		inst := insts[0]
-		namespace, name, ok := helpers.SplitFQDN(inst.FQDN)
-		if !ok {
+		legacyKey := legacyArtifactKey(inst.Namespace, inst.Name, inst.Version)
+		// A walked namespace directory may legally contain "." (nothing in
+		// this codebase's scan rejects it - see buildInstalledRecord's
+		// IsPathElement check, which permits it), and legacyArtifactKey's
+		// url.QueryEscape leaves both "." and "-" unescaped. A namespace like
+		// "<12-hex>.acme" therefore forges a legacyArtifactKey byte-identical
+		// to a genuine, current helpers.ArtifactKey entry scoped to a server
+		// whose fingerprint happens to be that same 12-hex prefix - a
+		// collision this pass has no reachability check or Source
+		// requirement to catch, since sweepLegacyArtifacts runs
+		// unconditionally over every scanned collection. Skipping any
+		// candidate that already carries ArtifactKey's own fingerprint prefix
+		// closes that: this pass only ever purges a key that could not also
+		// be a live, server-scoped cache slot.
+		if helpers.IsScopedArtifactKey(legacyKey) {
 			continue
 		}
-		key := legacyArtifactKey(namespace, name, inst.Version)
 		if cfg.DryRun {
-			reportLegacyArtifactSweepCandidate(ctx, runtime, artifacts, key)
+			reportLegacyArtifactSweepCandidate(ctx, runtime, artifacts, legacyKey)
 			continue
 		}
-		_ = artifacts.Delete(ctx, key)
+		_ = artifacts.Delete(ctx, legacyKey)
 	}
 }
 
@@ -1018,6 +1214,14 @@ func reportLegacyArtifactSweepCandidate(ctx context.Context, runtime *infra.Infr
 	if err != nil || !has {
 		return
 	}
+	// key needs no quoting here: legacyArtifactKey builds it via
+	// url.QueryEscape(filename), which percent-encodes every control byte
+	// (measured: url.QueryEscape("a\nb.tar.gz") == "a%0Ab.tar.gz") on top of
+	// namespace/name/version already being IsPathElement-validated by
+	// buildInstalledRecord before a key is ever built from them. A future
+	// author must not "fix" this into %q to match the extracted-entry line
+	// below: that line's name comes from a raw directory listing with no
+	// escaping step of its own, which is exactly what makes it different.
 	runtime.Output.Printf("🧹 would sweep legacy artifact %s", key)
 }
 
@@ -1121,6 +1325,14 @@ func reportExtractedSweepPlan(runtime *infra.Infra, extractedStore *extracted.St
 		return
 	}
 	for _, name := range plan {
-		runtime.Output.Printf("🧹 would sweep extracted %s", name)
+		// name is entry.Name() from a raw directory listing of the extracted
+		// store root (extracted.Store.SweepPlan) - content this program did
+		// not itself validate, unlike a legacy artifact key (see
+		// reportLegacyArtifactSweepCandidate) or an install key (see
+		// removeUnused), both of which are assembled solely from
+		// IsPathElement-validated components. A local writer able to plant a
+		// directory there controls this string outright, so it is rendered
+		// %q rather than %s.
+		runtime.Output.Printf("🧹 would sweep extracted %q", name)
 	}
 }

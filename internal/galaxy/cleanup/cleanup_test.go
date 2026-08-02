@@ -224,11 +224,173 @@ func assertLockIsFree(t *testing.T, cfg *config.Config, runtime *infra.Infra) {
 	}
 }
 
+// TestInitCleanupCacheBackendNewFailure pins initCleanup's first lifecycle
+// arm: cacheBackend.New itself failing (here, a nil *config.Config) before
+// anything is opened, locked, or loaded. Start must simply propagate the
+// error; nothing was ever acquired, so there is nothing beyond the non-nil
+// error itself to assert. Exit code is deliberately not asserted for this
+// arm: it exits 1 (unclassified) like every arm but the lock one below, and
+// asserting that here would cement a classification this codebase has not
+// settled elsewhere.
+func TestInitCleanupCacheBackendNewFailure(t *testing.T) {
+	t.Parallel()
+	runtime := newTestRuntime()
+	if err := Start(t.Context(), nil, runtime); err == nil {
+		t.Fatal("expected Start to fail when cfg is nil")
+	}
+}
+
+// TestInitCleanupOpenFailure pins initCleanup's second lifecycle arm:
+// backend.Open failing because the cache dir's parent path is itself a
+// regular file, so os.MkdirAll cannot create the cache dir under it. Open
+// runs before Lock, so nothing is acquired by the time this fails - this
+// pins the branch being taken, not a release - and the blocker file itself
+// must survive untouched, since nothing on this path ever removes or
+// replaces it.
+func TestInitCleanupOpenFailure(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	blocker := filepath.Join(tmp, "afile")
+	if err := os.WriteFile(blocker, []byte("x"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write blocker file: %v", err)
+	}
+
+	cfg := &config.Config{CacheDir: filepath.Join(blocker, "sub"), DryRun: false}
+	runtime := newTestRuntime()
+
+	if err := Start(t.Context(), cfg, runtime); err == nil {
+		t.Fatal("expected Start to fail when the cache dir's parent is a regular file")
+	}
+	info, statErr := os.Stat(blocker)
+	if statErr != nil {
+		t.Fatalf("expected the blocker file to survive, stat error: %v", statErr)
+	}
+	if !info.Mode().IsRegular() {
+		t.Fatalf("expected the blocker to remain a regular file, got mode %v", info.Mode())
+	}
+}
+
+// TestInitCleanupLockFailure pins initCleanup's third lifecycle arm: the
+// instance lock already held by another acquirer on the same cache dir.
+// flock(2) conflicts between file descriptions, not processes, so acquiring
+// it a second time from this same test process already reproduces
+// EWOULDBLOCK - no subprocess, no goroutine, no timing dependency needed.
+// This is also the one arm that carries a classified exit code:
+// helpers.ErrAnotherInstanceIsRunning classifies as exitcode.ExitCacheBusy,
+// asserted here alongside errors.Is.
+//
+// The positive control releases the held lock, closes the holding backend,
+// and re-runs Start on the identical cache dir: it must succeed, proving the
+// failure above was the lock specifically, not some other property of the
+// cache dir.
+func TestInitCleanupLockFailure(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	holder, err := cacheBackend.New(cfg, runtime)
+	if err != nil {
+		t.Fatalf("failed to build the lock-holding backend: %v", err)
+	}
+	if err := holder.Open(t.Context()); err != nil {
+		t.Fatalf("failed to open the lock-holding backend: %v", err)
+	}
+	release, err := holder.Lock(t.Context())
+	if err != nil {
+		t.Fatalf("failed to acquire the holding lock: %v", err)
+	}
+
+	startErr := Start(t.Context(), cfg, runtime)
+	if !errors.Is(startErr, helpers.ErrAnotherInstanceIsRunning) {
+		t.Fatalf("expected ErrAnotherInstanceIsRunning, got %v", startErr)
+	}
+	if got := exitcode.FromError(startErr); got != exitcode.ExitCacheBusy {
+		t.Fatalf("exitcode.FromError(startErr) = %d, want ExitCacheBusy (%d)", got, exitcode.ExitCacheBusy)
+	}
+
+	if err := release(); err != nil {
+		t.Fatalf("failed to release the holding lock: %v", err)
+	}
+	if err := holder.Close(t.Context()); err != nil {
+		t.Fatalf("failed to close the lock-holding backend: %v", err)
+	}
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed once the lock is released, got %v", err)
+	}
+}
+
+// TestInitCleanupLoadStoreFailure pins initCleanup's fourth lifecycle arm:
+// backend.LoadStore itself failing because the local Bolt file at
+// helpers.StoreDBLocal holds garbage instead of a valid database. Unlike the
+// other three lifecycle arms in this file, this one asserts a classified
+// exit code: openBolt's corruption arm must surface through Start as
+// helpers.ErrCorruptSnapshotStore and classify as exitcode.ExitCacheCorrupt,
+// since garbage bytes at this path satisfy that class's own predicate (the
+// persisted cache state cannot be interpreted by anyone) exactly as a
+// corrupt project registry already does. It also keeps the one other
+// genuinely observable discipline property this arm has: the lock acquired
+// just before LoadStore must still be released on this failure path, which
+// assertLockIsFree verifies by re-acquiring it through a fresh backend.
+//
+// The mandatory positive control deletes the corrupt file and re-runs Start
+// against the identical cache dir: it must succeed, proving this fixture
+// genuinely reaches LoadStore - rather than failing some earlier step for an
+// unrelated reason - and that the abort above is specific to the damaged
+// bytes, not to the cache dir itself.
+func TestInitCleanupLoadStoreFailure(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	if err := os.MkdirAll(cacheDir, helpers.DirMod); err != nil {
+		t.Fatalf("failed to create cache dir: %v", err)
+	}
+	dbPath := filepath.Join(cacheDir, helpers.StoreDBLocal)
+	if err := os.WriteFile(dbPath, []byte("not a bolt database"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write a garbage store db: %v", err)
+	}
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	err := Start(t.Context(), cfg, runtime)
+	if err == nil {
+		t.Fatal("expected Start to fail when the local store db is corrupt")
+	}
+	if !errors.Is(err, helpers.ErrCorruptSnapshotStore) {
+		t.Fatalf("expected ErrCorruptSnapshotStore, got %v", err)
+	}
+	if got := exitcode.FromError(err); got != exitcode.ExitCacheCorrupt {
+		t.Fatalf("exitcode.FromError(err) = %d, want ExitCacheCorrupt (%d)", got, exitcode.ExitCacheCorrupt)
+	}
+	assertLockIsFree(t, cfg, runtime)
+
+	if err := os.Remove(dbPath); err != nil {
+		t.Fatalf("failed to remove the corrupt store db: %v", err)
+	}
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed once the corrupt store db is removed, got %v", err)
+	}
+}
+
 // newTestRuntime builds an Infra wired with a no-op printer and the default
 // HTTP client, matching the pattern used by the collections package's own
 // tests for constructing an Infra without caring about rendered output.
 func newTestRuntime() *infra.Infra {
-	return infra.New(noopPrinter{}, http.DefaultClient)
+	return newTestRuntimeWith(nil)
+}
+
+// newTestRuntimeWith builds an Infra wired with printer and the default HTTP
+// client, for a test that needs to assert on recorded output (a warning, a
+// dry-run report line, or a non-fatal error) rather than only on Start's
+// return value or on-disk state. A nil printer falls back to noopPrinter{},
+// so newTestRuntime can share this single constructor instead of duplicating
+// infra.New's wiring.
+func newTestRuntimeWith(printer *recordingPrinter) *infra.Infra {
+	if printer == nil {
+		return infra.New(noopPrinter{}, http.DefaultClient)
+	}
+	return infra.New(printer, http.DefaultClient)
 }
 
 // openTestWorkspace opens collectionsPath's os.Root the same way
@@ -402,6 +564,101 @@ func TestRemoveInstalledRejectsTraversalVersion(t *testing.T) {
 	}
 }
 
+// TestRemoveUnusedCannotForgeAReportLine proves, end to end through Start,
+// that a MANIFEST.json version carrying a newline can never inject an extra
+// plain-text line into cleanup's own report output. The survival check
+// below is what actually closes the defect: buildInstalledRecord's
+// helpers.IsPathElement check on version rejects the newline at ingestion
+// (see IsPathElement's own doc comment for the structural fix this pins),
+// so a rejected identifier is never indexed and nothing about the hostile
+// collection - including a report line naming it - is ever printed at all.
+// The newline scan is checked first, ahead of that survival assertion and
+// the warning assertion after it, so that a reachable regression fails on
+// the injected line's own content rather than one step later on a
+// same-cause symptom (a missing file) that does not by itself say why.
+//
+// Its mandatory positive control is a second, ordinary collection seeded
+// under the identical project and fixture: with an empty requirements.yml,
+// both collections are unreferenced, so the ordinary one is a genuine
+// removal candidate and must actually be removed, with its own "removed"
+// line appearing in the report exactly as removeUnused always renders it
+// (helpers.IsPathElement-validated components, printed with a bare %s - see
+// removeUnused's own comment on that line). Without this control, the
+// hostile collection surviving would be indistinguishable from "cleanup
+// never reached the scan at all" rather than "the scan correctly refused
+// it".
+//
+// Confirmed killing mutation (disabling IsPathElement's control-character
+// rejection, restoring the pre-fix behavior that only checked for path
+// separators and "."/".."): running `go test ./internal/galaxy/cleanup/...
+// -run TestRemoveUnusedCannotForgeAReportLine -v` against that mutation
+// produced:
+//
+//	cleanup_test.go:635: recorded output line contains a raw newline,
+//	forged-line defect is not closed: "🧹 removed ns.hostile@1.0.0
+//	forged plain-text line"
+//	--- FAIL: TestRemoveUnusedCannotForgeAReportLine (0.01s)
+//
+// under the mutation, the forged version passes buildInstalledRecord's
+// IsPathElement check same as before this fix, so the hostile collection is
+// indexed and genuinely removed by removeUnused, whose bare-%s "removed"
+// line carries the forged newline and trailing text straight through -
+// exactly the injected line this test exists to catch. The scan is what
+// fails first under this mutation; the survival and warning checks below it
+// never run at all, so only the quoted line above is a mutation-pinned
+// claim - the positive control's own eventual behavior under this same
+// mutation is not what this mutation is cited for.
+func TestRemoveUnusedCannotForgeAReportLine(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+
+	const forgedVersion = "1.0.0\nforged plain-text line"
+	seedManifestAt(t, downloadPath, "ns", "hostile", forgedVersion)
+	seedManifestAt(t, downloadPath, "ns", "ordinary", "1.0.0")
+	registerCleanupProject(t, cacheDir, downloadPath)
+
+	printer := &recordingPrinter{}
+	runtime := infra.New(printer, http.DefaultClient)
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+
+	// Checked first, ahead of the survival and warning assertions below: no
+	// recorded warning or print line may contain a raw, unescaped newline,
+	// since that is exactly what would let a hostile value fold a second,
+	// attacker-chosen plain-text line into this program's own output.
+	for _, line := range append(append([]string{}, printer.warnings...), printer.prints...) {
+		if strings.Contains(line, "\n") {
+			t.Fatalf("recorded output line contains a raw newline, forged-line defect is not closed: %q", line)
+		}
+	}
+
+	// This is what actually closes the defect: the hostile collection was
+	// never indexed, so its own on-disk tree was never a removal candidate
+	// and survives untouched.
+	hostileManifest := filepath.Join(downloadPath, "ansible_collections", "ns", "hostile", "MANIFEST.json")
+	if _, err := os.Stat(hostileManifest); err != nil {
+		t.Fatalf("expected the hostile collection's install dir to survive since ingestion rejected it, stat error: %v", err)
+	}
+	if !printer.hasWarningContaining("unsafe identifier") {
+		t.Fatalf("expected a warning about an unsafe identifier, got: %v", printer.warnings)
+	}
+
+	// Positive control: the ordinary, unreferenced sibling collection is a
+	// genuine removal candidate and must actually be removed, with its
+	// report line rendered normally.
+	ordinaryManifest := filepath.Join(downloadPath, "ansible_collections", "ns", "ordinary", "MANIFEST.json")
+	if _, err := os.Stat(ordinaryManifest); !os.IsNotExist(err) {
+		t.Fatalf("expected the ordinary, unreferenced collection to be removed, stat error: %v", err)
+	}
+	if !printer.hasPrintContaining("removed ns.ordinary@1.0.0") {
+		t.Fatalf("expected a removal report line for ns.ordinary@1.0.0, got prints: %v", printer.prints)
+	}
+}
+
 // TestRemoveInstalledContainmentGuard exercises removeInstalled directly
 // with a crafted installedCollection whose Version is a traversal payload
 // containing "/". This trips the IsPathElement check on Version - the
@@ -421,6 +678,8 @@ func TestRemoveInstalledContainmentGuard(t *testing.T) {
 	inst := installedCollection{
 		Key:            "ns.name@../../evil",
 		FQDN:           "ns.name",
+		Namespace:      "ns",
+		Name:           "name",
 		Version:        "../../evil",
 		InstallPath:    filepath.Join(collectionsDir, "ansible_collections", "ns", "name"),
 		CollectionsDir: collectionsDir,
@@ -450,6 +709,8 @@ func TestRemoveInstalledRejectsInstallPathEscape(t *testing.T) {
 	inst := installedCollection{
 		Key:            "ns.name@1.0.0",
 		FQDN:           "ns.name",
+		Namespace:      "ns",
+		Name:           "name",
 		Version:        "1.0.0",
 		InstallPath:    filepath.Dir(sentinelFile),
 		CollectionsDir: collectionsDir,
@@ -469,7 +730,13 @@ func TestRemoveInstalledRejectsInstallPathEscape(t *testing.T) {
 // rejected with helpers.ErrUnsafeCollectionIdentifier, incomplete manifests
 // remain a benign skip (ok=false, err=nil), and valid identifiers - including
 // a semver value with both a prerelease and a build metadata segment - must
-// succeed.
+// succeed. ns and name are buildInstalledRecord's own arguments (the shape
+// scanCollectionDir feeds it, taken from the walked
+// ansible_collections/<ns>/<name> directory pair), so this table is what
+// actually exercises the namespace/name IsPathElement arm: the real scan
+// can never hand buildInstalledRecord a namespace or name containing "/" or
+// "..", since fs.ReadDir never yields
+// such an entry, but a direct call like this one still can.
 func TestBuildInstalledRecordRejectsSeparators(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -484,6 +751,13 @@ func TestBuildInstalledRecordRejectsSeparators(t *testing.T) {
 		{"name contains slash", "ns", "a/b", "1.0.0", false, true},
 		{"version is traversal", "ns", "name", "../../../../pwn", false, true},
 		{"version is absolute path", "ns", "name", "/etc/passwd", false, true},
+		// A version carrying a newline is what a hostile manifest would use
+		// to try to forge an extra plain-text line into a report line this
+		// package later prints verbatim (e.g. removeUnused's "removed %s" -
+		// see IsPathElement's own doc comment for the structural fix this
+		// pins). Rejected here, at ingestion, before any such value can ever
+		// reach a printed key.
+		{"version carries a newline", "ns", "name", "1.0.0\nforged plain-text line", false, true},
 		{"namespace is empty", "", "name", "1.0.0", false, false},
 		{"name is empty", "ns", "", "1.0.0", false, false},
 		{"version is empty", "ns", "name", "", false, false},
@@ -493,11 +767,11 @@ func TestBuildInstalledRecordRejectsSeparators(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var manifest types.GalaxyCollectionVersionInfoManifest
-			manifest.CollectionInfo.Namespace = tc.ns
-			manifest.CollectionInfo.Name = tc.coll
 			manifest.CollectionInfo.Version = tc.version
 
-			record, key, ok, err := buildInstalledRecord("/collections", "/collections/ansible_collections/x/MANIFEST.json", manifest)
+			record, key, ok, err := buildInstalledRecord(
+				"/collections", "/collections/ansible_collections/x/MANIFEST.json", tc.ns, tc.coll, manifest,
+			)
 
 			if tc.wantErr {
 				if !errors.Is(err, helpers.ErrUnsafeCollectionIdentifier) {
@@ -544,14 +818,16 @@ func TestStartFailsOnUnreadableRequirementsCorrupt(t *testing.T) {
 	assertManifestSurvives(t, installDir)
 }
 
-// TestStartFailsOnMissingRequirements proves the same fail-safe as
-// TestStartFailsOnUnreadableRequirementsCorrupt for a requirements file that
-// does not exist at all, for a project whose workspace is otherwise present
-// on disk. A missing file for a present workspace is a load failure exactly
-// like corrupt content - it must abort the run rather than skip past it,
-// since openProjectWorkspace has already confirmed the workspace exists and
-// scanInstalledCollections has already populated deletion candidates for it.
-func TestStartFailsOnMissingRequirements(t *testing.T) {
+// TestStartToleratesMissingRequirementsAsStaleEntry proves a recorded
+// project's requirements file that no longer exists is tolerated as a stale
+// registry entry, not treated the same way as
+// TestStartFailsOnUnreadableRequirementsCorrupt's unparseable one: a missing
+// file is the one state projectRequirementRoots can actually know the
+// answer for - "this project declares nothing" - as opposed to a
+// present-but-unreadable-or-unparseable file, where the roots it would have
+// contributed are genuinely unknown and could have been protecting any
+// project's on-disk copies, which is what still aborts the whole run.
+func TestStartToleratesMissingRequirementsAsStaleEntry(t *testing.T) {
 	t.Parallel()
 	cacheDir := t.TempDir()
 	downloadPath := t.TempDir()
@@ -560,22 +836,28 @@ func TestStartFailsOnMissingRequirements(t *testing.T) {
 	reqPath := filepath.Join(t.TempDir(), "does-not-exist.yml")
 	registerCleanupProjectAt(t, cacheDir, downloadPath, reqPath)
 
+	printer := &recordingPrinter{}
+	runtime := newTestRuntimeWith(printer)
 	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
-	runtime := newTestRuntime()
 
-	err := Start(t.Context(), cfg, runtime)
-	if !errors.Is(err, helpers.ErrProjectRequirementsUnreadable) {
-		t.Fatalf("expected ErrProjectRequirementsUnreadable, got %v", err)
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed with a stale (missing) requirements file, got %v", err)
 	}
-	assertManifestSurvives(t, installDir)
+	if !printer.hasWarningContaining("no longer exists") {
+		t.Fatalf("expected a warning about the missing requirements file, got: %v", printer.warnings)
+	}
+	manifestPath := filepath.Join(installDir, "MANIFEST.json")
+	if _, statErr := os.Stat(manifestPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the unreferenced install to still be removed despite the stale entry, stat error: %v", statErr)
+	}
 }
 
-// TestStartDeletesUnreferencedWithValidRequirements is the control for the
-// two requirements-load-failure tests above: a project with a valid
-// requirements file that references nothing must still let cleanup proceed
-// normally and delete the unreferenced installed collection, proving the
-// new fail-the-run behavior triggers only on an actual load failure and not
-// on every non-matching or empty requirements file.
+// TestStartDeletesUnreferencedWithValidRequirements is the control for
+// TestStartFailsOnUnreadableRequirementsCorrupt above: a project with a
+// valid requirements file that references nothing must still let cleanup
+// proceed normally and delete the unreferenced installed collection,
+// proving the abort triggers only on an actual read-or-parse failure, not
+// on every non-matching, empty, or missing requirements file.
 func TestStartDeletesUnreferencedWithValidRequirements(t *testing.T) {
 	t.Parallel()
 	cacheDir := t.TempDir()
@@ -592,6 +874,110 @@ func TestStartDeletesUnreferencedWithValidRequirements(t *testing.T) {
 	manifestPath := filepath.Join(installDir, "MANIFEST.json")
 	if _, statErr := os.Stat(manifestPath); !os.IsNotExist(statErr) {
 		t.Fatalf("expected the unreferenced collection to be deleted, stat error: %v", statErr)
+	}
+}
+
+// buildNonRegularRequirementsFixture builds the two-project fixture
+// TestStartAbortsOnFifoRequirementsFile and its positive control share: a
+// "gated-project" whose requirements file is shaped by buildReqFile (a
+// named pipe for the refusal case, a regular file for the control), and a
+// healthy "other-project" holding one unreferenced install of its own, so a
+// survival/removal assertion on it always has something real to check
+// regardless of what happens to the gated project's requirements file.
+// buildReqFile may call t.Skipf itself (mirroring buildManifestAsNamedPipe's
+// own contract) when the shape it needs is unavailable on this platform.
+func buildNonRegularRequirementsFixture(
+	t *testing.T,
+	cacheDir string,
+	buildReqFile func(t *testing.T, reqPath string),
+) (string, string) {
+	t.Helper()
+	gatedDownloadPath := t.TempDir()
+	gatedInstallDir := seedInstallTree(t, gatedDownloadPath)
+	gatedReqPath := filepath.Join(t.TempDir(), "requirements.yml")
+	buildReqFile(t, gatedReqPath)
+
+	otherDownloadPath := t.TempDir()
+	otherInstallDir := seedInstallTree(t, otherDownloadPath)
+	otherReqPath := filepath.Join(t.TempDir(), "requirements-other.yml")
+	if err := os.WriteFile(otherReqPath, []byte("collections: []\n"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write other project's requirements file: %v", err)
+	}
+
+	writeProjectRegistry(t, cacheDir, &store.ProjectRegistry{
+		Projects: map[string]store.ProjectRecord{
+			"gated-project": {RequirementsFile: gatedReqPath, CollectionsPath: gatedDownloadPath, LastRun: time.Now().UTC()},
+			"other-project": {RequirementsFile: otherReqPath, CollectionsPath: otherDownloadPath, LastRun: time.Now().UTC()},
+		},
+	})
+	return gatedInstallDir, otherInstallDir
+}
+
+// TestStartAbortsOnFifoRequirementsFile proves loadRequirements's Stat gate
+// end to end through Start: a recorded project's requirements file that is a
+// named pipe rather than a real file must abort the whole run with
+// helpers.ErrProjectRequirementsUnreadable rather than blocking forever in
+// requirements.LoadCollections's own os.ReadFile open() call - see
+// loadRequirements's own doc comment (requirements.go) for the full hazard,
+// including the S3 backend's lock-heartbeat consequence. The bound
+// (startBoundedErr) exists for the identical reason
+// nonRegularManifestStartBound does: if a regression ever removes the gate,
+// this test must fail fast rather than hang. A second, healthy project's own
+// unreferenced install must survive the abort untouched.
+func TestStartAbortsOnFifoRequirementsFile(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	_, otherInstallDir := buildNonRegularRequirementsFixture(t, cacheDir, func(t *testing.T, reqPath string) {
+		t.Helper()
+		if err := syscall.Mkfifo(reqPath, 0o644); err != nil {
+			t.Skipf("named pipes unavailable on this platform: %v", err)
+		}
+	})
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	err := startBoundedErr(t, cfg, runtime)
+	if !errors.Is(err, helpers.ErrProjectRequirementsUnreadable) {
+		t.Fatalf("expected ErrProjectRequirementsUnreadable, got %v", err)
+	}
+
+	otherManifest := filepath.Join(otherInstallDir, "MANIFEST.json")
+	if _, statErr := os.Stat(otherManifest); statErr != nil {
+		t.Fatalf("expected the other project's install to survive the abort untouched, stat error: %v", statErr)
+	}
+}
+
+// TestStartAbortsOnFifoRequirementsFilePositiveControl is the mandatory
+// positive control for TestStartAbortsOnFifoRequirementsFile on the
+// identical fixture shape: swapping the named pipe for a regular, valid
+// requirements file lets Start succeed and removes both projects'
+// unreferenced installs, proving the abort above is specific to the
+// non-regular shape, not to some other property of this fixture.
+func TestStartAbortsOnFifoRequirementsFilePositiveControl(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	gatedInstallDir, otherInstallDir := buildNonRegularRequirementsFixture(t, cacheDir, func(t *testing.T, reqPath string) {
+		t.Helper()
+		if err := os.WriteFile(reqPath, []byte("collections: []\n"), helpers.FileMod); err != nil {
+			t.Fatalf("failed to write requirements file: %v", err)
+		}
+	})
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	if err := startBoundedErr(t, cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+
+	gatedManifest := filepath.Join(gatedInstallDir, "MANIFEST.json")
+	if _, statErr := os.Stat(gatedManifest); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the formerly-gated project's unreferenced install to be removed, stat error: %v", statErr)
+	}
+	otherManifest := filepath.Join(otherInstallDir, "MANIFEST.json")
+	if _, statErr := os.Stat(otherManifest); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the other project's unreferenced install to be removed, stat error: %v", statErr)
 	}
 }
 
@@ -691,6 +1077,86 @@ func TestStartSweepsLegacyArtifactForReachableCollection(t *testing.T) {
 	}
 	if _, err := os.Stat(scopedPath); err != nil {
 		t.Fatalf("expected the scoped artifact of a reachable collection to survive, stat error: %v", err)
+	}
+}
+
+// TestSweepLegacyArtifactsSkipsForgedScopedCollision proves
+// sweepLegacyArtifacts's guard against the artifact-key collision a walked
+// namespace directory can forge: legacyArtifactKey's url.QueryEscape-based
+// shape leaves "." and "-" unescaped, so a hostile namespace directory named
+// "<fp>.acme" - fp being the leading helpers.ArtifactKeyFingerprintLen hex
+// characters of a real, current helpers.ArtifactKey scoped to some server -
+// produces a legacy key byte-identical to that genuine, scoped cache entry.
+// Without the guard, sweepLegacyArtifacts would delete it unconditionally:
+// this pass has no reachability check and no Source requirement, purely
+// because a scanned tree happened to contain a "." in a namespace component.
+//
+// A second, ordinary project with a genuinely legacy-keyed artifact is the
+// mandatory positive control, exercised in the same Start run: it proves the
+// guard skips only the forged collision rather than disabling the sweep
+// outright.
+func TestSweepLegacyArtifactsSkipsForgedScopedCollision(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+
+	const source = "https://galaxy.ansible.com/api"
+	const filename = "acme-app-1.0.0.tar.gz"
+	scopedKey := helpers.ArtifactKey(source, filename)
+	fp := scopedKey[:helpers.ArtifactKeyFingerprintLen]
+	hostileNS := fp + ".acme"
+
+	hostileDownloadPath := t.TempDir()
+	seedManifestAt(t, hostileDownloadPath, hostileNS, "app", "1.0.0")
+	hostileReqPath := filepath.Join(t.TempDir(), "requirements.yml")
+	if err := os.WriteFile(hostileReqPath, []byte("collections: []\n"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write hostile project's requirements file: %v", err)
+	}
+
+	// forgedLegacyKey is what legacyArtifactKey builds for the hostile
+	// namespace/name/version. If this fails, the fixture itself no longer
+	// demonstrates the collision this test exists to guard against.
+	forgedLegacyKey := legacyArtifactKey(hostileNS, "app", "1.0.0")
+	if forgedLegacyKey != scopedKey {
+		t.Fatalf("fixture assumption broken: forged legacy key %q does not equal scoped key %q", forgedLegacyKey, scopedKey)
+	}
+	scopedArtifactPath := filepath.Join(cacheDir, scopedKey)
+	if err := os.WriteFile(scopedArtifactPath, []byte("scoped-bytes"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to seed the scoped artifact: %v", err)
+	}
+
+	// Positive control: an ordinary project with a genuinely legacy-keyed
+	// artifact.
+	controlDownloadPath := t.TempDir()
+	seedManifestAt(t, controlDownloadPath, "ctrl", "coll", "1.0.0")
+	controlReqPath := filepath.Join(t.TempDir(), "requirements.yml")
+	if err := os.WriteFile(controlReqPath, []byte("collections: []\n"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write control project's requirements file: %v", err)
+	}
+	controlLegacyKey := legacyArtifactKey("ctrl", "coll", "1.0.0")
+	controlLegacyPath := filepath.Join(cacheDir, controlLegacyKey)
+	if err := os.WriteFile(controlLegacyPath, []byte("legacy-bytes"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to seed the control project's legacy artifact: %v", err)
+	}
+
+	writeProjectRegistry(t, cacheDir, &store.ProjectRegistry{
+		Projects: map[string]store.ProjectRecord{
+			"hostile-project": {RequirementsFile: hostileReqPath, CollectionsPath: hostileDownloadPath, LastRun: time.Now().UTC()},
+			"control-project": {RequirementsFile: controlReqPath, CollectionsPath: controlDownloadPath, LastRun: time.Now().UTC()},
+		},
+	})
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+
+	if _, err := os.Stat(scopedArtifactPath); err != nil {
+		t.Fatalf("expected the scoped artifact to survive the legacy sweep, stat error: %v", err)
+	}
+	if _, err := os.Stat(controlLegacyPath); !os.IsNotExist(err) {
+		t.Fatalf("expected the genuinely legacy-keyed control artifact to be swept, stat error: %v", err)
 	}
 }
 
@@ -1414,7 +1880,14 @@ func TestDryRunReportsExtractedSweepExcludesWarmedSha(t *testing.T) {
 // TestDryRunReportsLegacyArtifactSweep proves sweepLegacyArtifacts' dry-run
 // path: it reports only a legacy-keyed entry that actually exists on disk,
 // deletes nothing, and does not report a collection that never had a
-// legacy-keyed artifact in the first place.
+// legacy-keyed artifact in the first place. ns.other is seeded with no
+// legacy artifact specifically to pin that last property: the assertion
+// checks for its own legacyArtifactKey value's absence from the report, not
+// merely a loose "legacy artifact" substring, since the substring alone
+// would still pass even if reportLegacyArtifactSweepCandidate's own
+// has == false early return (a Has probe against a key that was never
+// written) silently regressed into reporting every scanned collection
+// regardless of whether it ever had a legacy-keyed artifact.
 func TestDryRunReportsLegacyArtifactSweep(t *testing.T) {
 	t.Parallel()
 	cacheDir := t.TempDir()
@@ -1444,8 +1917,13 @@ func TestDryRunReportsLegacyArtifactSweep(t *testing.T) {
 	if _, err := os.Stat(legacyPath); err != nil {
 		t.Fatalf("expected dry-run to delete nothing, but the legacy artifact is gone: %v", err)
 	}
-	if !printer.hasPrintContaining("legacy artifact") {
-		t.Fatalf("expected a would-sweep report mentioning the legacy artifact, got prints: %v", printer.prints)
+	legacyKey := legacyArtifactKey("ns", "name", "1.0.0")
+	if !printer.hasPrintContaining(legacyKey) {
+		t.Fatalf("expected a would-sweep report naming the legacy key %q, got prints: %v", legacyKey, printer.prints)
+	}
+	otherLegacyKey := legacyArtifactKey("ns", "other", "1.0.0")
+	if printer.hasPrintContaining(otherLegacyKey) {
+		t.Fatalf("expected no would-sweep report for ns.other's own legacy key %q, got prints: %v", otherLegacyKey, printer.prints)
 	}
 }
 
@@ -1668,6 +2146,8 @@ func TestRemoveInstalledRefusesNamespaceSymlinkSwap(t *testing.T) {
 	inst := installedCollection{
 		Key:            "ns.name@1.0.0",
 		FQDN:           "ns.name",
+		Namespace:      "ns",
+		Name:           "name",
 		Version:        "1.0.0",
 		InstallPath:    filepath.Join(nsDir, "name"),
 		CollectionsDir: collectionsDir,
@@ -1706,6 +2186,8 @@ func TestRemoveInstalledRefusesAnsibleCollectionsSymlinkSwap(t *testing.T) {
 	inst := installedCollection{
 		Key:            "ns.name@1.0.0",
 		FQDN:           "ns.name",
+		Namespace:      "ns",
+		Name:           "name",
 		Version:        "1.0.0",
 		InstallPath:    filepath.Join(acDir, "ns", "name"),
 		CollectionsDir: collectionsDir,
@@ -1778,6 +2260,8 @@ func TestRemoveInstalledDeletesArtifactWhenWorkspaceAbsent(t *testing.T) {
 	inst := installedCollection{
 		Key:            "ns.name@1.0.0",
 		FQDN:           "ns.name",
+		Namespace:      "ns",
+		Name:           "name",
 		Version:        "1.0.0",
 		InstallPath:    filepath.Join(collectionsDir, "ansible_collections", "ns", "name"),
 		CollectionsDir: collectionsDir,
@@ -1807,6 +2291,8 @@ func TestRemoveInstalledSkipsArtifactPurgeWhenSourceUnknown(t *testing.T) {
 	inst := installedCollection{
 		Key:            "ns.name@1.0.0",
 		FQDN:           "ns.name",
+		Namespace:      "ns",
+		Name:           "name",
 		Version:        "1.0.0",
 		InstallPath:    filepath.Join(collectionsDir, "ansible_collections", "ns", "name"),
 		CollectionsDir: collectionsDir,
@@ -2801,6 +3287,40 @@ func runStartBounded(t *testing.T, cfg *config.Config, runtime *infra.Infra) {
 	}
 }
 
+// requirementsFifoStartBound bounds startBoundedErr's call to Start in
+// TestStartAbortsOnFifoRequirementsFile and its positive control, the same
+// way nonRegularManifestStartBound bounds runStartBounded above: the only
+// job of this bound is to turn a regression that lets an unguarded
+// requirements-file read reach a named pipe's blocking open() into a fast,
+// named test failure instead of a whole-package hang.
+const requirementsFifoStartBound = 10 * time.Second
+
+// startBoundedErr runs Start against cfg/runtime on its own goroutine and
+// returns its error once Start completes within requirementsFifoStartBound,
+// failing the test instead if the bound elapses first. It is
+// runStartBounded's sibling for a caller that needs to inspect Start's
+// returned error rather than only assert success, so runStartBounded's own
+// existing call sites do not need to change shape. A goroutine still blocked
+// in open() when the bound fires is abandoned rather than waited on, exactly
+// as runStartBounded's own doc comment describes.
+func startBoundedErr(t *testing.T, cfg *config.Config, runtime *infra.Infra) error {
+	t.Helper()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Start(t.Context(), cfg, runtime)
+	}()
+	select {
+	case err := <-errCh:
+		return err
+	case <-time.After(requirementsFifoStartBound):
+		t.Fatalf(
+			"Start did not return within %s: the requirements-file gate did not reject this shape, so the read blocked on open",
+			requirementsFifoStartBound,
+		)
+		return nil // unreachable: t.Fatalf stops this goroutine before returning.
+	}
+}
+
 // runNonRegularManifestCase builds a hostile project (its
 // ansible_collections/ns/name/MANIFEST.json shaped by build) alongside a
 // healthy project holding one unreferenced, otherwise-ordinary
@@ -3105,4 +3625,948 @@ func TestDryRunReportsNoExtractedSweepWithNoPersistedSnapshot(t *testing.T) {
 		t.Fatalf("expected no would-sweep-extracted report with no persisted snapshot, got prints: %v", printer.prints)
 	}
 	assertExtractedDirsSurvive(t, cacheDir, "sha-orphaned-by-no-snapshot")
+}
+
+// ---------------------------------------------------------------------------
+// Identity-from-walked-directory coverage: a scanned collection's namespace
+// and name come from the ansible_collections/<ns>/<name> pair the scan
+// walked through, never from the manifest's own declared fields. The tests
+// below (prefixed TestScanIdentity.../TestRemoveInstalledArtifactAndSidecar)
+// pin that invariant; the tests further down (prefixed
+// TestBuildReachable.../TestStaleRegistryEntry.../TestUnparseableRequirements...)
+// pin buildReachable's two-phase, sorted-project reachability computation.
+// ---------------------------------------------------------------------------
+
+// seedManifestWithIdentity writes a MANIFEST.json at
+// <root>/ansible_collections/<dirNs>/<dirName> whose own JSON content
+// declares collection_info.namespace=jsonNs and collection_info.name=jsonName -
+// independently of the directory pair it is written under - for tests
+// proving a scanned collection's identity comes from the walked directory
+// rather than from this content.
+func seedManifestWithIdentity(t *testing.T, root, dirNs, dirName, jsonNs, jsonName, version string) {
+	t.Helper()
+	installDir := filepath.Join(root, "ansible_collections", dirNs, dirName)
+	if err := os.MkdirAll(installDir, helpers.DirMod); err != nil {
+		t.Fatalf("failed to create install dir for %s/%s: %v", dirNs, dirName, err)
+	}
+	manifest := manifestJSON(jsonNs, jsonName, version, nil)
+	if err := os.WriteFile(filepath.Join(installDir, "MANIFEST.json"), []byte(manifest), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write manifest for %s/%s: %v", dirNs, dirName, err)
+	}
+}
+
+// TestScanIdentityComesFromWalkedDirectoryNotManifest proves the governing
+// identity invariant end to end through Start: a hostile manifest at
+// ansible_collections/evil/pkg/MANIFEST.json whose own JSON content falsely
+// declares victim.collection@9.9.9 - the exact ns.name a legitimate,
+// requirements-pinned victim.collection@1.0.0 install sits at, under
+// ansible_collections/victim/collection - must never let that content
+// redirect reachability or deletion at the legitimate collection. A
+// requirements file pinning victim.collection ==1.0.0 keeps only the real
+// victim.collection@1.0.0 reachable (its key includes the pin, so version
+// 9.9.9 could never satisfy it even if the hostile record's identity were
+// trusted); the hostile record itself is unreferenced by anything and must
+// be removed from its own, real directory (evil/pkg), not from victim's.
+//
+// Confirmed killing mutation (reverting scanCollectionDir's call to
+// buildInstalledRecord to pass manifest.CollectionInfo.Namespace/.Name
+// instead of the walked ns/name, restoring the pre-fix behavior): running
+// `go test ./internal/galaxy/cleanup/... -v` against that mutation produces
+// exactly two top-level failures - this test and, independently,
+// TestRemoveInstalledArtifactAndSidecarFollowWalkedIdentity (see that
+// test's own doc comment for why). This test's own share of that run:
+//
+//	cleanup_test.go:3730: expected victim.collection to survive, stat error: stat .../MANIFEST.json: no such file or directory
+//	--- FAIL: TestScanIdentityComesFromWalkedDirectoryNotManifest (0.00s)
+//	    --- PASS: TestScanIdentityComesFromWalkedDirectoryNotManifest/positive_control:_evil.pkg_survives_its_own_requirement (0.02s)
+//	    --- FAIL: TestScanIdentityComesFromWalkedDirectoryNotManifest/hostile_manifest_cannot_redirect_deletion (0.02s)
+//
+// matching the disaster this invariant exists to prevent: the hostile
+// record's manifest-derived identity (victim.collection) let removeUnused
+// target the real victim's directory for deletion. The subtest's second
+// assertion (the hostile fixture's own directory being removed) never
+// actually ran under this mutation - t.Fatalf halted the subtest at the
+// first failing check - so only the quoted line above is a mutation-pinned
+// claim; the positive-control subtest's own pass under this same mutation
+// is coincidental and is not itself what this mutation is cited for. What
+// actually happens there: under the mutation both records' Namespace/Name
+// become manifest-derived ("victim"/"collection"), so the two distinct
+// installedByKey entries this fixture produces - victim.collection@1.0.0
+// (the real install) and victim.collection@9.9.9 (the hostile one) -
+// resolve to the identical removal target path
+// (ansible_collections/victim/collection), and neither record's FQDN is
+// ever "evil.pkg" any more, so the positive control's own evil.pkg root
+// matches nothing in the index and both keys stay unreachable. removeUnused
+// still removes ansible_collections/victim/collection (once, then again as
+// a harmless no-op for the second key), but evil/pkg's own physical
+// directory - the hostile record's true, on-disk location - is never
+// targeted at all, so it survives coincidentally rather than because
+// "evil.pkg" was ever resolved as reachable.
+func TestScanIdentityComesFromWalkedDirectoryNotManifest(t *testing.T) {
+	t.Parallel()
+
+	t.Run("hostile manifest cannot redirect deletion", func(t *testing.T) {
+		t.Parallel()
+		cacheDir := t.TempDir()
+		downloadPath := t.TempDir()
+		seedManifestAt(t, downloadPath, "victim", "collection", "1.0.0")
+		seedManifestWithIdentity(t, downloadPath, "evil", "pkg", "victim", "collection", "9.9.9")
+
+		reqPath := filepath.Join(t.TempDir(), "requirements.yml")
+		reqYAML := "collections:\n  - name: victim.collection\n    version: \"==1.0.0\"\n"
+		if err := os.WriteFile(reqPath, []byte(reqYAML), helpers.FileMod); err != nil {
+			t.Fatalf("failed to write requirements file: %v", err)
+		}
+		registerCleanupProjectAt(t, cacheDir, downloadPath, reqPath)
+
+		cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+		runtime := newTestRuntime()
+
+		if err := Start(t.Context(), cfg, runtime); err != nil {
+			t.Fatalf("expected Start to succeed, got %v", err)
+		}
+
+		if _, statErr := os.Stat(filepath.Join(downloadPath, "ansible_collections", "victim", "collection", "MANIFEST.json")); statErr != nil {
+			t.Fatalf("expected victim.collection to survive, stat error: %v", statErr)
+		}
+		if _, statErr := os.Stat(filepath.Join(downloadPath, "ansible_collections", "evil", "pkg", "MANIFEST.json")); !os.IsNotExist(statErr) {
+			t.Fatalf("expected the hostile fixture's own directory (evil/pkg) to be removed, stat error: %v", statErr)
+		}
+	})
+
+	// Positive control on the identical on-disk fixture: proves the fixture
+	// can be accepted, and that the scanned record's real identity really is
+	// evil.pkg - not victim.collection, which its own manifest falsely
+	// claims - by requiring evil.pkg directly and observing it survive.
+	t.Run("positive control: evil.pkg survives its own requirement", func(t *testing.T) {
+		t.Parallel()
+		cacheDir := t.TempDir()
+		downloadPath := t.TempDir()
+		seedManifestAt(t, downloadPath, "victim", "collection", "1.0.0")
+		seedManifestWithIdentity(t, downloadPath, "evil", "pkg", "victim", "collection", "9.9.9")
+
+		reqPath := filepath.Join(t.TempDir(), "requirements.yml")
+		if err := os.WriteFile(reqPath, []byte("collections:\n  - evil.pkg\n"), helpers.FileMod); err != nil {
+			t.Fatalf("failed to write requirements file: %v", err)
+		}
+		registerCleanupProjectAt(t, cacheDir, downloadPath, reqPath)
+
+		cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+		runtime := newTestRuntime()
+
+		if err := Start(t.Context(), cfg, runtime); err != nil {
+			t.Fatalf("expected Start to succeed, got %v", err)
+		}
+
+		assertManifestPresentAt(t, downloadPath, "evil", "pkg")
+		assertManifestAbsentAt(t, downloadPath, "victim", "collection")
+	})
+}
+
+// scanHostileEvilPkgRecord scans downloadPath's evil/pkg fixture (seeded by
+// seedManifestWithIdentity) through the real scanCollectionDir and returns
+// the resulting installedCollection record, failing the test unless exactly
+// one record was produced under the walked identity evil.pkg.
+func scanHostileEvilPkgRecord(t *testing.T, downloadPath string) installedCollection {
+	t.Helper()
+	ws := openTestWorkspace(t, downloadPath)
+	defer func() { _ = ws.root.Close() }()
+	index := make(map[string][]installedCollection)
+	byKey := make(map[string][]installedCollection)
+	deps := make(map[string]map[string]string)
+	if err := scanCollectionDir(noopPrinter{}, ws, "evil", "pkg", index, byKey, deps); err != nil {
+		t.Fatalf("failed to scan the hostile fixture: %v", err)
+	}
+	insts := byKey["evil.pkg@9.9.9"]
+	if len(insts) != 1 {
+		t.Fatalf("expected exactly one scanned record keyed evil.pkg@9.9.9, got %d: %+v", len(insts), insts)
+	}
+	inst := insts[0]
+	if inst.Namespace != "evil" || inst.Name != "pkg" {
+		t.Fatalf("expected the scanned record's identity to be evil/pkg (the walked directory), got ns=%q name=%q", inst.Namespace, inst.Name)
+	}
+	return inst
+}
+
+// seedEmptyDirs creates each of dirs as an empty directory, failing the test
+// on any MkdirAll error.
+func seedEmptyDirs(t *testing.T, dirs ...string) {
+	t.Helper()
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir, helpers.DirMod); err != nil {
+			t.Fatalf("failed to create dir %s: %v", dir, err)
+		}
+	}
+}
+
+// TestRemoveInstalledArtifactAndSidecarFollowWalkedIdentity proves the
+// artifact-cache purge and the .info sidecar removal both key off the same
+// walked identity buildInstalledRecord assigns - never off anything the
+// manifest declares. It scans the identical hostile fixture
+// TestScanIdentityComesFromWalkedDirectoryNotManifest uses (evil/pkg on
+// disk, claiming victim.collection@9.9.9 in its own JSON) through the real
+// scanCollectionDir, so the installedCollection record under test is exactly
+// what production code would build for it, then drives removeInstalled
+// directly with a recordingArtifactStore so the deleted artifact key can be
+// asserted precisely.
+//
+// This test dies independently under the identical mutation
+// TestScanIdentityComesFromWalkedDirectoryNotManifest's own doc comment
+// confirms (reverting scanCollectionDir's call to buildInstalledRecord to
+// pass manifest.CollectionInfo.Namespace/.Name instead of the walked
+// ns/name): under that mutation, scanCollectionDir("evil", "pkg", ...) keys
+// the resulting record under "victim.collection@9.9.9" instead of
+// "evil.pkg@9.9.9", so this test's own lookup below
+// (byKey["evil.pkg@9.9.9"]) finds nothing at all rather than the one record
+// it expects:
+//
+//	cleanup_test.go:3829: expected exactly one scanned record keyed evil.pkg@9.9.9, got 0: []
+//	--- FAIL: TestRemoveInstalledArtifactAndSidecarFollowWalkedIdentity (0.00s)
+func TestRemoveInstalledArtifactAndSidecarFollowWalkedIdentity(t *testing.T) {
+	t.Parallel()
+	downloadPath := t.TempDir()
+	seedManifestWithIdentity(t, downloadPath, "evil", "pkg", "victim", "collection", "9.9.9")
+	inst := scanHostileEvilPkgRecord(t, downloadPath)
+
+	// Two sidecar directories: one under the record's real, walked identity
+	// (evil.pkg-9.9.9.info) and one under the identity its own manifest
+	// falsely claims (victim.collection-9.9.9.info). Only the former must be
+	// removed.
+	realSidecar := filepath.Join(downloadPath, "ansible_collections", "evil.pkg-9.9.9.info")
+	falseSidecar := filepath.Join(downloadPath, "ansible_collections", "victim.collection-9.9.9.info")
+	seedEmptyDirs(t, realSidecar, falseSidecar)
+
+	st := store.New()
+	const source = "https://galaxy.example.com/api"
+	st.SetInstalled(inst.Key, store.InstalledEntry{Source: source, ArtifactSHA256: "deadbeef"})
+	resolvedSource := installedSource(st, inst.Key)
+
+	artifacts := &recordingArtifactStore{}
+	if err := removeInstalled(t.Context(), inst, artifacts, resolvedSource); err != nil {
+		t.Fatalf("expected removeInstalled to succeed, got %v", err)
+	}
+
+	wantKey := helpers.ArtifactKey(source, "evil-pkg-9.9.9.tar.gz")
+	if len(artifacts.deleted) != 1 || artifacts.deleted[0] != wantKey {
+		t.Fatalf("expected Delete to be called once with key %q, got %v", wantKey, artifacts.deleted)
+	}
+	if _, statErr := os.Stat(realSidecar); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the walked-identity sidecar to be removed, stat error: %v", statErr)
+	}
+	if _, statErr := os.Stat(falseSidecar); statErr != nil {
+		t.Fatalf("expected the manifest-claimed sidecar to survive untouched, stat error: %v", statErr)
+	}
+}
+
+// TestBuildReachablePhase2ReachesDirectCrossProjectRequirement proves
+// buildReachable's two-phase split: project "proj-a" requires foo.bar
+// >=1.0.0 but holds only
+// an unrelated other.thing install; project "proj-b" holds the only
+// foo.bar@1.0.0 install and requires nothing. "proj-a" sorts before
+// "proj-b", so under a single-phase implementation that scans and resolves
+// one project at a time, project A's own root would be resolved before
+// project B is ever scanned - foo.bar would not yet be in the index, and
+// project B's only copy would be removed as unreferenced. The two-phase
+// split scans every project's workspace first, so this fixture alone
+// deterministically distinguishes it from a single-phase implementation;
+// no statistical loop is needed.
+//
+// Confirmed killing mutation (collapsing buildReachable's two phases back
+// into one loop that scans and resolves each project in turn, unconditionally
+// calling projectRequirementRoots right after scanProjectWorkspace for each
+// project instead of over two full passes): running
+// `go test ./internal/galaxy/cleanup/... -v` against that mutation produces
+// exactly two top-level failures - this test and
+// TestBuildReachablePhase2FollowsTransitiveDependencyEdge below:
+//
+//	cleanup_test.go:3931: expected foo.bar to survive via project A's
+//	cross-project requirement, stat .../MANIFEST.json: no such file or directory
+//	cleanup_test.go:3986: expected dep.leaf to survive via top.level's
+//	transitive dependency, stat .../MANIFEST.json: no such file or directory
+//	--- FAIL: TestBuildReachablePhase2ReachesDirectCrossProjectRequirement (0.01s)
+//	--- FAIL: TestBuildReachablePhase2FollowsTransitiveDependencyEdge (0.01s)
+//
+// The same mutation run against TestBuildReachableSkippedProjectStillContributesRoots,
+// TestStaleRegistryEntryToleratedWithOtherProjectCleanup,
+// TestStaleRegistryEntryPositiveControlUnparseableAborts, and
+// TestUnparseableRequirementsAbortsEvenForUnscannedProject left all four
+// passing: this mutation removes the phase separation, not the "a skipped
+// project still contributes its roots" property those four pin, which is a
+// distinct fix confirmed by a separate mutation on
+// TestBuildReachableSkippedProjectStillContributesRoots's own doc comment.
+func TestBuildReachablePhase2ReachesDirectCrossProjectRequirement(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPathA := t.TempDir()
+	downloadPathB := t.TempDir()
+
+	seedManifestAt(t, downloadPathA, "other", "thing", "1.0.0")
+	seedManifestAt(t, downloadPathB, "foo", "bar", "1.0.0")
+
+	reqPathA := filepath.Join(t.TempDir(), "requirements-a.yml")
+	reqA := "collections:\n  - name: foo.bar\n    version: \">=1.0.0\"\n"
+	if err := os.WriteFile(reqPathA, []byte(reqA), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write requirements file for project A: %v", err)
+	}
+	reqPathB := filepath.Join(t.TempDir(), "requirements-b.yml")
+	if err := os.WriteFile(reqPathB, []byte("collections: []\n"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write requirements file for project B: %v", err)
+	}
+
+	writeProjectRegistry(t, cacheDir, &store.ProjectRegistry{
+		Projects: map[string]store.ProjectRecord{
+			"proj-a": {RequirementsFile: reqPathA, CollectionsPath: downloadPathA, LastRun: time.Now().UTC()},
+			"proj-b": {RequirementsFile: reqPathB, CollectionsPath: downloadPathB, LastRun: time.Now().UTC()},
+		},
+	})
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(downloadPathB, "ansible_collections", "foo", "bar", "MANIFEST.json")); statErr != nil {
+		t.Fatalf("expected foo.bar to survive via project A's cross-project requirement, stat error: %v", statErr)
+	}
+	assertManifestAbsentAt(t, downloadPathA, "other", "thing")
+}
+
+// TestBuildReachablePhase2FollowsTransitiveDependencyEdge is
+// TestBuildReachablePhase2ReachesDirectCrossProjectRequirement's sibling for
+// a transitive MANIFEST dependency edge rather than a direct requirements.yml
+// root: project A holds top.level, whose own manifest declares
+// dep.leaf >=1.0.0; project B holds the only dep.leaf@1.0.0; only top.level
+// is required. The same sorted-project-order trick applies (project A must
+// sort first), and the same mutation kills both tests together - see
+// TestBuildReachablePhase2ReachesDirectCrossProjectRequirement's own doc
+// comment for the quoted failure output covering both.
+//
+// unrelated.extra is seeded under project B and asserted removed as the
+// removal control: it proves removeUnused actually ran against B's own
+// tree in this run, rather than dep.leaf surviving for some reason
+// unrelated to reachability (e.g. B's workspace never being scanned at
+// all).
+func TestBuildReachablePhase2FollowsTransitiveDependencyEdge(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPathA := t.TempDir()
+	downloadPathB := t.TempDir()
+
+	seedManifestWithDeps(t, downloadPathA, "top", "level", "1.0.0", map[string]string{"dep.leaf": ">=1.0.0"})
+	seedManifestAt(t, downloadPathB, "dep", "leaf", "1.0.0")
+	seedManifestAt(t, downloadPathB, "unrelated", "extra", "1.0.0")
+
+	reqPathA := filepath.Join(t.TempDir(), "requirements-a.yml")
+	if err := os.WriteFile(reqPathA, []byte("collections:\n  - top.level\n"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write requirements file for project A: %v", err)
+	}
+	reqPathB := filepath.Join(t.TempDir(), "requirements-b.yml")
+	if err := os.WriteFile(reqPathB, []byte("collections: []\n"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write requirements file for project B: %v", err)
+	}
+
+	writeProjectRegistry(t, cacheDir, &store.ProjectRegistry{
+		Projects: map[string]store.ProjectRecord{
+			"proj-a": {RequirementsFile: reqPathA, CollectionsPath: downloadPathA, LastRun: time.Now().UTC()},
+			"proj-b": {RequirementsFile: reqPathB, CollectionsPath: downloadPathB, LastRun: time.Now().UTC()},
+		},
+	})
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+
+	assertManifestPresentAt(t, downloadPathA, "top", "level")
+	if _, statErr := os.Stat(filepath.Join(downloadPathB, "ansible_collections", "dep", "leaf", "MANIFEST.json")); statErr != nil {
+		t.Fatalf("expected dep.leaf to survive via top.level's transitive dependency, stat error: %v", statErr)
+	}
+	assertManifestAbsentAt(t, downloadPathB, "unrelated", "extra")
+}
+
+// buildSkippedProjectRootsFixture builds the two-project fixture the tests
+// below share: "aa-holder" holds the only foo.bar@1.0.0, and
+// "zz-requires-only" has an absent workspace (no ansible_collections
+// subdirectory at all, so scanProjectWorkspace skips it entirely without
+// ever reading its own requirements file in phase 1) but records a
+// requirements file requiring foo.bar when requireFooBar is true, or
+// referencing nothing when it is false. The project keys are deliberately
+// chosen so the skipped project sorts LAST: under the pre-fix single loop,
+// foo.bar would already have been indexed (aa-holder having already been
+// scanned earlier in that same loop) by the time the loop reached the
+// skipped project, so ordering alone could never explain a survival here -
+// only whether the skipped project's own roots are actually consulted
+// despite never having been scanned.
+func buildSkippedProjectRootsFixture(t *testing.T, cacheDir string, requireFooBar bool) string {
+	t.Helper()
+	holderPath := t.TempDir()
+	seedManifestAt(t, holderPath, "foo", "bar", "1.0.0")
+
+	holderReqPath := filepath.Join(t.TempDir(), "requirements-holder.yml")
+	if err := os.WriteFile(holderReqPath, []byte("collections: []\n"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write holder requirements file: %v", err)
+	}
+
+	skippedCollectionsPath := t.TempDir()
+	skippedReqPath := filepath.Join(t.TempDir(), "requirements-skipped.yml")
+	skippedReqYAML := "collections: []\n"
+	if requireFooBar {
+		skippedReqYAML = "collections:\n  - foo.bar\n"
+	}
+	if err := os.WriteFile(skippedReqPath, []byte(skippedReqYAML), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write skipped project's requirements file: %v", err)
+	}
+
+	writeProjectRegistry(t, cacheDir, &store.ProjectRegistry{
+		Projects: map[string]store.ProjectRecord{
+			"aa-holder":        {RequirementsFile: holderReqPath, CollectionsPath: holderPath, LastRun: time.Now().UTC()},
+			"zz-requires-only": {RequirementsFile: skippedReqPath, CollectionsPath: skippedCollectionsPath, LastRun: time.Now().UTC()},
+		},
+	})
+	return holderPath
+}
+
+// TestBuildReachableSkippedProjectStillContributesRoots proves a project
+// skipped in phase 1 (its own workspace is absent, so nothing under it is
+// ever scanned) still contributes its own requirements.yml roots in phase
+// 2, keeping another project's on-disk copy alive.
+//
+// Confirmed killing mutation (restoring the pre-fix behavior that tracks,
+// per project, whether phase 1's openProjectWorkspace found a usable
+// workspace, and skips phase 2's root resolution entirely - `if !scanned {
+// continue }` - for a project it did not): running
+// `go test ./internal/galaxy/cleanup/... -v` against that mutation produces
+// exactly two top-level failures - this test and
+// TestUnparseableRequirementsAbortsEvenForUnscannedProject, which pins the
+// identical "phase 2 still consults a phase-1-skipped project's
+// requirements" property from the opposite direction (an unparseable file
+// must still abort, rather than a valid file still being consulted):
+//
+//	cleanup_test.go:4074: expected foo.bar to survive via the skipped
+//	project's own requirement, stat .../MANIFEST.json: no such file or directory
+//	--- FAIL: TestBuildReachableSkippedProjectStillContributesRoots (0.01s)
+//
+// Every other test in this package - including
+// TestBuildReachablePhase2ReachesDirectCrossProjectRequirement,
+// TestBuildReachablePhase2FollowsTransitiveDependencyEdge,
+// TestStaleRegistryEntryToleratedWithOtherProjectCleanup, and
+// TestStaleRegistryEntryPositiveControlUnparseableAborts - keeps passing:
+// their own fixtures give every project a real, scanned workspace and so
+// never reach this gate at all. TestBuildReachableSkippedProjectRootsControl
+// (below) is this test's own positive control on the identical fixture
+// shape.
+func TestBuildReachableSkippedProjectStillContributesRoots(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	holderPath := buildSkippedProjectRootsFixture(t, cacheDir, true)
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(holderPath, "ansible_collections", "foo", "bar", "MANIFEST.json")); statErr != nil {
+		t.Fatalf("expected foo.bar to survive via the skipped project's own requirement, stat error: %v", statErr)
+	}
+}
+
+// TestBuildReachableSkippedProjectRootsControl is the positive control for
+// TestBuildReachableSkippedProjectStillContributesRoots on the identical
+// fixture shape: when the skipped project's own requirements do not name
+// foo.bar, the holder's unreferenced copy is removed normally, proving the
+// survival above comes from the skipped project's root specifically, not
+// from some blanket "a skipped project protects everything installed
+// anywhere" behavior.
+func TestBuildReachableSkippedProjectRootsControl(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	holderPath := buildSkippedProjectRootsFixture(t, cacheDir, false)
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+	assertManifestAbsentAt(t, holderPath, "foo", "bar")
+}
+
+// buildStaleRegistryFixture builds the two-project fixture the tests below
+// share: a "stale-project" whose requirements file is written with
+// staleContent (nil
+// leaves the file entirely unwritten, i.e. genuinely absent), and a healthy
+// "other-project" holding one unreferenced install of its own, so a
+// survival/removal assertion on the healthy project's copy always has
+// something real to check regardless of what happens to the stale one.
+func buildStaleRegistryFixture(t *testing.T, cacheDir string, staleContent []byte) (string, string) {
+	t.Helper()
+	staleDownloadPath := t.TempDir()
+	seedManifestAt(t, staleDownloadPath, "stale", "coll", "1.0.0")
+	staleReqPath := filepath.Join(t.TempDir(), "stale-requirements.yml")
+	if staleContent != nil {
+		if err := os.WriteFile(staleReqPath, staleContent, helpers.FileMod); err != nil {
+			t.Fatalf("failed to write stale project's requirements file: %v", err)
+		}
+	}
+
+	otherDownloadPath := t.TempDir()
+	otherInstallDir := seedInstallTree(t, otherDownloadPath)
+	otherReqPath := filepath.Join(t.TempDir(), "requirements-other.yml")
+	if err := os.WriteFile(otherReqPath, []byte("collections: []\n"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write other project's requirements file: %v", err)
+	}
+
+	writeProjectRegistry(t, cacheDir, &store.ProjectRegistry{
+		Projects: map[string]store.ProjectRecord{
+			"stale-project": {RequirementsFile: staleReqPath, CollectionsPath: staleDownloadPath, LastRun: time.Now().UTC()},
+			"other-project": {RequirementsFile: otherReqPath, CollectionsPath: otherDownloadPath, LastRun: time.Now().UTC()},
+		},
+	})
+	return staleDownloadPath, otherInstallDir
+}
+
+// TestStaleRegistryEntryToleratedWithOtherProjectCleanup proves a
+// recorded requirements file that no longer exists at all is tolerated as a
+// stale registry entry - a warning, not a load failure - and every other
+// recorded project's cleanup still proceeds normally around it.
+func TestStaleRegistryEntryToleratedWithOtherProjectCleanup(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	_, otherInstallDir := buildStaleRegistryFixture(t, cacheDir, nil)
+
+	printer := &recordingPrinter{}
+	runtime := newTestRuntimeWith(printer)
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+	if !printer.hasWarningContaining("no longer exists") {
+		t.Fatalf("expected a warning about the missing requirements file, got: %v", printer.warnings)
+	}
+	manifestPath := filepath.Join(otherInstallDir, "MANIFEST.json")
+	if _, statErr := os.Stat(manifestPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the other project's unreferenced copy to still be removed, stat error: %v", statErr)
+	}
+}
+
+// TestStaleRegistryEntryPositiveControlUnparseableAborts is the mandatory
+// positive control for TestStaleRegistryEntryToleratedWithOtherProjectCleanup
+// on the identical two-project fixture: replacing the missing file with an
+// unparseable one flips the outcome from tolerated to aborted, and nothing -
+// including the other, healthy project's own unreferenced copy - is
+// deleted, proving the tolerant behavior above is specific to a genuinely
+// absent file, not to "cleanup never touches the other project's install
+// anyway".
+func TestStaleRegistryEntryPositiveControlUnparseableAborts(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	staleDownloadPath, otherInstallDir := buildStaleRegistryFixture(t, cacheDir, []byte("{invalid"))
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	err := Start(t.Context(), cfg, runtime)
+	if !errors.Is(err, helpers.ErrProjectRequirementsUnreadable) {
+		t.Fatalf("expected ErrProjectRequirementsUnreadable, got %v", err)
+	}
+
+	staleManifest := filepath.Join(staleDownloadPath, "ansible_collections", "stale", "coll", "MANIFEST.json")
+	if _, statErr := os.Stat(staleManifest); statErr != nil {
+		t.Fatalf("expected the stale project's own install to survive the abort, stat error: %v", statErr)
+	}
+	otherManifest := filepath.Join(otherInstallDir, "MANIFEST.json")
+	if _, statErr := os.Stat(otherManifest); statErr != nil {
+		t.Fatalf("expected the other project's install to survive the abort untouched, stat error: %v", statErr)
+	}
+}
+
+// buildUnscannedProjectFixture builds the two-project fixture
+// TestUnparseableRequirementsAbortsEvenForUnscannedProject and its positive
+// control share, mirroring buildStaleRegistryFixture's own shape: an
+// "absent-workspace-project" whose collections path has no
+// ansible_collections subdirectory at all (so phase 1 skips it without ever
+// reading its own requirements file) and whose requirements file is written
+// with reqContent, and a healthy "other-project" holding one unreferenced
+// install of its own. The project keys are kept exactly as the inline
+// fixture this replaces used them, so sorted project order - load-bearing
+// for buildReachable's own determinism (see its doc comment) - stays
+// unchanged. It returns the absent-workspace project's own requirements file
+// path (needed to pin which project's own path an abort error names) and the
+// other project's install directory.
+func buildUnscannedProjectFixture(t *testing.T, cacheDir string, reqContent []byte) (string, string) {
+	t.Helper()
+	absentCollectionsPath := t.TempDir()
+	reqPath := filepath.Join(t.TempDir(), "unparseable.yml")
+	if err := os.WriteFile(reqPath, reqContent, helpers.FileMod); err != nil {
+		t.Fatalf("failed to write the absent-workspace project's requirements file: %v", err)
+	}
+
+	otherDownloadPath := t.TempDir()
+	otherInstallDir := seedInstallTree(t, otherDownloadPath)
+	otherReqPath := filepath.Join(t.TempDir(), "requirements-other.yml")
+	if err := os.WriteFile(otherReqPath, []byte("collections: []\n"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write other project's requirements file: %v", err)
+	}
+
+	writeProjectRegistry(t, cacheDir, &store.ProjectRegistry{
+		Projects: map[string]store.ProjectRecord{
+			"absent-workspace-project": {RequirementsFile: reqPath, CollectionsPath: absentCollectionsPath, LastRun: time.Now().UTC()},
+			"other-project":            {RequirementsFile: otherReqPath, CollectionsPath: otherDownloadPath, LastRun: time.Now().UTC()},
+		},
+	})
+	return reqPath, otherInstallDir
+}
+
+// TestUnparseableRequirementsAbortsEvenForUnscannedProject proves the
+// abort on an unreadable requirements file is not conditioned on that same
+// project's own workspace having been scanned: a project whose collections
+// path has no ansible_collections subdirectory at all (so phase 1 skips it
+// without ever reading its requirements file) still aborts the whole run in
+// phase 2 once that same requirements file turns out to be unparseable, and
+// another, healthy project's install survives the abort untouched. Asserting
+// that the error names unparseableReqPath - not just errors.Is - is what
+// pins WHICH project's requirements file aborted the run: projectRequirementRoots
+// wraps the underlying load failure as "%w: %s: %w" carrying
+// project.RequirementsFile, so a regression that aborted for the wrong
+// recorded project would still satisfy errors.Is here but fail this
+// substring check.
+//
+// Confirmed killing mutation: the same `if !scanned { continue }` mutation
+// documented on TestBuildReachableSkippedProjectStillContributesRoots's own
+// doc comment kills this test too - phase 2 never reaches this project's
+// requirements file at all once it is gated on phase 1 having scanned
+// something, so the unparseable content is never read and Start returns nil
+// instead of aborting:
+//
+//	cleanup_test.go:4259: expected ErrProjectRequirementsUnreadable, got <nil>
+//	--- FAIL: TestUnparseableRequirementsAbortsEvenForUnscannedProject (0.01s)
+func TestUnparseableRequirementsAbortsEvenForUnscannedProject(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	unparseableReqPath, otherInstallDir := buildUnscannedProjectFixture(t, cacheDir, []byte("{invalid"))
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	err := Start(t.Context(), cfg, runtime)
+	if !errors.Is(err, helpers.ErrProjectRequirementsUnreadable) {
+		t.Fatalf("expected ErrProjectRequirementsUnreadable, got %v", err)
+	}
+	if !strings.Contains(err.Error(), unparseableReqPath) {
+		t.Fatalf("expected the error to name the failing requirements file %q, got %v", unparseableReqPath, err)
+	}
+
+	otherManifest := filepath.Join(otherInstallDir, "MANIFEST.json")
+	if _, statErr := os.Stat(otherManifest); statErr != nil {
+		t.Fatalf("expected the other project's install to survive the abort untouched, stat error: %v", statErr)
+	}
+}
+
+// TestUnparseableRequirementsAbortsEvenForUnscannedProjectPositiveControl is
+// the mandatory positive control for
+// TestUnparseableRequirementsAbortsEvenForUnscannedProject on the identical
+// fixture shape: a valid, empty requirements file at the absent-workspace
+// project lets Start succeed and removes the other project's unreferenced
+// install, proving the abort above is specific to the unparseable content,
+// not to some other property of an absent-workspace project reaching phase
+// 2.
+func TestUnparseableRequirementsAbortsEvenForUnscannedProjectPositiveControl(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	_, otherInstallDir := buildUnscannedProjectFixture(t, cacheDir, []byte("collections: []\n"))
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+	otherManifest := filepath.Join(otherInstallDir, "MANIFEST.json")
+	if _, statErr := os.Stat(otherManifest); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the other project's unreferenced install to be removed, stat error: %v", statErr)
+	}
+}
+
+// TestScanNamespaceDirAbortsOnUnreadableNamespaceDir proves
+// scanNamespaceDir's own non-ENOENT read failure aborts the whole run:
+// chmod 0o000 on ansible_collections/ns itself - not the manifest, and not
+// ansible_collections - blocks fs.ReadDir from listing that namespace's own
+// <name> entries, which is a different failure site than either existing
+// manifest-level abort test (TestScanAbortsOnRealIOErrorReadingManifest's
+// ReadFile "openat" on the manifest file itself, and
+// TestScanAbortsOnUnreadableCollectionDir's Lstat "statat" on the manifest
+// path). Asserting the error contains "openat ansible_collections/ns:" -
+// with the trailing colon - is what pins this specific branch: neither
+// sibling test's error string can ever contain that substring, since both
+// name a deeper MANIFEST.json path instead.
+//
+// Skipped when running as root, since root bypasses the permission bits
+// this test relies on to force the read failure, matching the two sibling
+// tests' own guard.
+func TestScanNamespaceDirAbortsOnUnreadableNamespaceDir(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; permission-based read guard cannot be tested")
+	}
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+	installDir := seedInstallTree(t, downloadPath)
+
+	nsDir := filepath.Join(downloadPath, "ansible_collections", "ns")
+	if err := os.Chmod(nsDir, 0o000); err != nil {
+		t.Fatalf("failed to chmod namespace dir unreadable: %v", err)
+	}
+	restored := false
+	restore := func() {
+		if restored {
+			return
+		}
+		if err := os.Chmod(nsDir, helpers.DirMod); err != nil {
+			t.Errorf("failed to restore namespace dir perms: %v", err)
+		}
+		restored = true
+	}
+	t.Cleanup(restore)
+
+	registerCleanupProject(t, cacheDir, downloadPath)
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	err := Start(t.Context(), cfg, runtime)
+	if err == nil {
+		t.Fatalf("expected Start to abort on an unreadable namespace directory, got nil")
+	}
+	if !strings.Contains(err.Error(), "openat ansible_collections/ns:") {
+		t.Fatalf("expected the error to name the failing openat call on ansible_collections/ns, got %v", err)
+	}
+
+	// The abort happens in buildReachable, before removeUnused ever runs, so
+	// nothing could have been deleted. The survival check runs only after
+	// restore(), not right here: a mode-0 namespace directory blocks this
+	// test's own os.Stat traversal to the manifest too.
+	restore()
+	assertManifestSurvives(t, installDir)
+
+	// Positive control: the identical fixture with the namespace directory
+	// readable again must complete and remove the unreferenced install,
+	// proving the abort above pins the permission failure specifically and
+	// not some other property of this fixture.
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed once the namespace directory is readable again, got %v", err)
+	}
+	manifestPath := filepath.Join(installDir, "MANIFEST.json")
+	if _, statErr := os.Stat(manifestPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the unreferenced install to be removed once the read succeeds, stat error: %v", statErr)
+	}
+}
+
+// TestScanCollectionDirManifestMissingVersionIsBenignSkip proves a
+// manifest with a namespace and name but no version is buildInstalledRecord's
+// benign skip (ok=false, err=nil): the collection is neither indexed nor
+// reported, and its on-disk tree survives untouched. The assertion is
+// deliberately !hasWarningContaining("unsafe identifier") rather than
+// asserting zero warnings outright: this fixture seeds no snapshot, so
+// warnIfSnapshotNotPersisted's own, unrelated warning fires regardless, and
+// asserting on the total warning count would make this test fail for a
+// reason that has nothing to do with the missing-version skip it exists to
+// pin.
+func TestScanCollectionDirManifestMissingVersionIsBenignSkip(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+
+	installDir := filepath.Join(downloadPath, "ansible_collections", "ns", "name")
+	if err := os.MkdirAll(installDir, helpers.DirMod); err != nil {
+		t.Fatalf("failed to create install dir: %v", err)
+	}
+	manifestNoVersion := `{"collection_info": {"namespace": "ns", "name": "name"}}`
+	manifestPath := filepath.Join(installDir, "MANIFEST.json")
+	if err := os.WriteFile(manifestPath, []byte(manifestNoVersion), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write manifest without a version: %v", err)
+	}
+	registerCleanupProject(t, cacheDir, downloadPath)
+
+	printer := &recordingPrinter{}
+	runtime := newTestRuntimeWith(printer)
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+	if _, statErr := os.Stat(manifestPath); statErr != nil {
+		t.Fatalf("expected the version-less install to survive as a benign skip, stat error: %v", statErr)
+	}
+	if printer.hasWarningContaining("unsafe identifier") {
+		t.Fatalf("expected no unsafe-identifier warning for a manifest missing only its version, got: %v", printer.warnings)
+	}
+	if printer.hasWarningContaining("corrupt manifest") {
+		t.Fatalf("expected no corrupt-manifest warning for a manifest missing only its version, got: %v", printer.warnings)
+	}
+}
+
+// TestScanCollectionDirManifestMissingVersionPositiveControl is the positive
+// control for TestScanCollectionDirManifestMissingVersionIsBenignSkip on the
+// identical fixture shape: the same manifest with a version present is
+// indexed normally and, being unreferenced, removed - proving the survival
+// above is buildInstalledRecord's benign skip specifically, not some
+// unrelated reason the install tree was left alone.
+func TestScanCollectionDirManifestMissingVersionPositiveControl(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	downloadPath := t.TempDir()
+	installDir := seedInstallTree(t, downloadPath) // ns.name@1.0.0, version present
+	registerCleanupProject(t, cacheDir, downloadPath)
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+	manifestPath := filepath.Join(installDir, "MANIFEST.json")
+	if _, statErr := os.Stat(manifestPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the version-complete install to be indexed and removed, stat error: %v", statErr)
+	}
+}
+
+// buildCollectionsPathFallbackFixture creates a real project directory -
+// used directly as the registry's map key, exactly as store.RecordProject
+// would key it from a requirements file's own directory - with an
+// ansible_collections tree seeded under a fallbackDirName (".collections" or
+// "collections") subdirectory, and registers a project record whose
+// CollectionsPath is deliberately empty so collectionsPathCandidates falls
+// back to that project-relative candidate. It returns the seeded install's
+// directory; the project directory itself (the registry key) is not needed
+// by any caller.
+func buildCollectionsPathFallbackFixture(t *testing.T, cacheDir, fallbackDirName string) string {
+	t.Helper()
+	projectDir := t.TempDir()
+	fallbackRoot := filepath.Join(projectDir, fallbackDirName)
+	installDir := seedInstallTree(t, fallbackRoot)
+
+	reqPath := filepath.Join(projectDir, "requirements.yml")
+	if err := os.WriteFile(reqPath, []byte("collections: []\n"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write requirements file: %v", err)
+	}
+	writeProjectRegistry(t, cacheDir, &store.ProjectRegistry{
+		Projects: map[string]store.ProjectRecord{
+			projectDir: {RequirementsFile: reqPath, CollectionsPath: "", LastRun: time.Now().UTC()},
+		},
+	})
+	return installDir
+}
+
+// TestOpenProjectWorkspaceFallsBackToDotCollections proves that an
+// empty recorded CollectionsPath falls back to a project-relative
+// ".collections" directory: the workspace under it is scanned and its
+// unreferenced install cleaned up normally.
+func TestOpenProjectWorkspaceFallsBackToDotCollections(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	installDir := buildCollectionsPathFallbackFixture(t, cacheDir, ".collections")
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed scanning the .collections fallback, got %v", err)
+	}
+	manifestPath := filepath.Join(installDir, "MANIFEST.json")
+	if _, statErr := os.Stat(manifestPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the unreferenced install under .collections to be removed, stat error: %v", statErr)
+	}
+}
+
+// TestOpenProjectWorkspaceFallsBackToCollections is
+// TestOpenProjectWorkspaceFallsBackToDotCollections's sibling for the second,
+// non-dotfile fallback candidate ("collections").
+func TestOpenProjectWorkspaceFallsBackToCollections(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	installDir := buildCollectionsPathFallbackFixture(t, cacheDir, "collections")
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed scanning the collections fallback, got %v", err)
+	}
+	manifestPath := filepath.Join(installDir, "MANIFEST.json")
+	if _, statErr := os.Stat(manifestPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the unreferenced install under collections to be removed, stat error: %v", statErr)
+	}
+}
+
+// TestOpenProjectWorkspacePrefersRecordedCollectionsPathOverFallback is the
+// positive control proving collectionsPathCandidates' order, not merely its
+// reachability: a project with a non-empty, real CollectionsPath plus an
+// existing ".collections" sibling holding a completely different,
+// unreferenced collection. Only the recorded path is ever opened -
+// openProjectWorkspace returns at its first usable candidate - so the
+// sibling collection under ".collections" must survive untouched even
+// though it too is unreferenced by anything.
+//
+// Confirmed killing mutation (reversing collectionsPathCandidates' two
+// append blocks, so the ".collections"/"collections" fallbacks are tried
+// before the recorded CollectionsPath): running
+// `go test -run TestOpenProjectWorkspacePrefersRecordedCollectionsPathOverFallback -v`
+// against that mutation produced:
+//
+//	cleanup_test.go:4567: expected the recorded CollectionsPath's unreferenced install to be removed, stat error: <nil>
+//	--- FAIL: TestOpenProjectWorkspacePrefersRecordedCollectionsPathOverFallback (0.01s)
+//
+// under the mutation, the fallback candidate wins the race instead: it is a
+// real, usable workspace holding only the sibling collection, so
+// openProjectWorkspace returns there first and never even opens
+// recordedPath, leaving its own unreferenced install untouched (a nil stat
+// error) instead of removed.
+func TestOpenProjectWorkspacePrefersRecordedCollectionsPathOverFallback(t *testing.T) {
+	t.Parallel()
+	cacheDir := t.TempDir()
+	projectDir := t.TempDir()
+
+	recordedPath := t.TempDir()
+	recordedInstallDir := seedInstallTree(t, recordedPath) // ns.name@1.0.0
+
+	fallbackRoot := filepath.Join(projectDir, ".collections")
+	fallbackInstallDir := filepath.Join(fallbackRoot, "ansible_collections", "sibling", "other")
+	if err := os.MkdirAll(fallbackInstallDir, helpers.DirMod); err != nil {
+		t.Fatalf("failed to create sibling fallback install dir: %v", err)
+	}
+	sibling := `{"collection_info": {"namespace": "sibling", "name": "other", "version": "1.0.0"}}`
+	fallbackManifestPath := filepath.Join(fallbackInstallDir, "MANIFEST.json")
+	if err := os.WriteFile(fallbackManifestPath, []byte(sibling), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write sibling manifest: %v", err)
+	}
+
+	reqPath := filepath.Join(projectDir, "requirements.yml")
+	if err := os.WriteFile(reqPath, []byte("collections: []\n"), helpers.FileMod); err != nil {
+		t.Fatalf("failed to write requirements file: %v", err)
+	}
+	writeProjectRegistry(t, cacheDir, &store.ProjectRegistry{
+		Projects: map[string]store.ProjectRecord{
+			projectDir: {RequirementsFile: reqPath, CollectionsPath: recordedPath, LastRun: time.Now().UTC()},
+		},
+	})
+
+	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+	runtime := newTestRuntime()
+
+	if err := Start(t.Context(), cfg, runtime); err != nil {
+		t.Fatalf("expected Start to succeed, got %v", err)
+	}
+
+	recordedManifest := filepath.Join(recordedInstallDir, "MANIFEST.json")
+	if _, statErr := os.Stat(recordedManifest); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the recorded CollectionsPath's unreferenced install to be removed, stat error: %v", statErr)
+	}
+	if _, statErr := os.Stat(fallbackManifestPath); statErr != nil {
+		t.Fatalf("expected the .collections sibling to survive untouched, stat error: %v", statErr)
+	}
 }
