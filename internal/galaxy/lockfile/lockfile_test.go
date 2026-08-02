@@ -399,3 +399,59 @@ func TestResolveDefaultPath(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+// TestLoadRejectsAnInvalidCollectionName pins the read boundary for a
+// lockfile entry's name: a name outside the alphabet a Galaxy server itself
+// accepts makes the whole file invalid, so nothing downstream ever holds it.
+//
+// Before this, such a name loaded successfully and was carried until
+// something else tripped over it - for a name carrying a newline, that was
+// URL construction, which reported a network failure and so invited a CI to
+// retry a file no retry could ever repair. The rows here are the two ways a
+// name can be wrong and the control that proves the fixture loads at all.
+func TestLoadRejectsAnInvalidCollectionName(t *testing.T) {
+	t.Parallel()
+	for _, tc := range invalidCollectionNameCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "requirements.lock.yml")
+			body := "schema_version: 1\ncollections:\n  - name: " + tc.entryName + "\n    version: 1.0.0\n"
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatalf("write lockfile: %v", err)
+			}
+
+			_, err := Load(path)
+			if tc.wantValid {
+				if err != nil {
+					t.Fatalf("Load with a well-formed name: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, helpers.ErrLockfileInvalid) {
+				t.Fatalf("Load(%s) error = %v, want errors.Is helpers.ErrLockfileInvalid", tc.entryName, err)
+			}
+		})
+	}
+}
+
+// invalidCollectionNameCase is one row of TestLoadRejectsAnInvalidCollectionName.
+// entryName is written into the YAML as-is, so a row needing quoting supplies
+// its own.
+type invalidCollectionNameCase struct {
+	name      string
+	entryName string
+	wantValid bool
+}
+
+// invalidCollectionNameCases covers a name that splits into two halves but
+// fails the alphabet, one that fails the split itself, and the well-formed
+// control on the identical fixture shape.
+func invalidCollectionNameCases() []invalidCollectionNameCase {
+	return []invalidCollectionNameCase{
+		{name: "well formed", entryName: "acme.widgets", wantValid: true},
+		{name: "forged line", entryName: `"acme.widgets\nUp to date: nothing"`},
+		{name: "path traversal", entryName: `"../../../../etc/passwd"`},
+		{name: "uppercase half", entryName: "Acme.widgets"},
+		{name: "three parts", entryName: "acme.sub.widgets"},
+	}
+}

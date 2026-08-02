@@ -1210,38 +1210,30 @@ func TestLockDryRunSkipsMetricsAndSaysSo(t *testing.T) {
 	}
 }
 
-// TestLockDryRunRendersHostileBaselineWithoutActingOnIt proves lock's
-// --dry-run preview survives an adversarial baseline lockfile through the
-// real production path - lockfile.Save writes it, lockDryRunBaseline's own
-// lockfile.Load reads it back, Compare diffs it, reportLockfileDiff prints
-// it - not through a hand-built *File handed directly to Compare, which
-// would only pin lockfile package behavior TestCompareRendersHostileEntryVerbatim
-// (internal/galaxy/lockfile) already covers. Assertion (1) below, that Load
-// itself returns the hostile name unmangled, is what makes this a
-// production-path test rather than that same Compare unit test in disguise:
-// without it, nothing here would prove the hostile bytes ever survived a
-// real YAML round trip before reaching Compare at all.
+// TestLockDryRunRefusesAHostileBaselineAndSaysSo proves lock's --dry-run
+// preview no longer renders an adversarial baseline lockfile - it never loads
+// one. A lockfile entry whose name is not <namespace>.<name> in the alphabet
+// a Galaxy server itself accepts is refused by lockfile.Load, and
+// lockDryRunBaseline's documented policy takes over from there: warn on
+// stderr, then report every collection as added, exactly as it does for any
+// other baseline it cannot read.
 //
-// The baseline carries a path-traversal Name ("../../../../etc/passwd"), a
-// Source embedding a NUL byte, an ANSI escape, and a CRLF, and an oversized
-// Deps element - the identical hostile shape
-// TestCompareRendersHostileEntryVerbatim exercises at the lockfile-package
-// level, here driven through Lock end to end instead.
+// This test previously asserted the opposite - that the hostile name survived
+// a real YAML round trip and was printed, sanitized, into the report. That
+// was the repository's earlier answer to where this boundary belongs, and it
+// is the answer this change replaces: rendering a forged line is the harm,
+// and the printer's sanitization deliberately keeps "\n" so it cannot be the
+// thing that prevents it. The printer boundary is untouched and still covers
+// what no name alphabet can reach - a server's error text, a filesystem path,
+// a manifest.
 //
-// This test asserts CONTAINMENT of the traversal name in the printed output,
-// deliberately not byte-exact rendering of it or of the control-byte Source:
-// containment survives a possible future switch of the printer's format verb
-// from %s to %q unchanged (%q leaves "." and "/" unescaped), while a
-// control-byte string's exact rendering does not (%q would escape the
-// NUL/ANSI/CRLF that %s passes through verbatim) - asserting exact rendering
-// here would make this test require a second edit the day that switch
-// happens, for a property (byte-exact control-character rendering) this test
-// does not exist to pin in the first place. lock.go renders every
-// operator-facing identifier with %s, and internal/progress sanitizes the
-// resulting line through safeout.Clean; this test still asserts containment
-// rather than byte-exact rendering, for the reason already given (a future
-// %s to %q switch must not require a second edit here).
-func TestLockDryRunRendersHostileBaselineWithoutActingOnIt(t *testing.T) {
+// Assertion (1) is what keeps this a production-path test rather than a
+// lockfile unit test wearing this file's name: the refusal is observed
+// through lockfile.Load on a file lockfile.Save itself wrote, so the round
+// trip is real. (2) and (3) then prove the preview degraded into its
+// documented no-baseline behavior instead of failing the run or acting on the
+// entry.
+func TestLockDryRunRefusesAHostileBaselineAndSaysSo(t *testing.T) {
 	t.Parallel()
 	f := newLockRun(t)
 	const hostileName = "../../../../etc/passwd"
@@ -1259,47 +1251,50 @@ func TestLockDryRunRendersHostileBaselineWithoutActingOnIt(t *testing.T) {
 	if err := lockfile.Save(path, stale); err != nil {
 		t.Fatalf("save hostile baseline lockfile: %v", err)
 	}
-	assertHostileNameSurvivesLoad(t, path, hostileName)
+	// (1) the refusal happens on the real round trip, not on a hand-built
+	// *File: Save wrote this file and Load is what rejects it.
+	assertHostileNameIsRefusedByLoad(t, path)
 
 	f.cfg.DryRun = true
 	if err := Lock(context.Background(), f.cfg, f.runtime); err != nil {
 		t.Fatalf("Lock: %v", err)
 	}
 
-	// (2) the traversal name appears in the printed report - contained, not
-	// asserted byte-exact; see this test's own doc comment for why.
-	if !f.printer.hasOkContaining(hostileName) {
-		t.Fatalf("oks = %v", f.printer.oks)
+	// (2) the hostile name reaches no report line at all. Its own bytes are
+	// what would have forged one, so the check is that nothing printed
+	// contains it rather than that it printed in some safe form.
+	if f.printer.hasOkContaining(hostileName) {
+		t.Fatalf("the refused baseline's name still reached the report: oks = %v", f.printer.oks)
 	}
 	assertNoPathMatchesHostileName(t, f.root)
 
-	// (4) the run still succeeded and still reported the legitimate
-	// collection - the hostile baseline degraded nothing else in the report.
+	// (3) the run still succeeded and still reported the legitimate
+	// collection as added, which is lockDryRunBaseline's documented behavior
+	// for a baseline it cannot read - and the control proving the refusal did
+	// not simply abort the preview.
 	if !f.printer.hasOkContaining("Would add: acme.widgets@1.0.0") {
 		t.Fatalf("oks = %v", f.printer.oks)
 	}
+	if !f.printer.hasWarnContaining("cannot be read") {
+		t.Fatalf("expected a warning naming the unreadable baseline, warns = %v", f.printer.warns)
+	}
 }
 
-// assertHostileNameSurvivesLoad is assertion (1) from
-// TestLockDryRunRendersHostileBaselineWithoutActingOnIt's own doc comment:
-// the production path (lockfile.Save -> lockfile.Load) itself carries the
-// hostile name through unmangled, before Compare ever sees it - the property
-// that makes that test a production-path test rather than a Compare unit
-// test wearing this file's name. Factored out to keep the caller's own
-// cyclomatic complexity within budget.
-func assertHostileNameSurvivesLoad(t *testing.T, path, hostileName string) {
+// assertHostileNameIsRefusedByLoad is assertion (1) from
+// TestLockDryRunRefusesAHostileBaselineAndSaysSo's own doc comment: the
+// production path (lockfile.Save then lockfile.Load) refuses the hostile name
+// on the way back in, so nothing downstream ever holds it. Factored out to
+// keep the caller's own cyclomatic complexity within budget.
+func assertHostileNameIsRefusedByLoad(t *testing.T, path string) {
 	t.Helper()
 	loaded, err := lockfile.Load(path)
-	if err != nil {
-		t.Fatalf("lockfile.Load(%s): %v", path, err)
-	}
-	if len(loaded.Collections) != 1 || loaded.Collections[0].Name != hostileName {
-		t.Fatalf("lockfile.Load returned %+v, want the hostile name unmangled", loaded.Collections)
+	if !errors.Is(err, helpers.ErrLockfileInvalid) {
+		t.Fatalf("lockfile.Load(%s) = (%+v, %v), want errors.Is helpers.ErrLockfileInvalid", path, loaded, err)
 	}
 }
 
 // assertNoPathMatchesHostileName is assertion (3) from
-// TestLockDryRunRendersHostileBaselineWithoutActingOnIt's own doc comment:
+// TestLockDryRunRefusesAHostileBaselineAndSaysSo's own doc comment:
 // the preview never touched the filesystem on the hostile entry's behalf -
 // no path anywhere under root resolves to, or is even named after, the
 // traversal target "passwd". Factored out to keep the caller's own

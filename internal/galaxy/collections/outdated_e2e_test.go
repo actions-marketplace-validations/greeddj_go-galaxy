@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"os"
@@ -207,100 +208,52 @@ func TestOutdatedSanitizesServerReasonPhrase(t *testing.T) {
 	}
 }
 
-// TestOutdatedSanitizesLockfileEntryName mirrors
-// TestOutdatedSanitizesServerReasonPhrase for the report's other untrusted
-// channel: a lockfile entry's own Name. helpers.SplitFQDN never validates
-// name for character class - it checks only that splitting on "." yields
-// exactly two non-empty halves - so a name carrying a raw control byte
-// reaches reportOutdated unfiltered once lockfile.Load has parsed it off
-// disk, through either of two different code paths that both end at the
-// identical Errorf("Lookup failed: %q@%s: %s", ...) line: a name that does
-// split into two parts and then fails its network lookup
-// (testOutdatedSanitizesTwoPartHostileName), and a name that fails the
-// split itself and never reaches the network at all
-// (testOutdatedSanitizesMultiDotHostileName).
+// TestOutdatedRefusesAHostileLockfileEntryName covers the channel that used
+// to reach the report unfiltered: a lockfile entry's own Name. It no longer
+// reaches it at all. A name outside the alphabet a Galaxy server itself
+// accepts is refused by lockfile.Load, so outdated fails before it builds a
+// URL, before it prints a line, and before it touches the network.
 //
-// The hostile byte in both subtests is a validly UTF-8-encoded C1 control
-// character (U+009B, CSI), not a raw ESC or BEL, and deliberately so: the
-// first subtest's name has to survive a real HTTP request, and net/url.Parse
-// rejects any raw byte below 0x20 or equal to 0x7F before a request is even
-// built ("net/url: invalid control character in URL", confirmed against the
-// stdlib source) - so a name carrying either of those two would never reach
-// the network, and that subtest would then be pinning a URL-construction
-// failure instead of the sanitization property it exists to prove. A C1
-// character encoded as valid UTF-8 has no byte below 0x80, so it survives
-// request construction. The CSI rune is built from its numeric code point
-// (rune(0x9b)) rather than placed directly in a string literal, so the
-// source file carries no raw or escaped control character for a linter (or
-// a human diffing this file) to trip over.
+// These two subtests previously asserted the opposite - that such a name was
+// printed, sanitized, on outdated's failure line. That was the repository's
+// earlier answer to where this boundary belongs. The printer boundary itself
+// is untouched and still proven here: TestOutdatedSanitizesServerReasonPhrase
+// covers the channel no name alphabet can reach, a server's own HTTP reason
+// phrase, and it is that test - not these - which pins that safeout.Clean's
+// replacement actually fires for this report.
 //
-// The two subtests pin different defenses, not the same one twice: the
-// two-part subtest's replacement count comes from r.Err and so is the only
-// evidence in this file that safeout.Clean's own replacement actually fires
-// for outdated's report, while the multi-dot subtest's zero-replacement
-// count pins %q instead and would still pass even if Clean were removed
-// from Errorf entirely. They must be read together for that reason: if a
-// future edit made the two-part subtest's count coincidentally match the
-// multi-dot subtest's, updating its "want" constant to keep both green
-// would delete the only proof left that Clean's replacement fires here, and
-// nothing in this file would flag that loss.
-//
-// Deliberately not t.Parallel(); see
-// TestOutdatedSanitizesServerReasonPhrase's own doc comment for why.
-//
-// Mutation: reverting reportOutdated's failure-line Errorf call to a bare
-// fmt.Printf kills both subtests. The first fails with `stderr carries 0
-// U+FFFD replacement characters, want 1: ""`, `expected the failure line to
-// stay off stdout, got stdout="Lookup failed: \"acme.\\u009bwidgets\"@1.0.0:
-// failed to fetch metadata: 404 Not Found (http://127.0.0.1:.../api/
-// collections/acme/\u009bwidgets)\n..."` - the double backslash before the
-// first "u009b" is not a transcription error: reportOutdated's own %q on
-// r.Name has already turned the raw CSI byte into the six literal characters
-// \u009b before t.Errorf's own %q re-quotes the whole captured stdout for
-// display, escaping that literal backslash a second time, while the second
-// occurrence, reached through r.Err and never passed through %q by
-// reportOutdated itself, is still a real control codepoint at that point and
-// so is escaped only once - and the stream-separation and positive-control
-// assertions fail alongside it. The second subtest fails with `expected the
-// failure line to stay off stdout, got stdout="Lookup failed:
-// \"acme.\\u009b.widgets\"@1.0.0: lockfile is invalid: invalid name
-// \"acme.\\u009b.widgets\"\n..."` - both occurrences double-backslashed here,
-// since lookupOutdated's own %q on e.Name already escaped the second one too
-// before t.Errorf's own %q ever saw it - with the same stream-separation,
-// lockfile-cause, and positive-control assertions failing alongside it - run
-// and confirmed.
-func TestOutdatedSanitizesLockfileEntryName(t *testing.T) {
-	// t.Run, not t.Parallel(): both subtests drive captureStdIO, which swaps
-	// the process-wide os.Stdout/os.Stderr, and Go only runs subtests
-	// concurrently when they call t.Parallel() themselves - neither does, so
-	// they already run one after the other under the parent's own serial
-	// execution.
-	t.Run("two-part name survives SplitFQDN and 404s", testOutdatedSanitizesTwoPartHostileName)
-	t.Run("multi-dot name fails SplitFQDN before any network request", testOutdatedSanitizesMultiDotHostileName)
+// The two rows differ in which check refuses them, and both are kept because
+// a single alphabet check replacing two different rejections is exactly the
+// kind of change that could silently narrow to one: the first is a name that
+// splits into two halves and fails the alphabet, the second fails the split
+// itself. The third row is the control: a well-formed name on the identical
+// fixture must load, be looked up, and be reported, so the two refusals
+// cannot be the fixture failing to reach the report path at all.
+func TestOutdatedRefusesAHostileLockfileEntryName(t *testing.T) {
+	// t.Run, not t.Parallel(): every row drives captureStdIO, which swaps the
+	// process-wide os.Stdout/os.Stderr.
+	t.Run("control byte in a two-part name", func(t *testing.T) {
+		assertOutdatedRefusesName(t, "acme."+string(rune(0x9b))+"widgets")
+	})
+	t.Run("three dot-separated parts", func(t *testing.T) {
+		assertOutdatedRefusesName(t, "acme."+string(rune(0x9b))+".widgets")
+	})
+	t.Run("well-formed name is reported", testOutdatedReportsAWellFormedName)
 }
 
-// testOutdatedSanitizesTwoPartHostileName is
-// TestOutdatedSanitizesLockfileEntryName's first subtest, split into its own
-// top-level function purely to stay under the cyclomatic-complexity budget
-// alongside its sibling below.
-//
-// acme.<CSI>widgets is never registered, so its root-metadata lookup 404s:
-// this exercises lookupOutdated's network-failure arm, not its SplitFQDN
-// guard.
-func testOutdatedSanitizesTwoPartHostileName(t *testing.T) {
-	const csi = rune(0x9b)
+// assertOutdatedRefusesName runs outdated against a lockfile holding exactly
+// one entry named hostileName and asserts the run is refused at load: the
+// lockfile exit class, no request to the server, and nothing printed on
+// either stream that carries the name.
+func assertOutdatedRefusesName(t *testing.T, hostileName string) {
+	t.Helper()
+
 	root := t.TempDir()
 	reqPath := filepath.Join(root, "requirements.yml")
-
 	s := fakegalaxy.New(t)
-	hostileName := "acme." + string(csi) + "widgets"
 	saveOutdatedLockfile(t, reqPath, s.URL(), lockfile.Entry{Name: hostileName, Version: "1.0.0"})
 
-	cfg := &config.Config{
-		Server:           s.URL(),
-		RequirementsFile: reqPath,
-		Workers:          1,
-	}
+	cfg := &config.Config{Server: s.URL(), RequirementsFile: reqPath, Workers: 1}
 
 	var outErr error
 	stdout, stderr := captureStdIO(t, func() {
@@ -309,99 +262,49 @@ func testOutdatedSanitizesTwoPartHostileName(t *testing.T) {
 		runtime := infra.New(printer, s.Client())
 		outErr = collections.Outdated(context.Background(), cfg, runtime)
 	})
-	if outErr == nil {
-		t.Fatal("expected an error from the failed lookup")
-	}
 
-	// reportOutdated renders r.Name with %q, which is fmt's own escaping,
-	// not safeout.Clean's: it turns the raw CSI byte into the printable
-	// text "\u009b" before Clean ever sees that occurrence, so Clean finds
-	// nothing left to replace there. The other occurrence - the same
-	// split-name half echoed inside the 404's own *cacheManager.HTTPStatusError
-	// message, reached through reportOutdated's %s on r.Err - is never
-	// passed through %q at all, so it stays a raw byte until Clean
-	// replaces it. One occurrence pre-neutralized by %q plus one replaced
-	// by Clean is why the count below is 1, not 2.
-	const wantReplacements = 1
-	if got := bytes.Count(stderr, []byte("�")); got != wantReplacements {
-		t.Errorf("stderr carries %d U+FFFD replacement characters, want %d: %q", got, wantReplacements, stderr)
+	if !errors.Is(outErr, helpers.ErrLockfileInvalid) {
+		t.Fatalf("Outdated error = %v, want errors.Is helpers.ErrLockfileInvalid", outErr)
 	}
-	if bytes.Contains(stdout, []byte("Lookup failed")) {
-		t.Errorf("expected the failure line to stay off stdout, got stdout=%q", stdout)
+	if got := exitcode.FromError(outErr); got != exitcode.ExitLock {
+		t.Errorf("exitcode.FromError(err) = %d, want ExitLock (%d)", got, exitcode.ExitLock)
 	}
-	if !bytes.Contains(stderr, []byte("Lookup failed")) {
-		t.Errorf("expected the failure line on stderr, got stderr=%q", stderr)
-	}
-	// Positive control: the name's printable substrings survive
-	// sanitization, proving the name was printed and cleaned rather than
-	// dropped entirely.
-	if !bytes.Contains(stderr, []byte("acme.")) || !bytes.Contains(stderr, []byte("widgets")) {
-		t.Errorf("expected the sanitized name's printable substrings to still be printed, got stderr=%q", stderr)
-	}
-}
-
-// testOutdatedSanitizesMultiDotHostileName is
-// TestOutdatedSanitizesLockfileEntryName's second subtest: three dot-
-// separated parts, not two, so helpers.SplitFQDN rejects this name outright
-// and lookupOutdated returns its own fmt.Errorf("%w: invalid name %q",
-// helpers.ErrLockfileInvalid, e.Name) without ever building a URL or
-// reaching the fake server.
-func testOutdatedSanitizesMultiDotHostileName(t *testing.T) {
-	const csi = rune(0x9b)
-	root := t.TempDir()
-	reqPath := filepath.Join(root, "requirements.yml")
-
-	s := fakegalaxy.New(t)
-	hostileName := "acme." + string(csi) + ".widgets"
-	saveOutdatedLockfile(t, reqPath, s.URL(), lockfile.Entry{Name: hostileName, Version: "1.0.0"})
-
-	cfg := &config.Config{
-		Server:           s.URL(),
-		RequirementsFile: reqPath,
-		Workers:          1,
-	}
-
-	var outErr error
-	stdout, stderr := captureStdIO(t, func() {
-		printer := progress.New(cfg.Verbose, cfg.Quiet)
-		defer printer.Close()
-		runtime := infra.New(printer, s.Client())
-		outErr = collections.Outdated(context.Background(), cfg, runtime)
-	})
-	if outErr == nil {
-		t.Fatal("expected an error from the invalid lockfile entry name")
-	}
-
 	if got := s.Total(); got != 0 {
-		t.Errorf("fake server saw %d requests, want 0: SplitFQDN must reject this name before any network call", got)
+		t.Errorf("fake server saw %d requests, want 0: the name must be refused before any network call", got)
 	}
-	// Both occurrences of the hostile byte on this line go through %q
-	// before Clean ever runs: reportOutdated's own %q on r.Name, and
-	// lookupOutdated's own %q on e.Name when it built r.Err in the first
-	// place. Fmt's escaping already turned the raw byte into printable
-	// text at both sites, so Clean has nothing left to replace - the
-	// count is 0, not a lower positive number. A 0-vs-N assertion is
-	// still a real sanitization proof: it demonstrates the byte never
-	// reaches Clean in raw form on this path at all, which is a stronger
-	// property than "Clean replaced it", not a weaker one.
-	const wantReplacements = 0
-	if got := bytes.Count(stderr, []byte("�")); got != wantReplacements {
-		t.Errorf("stderr carries %d U+FFFD replacement characters, want %d: %q", got, wantReplacements, stderr)
+	// The refusal message names the offending value, quoted, which is the
+	// only place it may still appear - a report line built from it must not.
+	if bytes.Contains(stdout, []byte("Lookup failed")) || bytes.Contains(stderr, []byte("Lookup failed")) {
+		t.Errorf("a refused entry still produced a report line: stdout=%q stderr=%q", stdout, stderr)
 	}
-	if bytes.Contains(stdout, []byte("Lookup failed")) {
-		t.Errorf("expected the failure line to stay off stdout, got stdout=%q", stdout)
+}
+
+// testOutdatedReportsAWellFormedName is the control for the two refusals
+// above: the identical fixture with a name inside the alphabet must reach the
+// report. It is registered on the fake server so the lookup succeeds and the
+// run exits cleanly, which is what proves the refusals come from the name and
+// not from the fixture.
+func testOutdatedReportsAWellFormedName(t *testing.T) {
+	root := t.TempDir()
+	reqPath := filepath.Join(root, "requirements.yml")
+	s := fakegalaxy.New(t)
+	s.AddVersion("acme", "widgets", "1.0.0", nil)
+	saveOutdatedLockfile(t, reqPath, s.URL(), lockfile.Entry{Name: "acme.widgets", Version: "1.0.0"})
+
+	cfg := &config.Config{Server: s.URL(), RequirementsFile: reqPath, Workers: 1}
+
+	var outErr error
+	stdout, _ := captureStdIO(t, func() {
+		printer := progress.New(cfg.Verbose, cfg.Quiet)
+		defer printer.Close()
+		runtime := infra.New(printer, s.Client())
+		outErr = collections.Outdated(context.Background(), cfg, runtime)
+	})
+	if outErr != nil {
+		t.Fatalf("Outdated with a well-formed name: %v", outErr)
 	}
-	if !bytes.Contains(stderr, []byte("Lookup failed")) {
-		t.Errorf("expected the failure line on stderr, got stderr=%q", stderr)
-	}
-	if !bytes.Contains(stderr, []byte(helpers.ErrLockfileInvalid.Error())) {
-		t.Errorf("expected the lockfile-invalid cause on stderr, got stderr=%q", stderr)
-	}
-	// Positive control: the name's printable substrings survive
-	// sanitization (here, fmt's own %q escaping) rather than being
-	// dropped entirely.
-	if !bytes.Contains(stderr, []byte("acme.")) || !bytes.Contains(stderr, []byte("widgets")) {
-		t.Errorf("expected the sanitized name's printable substrings to still be printed, got stderr=%q", stderr)
+	if !bytes.Contains(stdout, []byte("acme.widgets")) {
+		t.Errorf("expected the well-formed name in the report, got stdout=%q", stdout)
 	}
 }
 

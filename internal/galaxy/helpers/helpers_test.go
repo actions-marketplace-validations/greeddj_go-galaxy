@@ -10,6 +10,9 @@ import "testing"
 // namespace/name as a filesystem path element (buildCollectionsMap,
 // newInstallTarget, cleanup.removeInstalled) must run its own IsPathElement
 // check - SplitFQDN itself is not, and was never meant to be, that guard.
+// The same holds on the other side: a caller reading a name from outside this
+// program applies IsCollectionName, which is a different question again (what
+// a collection may be called, rather than what a path element may contain).
 func TestSplitFQDNDoesNotValidatePathSafety(t *testing.T) {
 	t.Parallel()
 	ns, name, ok := SplitFQDN("foo/bar.baz")
@@ -58,5 +61,87 @@ func TestNormalizeConstraint(t *testing.T) {
 				t.Errorf("NormalizeConstraint(%q) = %q, want %q", tc.value, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestIsCollectionNamePart pins the alphabet a collection name half must
+// satisfy, and pins it as an allow-list rather than a blocklist: the rows
+// below name what is accepted as well as what is not, so a future edit that
+// widened the predicate to "anything not obviously hostile" would fail here
+// rather than pass quietly.
+func TestIsCollectionNamePart(t *testing.T) {
+	t.Parallel()
+	for _, tc := range collectionNamePartCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsCollectionNamePart(tc.value); got != tc.want {
+				t.Errorf("IsCollectionNamePart(%q) = %v, want %v", tc.value, got, tc.want)
+			}
+		})
+	}
+}
+
+// collectionNamePartCase is one row of TestIsCollectionNamePart.
+type collectionNamePartCase struct {
+	name  string
+	value string
+	want  bool
+}
+
+// collectionNamePartCases enumerates the alphabet's boundaries: what a real
+// Galaxy namespace or name looks like, the three shapes real servers reject
+// (uppercase, hyphen, leading digit or underscore), and the hostile shapes
+// this predicate exists to stop.
+func collectionNamePartCases() []collectionNamePartCase {
+	return []collectionNamePartCase{
+		{name: "plain lowercase", value: "acme", want: true},
+		{name: "digits after the first rune", value: "acme2", want: true},
+		{name: "underscore after the first rune", value: "my_collection", want: true},
+		{name: "empty", value: "", want: false},
+		{name: "uppercase", value: "Acme", want: false},
+		{name: "hyphen", value: "my-collection", want: false},
+		{name: "leading digit", value: "1acme", want: false},
+		{name: "leading underscore", value: "_acme", want: false},
+		{name: "embedded dot", value: "acme.widgets", want: false},
+		{name: "path separator", value: "foo/bar", want: false},
+		{name: "newline, the forged-line shape", value: "acme\nUp to date: nothing", want: false},
+		{name: "non-ASCII letter", value: "acmé", want: false},
+	}
+}
+
+// TestIsCollectionName pins the whole-identifier form: exactly two halves,
+// each satisfying the part predicate. The dotted-halves rows are what
+// separate it from a naive check on the joined string.
+func TestIsCollectionName(t *testing.T) {
+	t.Parallel()
+	for _, tc := range collectionNameCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsCollectionName(tc.value); got != tc.want {
+				t.Errorf("IsCollectionName(%q) = %v, want %v", tc.value, got, tc.want)
+			}
+		})
+	}
+}
+
+// collectionNameCase is one row of TestIsCollectionName.
+type collectionNameCase struct {
+	name  string
+	value string
+	want  bool
+}
+
+// collectionNameCases covers the shapes SplitFQDN accepts but the alphabet
+// must not, alongside the ones it rejects on shape alone.
+func collectionNameCases() []collectionNameCase {
+	return []collectionNameCase{
+		{name: "well formed", value: "acme.widgets", want: true},
+		{name: "underscores in both halves", value: "my_ns.my_coll", want: true},
+		{name: "no dot", value: "acme", want: false},
+		{name: "three parts", value: "acme.sub.widgets", want: false},
+		{name: "empty half", value: "acme.", want: false},
+		{name: "path separator in the namespace", value: "foo/bar.baz", want: false},
+		{name: "newline in the name half", value: "acme.widgets\nUp to date: nothing", want: false},
+		{name: "uppercase half", value: "Acme.widgets", want: false},
 	}
 }

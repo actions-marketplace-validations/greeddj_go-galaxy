@@ -176,6 +176,15 @@ func (f *File) validate() error {
 			return fmt.Errorf("%w: duplicate collection name %q", helpers.ErrLockfileInvalid, e.Name)
 		}
 		seen[e.Name] = struct{}{}
+		// Checked before the version, and quoted, because until it passes
+		// nothing here knows what e.Name contains: the version message below
+		// prints the name, and a name carrying a newline would compose extra
+		// lines into the very error reporting it. Once this check has passed,
+		// a name is an ordinary identifier again.
+		if !helpers.IsCollectionName(e.Name) {
+			return fmt.Errorf("%w: collection name %q is not <namespace>.<name> in the form ^[a-z][a-z0-9_]*$",
+				helpers.ErrLockfileInvalid, e.Name)
+		}
 		if !helpers.IsExactVersion(e.Version) {
 			return fmt.Errorf("%w: %s: version %q is not an exact version", helpers.ErrLockfileInvalid, e.Name, e.Version)
 		}
