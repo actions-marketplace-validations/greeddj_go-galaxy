@@ -453,10 +453,11 @@ func prepareFromCache(ctx context.Context, deps installDeps, col collection) (in
 //
 // Neither warning also names the collection: err already renders namespace,
 // name, and version (or the offending path component) with %q, and
-// interpolating the raw identifier a second time with %s would put an
-// attacker-controlled string - one that could carry newlines or ANSI escapes
-// - onto CI stderr verbatim for no added information. Same reason
-// verifyExtractMarker uses %q and never %s for a sha.
+// interpolating the raw identifier a second time with %s would add no
+// information - col already passed newInstallTarget's IsPathElement check
+// earlier in installCollection, and Warnf/Printf both sanitize the rendered
+// line through safeout.Clean besides. Same reason verifyExtractMarker uses
+// %q and never %s for a sha.
 func writeGalaxyInfoIfPresent(
 	runtime *infra.Infra,
 	target installTarget,

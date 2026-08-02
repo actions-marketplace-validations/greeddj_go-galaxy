@@ -1236,10 +1236,11 @@ func TestLockDryRunSkipsMetricsAndSaysSo(t *testing.T) {
 // NUL/ANSI/CRLF that %s passes through verbatim) - asserting exact rendering
 // here would make this test require a second edit the day that switch
 // happens, for a property (byte-exact control-character rendering) this test
-// does not exist to pin in the first place. lock.go renders every operator-
-// facing identifier with %s today, matching every other printer call site in
-// this package - printer-wide sanitization, if it happens, is separate work
-// this test does not depend on either way.
+// does not exist to pin in the first place. lock.go renders every
+// operator-facing identifier with %s, and internal/progress sanitizes the
+// resulting line through safeout.Clean; this test still asserts containment
+// rather than byte-exact rendering, for the reason already given (a future
+// %s to %q switch must not require a second edit here).
 func TestLockDryRunRendersHostileBaselineWithoutActingOnIt(t *testing.T) {
 	t.Parallel()
 	f := newLockRun(t)

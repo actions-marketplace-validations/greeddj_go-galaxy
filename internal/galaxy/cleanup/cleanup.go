@@ -573,17 +573,21 @@ func openProjectWorkspace(projectPath string, project store.ProjectRecord) (work
 // content, not a value this tool ever validates. The collections path
 // carries the same exposure whenever it too derives from projectPath - true
 // of both scan fallback candidates and of the default, relative
-// download-path, though not of an operator-configured absolute one - so
-// either string reaching this function's Warnf or error wrap can carry
-// attacker-chosen bytes, including terminal control sequences. The %q used
-// to render both here and in openProjectWorkspace's own wrapped error
-// narrows, rather than closes, that exposure: it renders control bytes as
-// escaped Go syntax instead of raw terminal control sequences for these two
-// values specifically, but the wrapped *fs.PathError underneath still
-// carries ansible_collections/<ns>/<name>/MANIFEST.json verbatim, unquoted,
-// and those namespace/name components are exactly as attacker-influenced.
-// Real closure of this surface is a sanitizing printer in internal/progress,
-// which this function does not attempt.
+// download-path, though not of an operator-configured absolute one.
+//
+// Every line this package emits goes through internal/progress, which
+// applies safeout.Clean on every tier, so no control character except \n
+// and \t reaches a terminal from either the Warnf here or the error wrapped
+// further down this function. The %q on projectPath here, and on the path
+// in openProjectWorkspace's own wrapped error, additionally escapes \n for
+// those two operands specifically, before Clean ever sees it - the same
+// overlap reportOutdated's doc (outdated.go) already describes for its own
+// rendering. The residual that remains is Clean's own documented one: a
+// *fs.PathError surfacing from the scan carries
+// ansible_collections/<ns>/<name>/MANIFEST.json with ns and name straight
+// off fs.ReadDir, and a \n in either survives Clean, so such a path can
+// claim one extra plain-text line - never overwrite one already emitted,
+// since \r does not survive. See safeout.Clean's own doc comment for why.
 func scanProjectWorkspace(
 	out output.Printer,
 	projectPath string,
