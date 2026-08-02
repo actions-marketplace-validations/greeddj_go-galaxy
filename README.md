@@ -98,12 +98,18 @@ go install github.com/greeddj/go-galaxy/cmd/go-galaxy@latest
 
 Binary is installed into `$(go env GOPATH)/bin` (usually `~/go/bin`).
 
-### Homebrew (macOS)
+### Binary
 
 ```bash
-brew tap greeddj/tap
-brew install go-galaxy
+curl -sSLf -o /usr/local/bin/go-galaxy \
+  https://github.com/greeddj/go-galaxy/releases/latest/download/go-galaxy-linux-amd64
+chmod +x /usr/local/bin/go-galaxy
 ```
+
+Substitute `linux-arm64`, `darwin-amd64` or `darwin-arm64` for another
+platform. Each release also carries a `.tar.gz` per platform with the same
+binary plus LICENSE and README. See [Verifying a
+release](#verifying-a-release) before trusting either.
 
 ### Podman
 
@@ -122,6 +128,58 @@ podman run --rm -v "$PWD":/work -w /work ghcr.io/greeddj/go-galaxy:latest i -r r
 ```bash
 go build -o ./dist/go-galaxy ./cmd/go-galaxy
 ```
+
+## Verifying a release
+
+Every release is signed, catalogued and attested by the workflow that built
+it. There is no public key to fetch and no key for anyone to lose: cosign
+signs keylessly, so the identity in the certificate *is* the release workflow,
+proved by a short-lived OIDC token from GitHub.
+
+`checksums.txt` lists every asset by sha256, and it is what gets signed - so
+verifying one signature and one hash covers whichever asset you actually
+downloaded:
+
+```bash
+tag=v1.2.3
+base="https://github.com/greeddj/go-galaxy/releases/download/$tag"
+curl -sSLfO "$base/checksums.txt" -O "$base/checksums.txt.sigstore.json"
+
+cosign verify-blob checksums.txt \
+  --bundle checksums.txt.sigstore.json \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp \
+    '^https://github\.com/greeddj/go-galaxy/\.github/workflows/release\.yml@refs/tags/'
+
+sha256sum --ignore-missing -c checksums.txt   # or: shasum -a 256 --ignore-missing -c
+```
+
+Container images are signed the same way, with the signature stored in the
+registry next to the image, so nothing needs downloading first:
+
+```bash
+cosign verify ghcr.io/greeddj/go-galaxy:latest \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp \
+    '^https://github\.com/greeddj/go-galaxy/\.github/workflows/release\.yml@refs/tags/'
+```
+
+A signature says the file is the one that was published. Provenance says which
+workflow, at which commit, produced it - a different question, recorded as a
+GitHub build attestation for every asset:
+
+```bash
+gh attestation verify go-galaxy-linux-amd64 --repo greeddj/go-galaxy
+```
+
+Each asset also ships an SPDX SBOM next to it (`<asset>.sbom.json`), listing
+the Go modules actually linked into that build, for scanning against a
+vulnerability feed without unpacking anything.
+
+macOS builds are **not** Apple-notarized, so Gatekeeper has nothing to check
+them against - the signature and provenance above are what to verify instead.
+A binary downloaded by a browser also arrives quarantined; the release ships
+no packaging that clears that flag on your behalf.
 
 ## Usage
 

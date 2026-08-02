@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write
   packages: write
+  # cosign signs keyless: the signing identity is this workflow, proved by an
+  # OIDC token, so there is no private key anywhere. attest-build-provenance
+  # needs the same token plus somewhere to record what it produced.
+  id-token: write
+  attestations: write
 
 jobs:
   # The CI workflow does not run on tags, so the gate has to be called from
@@ -44,12 +49,35 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # goreleaser shells out to both of these: cosign for the signs and
+      # docker_signs stages, syft for sboms. Neither ships on the runner, and a
+      # missing one fails the release rather than skipping the stage.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4
+
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@v0
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
           version: latest
           args: release --clean
         env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+
+      # Provenance answers a question a signature does not: not "is this the
+      # file that was published" but "which workflow, at which commit, built
+      # it". Recorded per asset, so `gh attestation verify` works on a single
+      # downloaded binary without the rest of the release.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          # checksums.txt, not a path glob: goreleaser publishes the raw
+          # binaries under names they do not carry on disk (every one of them
+          # is a file called `go-galaxy` inside a per-target directory), so a
+          # glob would either miss them or attest four subjects of the same
+          # name. The checksums file already pairs every published name with
+          # its digest.
+          subject-checksums: dist/checksums.txt

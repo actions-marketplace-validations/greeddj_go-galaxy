@@ -1,7 +1,10 @@
 version: 2
 before:
   hooks:
-    - go mod tidy
+    # No `go mod tidy` here. A release must build the dependency set that was
+    # committed and reviewed, and tidy rewrites go.mod/go.sum in the working
+    # tree the release is cut from - a dependency change nobody signed off on,
+    # landing in the one build that gets published.
     - go test ./...
 builds:
   - id: go-galaxy
@@ -48,6 +51,31 @@ archives:
     name_template: "{{ .ProjectName }}-{{ .Os }}-{{ .Arch }}"
 checksum:
   name_template: 'checksums.txt'
+# One SPDX document per published thing, so an operator can answer "what is in
+# this" without unpacking it. Both entries are needed because the two archive
+# entries above publish two different shapes: `binary` catalogs the raw
+# per-platform binaries, `archive` the tar.gz. syft reads the Go build info
+# embedded in the binary, so the dependency list is the one actually linked in.
+sboms:
+  - id: binary
+    artifacts: binary
+  - id: archive
+    artifacts: archive
+# Keyless cosign, signing checksums.txt rather than each asset: everything the
+# release publishes is listed in it by digest, so one signature plus one sha256
+# check authenticates any single asset a user downloads - see "Verifying a
+# release" in the README for the two-command flow. Keyless means the signing
+# identity is the release workflow itself, proved by an OIDC token, so there is
+# no private key to hold, rotate, or leak.
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sigstore.json"
+    args:
+      - "sign-blob"
+      - "--bundle=${signature}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
 snapshot:
   version_template: "{{ incpatch .Version }}-snapshot"
 changelog:
@@ -101,25 +129,16 @@ docker_manifests:
     image_templates:
       - "ghcr.io/greeddj/{{ .ProjectName }}:latest-amd64"
       - "ghcr.io/greeddj/{{ .ProjectName }}:latest-arm64"
-homebrew_casks:
-  - name: go-galaxy
-    ids:
-      - archive
-    repository:
-      owner: greeddj
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    homepage: https://github.com/greeddj/go-galaxy
-    description: "Fast Ansible Galaxy collections installer for CI."
-    license: MIT
-    binaries:
-      - go-galaxy
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/go-galaxy"]
-          end
+# The published images and manifests, signed by the same keyless identity as
+# checksums.txt above. Signatures are attached in the registry beside the
+# image, so `cosign verify` needs nothing but the image reference.
+docker_signs:
+  - cmd: cosign
+    args:
+      - "sign"
+      - "${artifact}@${digest}"
+      - "--yes"
+    artifacts: all
 release:
   github:
     owner: greeddj
