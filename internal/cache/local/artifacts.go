@@ -33,7 +33,7 @@ func (s *Artifacts) Has(_ context.Context, key string) (bool, error) {
 	if os.IsNotExist(err) {
 		return false, nil
 	}
-	return false, err
+	return false, classifyCacheFailure(err)
 }
 
 // Fetch returns a cached artifact file by key. When a sidecar written by a
@@ -48,7 +48,7 @@ func (s *Artifacts) Fetch(_ context.Context, key string) (cacheManager.ArtifactF
 		return cacheManager.ArtifactFile{}, err
 	}
 	if _, err := os.Stat(path); err != nil {
-		return cacheManager.ArtifactFile{}, err
+		return cacheManager.ArtifactFile{}, classifyCacheFailure(err)
 	}
 	return cacheManager.ArtifactFile{Path: path, Meta: s.sidecarMeta(path)}, nil
 }
@@ -92,7 +92,7 @@ func (s *Artifacts) TempFile(_ context.Context, prefix string) (*os.File, func()
 	}
 	file, err := os.CreateTemp(dir, prefix)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, classifyCacheFailure(err)
 	}
 	cleanup := func() {
 		_ = os.Remove(file.Name())
@@ -115,7 +115,7 @@ func (s *Artifacts) Commit(_ context.Context, key, tmpPath string, meta map[stri
 		return cacheManager.ArtifactFile{}, err
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		return cacheManager.ArtifactFile{}, err
+		return cacheManager.ArtifactFile{}, classifyCacheFailure(err)
 	}
 	result := cacheManager.ArtifactFile{Path: path}
 	if sha := strings.TrimSpace(meta["sha256"]); helpers.IsSHA256Hex(sha) {
@@ -134,10 +134,10 @@ func (s *Artifacts) Delete(_ context.Context, key string) error {
 		return err
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
+		return classifyCacheFailure(err)
 	}
 	if err := os.Remove(path + helpers.ArtifactSHASidecarSuffix); err != nil && !os.IsNotExist(err) {
-		return err
+		return classifyCacheFailure(err)
 	}
 	return nil
 }

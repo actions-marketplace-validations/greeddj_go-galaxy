@@ -28,7 +28,7 @@ func New(cacheDir string) *Backend {
 // ensureOpen so the instance lock can be taken first, keeping a second
 // process from hanging on an unbounded Bolt file lock.
 func (b *Backend) Open(_ context.Context) error {
-	return b.ensureDir()
+	return classifyCacheFailure(b.ensureDir())
 }
 
 // Close releases any open resources.
@@ -38,7 +38,7 @@ func (b *Backend) Close(_ context.Context) error {
 	}
 	err := b.dbs.Close()
 	b.dbs = nil
-	return err
+	return classifyCacheFailure(err)
 }
 
 // Lock obtains an exclusive lock for the cache directory. It ensures the
@@ -46,25 +46,33 @@ func (b *Backend) Close(_ context.Context) error {
 // never called, then acquires the lock before any Bolt file is opened.
 func (b *Backend) Lock(_ context.Context) (func() error, error) {
 	if err := b.ensureDir(); err != nil {
-		return nil, err
+		return nil, classifyCacheFailure(err)
 	}
-	return store.AcquireLock(b.cacheDir)
+	release, err := store.AcquireLock(b.cacheDir)
+	if err != nil {
+		return nil, classifyCacheFailure(err)
+	}
+	return release, nil
 }
 
 // LoadStore loads the persistent snapshot store.
 func (b *Backend) LoadStore(_ context.Context) (*store.Store, error) {
 	if err := b.ensureOpen(); err != nil {
-		return nil, err
+		return nil, classifyCacheFailure(err)
 	}
-	return store.Load(b.dbs)
+	st, err := store.Load(b.dbs)
+	if err != nil {
+		return nil, classifyCacheFailure(err)
+	}
+	return st, nil
 }
 
 // SaveStore persists the snapshot store.
 func (b *Backend) SaveStore(_ context.Context, st *store.Store) error {
 	if err := b.ensureOpen(); err != nil {
-		return err
+		return classifyCacheFailure(err)
 	}
-	return store.Save(b.dbs, st)
+	return classifyCacheFailure(store.Save(b.dbs, st))
 }
 
 // ClearFiles removes cached artifact files from disk.
@@ -72,7 +80,7 @@ func (b *Backend) ClearFiles(_ context.Context) error {
 	if b.cacheDir == "" {
 		return helpers.ErrCacheDirEmpty
 	}
-	return store.ClearCacheFiles(b.cacheDir)
+	return classifyCacheFailure(store.ClearCacheFiles(b.cacheDir))
 }
 
 // RecordProject records the project in the local registry.
@@ -80,7 +88,7 @@ func (b *Backend) RecordProject(_ context.Context, requirementsFile, downloadPat
 	if b.cacheDir == "" {
 		return helpers.ErrCacheDirEmpty
 	}
-	return store.RecordProject(b.cacheDir, requirementsFile, downloadPath)
+	return classifyCacheFailure(store.RecordProject(b.cacheDir, requirementsFile, downloadPath))
 }
 
 // LoadProjectRegistry loads the local project registry.
@@ -88,7 +96,11 @@ func (b *Backend) LoadProjectRegistry(_ context.Context) (*store.ProjectRegistry
 	if b.cacheDir == "" {
 		return nil, helpers.ErrCacheDirEmpty
 	}
-	return store.LoadProjectRegistry(b.cacheDir)
+	registry, err := store.LoadProjectRegistry(b.cacheDir)
+	if err != nil {
+		return nil, classifyCacheFailure(err)
+	}
+	return registry, nil
 }
 
 // Artifacts returns the artifact store for the backend.
@@ -104,7 +116,7 @@ func (b *Backend) SweepTemp(_ context.Context) error {
 	if b.cacheDir == "" {
 		return helpers.ErrCacheDirEmpty
 	}
-	return store.SweepDownloadTemps(b.cacheDir)
+	return classifyCacheFailure(store.SweepDownloadTemps(b.cacheDir))
 }
 
 // ensureOpen lazily opens the Bolt snapshot files. Deferring this past

@@ -225,3 +225,111 @@ func assertLockFailsFast(t *testing.T, b *Backend) {
 		t.Fatal("Lock hung instead of failing fast")
 	}
 }
+
+// TestBackendClassifiesItsOwnFailures pins that this backend now speaks the
+// same cache-backend classes the S3 one does. Before it, a filesystem failure
+// came back bare and exited 1, while the S3 backend against a store it could
+// not reach exited 4 - one operator mistake, two exit codes, depending on a
+// backend choice a CI branching on the exit code does not know about.
+//
+// The rows are the two halves of the split and the two verdicts that must not
+// move. Contention is the sharpest of those: it is the one class this backend
+// always had, and a classifier that swallowed it would turn "another process
+// holds the cache" into "the cache is unusable", which is exactly the wrong
+// advice.
+func TestBackendClassifiesItsOwnFailures(t *testing.T) {
+	t.Parallel()
+
+	t.Run("permission failure is unusable", func(t *testing.T) {
+		t.Parallel()
+		dir := readOnlyDir(t)
+		// Lock, not Open: os.MkdirAll returns nil for a directory that already
+		// exists whatever its mode, so Open on a read-only cache directory
+		// succeeds and the permission failure lands where the lock file is
+		// created - which is exactly where a real run meets it.
+		_, err := New(dir).Lock(context.Background())
+		if !errors.Is(err, helpers.ErrCacheBackendUnusable) {
+			t.Fatalf("Lock on a read-only cache dir = %v, want errors.Is helpers.ErrCacheBackendUnusable", err)
+		}
+	})
+
+	t.Run("other filesystem failure is unavailable", func(t *testing.T) {
+		t.Parallel()
+		// A regular file where a parent directory belongs: the resulting
+		// ENOTDIR is neither a permission problem nor an absence, which is
+		// the whole "everything else" half of the split.
+		blocker := filepath.Join(t.TempDir(), "blocker")
+		if err := os.WriteFile(blocker, []byte("not a directory"), helpers.FileMod); err != nil {
+			t.Fatalf("write blocker: %v", err)
+		}
+		err := New(filepath.Join(blocker, "cache")).Open(context.Background())
+		if !errors.Is(err, helpers.ErrCacheBackendUnavailable) {
+			t.Fatalf("Open under a regular file = %v, want errors.Is helpers.ErrCacheBackendUnavailable", err)
+		}
+	})
+
+	t.Run("an empty cache dir stays a usage error", func(t *testing.T) {
+		t.Parallel()
+		err := New("").Open(context.Background())
+		if !errors.Is(err, helpers.ErrCacheDirEmpty) {
+			t.Fatalf("Open with no cache dir = %v, want errors.Is helpers.ErrCacheDirEmpty", err)
+		}
+		if errors.Is(err, helpers.ErrCacheBackendUnusable) || errors.Is(err, helpers.ErrCacheBackendUnavailable) {
+			t.Errorf("an operator's own configuration mistake must not be reclassified: %v", err)
+		}
+	})
+
+	t.Run("contention keeps its own class", testContentionKeepsItsOwnClass)
+}
+
+// testContentionKeepsItsOwnClass is the row above, split out to keep its
+// parent within the cyclomatic-complexity budget. It is the sharpest of the
+// four: contention is the one class this backend always spoke, and a
+// classifier that swallowed it would turn "another process holds the cache"
+// into "the cache is unusable", which is the wrong advice entirely.
+func testContentionKeepsItsOwnClass(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	release, err := New(dir).Lock(context.Background())
+	if err != nil {
+		t.Fatalf("first Lock: %v", err)
+	}
+	defer func() { _ = release() }()
+
+	_, err = New(dir).Lock(context.Background())
+	if !errors.Is(err, helpers.ErrAnotherInstanceIsRunning) {
+		t.Fatalf("second Lock = %v, want errors.Is helpers.ErrAnotherInstanceIsRunning", err)
+	}
+	if errors.Is(err, helpers.ErrCacheBackendUnusable) || errors.Is(err, helpers.ErrCacheBackendUnavailable) {
+		t.Errorf("contention must not be reclassified as a backend problem: %v", err)
+	}
+}
+
+// readOnlyDir returns a directory this process cannot write to, restoring its
+// mode afterwards so t.TempDir's own cleanup can remove it.
+func readOnlyDir(t *testing.T) string {
+	t.Helper()
+
+	dir := filepath.Join(t.TempDir(), "cache")
+	if err := os.MkdirAll(dir, helpers.DirMod); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	//nolint:gosec // 0o555 is a directory mode (read+traverse, no write), which is the condition under test.
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(dir, helpers.DirMod); err != nil {
+			t.Errorf("restoring directory mode: %v", err)
+		}
+	})
+	// A process running as root ignores the mode entirely, which would make
+	// the caller assert against a directory it can still write to. Prove the
+	// condition holds before returning it.
+	probe := filepath.Join(dir, "writable-probe")
+	if err := os.WriteFile(probe, []byte("x"), helpers.FileMod); err == nil {
+		_ = os.Remove(probe)
+		t.Skip("this process can write to a 0o555 directory (running as root?), so the permission case is unreachable here")
+	}
+	return dir
+}
