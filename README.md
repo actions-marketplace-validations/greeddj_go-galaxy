@@ -642,17 +642,51 @@ variables:
 
 install_collections:
   stage: install
-  image: ghcr.io/greeddj/go-galaxy:latest
-  before_script:
-    - export CACHE_KEY="$(go-galaxy hash)"
-    - echo "cache key = $CACHE_KEY"
+  # Not ghcr.io/greeddj/go-galaxy: that image is distroless and carries no
+  # shell, and GitLab runs every job's script through one, so a job in it
+  # cannot start at all. Drop the static binary into an ordinary image.
+  image: alpine:3
   cache:
-    key: "go-galaxy-$CACHE_KEY"
+    # cache:key is expanded when the job is created, and the cache is restored
+    # before before_script runs, so a key computed by a script step is always
+    # too late: whatever it expands to is the same for every pipeline, which
+    # means one shared cache entry rather than one per lockfile. cache:key:files
+    # makes GitLab hash the lockfile itself - the same input `go-galaxy hash`
+    # reads.
+    key:
+      files:
+        - requirements.lock.yml
+      prefix: go-galaxy
     paths:
       - .cache/go-galaxy
+  before_script:
+    - apk add --no-cache ca-certificates curl
+    - curl -sSLf -o /usr/local/bin/go-galaxy https://github.com/greeddj/go-galaxy/releases/latest/download/go-galaxy-linux-amd64
+    - chmod +x /usr/local/bin/go-galaxy
   script:
-    - go-galaxy install --frozen --offline -p ./collections
+    # --frozen without --offline: a cache miss is normal here - the first
+    # pipeline after a lockfile change gets one - and --offline would turn it
+    # into a failed job instead of a download.
+    - go-galaxy install --frozen -p ./collections
 ```
+
+**Distributed runners.** GitLab's own `cache:` is per-runner unless the runner
+is configured with a distributed cache, so with several runners each one
+rebuilds its own copy. Pointing go-galaxy at its own S3 cache instead gives
+every runner one shared artifact cache: set `GO_GALAXY_S3_BUCKET`,
+`GO_GALAXY_S3_REGION` and `GO_GALAXY_S3_PREFIX` in `variables:`, and
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` as masked project variables,
+which go-galaxy reads directly. Keep the `cache:` block alongside it: the
+extracted-tree store stays local to `GO_GALAXY_CACHE_DIR` even with the S3
+backend, so the job cache is what saves re-extracting every collection.
+
+Two runtime consequences of a shared S3 cache are worth knowing before you
+enable it. Jobs sharing one bucket serialize: a run holds the backend's
+exclusive lock for its whole duration, so a `parallel:` matrix against one
+bucket runs one job at a time, and a job that gives up waiting on another's
+lock exits `8`. And a bucket is a trust boundary, not just storage: give jobs
+that build untrusted branches or forks their own bucket, and see [Security /
+Trust model](#security--trust-model) for why a prefix alone is not a boundary.
 
 ### Lockfile drift gate
 
