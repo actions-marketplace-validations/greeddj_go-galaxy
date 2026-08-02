@@ -11,7 +11,7 @@ description: Run mutating maintenance commands for the go-galaxy Go repo — go 
 - "примени fieldalignment -fix" / "apply auto-fix"
 - After `go get` of a new module, before lint
 
-**Do not run these as part of routine checks.** They mutate go.mod, go.sum, and source files, and regenerate the git-ignored local vendor/ tree. Note that `just check`, `just build`, `just build_linux`, and `just run` *implicitly* run `just deps` already — call out vendor churn before invoking those if the user is mid-PR.
+**Do not run these as part of routine checks.** They mutate go.mod, go.sum, and source files, and regenerate the git-ignored local vendor/ tree. No other `just` target chains them: `check`, `build`, `build_linux`, `run` and `oci` all read `vendor/` without regenerating it, so a dependency change is not synced until someone runs `just deps` on purpose. A target failing with `inconsistent vendoring` is that state, and this skill is the fix.
 
 ## Commands
 
@@ -41,7 +41,7 @@ go tool fieldalignment -fix ./...
 3. `just deps` to sync `vendor/`.
 4. `just lint` to confirm.
 
-The current allowlist (stdlib `$gostd` plus): `github.com/greeddj/go-galaxy`, `github.com/BurntSushi/toml`, `github.com/Masterminds/semver`, `github.com/briandowns/spinner`, `github.com/klauspost/pgzip`, `github.com/psvmcc/hub`, `github.com/urfave/cli/v3`, `go.etcd.io/bbolt`, `gopkg.in/yaml.v3`.
+The current allowlist (stdlib `$gostd` plus): `go/ast`, `go/parser`, `go/token` (stdlib that `$gostd` does not expand to), `github.com/greeddj/go-galaxy`, `github.com/Masterminds/semver/v3`, `github.com/briandowns/spinner`, `github.com/klauspost/pgzip`, `github.com/psvmcc/hub`, `github.com/urfave/cli/v3`, `go.etcd.io/bbolt`, `gopkg.in/yaml.v3`. Read [.golangci.yml](.golangci.yml) rather than trusting this list.
 
 ## fieldalignment -fix caveats
 

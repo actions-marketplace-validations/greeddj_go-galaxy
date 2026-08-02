@@ -13,7 +13,7 @@ The project uses `just` (Justfile) as the task runner.
 - `just deps` - `go mod tidy && go mod vendor`. The repo is **vendored** locally, but `vendor/` is git-ignored and never committed - a dependency change commits `go.mod`/`go.sum` only, and CI builds in module mode with no committed vendor tree.
 - `just lint` - `golangci-lint run ./... --timeout=5m`.
 - `just test` - `go test ./...`.
-- `just check` - runs `go vet`, `staticcheck`, `govulncheck`, and `fieldalignment` (all wired through `go tool` directives in `go.mod`).
+- `just check` - runs `go vet`, `staticcheck`, `govulncheck`, and `fieldalignment` (all wired through `go tool` directives in `go.mod`). It mutates nothing and deliberately does not chain `just deps`, so a stale `vendor/` fails it with Go's own `inconsistent vendoring` error naming the module rather than being silently re-synced underneath the analyzers. `check` is a dependency of `build`, `build_linux` and `run`, which is why that property belongs to it rather than to each caller.
 - `just fix` - `go fix` + `fieldalignment -fix`.
 - `just run` - runs `check` + `lint` + `test`, then `go run -race ./cmd/go-galaxy/main.go`.
 - `just build` / `just build_linux` - produce binaries under `dist/` with version ldflags injected.

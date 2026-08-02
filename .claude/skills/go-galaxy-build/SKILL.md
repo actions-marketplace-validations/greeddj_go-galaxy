@@ -35,15 +35,15 @@ Both build targets:
 - `-trimpath`
 - `-ldflags="-s -w -X main.Version=<git-tag-or-branch> -X main.Commit=<short-sha> -X main.Date=<UTC-RFC3339> -X main.BuiltBy=just"`
 
-`Version` resolves to the latest git tag, falling back to current branch name if no tag exists. `Commit` is `git rev-parse --short HEAD`.
+`Version` is `git describe --tags --always --dirty`, so a build off a commit past the last tag reads `v1.2.3-42-gabc1234` and a build from an unclean tree gains a `-dirty` suffix; with no tags at all it is a bare short sha. It is deliberately not the nearest tag alone, which would make every build between two releases claim to be the earlier release. `Commit` is `git rev-parse --short HEAD`.
 
 ## Pre-build chain
 
-- `just build` depends on **`check lint test`** — every host build runs the full quality + test suite first. `just check` itself depends on `just deps` (mutates `vendor/`, `go.mod`, `go.sum`).
-- `just build_linux` depends on **`check`** only (no lint, no tests) — still mutating via `deps`.
+- `just build` depends on **`check lint test`** — every host build runs the full quality + test suite first.
+- `just build_linux` depends on **`check`** only (no lint, no tests).
 - `just oci` depends on `build_linux`.
 
-If the user wants a build *without* dep mutation, run `go build` directly with the same ldflags, or warn before proceeding.
+None of these mutate `go.mod`, `go.sum` or `vendor/`: `check` does not chain `just deps`. A build failing with `inconsistent vendoring` means `vendor/` is stale, and the fix is an explicit `just deps` (see the `go-galaxy-deps` skill).
 
 ## OCI gotchas
 

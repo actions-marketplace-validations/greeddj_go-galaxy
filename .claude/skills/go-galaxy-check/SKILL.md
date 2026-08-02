@@ -20,7 +20,7 @@ description: Run static-analysis quality gates for the go-galaxy Go repo via Jus
 | All gates in one go (vet + staticcheck + govulncheck + fieldalignment) | `just check` |
 | Lint + check + tests + run | `just run` |
 
-`just check` runs the four analyzers sequentially and **depends on `just deps`** — invoking it mutates `vendor/`, `go.mod`, `go.sum` before the analyzers run. If you only want analysis without dep churn, call the Go equivalents directly (below).
+`just check` runs the four analyzers sequentially and **mutates nothing**. It does not chain `just deps`: a gate that rewrote `go.mod`, `go.sum` and `vendor/` before reading them could only agree with itself. If `vendor/` is out of sync with `go.mod`, the run fails on Go's own vendor-consistency check naming the module, and the fix is to run `just deps` yourself.
 
 ## Direct Go equivalents (tight loop)
 

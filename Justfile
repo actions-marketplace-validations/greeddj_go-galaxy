@@ -1,5 +1,10 @@
 PROJECT := "go-galaxy"
-VERSION := `sh -c 'git describe --tags --abbrev=0 2>/dev/null || git rev-parse --abbrev-ref HEAD'`
+# --always --dirty, never --abbrev=0: a bare nearest-tag lookup makes every
+# build between two releases report the earlier release's version, so a binary
+# built from an arbitrary commit claims to be a shipped one. This keeps the
+# commit distance and the dirty marker, and falls back to a bare sha where no
+# tag exists at all.
+VERSION := `sh -c 'git describe --tags --always --dirty 2>/dev/null || echo unknown'`
 COMMIT := `git rev-parse --short HEAD`
 DATE := `date -u +%Y-%m-%dT%H:%M:%SZ`
 LDFLAGS := "-s -w" \
@@ -21,7 +26,11 @@ test:
 	@echo "===== Test {{PROJECT}} ====="
 	go test ./...
 
-check: deps
+# Deliberately does not depend on `deps`: a gate that rewrites go.mod, go.sum
+# and vendor/ before reading them can only ever agree with itself. Run
+# `just deps` yourself after changing a dependency; until then Go's own
+# vendor-consistency check fails the run and names what is out of sync.
+check:
 	@echo "===== Check {{PROJECT}} ====="
 	go vet ./...
 	go tool staticcheck ./...
