@@ -192,8 +192,8 @@ func TestParseAnsibleConfigLexicalQuirks(t *testing.T) {
 }
 
 // TestParseAnsibleConfigServerList checks that [galaxy] server_list is
-// captured as a plain string, with the same BC2 fidelity (verbatim value,
-// last-occurrence-wins) as every other [galaxy] key.
+// captured as a plain string, with the same drop-in ansible.cfg fidelity
+// (verbatim value, last-occurrence-wins) as every other [galaxy] key.
 func TestParseAnsibleConfigServerList(t *testing.T) {
 	t.Parallel()
 	runParseAnsibleConfigCases(t, []parseAnsibleConfigCase{
@@ -278,14 +278,14 @@ func TestParseAnsibleConfigGalaxyServerSections(t *testing.T) {
 }
 
 // TestParseAnsibleConfigGalaxyServerSectionsFidelity checks that a
-// [galaxy_server.<id>] section gets the same BC2 fidelity (verbatim
-// values, case-sensitive section matching, lowercased keys) as every other
-// section this parser tracks.
+// [galaxy_server.<id>] section gets the same drop-in ansible.cfg fidelity
+// (verbatim values, case-sensitive section matching, lowercased keys) as
+// every other section this parser tracks.
 func TestParseAnsibleConfigGalaxyServerSectionsFidelity(t *testing.T) {
 	t.Parallel()
 	runParseAnsibleConfigCases(t, []parseAnsibleConfigCase{
 		{
-			name: "quoted value and inline comment preserved verbatim (BC2 fidelity)",
+			name: "quoted value and inline comment preserved verbatim",
 			input: "[galaxy_server.prod]\n" +
 				`url = "https://prod.example"` + "\n" +
 				"token = abc123 # comment\n",

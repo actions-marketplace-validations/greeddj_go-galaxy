@@ -1,9 +1,9 @@
 // Package cache_test exercises WithStateDeadline as an external test
-// package specifically so it can import internal/cache/local (E3's real
-// local.Backend fixture) without an import cycle: internal/cache/local
-// itself imports internal/galaxy/cache for its Backend/ArtifactStore
-// interfaces, so a same-package (internal) test file here could never import
-// it back.
+// package specifically so it can import internal/cache/local - the real
+// local.Backend the decorator must be inert for - without an import cycle:
+// internal/cache/local itself imports internal/galaxy/cache for its
+// Backend/ArtifactStore interfaces, so a same-package (internal) test file
+// here could never import it back.
 package cache_test
 
 // This file pins WithStateDeadline's core drift guarantee: every one of the

@@ -466,13 +466,13 @@ func testCheckExtractMarkerMissing(t *testing.T) {
 	}
 }
 
-// TestPrefetchScanUsesCheapCheck proves shouldSchedulePrefetch still calls
+// TestPrefetchScanUsesCheapCheck proves shouldSchedulePrefetch calls
 // installRecordMatches - the bare-os.Stat cheap check - rather than
 // canSkipInstall's strict tally verification: a seeded install whose marker
-// is in the legacy "ok" format (which canSkipInstall would now reject) must
-// still make the prefetch scan report "already installed", so this unit does
-// not accidentally make the prefetch scan pay the cost or the strictness the
-// architect scoped to installCollection alone.
+// is in the legacy "ok" format (which canSkipInstall rejects) must
+// still make the prefetch scan report "already installed", so the prefetch
+// scan never pays the cost or the strictness that belongs to
+// installCollection alone.
 func TestPrefetchScanUsesCheapCheck(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

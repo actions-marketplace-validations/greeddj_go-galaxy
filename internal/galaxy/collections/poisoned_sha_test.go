@@ -6,8 +6,8 @@ package collections
 // operations marker.go's markerRel guards, and, for the
 // resolveArtifactSHA route, never gets persisted into the snapshot either.
 // Every victim file below lives inside this test's own t.TempDir() sandbox,
-// standing in for a real path outside the install root the way the
-// architect's own verified proof of concept used a root-relative path.
+// standing in for a real path outside the install root: each traversal sha
+// is sized to land back inside the sandbox rather than escape it.
 
 import (
 	"context"
@@ -28,7 +28,7 @@ import (
 	"github.com/psvmcc/hub/pkg/types"
 )
 
-// TestInstallRejectsPoisonedMetadataSHAOnCacheHit is T12: the full
+// TestInstallRejectsPoisonedMetadataSHAOnCacheHit covers the full
 // meta.Artifact.Sha256 route. The artifact cache is primed so isCacheHit is
 // true, and installCollection is driven with a metaOverride whose
 // Artifact.Sha256 is a traversal string - raw Galaxy API JSON a server
@@ -44,8 +44,8 @@ import (
 // invariant this test still asserts, but it holds regardless of whether
 // resolveArtifactSHA's own guard is present, and is kept as a
 // non-discriminating invariant guard rather than as proof of this specific
-// guard - this discrepancy from an earlier draft of this test was found by
-// actually removing the guard and observing (c) still pass.
+// guard - the discrepancy was found by actually removing the guard and
+// observing (c) still pass.
 //
 // A working fakegalaxy origin is wired in (not just a stub) so the
 // discriminating assertions below are meaningful: without
@@ -155,7 +155,7 @@ func TestInstallRejectsPoisonedMetadataSHAOnCacheHit(t *testing.T) {
 	}
 }
 
-// TestCanSkipInstallRefusesPoisonedSnapshotSHA is T13: the first reachable
+// TestCanSkipInstallRefusesPoisonedSnapshotSHA covers the first reachable
 // route, canSkipInstall reading entry.ArtifactSHA256 straight from a
 // (possibly poisoned) persisted snapshot. A real victim is seeded at the
 // location the traversal sha would reach, and canSkipInstall must both
@@ -183,8 +183,8 @@ func TestCanSkipInstallRefusesPoisonedSnapshotSHA(t *testing.T) {
 
 	// installPath is DownloadPath/ansible_collections/acme/widgets - three
 	// real path elements under downloadPath - so five ".." segments (no
-	// leading dot) land exactly at downloadPath itself, mirroring the
-	// architect's own verified arithmetic at this shallower depth.
+	// leading dot) land exactly at downloadPath itself, which keeps this
+	// test's victim inside its own sandbox at this shallower depth.
 	const traversalSHA = "../../../../../home/ci/.ssh/authorized_keys"
 	victim := filepath.Join(downloadPath, "home", "ci", ".ssh", "authorized_keys")
 	const victimContent = "ssh-ed25519 AAAA... ci@legit\n"

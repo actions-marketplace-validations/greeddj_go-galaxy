@@ -1727,7 +1727,7 @@ func assertExtractedDirGone(t *testing.T, cacheDir, sha string) {
 // TestMarkReachableFollowsTransitiveDependency proves the core reachability
 // safety guarantee: a collection that is not itself a root requirement, but
 // is a declared dependency of one, must survive cleanup, and this
-// reachability must also drive C08.3's snapshot-derived extracted-store
+// reachability must also drive the snapshot-derived extracted-store
 // sweep. ns.a is the sole root (via requirements.yml); ns.a declares
 // ns.b as a dependency in its manifest (exercising extractDeps's non-nil
 // branch and markReachable's deps[current] walk with a real, parsed

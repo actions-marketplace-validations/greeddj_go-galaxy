@@ -5,7 +5,7 @@ package collections
 // is rejected with helpers.ErrMalformedArtifactSHA256 unless it is exactly
 // helpers.IsSHA256Hex, while a value this process just computed (artifactSHA,
 // or a fresh archive.FileHashSHA256 result) is never subjected to that check
-// - and that the four existing precedence arms (pin, meta hit, sidecar hit,
+// - and that the four precedence arms (pin, meta hit, sidecar hit,
 // fallback hash) still behave when every value in play is well-formed.
 
 import (
@@ -40,7 +40,7 @@ func mustWriteTarball(t *testing.T, content []byte) string {
 	return path
 }
 
-// TestResolveArtifactSHARejectsMalformedMetaSha256 is T8: a traversal, a
+// TestResolveArtifactSHARejectsMalformedMetaSha256 checks that a traversal, a
 // short-but-hex value, and an uppercase value arriving via
 // meta.Artifact.Sha256 - the raw Galaxy API JSON branch - are all rejected
 // with helpers.ErrMalformedArtifactSHA256 and an empty resolved sha, never
@@ -74,7 +74,7 @@ func TestResolveArtifactSHARejectsMalformedMetaSha256(t *testing.T) {
 	}
 }
 
-// TestResolveArtifactSHARejectsMalformedSidecarSha256 is T9: the same three
+// TestResolveArtifactSHARejectsMalformedSidecarSha256 checks that the same three
 // malformed shapes, this time arriving via artifactMeta["sha256"] - the
 // cache-sidecar branch - are rejected identically.
 func TestResolveArtifactSHARejectsMalformedSidecarSha256(t *testing.T) {
@@ -105,7 +105,7 @@ func TestResolveArtifactSHARejectsMalformedSidecarSha256(t *testing.T) {
 	}
 }
 
-// TestResolveArtifactSHATrustsOwnComputationUnvalidated is T10: it pins the
+// TestResolveArtifactSHATrustsOwnComputationUnvalidated pins the
 // "never validate what we just computed" half of the rule against a future
 // reviewer who might otherwise "complete" the guard. artifactSHA is this
 // process's own hex.EncodeToString(hasher.Sum(nil)) over bytes it just
@@ -130,7 +130,7 @@ func TestResolveArtifactSHATrustsOwnComputationUnvalidated(t *testing.T) {
 	}
 }
 
-// TestResolveArtifactSHAPrecedence is T11: the four existing precedence arms
+// TestResolveArtifactSHAPrecedence checks that the four precedence arms
 // still behave when every value in play is well-formed - a lockfile pin
 // forces a real file hash regardless of what meta or the sidecar claim, a
 // well-formed meta hit is used directly, a well-formed sidecar hit is used
