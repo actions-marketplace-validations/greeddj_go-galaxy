@@ -188,6 +188,36 @@ func IsNotExist(err error) bool {
 	return errors.Is(err, fs.ErrNotExist)
 }
 
+// LoadRequired is Load for a caller that cannot proceed without the lockfile:
+// an absent file becomes helpers.ErrLockfileMissing naming the path, instead
+// of the bare fs.ErrNotExist Load returns.
+//
+// The distinction it draws is between commands, not between failures. "The
+// lockfile you asked me to read is not there" is a fact about the lockfile,
+// which is why it classifies as the lockfile exit class; reaching a command
+// through a bare fs.ErrNotExist instead lands it in the environment-usage
+// class, which is where the same absence used to send `tree`, `explain` and
+// `outdated` while it already sent `install --frozen` and its two siblings to
+// the lockfile class. Every command that requires a lockfile goes through
+// here, so the classification is a property of the loader rather than
+// something each call site has to remember.
+//
+// hash is the one deliberate exception and does not call this: a missing
+// lockfile there is not a failure at all, since it falls back to hashing the
+// requirements file for repositories that do not lock. It stays on Load and
+// branches on IsNotExist itself.
+func LoadRequired(path string) (*File, error) {
+	f, err := Load(path)
+	switch {
+	case err == nil:
+		return f, nil
+	case IsNotExist(err):
+		return nil, fmt.Errorf("%w: %s", helpers.ErrLockfileMissing, path)
+	default:
+		return nil, err
+	}
+}
+
 func canonicalize(f *File) {
 	if f.SchemaVersion == 0 {
 		f.SchemaVersion = SchemaVersion

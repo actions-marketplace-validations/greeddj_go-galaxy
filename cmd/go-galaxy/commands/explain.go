@@ -41,9 +41,9 @@ func Explain() *cli.Command {
 				reqPath = requirementsYAML
 			}
 			lockPath := lockfile.ResolveDefaultPath(reqPath, c.String("lock-file"))
-			lf, err := lockfile.Load(lockPath)
+			lf, err := lockfile.LoadRequired(lockPath)
 			if err != nil {
-				return fmt.Errorf("load lockfile %s: %w", lockPath, err)
+				return err
 			}
 			roots, _ := loadRootFQDNs(reqPath)
 			rootSet := make(map[string]bool, len(roots))

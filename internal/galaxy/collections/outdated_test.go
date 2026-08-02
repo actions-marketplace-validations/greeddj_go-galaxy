@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/greeddj/go-galaxy/cmd/go-galaxy/exitcode"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
+	"github.com/greeddj/go-galaxy/internal/galaxy/lockfile"
 )
 
 // errTestBoom stands in for a lookup failure's cause in
@@ -236,5 +239,42 @@ func TestReportOutdatedTiers(t *testing.T) {
 		if c.tier == "Printf" {
 			t.Errorf("reportOutdated must never use the transient Printf tier, got %+v", c)
 		}
+	}
+}
+
+// TestOutdatedMissingLockfileClassifiesAsLockfileError is outdated's share of
+// the unified verdict for a missing lockfile: the same fact that reaches
+// install --frozen, warm --frozen, lock --frozen, tree and explain must reach
+// this command as the same sentinel and the same exit class. It used to
+// arrive here as a bare fs.ErrNotExist and land in the environment-usage
+// class instead.
+//
+// The check runs before any network contact, so the fixture needs no server:
+// the requirements file exists and the lockfile beside it does not, which is
+// the only condition under test.
+func TestOutdatedMissingLockfileClassifiesAsLockfileError(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	reqPath := filepath.Join(dir, "requirements.yml")
+	mustWriteFile(t, reqPath, []byte("collections:\n  - name: acme.widgets\n    version: \"*\"\n"))
+
+	cfg := &config.Config{RequirementsFile: reqPath}
+	err := Outdated(context.Background(), cfg, infra.New(noopPrinter{}, nil))
+	if !errors.Is(err, helpers.ErrLockfileMissing) {
+		t.Fatalf("Outdated with no lockfile: err = %v, want errors.Is helpers.ErrLockfileMissing", err)
+	}
+	if got := exitcode.FromError(err); got != exitcode.ExitLock {
+		t.Errorf("exitcode.FromError(err) = %d, want ExitLock (%d)", got, exitcode.ExitLock)
+	}
+
+	// Positive control on the same fixture: with a lockfile in place the
+	// command gets past this gate, so the failure above is the absence of the
+	// file and not the fixture failing to reach the load at all. Offline
+	// stops it at the next step, which is not the sentinel under test.
+	mustWriteFile(t, filepath.Join(dir, lockfile.DefaultName),
+		[]byte("schema_version: 1\ncollections: []\n"))
+	cfg.Offline = true
+	if err := Outdated(context.Background(), cfg, infra.New(noopPrinter{}, nil)); errors.Is(err, helpers.ErrLockfileMissing) {
+		t.Errorf("Outdated with a lockfile present still reported it missing: %v", err)
 	}
 }

@@ -726,6 +726,14 @@ pipelines can branch on failure type without parsing log output:
 |    9 | Persisted cache state is corrupt or oversized and must be discarded (a project registry that fails to decode, a state object that exceeds its size ceiling, or - local backend only - a Bolt snapshot file that fails one of its own corruption checks)                                                                                                                                                                                                           |
 |  130 | Interrupted (a caught SIGINT, or the caller's own context canceled)                                                                                                                                                                                                                                                                                                                                                                                               |
 
+Exit `6`'s "missing" half is uniform across every command that requires a
+lockfile: `install --frozen`, `warm --frozen`, `lock --frozen`, `tree`,
+`explain` and `outdated` all exit `6` when the lockfile they were told to read
+is not there, rather than treating its absence as a usage error. `hash` is the
+one deliberate exception and exits `0`: with no lockfile it falls back to
+hashing `requirements.yml`, which is the documented behavior for repositories
+that do not lock.
+
 Exit `7` covers content that failed to authenticate against the sha256 that
 named it - a lockfile pin, a Galaxy server's declared digest, a cache sidecar,
 or the extracted store's content-address key - or a digest that was

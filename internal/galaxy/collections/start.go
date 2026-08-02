@@ -493,12 +493,9 @@ func lockFrozen(
 	path string,
 	start time.Time,
 ) error {
-	existing, err := lockfile.Load(path)
+	existing, err := lockfile.LoadRequired(path)
 	if err != nil {
-		if lockfile.IsNotExist(err) {
-			return fmt.Errorf("%w: %s", helpers.ErrLockfileMissing, path)
-		}
-		return fmt.Errorf("load lockfile %s: %w", path, err)
+		return err
 	}
 
 	diff := lockfile.Compare(existing, lf)
@@ -1017,11 +1014,8 @@ func resolveOrLoadLockfile(
 	if cfg.Frozen {
 		path := lockfile.ResolveDefaultPath(cfg.RequirementsFile, cfg.LockFile)
 		runtime.Output.Printf("🔒 frozen: using lockfile %s", path)
-		lf, err := lockfile.Load(path)
+		lf, err := lockfile.LoadRequired(path)
 		if err != nil {
-			if lockfile.IsNotExist(err) {
-				return nil, nil, fmt.Errorf("%w: %s", helpers.ErrLockfileMissing, path)
-			}
 			return nil, nil, err
 		}
 		return resolveFromLockfile(cfg, lf, prep)

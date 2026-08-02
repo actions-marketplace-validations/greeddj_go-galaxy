@@ -65,9 +65,9 @@ func Outdated(ctx context.Context, cfg *config.Config, runtime *infra.Infra) err
 
 	start := time.Now()
 	lockPath := lockfile.ResolveDefaultPath(cfg.RequirementsFile, cfg.LockFile)
-	lf, err := lockfile.Load(lockPath)
+	lf, err := lockfile.LoadRequired(lockPath)
 	if err != nil {
-		return fmt.Errorf("load lockfile %s: %w", lockPath, err)
+		return err
 	}
 
 	results := queryLatestVersions(ctx, cfg, runtime, lf)

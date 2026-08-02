@@ -324,8 +324,12 @@ var (
 	ErrStateObjectDeadline = errors.New("cache state object deadline exceeded")
 	// ErrLockfileMismatch indicates the lockfile content does not match the resolution.
 	ErrLockfileMismatch = errors.New("lockfile does not match resolved requirements")
-	// ErrLockfileMissing indicates a lockfile was required but not found.
-	ErrLockfileMissing = errors.New("lockfile is required by --frozen but not found")
+	// ErrLockfileMissing indicates a lockfile a command required was not
+	// found. The text names no flag: the same absence reaches this sentinel
+	// from --frozen's three commands and from tree, explain and outdated,
+	// which require the lockfile for a reason of their own, and a message
+	// naming --frozen would be false for four of the six.
+	ErrLockfileMissing = errors.New("lockfile not found")
 	// ErrLockfileInvalid indicates the lockfile is malformed or unsupported.
 	ErrLockfileInvalid = errors.New("lockfile is invalid")
 	// ErrLockfileDrift indicates lock --frozen compared a fresh resolve
