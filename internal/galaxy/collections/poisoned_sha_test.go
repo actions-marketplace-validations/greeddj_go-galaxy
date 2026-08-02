@@ -5,9 +5,13 @@ package collections
 // resolveArtifactSHA and canSkipInstall read - never reaches the filesystem
 // operations marker.go's markerRel guards, and, for the
 // resolveArtifactSHA route, never gets persisted into the snapshot either.
-// Every victim file below lives inside this test's own t.TempDir() sandbox,
-// standing in for a real path outside the install root: each traversal sha
-// is sized to land back inside the sandbox rather than escape it.
+// Every victim file below sits outside the collection's own install
+// directory but deliberately inside the rooting boundary: openCollectionsRoot
+// establishes its os.Root at cfg.DownloadPath, and each traversal sha is
+// sized to land back under that root rather than escape it. That placement is
+// what puts markerRel under test at all - a victim beyond the root would be
+// refused by target.root first, and every assertion here would hold without
+// markerRel ever being consulted.
 
 import (
 	"context"
@@ -95,9 +99,10 @@ func TestInstallRejectsPoisonedMetadataSHAOnCacheHit(t *testing.T) {
 	mustWriteFile(t, artifactPath, []byte("cached tarball bytes, irrelevant to this test"))
 
 	// The canary this test's assertion (b) protects: a file outside the
-	// install root entirely, at a location the traversal sha below would
-	// have reached had marker.go's own guard been the only defense in
-	// place - see poisoned_sha_test.go's package doc for the arithmetic.
+	// collection's own install directory, at the location the traversal sha
+	// below would have reached had marker.go's own guard not rejected the sha
+	// first - see this file's package doc for why it has to stay inside the
+	// rooting boundary.
 	victim := filepath.Join(downloadPath, "home", "ci", ".ssh", "authorized_keys")
 	const victimContent = "ssh-ed25519 AAAA... ci@legit\n"
 	mustMkdirAll(t, filepath.Dir(victim))

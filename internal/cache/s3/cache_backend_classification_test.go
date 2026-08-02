@@ -152,10 +152,10 @@ func TestClientDoClassifiesConnectionFailureAsCacheBackendUnavailable(t *testing
 // real transport error each shape produces on this toolchain (reported at the
 // caller's line, since the helper calls t.Helper()):
 //
-//	cache_backend_classification_test.go:200: expected errors.Is(err, helpers.ErrCacheBackendUnavailable),
+//	cache_backend_classification_test.go:201: expected errors.Is(err, helpers.ErrCacheBackendUnavailable),
 //	got Get "http://127.0.0.1:<port>/test/some-key": dial tcp 127.0.0.1:<port>: i/o timeout
 //
-//	cache_backend_classification_test.go:200: expected errors.Is(err, helpers.ErrCacheBackendUnavailable),
+//	cache_backend_classification_test.go:201: expected errors.Is(err, helpers.ErrCacheBackendUnavailable),
 //	got Get "http://127.0.0.1:<port>/test/some-key": net/http: timeout awaiting response headers
 //
 // while TestClientDoClassifiesConnectionFailureAsCacheBackendUnavailable and

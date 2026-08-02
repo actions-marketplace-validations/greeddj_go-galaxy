@@ -46,8 +46,8 @@ const validMarkerSHA = "0123456789abcdef0123456789abcdef0123456789abcdef01234567
 // every test that seeds an "already installed" tree gets a tally that
 // actually matches the tree on disk (entries=0 dirs=0 bytes=0 for an empty
 // tree): canSkipInstall's tally-checking gate rejects a marker that merely
-// exists but does not carry a matching tally, so a bare os.Stat-satisfying
-// placeholder is not enough here.
+// exists but does not carry a matching tally, so a placeholder that only has
+// to be found by a Stat is not enough here.
 func seedValidExtractMarker(t *testing.T, target installTarget, sha string) {
 	t.Helper()
 	if err := writeExtractMarker(target, sha); err != nil {
@@ -467,7 +467,9 @@ func testCheckExtractMarkerMissing(t *testing.T) {
 }
 
 // TestPrefetchScanUsesCheapCheck proves shouldSchedulePrefetch calls
-// installRecordMatches - the bare-os.Stat cheap check - rather than
+// installRecordMatches - the cheap check, which roots the marker path through
+// markerRel and then only asks target.root.Stat whether it and the sidecar
+// are there, reading neither - rather than
 // canSkipInstall's strict tally verification: a seeded install whose marker
 // is in the legacy "ok" format (which canSkipInstall rejects) must
 // still make the prefetch scan report "already installed", so the prefetch

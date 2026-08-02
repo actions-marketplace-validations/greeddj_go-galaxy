@@ -73,7 +73,7 @@ var sentinelClassCases = []struct {
 // to errS3LockWaitTimeout's wrap makes the "errS3LockWaitTimeout" subtest
 // fail with:
 //
-//	sentinel_class_test.go:82: errors.Is(err, helpers.ErrCacheBackendUnavailable) = true, want false
+//	sentinel_class_test.go:85: errors.Is(err, helpers.ErrCacheBackendUnavailable) = true, want false
 func TestSentinelClassPartitionIsExhaustiveAndExclusive(t *testing.T) {
 	for _, tt := range sentinelClassCases {
 		t.Run(tt.name, func(t *testing.T) {

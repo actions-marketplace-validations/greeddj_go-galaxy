@@ -1,0 +1,663 @@
+package proseaudit
+
+import (
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strconv"
+	"strings"
+	"testing"
+)
+
+// citationPattern matches a `file.go:NNN` or `file.go:NNN-MMM` reference,
+// with NNN and MMM real numbers - this package spells its own examples with
+// placeholders so that the gate needs no exemption for the file defining it.
+// The leading path is matched and then discarded down to its base name, so a
+// citation copied verbatim out of a stack frame (`.../failures.go:NNN +0x104`)
+// is recognized rather than skipped for the noise around it.
+var citationPattern = regexp.MustCompile(`([\w./-]+\.go):(\d+)(?:-(\d+))?`)
+
+// citation is one line reference read out of one comment.
+type citation struct {
+	// target is the cited file's base name, path prefix stripped.
+	target string
+	// raw is the reference as written, reproduced in the failure message so
+	// the reader can find it by searching for what they typed.
+	raw string
+	// first and last are the cited line span; both hold the same number for
+	// the common single-line form.
+	first int
+	last  int
+}
+
+// pkgFiles is one directory's parsed Go files, keyed by base name. Files of a
+// directory's `foo` and `foo_test` packages are deliberately held together:
+// helper resolution has to see across that split, and this repository keeps
+// its tests in-package anyway.
+type pkgFiles map[string]*ast.File
+
+// TestCommentLineReferencesResolve is the gate. Every `file.go:NNN` in every
+// comment in the module must name a line `go test` could report a failure on,
+// in a test file of the same package.
+//
+// Run against a real one-line drift and back: rewriting one accurate citation
+// in internal/galaxy/lockfile/lockfile_test.go to name the line above its
+// assertion instead made this test fail with
+//
+//	refs_test.go:78: stale or forbidden line citations:
+//
+// followed by one line naming that file, the comment's own line, and the
+// cited line that is not one go test could report a failure on; restoring the
+// digit made it pass again. That offending citation is described rather than
+// reproduced here on purpose - this gate reads comments, so a bad citation
+// quoted verbatim inside one is audited as a citation and fails the very gate
+// quoting it.
+func TestCommentLineReferencesResolve(t *testing.T) {
+	t.Parallel()
+
+	root := moduleRoot(t)
+	fset := token.NewFileSet()
+
+	var problems []string
+	for _, dir := range goDirs(t, root) {
+		rel, err := filepath.Rel(root, dir)
+		if err != nil {
+			t.Fatalf("relative path of %s: %v", dir, err)
+		}
+		for _, problem := range auditPackage(fset, parseDir(t, fset, dir)) {
+			problems = append(problems, filepath.Join(rel, problem))
+		}
+	}
+
+	if len(problems) > 0 {
+		t.Fatalf("stale or forbidden line citations:\n\t%s", strings.Join(problems, "\n\t"))
+	}
+}
+
+// TestAuditReportsAStaleLineCitation is the gate's positive control. The same
+// fixture is audited twice, differing only in the cited number: with the
+// citation on the assertion's own line it must produce nothing, and one line
+// past that assertion it must be reported. Without the first half, "the audit
+// found nothing" would be indistinguishable from "the audit never reached the
+// check".
+func TestAuditReportsAStaleLineCitation(t *testing.T) {
+	t.Parallel()
+
+	accurate, fatalLine := fixtureSource(0)
+	if problems := auditFixture(t, fixtureName, accurate); len(problems) != 0 {
+		t.Fatalf("accurate citation of line %d reported as a problem: %v", fatalLine, problems)
+	}
+
+	stale, _ := fixtureSource(1)
+	problems := auditFixture(t, fixtureName, stale)
+	if len(problems) != 1 {
+		t.Fatalf("citation one line past the assertion reported %d problems, want 1: %v", len(problems), problems)
+	}
+	if !strings.Contains(problems[0], strconv.Itoa(fatalLine+1)) {
+		t.Fatalf("problem does not name the stale line %d: %s", fatalLine+1, problems[0])
+	}
+}
+
+// TestAuditReportsACitationIntoAProductionFile pins the production-file ban,
+// and pins it as a ban rather than as a line check: the cited line is a real,
+// existing line of the production file, so a build that reported nothing here
+// would be one that had silently downgraded the rule to "the line must
+// exist". The control is the same fixture with the citation replaced by the
+// identifier the rule asks for.
+func TestAuditReportsACitationIntoAProductionFile(t *testing.T) {
+	t.Parallel()
+
+	fset := token.NewFileSet()
+	files := pkgFiles{
+		productionName:     parseFixture(t, fset, productionName, productionSource),
+		productionTestName: parseFixture(t, fset, productionTestName, productionTestSource(true)),
+	}
+	problems := auditPackage(fset, files)
+	if len(problems) != 1 {
+		t.Fatalf("citation into a production file reported %d problems, want 1: %v", len(problems), problems)
+	}
+	if !strings.Contains(problems[0], productionName) {
+		t.Fatalf("problem does not name the cited production file: %s", problems[0])
+	}
+
+	files[productionTestName] = parseFixture(t, fset, productionTestName, productionTestSource(false))
+	if problems := auditPackage(fset, files); len(problems) != 0 {
+		t.Fatalf("naming the identifier instead of a line was reported as a problem: %v", problems)
+	}
+}
+
+// TestAuditAcceptsAHelperCallAndADeclarationLine covers the two accepting
+// branches the module's own citations reach least often, so that neither can
+// rot into an accept-everything. Each is checked against its own negative: a
+// call to a same-package function that does not call t.Helper() is not a
+// failure site, and a line inside a function body that holds no assertion is
+// not one either.
+func TestAuditAcceptsAHelperCallAndADeclarationLine(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range helperFixtureCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			source, line := helperFixtureSource(tc.marker)
+			problems := auditFixture(t, fixtureName, source)
+			if tc.wantProblem && len(problems) == 0 {
+				t.Fatalf("citation of line %d (%s) was accepted, want reported", line, tc.name)
+			}
+			if !tc.wantProblem && len(problems) != 0 {
+				t.Fatalf("citation of line %d (%s) was reported: %v", line, tc.name, problems)
+			}
+		})
+	}
+}
+
+// helperFixtureCase is one row of TestAuditAcceptsAHelperCallAndADeclarationLine:
+// marker names the fixture line to cite, wantProblem states whether the audit
+// must reject that citation.
+type helperFixtureCase struct {
+	name        string
+	marker      string
+	wantProblem bool
+}
+
+// helperFixtureCases returns the four lines of one fixture that separate the
+// two accepting branches from their negatives.
+func helperFixtureCases() []helperFixtureCase {
+	return []helperFixtureCase{
+		{name: "call_to_t_Helper_function", marker: helperCallMarker, wantProblem: false},
+		{name: "declaration_line", marker: declarationMarker, wantProblem: false},
+		{name: "call_to_plain_function", marker: plainCallMarker, wantProblem: true},
+		{name: "line_with_no_assertion", marker: inertMarker, wantProblem: true},
+	}
+}
+
+// auditPackage reports every bad citation in one directory's parsed files, as
+// `file:line: message` relative to that directory.
+func auditPackage(fset *token.FileSet, files pkgFiles) []string {
+	helpers := helperFuncs(files)
+
+	targets := make(map[string]map[int]bool, len(files))
+	for name, file := range files {
+		targets[name] = failureLines(fset, file, helpers)
+	}
+
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+
+	problems := make([]string, 0, len(names))
+	for _, name := range names {
+		problems = append(problems, auditFile(fset, name, files[name], targets)...)
+	}
+	return problems
+}
+
+// auditFile reports the bad citations carried by one file's comments. Only
+// *ast.Comment nodes are read, so a citation inside a string literal or a
+// testdata fixture is out of scope by construction rather than by heuristic -
+// which is also what keeps this file's own fixtures, which are string
+// literals holding exactly such citations, from being audited as prose.
+func auditFile(fset *token.FileSet, name string, file *ast.File, targets map[string]map[int]bool) []string {
+	var problems []string
+	for _, group := range file.Comments {
+		for _, comment := range group.List {
+			base := fset.Position(comment.Pos()).Line
+			for _, span := range citationPattern.FindAllStringSubmatchIndex(comment.Text, -1) {
+				cited, ok := parseCitation(comment.Text, span)
+				if !ok {
+					continue
+				}
+				if problem := checkCitation(cited, targets); problem != "" {
+					line := base + strings.Count(comment.Text[:span[0]], "\n")
+					problems = append(problems, fmt.Sprintf("%s:%d: %s", name, line, problem))
+				}
+			}
+		}
+	}
+	return problems
+}
+
+// parseCitation turns one regexp match into a citation. It reports false for
+// a line number too large to be one, which no comment in this repository
+// carries but which a malformed citation could produce.
+func parseCitation(text string, span []int) (citation, bool) {
+	group := func(i int) string {
+		if span[2*i] < 0 {
+			return ""
+		}
+		return text[span[2*i]:span[2*i+1]]
+	}
+
+	first, err := strconv.Atoi(group(2))
+	if err != nil {
+		return citation{}, false
+	}
+	last := first
+	if end := group(3); end != "" {
+		if last, err = strconv.Atoi(end); err != nil {
+			return citation{}, false
+		}
+	}
+	return citation{
+		target: filepath.Base(group(1)),
+		raw:    group(0),
+		first:  first,
+		last:   last,
+	}, true
+}
+
+// checkCitation returns the problem with one citation, or "" when it is
+// sound.
+//
+// The production-file ban is checked first and without consulting the file at
+// all, because it is not a claim about the cited line: a line number into
+// production code is unverifiable in principle once the reason it was quoted
+// is gone - a stack frame from a mutated tree, say - and it is strictly less
+// informative than the identifier that sits there, which survives every edit
+// above it.
+func checkCitation(cited citation, targets map[string]map[int]bool) string {
+	if !strings.HasSuffix(cited.target, "_test.go") {
+		return cited.raw + " cites a production file; name the identifier instead of a line"
+	}
+
+	lines, ok := targets[cited.target]
+	if !ok {
+		return cited.raw + " cites a file that is not in this package"
+	}
+
+	for line := cited.first; line <= cited.last; line++ {
+		if !lines[line] {
+			return fmt.Sprintf("%s cites line %d, which is not a line go test could report a failure on", cited.raw, line)
+		}
+	}
+	return ""
+}
+
+// failureSites accumulates the failure-attributable lines of one file.
+type failureSites struct {
+	fset    *token.FileSet
+	helpers map[string]bool
+	lines   map[int]bool
+}
+
+// failureLines returns every line of file that `go test` could attribute a
+// failure to. Three shapes qualify, and together they are the predicate "a
+// line a failure could be reported on", not a list of conveniences:
+//
+//   - a call to Fatal/Fatalf/Error/Errorf/Log/Logf/Skip/Skipf on a value bound
+//     to a *testing.T (or *testing.B, *testing.F, testing.TB) - matched over
+//     the call's whole Lparen..Rparen span, so a multi-line call matches on
+//     any of its lines, which is where the reported number often lands;
+//   - a call to a same-package function whose body calls t.Helper(), since
+//     that is exactly the construct that makes `go test` report the caller's
+//     line instead of the assertion's own;
+//   - a function's declaration line, for the "see that test" citation, which
+//     names a test rather than a failure.
+func failureLines(fset *token.FileSet, file *ast.File, helpers map[string]bool) map[int]bool {
+	sites := &failureSites{fset: fset, helpers: helpers, lines: make(map[int]bool)}
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		sites.lines[fset.Position(fn.Pos()).Line] = true
+		sites.scan(fn.Body, fn.Type.Params, nil)
+	}
+	return sites.lines
+}
+
+// scan walks one function body, marking every failure site in it. outer
+// carries the testing identifiers visible from an enclosing function, so a
+// subtest closure rebinding t is read with its own binding rather than the
+// parent's.
+func (s *failureSites) scan(body *ast.BlockStmt, params *ast.FieldList, outer map[string]bool) {
+	if body == nil {
+		return
+	}
+	idents := testingIdents(params, outer)
+	ast.Inspect(body, func(node ast.Node) bool {
+		switch typed := node.(type) {
+		case *ast.FuncLit:
+			s.scan(typed.Body, typed.Type.Params, idents)
+			return false
+		case *ast.CallExpr:
+			if isFailureCall(typed, idents, s.helpers) {
+				s.mark(typed.Lparen, typed.Rparen)
+			}
+		}
+		return true
+	})
+}
+
+// mark records every line the span from..to covers.
+func (s *failureSites) mark(from, to token.Pos) {
+	for line := s.fset.Position(from).Line; line <= s.fset.Position(to).Line; line++ {
+		s.lines[line] = true
+	}
+}
+
+// isFailureCall reports whether call is one of the two call shapes a failure
+// can be attributed to: an assertion on a testing value, or a call to a
+// same-package helper.
+func isFailureCall(call *ast.CallExpr, idents, helpers map[string]bool) bool {
+	switch fun := call.Fun.(type) {
+	case *ast.SelectorExpr:
+		receiver, ok := fun.X.(*ast.Ident)
+		return ok && idents[receiver.Name] && isFailureSelector(fun.Sel.Name)
+	case *ast.Ident:
+		return helpers[fun.Name]
+	default:
+		return false
+	}
+}
+
+// isFailureSelector reports whether name is a testing method that can carry a
+// file:line into the output.
+func isFailureSelector(name string) bool {
+	switch name {
+	case "Fatal", "Fatalf", "Error", "Errorf", "Log", "Logf", "Skip", "Skipf":
+		return true
+	default:
+		return false
+	}
+}
+
+// helperFuncs returns the names of the package's plain functions whose body
+// calls Helper() on a testing value. Methods are excluded: a citation
+// resolves a bare identifier, and a method call is never one.
+func helperFuncs(files pkgFiles) map[string]bool {
+	out := make(map[string]bool)
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv != nil || !callsHelper(fn) {
+				continue
+			}
+			out[fn.Name.Name] = true
+		}
+	}
+	return out
+}
+
+// callsHelper reports whether fn's body calls Helper() on one of its own
+// testing parameters.
+func callsHelper(fn *ast.FuncDecl) bool {
+	if fn.Body == nil {
+		return false
+	}
+	idents := testingIdents(fn.Type.Params, nil)
+
+	found := false
+	ast.Inspect(fn.Body, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || selector.Sel.Name != "Helper" {
+			return true
+		}
+		receiver, ok := selector.X.(*ast.Ident)
+		found = found || (ok && idents[receiver.Name])
+		return !found
+	})
+	return found
+}
+
+// testingIdents returns the identifiers bound to a testing value in a
+// function with these parameters, on top of those visible from outer.
+func testingIdents(params *ast.FieldList, outer map[string]bool) map[string]bool {
+	idents := make(map[string]bool, len(outer))
+	for name := range outer {
+		idents[name] = true
+	}
+	if params == nil {
+		return idents
+	}
+	for _, field := range params.List {
+		if !isTestingType(field.Type) {
+			continue
+		}
+		for _, name := range field.Names {
+			idents[name.Name] = true
+		}
+	}
+	return idents
+}
+
+// isTestingType reports whether expr is *testing.T, *testing.B, *testing.F,
+// or testing.TB.
+func isTestingType(expr ast.Expr) bool {
+	if star, ok := expr.(*ast.StarExpr); ok {
+		expr = star.X
+	}
+	selector, ok := expr.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	pkg, ok := selector.X.(*ast.Ident)
+	if !ok || pkg.Name != "testing" {
+		return false
+	}
+	switch selector.Sel.Name {
+	case "T", "B", "F", "TB":
+		return true
+	default:
+		return false
+	}
+}
+
+// moduleRoot walks up from this package's directory to the one holding
+// go.mod.
+func moduleRoot(t *testing.T) string {
+	t.Helper()
+
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("working directory: %v", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("no go.mod above %s", dir)
+		}
+		dir = parent
+	}
+}
+
+// goDirs returns every directory under root holding at least one .go file.
+// vendor/ is skipped because it is not this repository's prose, testdata/
+// because its contents are fixtures rather than code, and dot-directories
+// because they hold tooling rather than the module.
+func goDirs(t *testing.T, root string) []string {
+	t.Helper()
+
+	seen := make(map[string]bool)
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if skipDir(path, root, entry.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(entry.Name(), ".go") {
+			seen[filepath.Dir(path)] = true
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking %s: %v", root, err)
+	}
+
+	dirs := make([]string, 0, len(seen))
+	for dir := range seen {
+		dirs = append(dirs, dir)
+	}
+	slices.Sort(dirs)
+	return dirs
+}
+
+// skipDir reports whether the walk must not descend into this directory.
+func skipDir(path, root, name string) bool {
+	if path == root {
+		return false
+	}
+	return name == "vendor" || name == "testdata" || strings.HasPrefix(name, ".")
+}
+
+// parseDir parses every .go file directly in dir, comments included.
+func parseDir(t *testing.T, fset *token.FileSet, dir string) pkgFiles {
+	t.Helper()
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading %s: %v", dir, err)
+	}
+
+	files := make(pkgFiles)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filepath.Join(dir, entry.Name()), nil, parser.ParseComments)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", filepath.Join(dir, entry.Name()), err)
+		}
+		files[entry.Name()] = file
+	}
+	return files
+}
+
+// Fixture names and the placeholder the fixture builders substitute a
+// computed line number into. The placeholder keeps the built source
+// line-for-line identical to the source the line numbers were computed
+// against, which is the same discipline the citations themselves are held to.
+const (
+	fixtureName        = "fixture_test.go"
+	productionName     = "thing.go"
+	productionTestName = "thing_test.go"
+	citedPlaceholder   = "CITED"
+)
+
+// Markers naming the fixture lines TestAuditAcceptsAHelperCallAndADeclarationLine
+// cites, one per row of its table.
+const (
+	helperCallMarker  = "\tcheckThing(t)"
+	declarationMarker = "func TestFixture(t *testing.T) {"
+	plainCallMarker   = "\tsetUp()"
+	inertMarker       = "\tvalue := 1"
+)
+
+// fixtureLines is the source TestAuditReportsAStaleLineCitation audits, held
+// as lines so the assertion's number is computed rather than counted by hand.
+func fixtureLines() []string {
+	return []string{
+		"package fixture",
+		"",
+		`import "testing"`,
+		"",
+		"// TestFixture fails with:",
+		"//",
+		"//\tfixture_test.go:CITED: boom",
+		"func TestFixture(t *testing.T) {",
+		"\tt.Fatalf(\"boom\")",
+		"}",
+	}
+}
+
+// fixtureSource returns the fixture citing its assertion's line plus offset,
+// together with the line that assertion really sits on.
+func fixtureSource(offset int) (string, int) {
+	lines := fixtureLines()
+	fatal := slices.Index(lines, "\tt.Fatalf(\"boom\")") + 1
+	source := strings.ReplaceAll(strings.Join(lines, "\n"), citedPlaceholder, strconv.Itoa(fatal+offset))
+	return source, fatal
+}
+
+// helperFixtureLines is the source TestAuditAcceptsAHelperCallAndADeclarationLine
+// audits: one file holding both accepting branches and both of their
+// negatives.
+func helperFixtureLines() []string {
+	return []string{
+		"package fixture",
+		"",
+		`import "testing"`,
+		"",
+		"// TestFixture fails with:",
+		"//",
+		"//\tfixture_test.go:CITED: boom",
+		declarationMarker,
+		plainCallMarker,
+		inertMarker,
+		"\t_ = value",
+		helperCallMarker,
+		"}",
+		"",
+		"func checkThing(t *testing.T) {",
+		"\tt.Helper()",
+		"\tt.Fatalf(\"boom\")",
+		"}",
+		"",
+		"func setUp() {}",
+	}
+}
+
+// helperFixtureSource returns that fixture citing the line marker sits on,
+// together with that line.
+func helperFixtureSource(marker string) (string, int) {
+	lines := helperFixtureLines()
+	cited := slices.Index(lines, marker) + 1
+	source := strings.ReplaceAll(strings.Join(lines, "\n"), citedPlaceholder, strconv.Itoa(cited))
+	return source, cited
+}
+
+// productionSource is the fixture's production file: the cited line exists and
+// holds real code, so rejecting a citation of it can only be the ban firing.
+const productionSource = `package fixture
+
+func Thing() int {
+	return 1
+}
+`
+
+// productionTestSource returns the fixture's test file, citing the production
+// file by line when byLine is set and by identifier otherwise.
+func productionTestSource(byLine bool) string {
+	reference := "Thing"
+	if byLine {
+		reference = productionName + ":4"
+	}
+	return fmt.Sprintf("package fixture\n\n// TestThing pins %s.\nfunc TestThing() {}\n", reference)
+}
+
+// auditFixture parses one in-memory file and audits it as its own package.
+func auditFixture(t *testing.T, name, source string) []string {
+	t.Helper()
+
+	fset := token.NewFileSet()
+	return auditPackage(fset, pkgFiles{name: parseFixture(t, fset, name, source)})
+}
+
+// parseFixture parses one in-memory source file, comments included.
+func parseFixture(t *testing.T, fset *token.FileSet, name, source string) *ast.File {
+	t.Helper()
+
+	file, err := parser.ParseFile(fset, name, source, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parsing fixture %s: %v", name, err)
+	}
+	return file
+}

@@ -20,6 +20,12 @@ linters:
         main:
           allow:
             - $gostd
+            # Standard library, but outside depguard's own $gostd expansion,
+            # which does not cover the go/ tree. Used only by the comment
+            # audit in internal/proseaudit.
+            - go/ast
+            - go/parser
+            - go/token
             - github.com/greeddj/go-galaxy
             - github.com/Masterminds/semver/v3
             - github.com/briandowns/spinner

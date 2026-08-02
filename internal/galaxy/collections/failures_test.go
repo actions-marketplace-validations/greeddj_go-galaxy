@@ -9,16 +9,18 @@ package collections
 //   - TestFailureRecorderIsConcurrencySafe: dropping the mutex in record
 //     (appending to r.causes with no lock, leaving only n.Add(1) atomic)
 //     makes `go test -race -run TestFailureRecorderIsConcurrencySafe` fail
-//     with a real data race, reported by the race detector as:
+//     with a real data race, both of whose conflicting frames are
+//     failureRecorder.record:
 //     "WARNING: DATA RACE
 //     Write at 0x00c0000a9ce0 by goroutine 11:
 //       github.com/greeddj/go-galaxy/internal/galaxy/collections.(*failureRecorder).record()
-//           .../failures.go:30 +0x104
 //     Previous read at 0x00c0000a9ce0 by goroutine 10:
-//       github.com/greeddj/go-galaxy/internal/galaxy/collections.(*failureRecorder).record()
-//           .../failures.go:30 +0x78"
+//       github.com/greeddj/go-galaxy/internal/galaxy/collections.(*failureRecorder).record()"
 //     (the race detector reports several overlapping read/write races across
-//     the 64 goroutines; this is the first one it surfaces)
+//     the 64 goroutines; this is the first one it surfaces. The source
+//     position each frame carried is left out deliberately: it named a line
+//     of the mutated tree, which no longer exists for anyone to check the
+//     number against, whereas the function name stays checkable)
 //   - TestSummaryErrorRendersHeadlineOnly: changing wrap to
 //     `return errors.Join(headline, s.cause)` unconditionally (skipping the
 //     one-line *summaryError wrapper) makes the test fail with:

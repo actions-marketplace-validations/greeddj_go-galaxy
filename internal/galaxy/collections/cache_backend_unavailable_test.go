@@ -25,11 +25,11 @@ package collections
 // SaveStore. For LoadStore, the carrier hop is not directly exercised; the
 // inference that it behaves the same is sound rather than assumed, because
 // initInstall returns backend.LoadStore's error bare - `st, err :=
-// backend.LoadStore(ctx); if err != nil { ...; return nil, err }`
-// (internal/galaxy/collections/start.go:802-806) - sharing no wrapping code
-// with the SaveStore path this file does exercise. A bare return has no
-// logic left to regress independently of what this file already pins for
-// SaveStore's own bare-return arm.
+// backend.LoadStore(ctx); if err != nil { ...; return nil, err }`, its only
+// LoadStore call - sharing no wrapping code with the SaveStore path this
+// file does exercise. A bare return has no logic left to regress
+// independently of what this file already pins for SaveStore's own
+// bare-return arm.
 
 import (
 	"context"

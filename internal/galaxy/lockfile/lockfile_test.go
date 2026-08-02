@@ -118,7 +118,7 @@ func TestLoadWrapsUnreadableFileAsInvalid(t *testing.T) {
 // err }` guard, so every os.ReadFile failure is wrapped) confirmed to fail
 // this test with:
 //
-//	lockfile_test.go:144: expected IsNotExist, got lockfile is invalid: open
+//	lockfile_test.go:143: expected IsNotExist, got lockfile is invalid: open
 //	/.../missing.yml: no such file or directory
 //	--- FAIL: TestLoadAbsentFileIsNotInvalid (0.00s)
 //

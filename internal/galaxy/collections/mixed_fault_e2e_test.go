@@ -40,12 +40,12 @@ package collections_test
 //     fixture to Hang.
 //
 // TestMixedDripAndStallDoesNotClassifyAsInterrupt was run against a real
-// revert of watchdog.go:102 back to wrapping its cause with %w, and the
+// revert of watchdogBody.Read back to wrapping its cause with %w, and the
 // observed failure was:
 //
-//	mixed_fault_e2e_test.go:146: !errors.Is(err, context.Canceled) failed: err = installation failed for 2 collections
-//	mixed_fault_e2e_test.go:149: exitcode.FromError(err) = 130, want != ExitInterrupt (130)
-//	mixed_fault_e2e_test.go:152: exitcode.FromError(err) = 130, want ExitInstall (5)
+//	mixed_fault_e2e_test.go:150: !errors.Is(err, context.Canceled) failed: err = installation failed for 2 collections
+//	mixed_fault_e2e_test.go:158: exitcode.FromError(err) = 130, want != ExitInterrupt (130)
+//	mixed_fault_e2e_test.go:161: exitcode.FromError(err) = 130, want ExitInstall (5)
 //
 // (the summary error's Error() renders only the one-line headline -
 // "installation failed for 2 collections" - never the per-collection causes;

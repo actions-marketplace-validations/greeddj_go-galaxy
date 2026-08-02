@@ -29,9 +29,9 @@ import (
 // survive byte-identical - the containment guarantee that an escaping
 // ansible_collections symlink must never let a run RemoveAll what it points
 // at, observed at the same entry point (Start) a real CI job would call.
-// t.Errorf, not t.Fatalf, on the sentinel check: the
-// filesystem assertions below are what actually discriminate a real fix, so
-// they must still run even if the error class itself regresses.
+// t.Errorf, not t.Fatalf, on the sentinel check: the filesystem assertions
+// below are what actually discriminate a real fix, so they must still run
+// even if the error class itself regresses.
 //
 // Both symlinkForm values are exercised, matching
 // TestExtractCollectionSymlinkedPrefixLeavesOutsideTreeIntact's own reasoning:

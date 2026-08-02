@@ -80,14 +80,14 @@ func TestVerifyArtifactSHARejectsCaseOnlyDifference(t *testing.T) {
 // call, so a downloaded object is returned without its recorded digest ever
 // being checked against the bytes, makes this test fail with:
 //
-//	artifacts_test.go:102: expected Fetch to refuse an object whose recorded
+//	artifacts_test.go:110: expected Fetch to refuse an object whose recorded
 //	digest disagrees with its bytes
 //
 // Dropping only that same arm's cleanupIfNeeded call, leaving the refusal
 // itself intact, instead fails the leftover-temp assertion below it, which is
 // what proves that assertion is load-bearing rather than decorative:
 //
-//	artifacts_test.go:107: expected no leftover temp file under tmpBase after
+//	artifacts_test.go:115: expected no leftover temp file under tmpBase after
 //	a refused Fetch, found [- .artifact-<random>]
 func TestFetchRefusesAnObjectWhoseRecordedDigestDisagreesWithItsBytes(t *testing.T) {
 	t.Parallel()
