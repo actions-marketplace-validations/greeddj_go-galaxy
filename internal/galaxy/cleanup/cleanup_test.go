@@ -1186,6 +1186,36 @@ func seedSnapshotInstalled(t *testing.T, cfg *config.Config, runtime *infra.Infr
 	}
 }
 
+// resaveLoadedSnapshot loads the persisted snapshot at cfg.CacheDir, applies
+// mutate to it, and saves it back - the shape every real run has, and the one
+// seedSnapshotInstalled deliberately does not: that helper saves a fresh
+// store.New(), so anything the previous snapshot recorded about itself is
+// absent rather than carried forward. A test about what a snapshot remembers
+// across runs has to go through a load.
+func resaveLoadedSnapshot(t *testing.T, cfg *config.Config, runtime *infra.Infra, mutate func(*store.Store)) {
+	t.Helper()
+	backend, err := cacheBackend.New(cfg, runtime)
+	if err != nil {
+		t.Fatalf("failed to build backend for resaving: %v", err)
+	}
+	if err := backend.Open(t.Context()); err != nil {
+		t.Fatalf("failed to open backend for resaving: %v", err)
+	}
+	defer func() {
+		if err := backend.Close(t.Context()); err != nil {
+			t.Errorf("failed to close resaving backend: %v", err)
+		}
+	}()
+	st, err := backend.LoadStore(t.Context())
+	if err != nil {
+		t.Fatalf("failed to load store for resaving: %v", err)
+	}
+	mutate(st)
+	if err := backend.SaveStore(t.Context(), st); err != nil {
+		t.Fatalf("failed to resave store: %v", err)
+	}
+}
+
 // seedSnapshotWarmed saves a store snapshot at cfg.CacheDir whose Warmed set
 // is exactly entries, via the real local backend (SaveStore), mirroring how a
 // prior warm run would have persisted it. Entries are written directly into
@@ -3544,31 +3574,68 @@ func TestStartTwiceWithNoSnapshotLeavesExtractedCacheIntact(t *testing.T) {
 	assertExtractedDirsSurvive(t, cacheDir, "sha-orphaned-by-no-snapshot")
 }
 
-// TestStartSweepsExtractedCacheWhenSnapshotIsPersistedButEmpty is the
-// narrowness guard on the read side: a snapshot that was actually persisted -
-// even one whose Installed/Warmed maps are both empty - is real evidence
-// ("nothing is referenced"), unlike an absent snapshot ("unknown"), and the
-// guard must not treat the two the same. An orphaned extracted dir must
-// still be swept in this case.
-func TestStartSweepsExtractedCacheWhenSnapshotIsPersistedButEmpty(t *testing.T) {
+// TestStartSweepsOnlyWhenTheSnapshotEverRecordedContent draws the line the
+// sweep's guard actually needs, and it is not "was a snapshot persisted".
+//
+// A snapshot can be persisted and hold nothing in either content set for two
+// reasons that look identical on disk and mean opposite things. It can be a
+// cache whose collections were all legitimately cleaned up, where emptiness is
+// evidence; or it can be a cache a `lock` run wrote, which records neither
+// installed nor warmed entries and so leaves both sets empty having never
+// looked at what is on disk at all. Reading the second as the first is how a
+// plain `lock` on a machine whose snapshot a schema bump dropped, but whose
+// extracted trees survived, hands the next cleanup the evidence to wipe the
+// whole content-addressable store.
+//
+// Both halves run against the same fixture shape, so neither verdict can be
+// the fixture failing to reach the sweep at all.
+func TestStartSweepsOnlyWhenTheSnapshotEverRecordedContent(t *testing.T) {
 	t.Parallel()
-	cacheDir := t.TempDir()
-	downloadPath := t.TempDir()
 
-	cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
-	runtime := newTestRuntime()
+	t.Run("never recorded content: kept", func(t *testing.T) {
+		t.Parallel()
+		cacheDir := t.TempDir()
+		downloadPath := t.TempDir()
+		cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+		runtime := newTestRuntime()
 
-	// An empty but persisted snapshot: SaveStore still stamps Meta.LastSnapshot
-	// even though the Installed map given to it is empty.
-	seedSnapshotInstalled(t, cfg, runtime, map[string]store.InstalledEntry{})
-	seedExtractedDir(t, cacheDir, "sha-orphan-with-persisted-empty-snapshot")
-	recordAbsentWorkspaceProject(t, cfg, runtime, downloadPath)
+		// The shape a lock run leaves on a cache with no prior snapshot: the
+		// save happened, so LastSnapshot is stamped, but nothing about on-disk
+		// content was ever written.
+		seedSnapshotInstalled(t, cfg, runtime, map[string]store.InstalledEntry{})
+		seedExtractedDir(t, cacheDir, "sha-orphan-never-recorded")
+		recordAbsentWorkspaceProject(t, cfg, runtime, downloadPath)
 
-	if err := Start(t.Context(), cfg, runtime); err != nil {
-		t.Fatalf("expected Start to succeed, got %v", err)
-	}
+		if err := Start(t.Context(), cfg, runtime); err != nil {
+			t.Fatalf("expected Start to succeed, got %v", err)
+		}
+		assertExtractedDirsSurvive(t, cacheDir, "sha-orphan-never-recorded")
+	})
 
-	assertExtractedDirGone(t, cacheDir, "sha-orphan-with-persisted-empty-snapshot")
+	t.Run("recorded content once, now empty: swept", func(t *testing.T) {
+		t.Parallel()
+		cacheDir := t.TempDir()
+		downloadPath := t.TempDir()
+		cfg := &config.Config{CacheDir: cacheDir, DryRun: false}
+		runtime := newTestRuntime()
+
+		// A real install once recorded a collection here, and a later run
+		// emptied the set. The snapshot genuinely knows nothing is installed,
+		// which is evidence, so the sweep must still reclaim an orphan.
+		seedSnapshotInstalled(t, cfg, runtime, map[string]store.InstalledEntry{
+			"ns.name@1.0.0": {ArtifactSHA256: "sha-once-installed"},
+		})
+		resaveLoadedSnapshot(t, cfg, runtime, func(st *store.Store) {
+			st.DeleteInstalled("ns.name@1.0.0")
+		})
+		seedExtractedDir(t, cacheDir, "sha-orphan-after-recorded-content")
+		recordAbsentWorkspaceProject(t, cfg, runtime, downloadPath)
+
+		if err := Start(t.Context(), cfg, runtime); err != nil {
+			t.Fatalf("expected Start to succeed, got %v", err)
+		}
+		assertExtractedDirGone(t, cacheDir, "sha-orphan-after-recorded-content")
+	})
 }
 
 // TestStartRemovesUnreferencedInstallWithNoPersistedSnapshot is the
@@ -3676,7 +3743,7 @@ func seedManifestWithIdentity(t *testing.T, root, dirNs, dirName, jsonNs, jsonNa
 // TestRemoveInstalledArtifactAndSidecarFollowWalkedIdentity (see that
 // test's own doc comment for why). This test's own share of that run:
 //
-//	cleanup_test.go:3730: expected victim.collection to survive, stat error: stat .../MANIFEST.json: no such file or directory
+//	cleanup_test.go:3797: expected victim.collection to survive, stat error: stat .../MANIFEST.json: no such file or directory
 //	--- FAIL: TestScanIdentityComesFromWalkedDirectoryNotManifest (0.00s)
 //	    --- PASS: TestScanIdentityComesFromWalkedDirectoryNotManifest/positive_control:_evil.pkg_survives_its_own_requirement (0.02s)
 //	    --- FAIL: TestScanIdentityComesFromWalkedDirectoryNotManifest/hostile_manifest_cannot_redirect_deletion (0.02s)
@@ -3820,7 +3887,7 @@ func seedEmptyDirs(t *testing.T, dirs ...string) {
 // (byKey["evil.pkg@9.9.9"]) finds nothing at all rather than the one record
 // it expects:
 //
-//	cleanup_test.go:3829: expected exactly one scanned record keyed evil.pkg@9.9.9, got 0: []
+//	cleanup_test.go:3849: expected exactly one scanned record keyed evil.pkg@9.9.9, got 0: []
 //	--- FAIL: TestRemoveInstalledArtifactAndSidecarFollowWalkedIdentity (0.00s)
 func TestRemoveInstalledArtifactAndSidecarFollowWalkedIdentity(t *testing.T) {
 	t.Parallel()
@@ -3879,9 +3946,9 @@ func TestRemoveInstalledArtifactAndSidecarFollowWalkedIdentity(t *testing.T) {
 // exactly two top-level failures - this test and
 // TestBuildReachablePhase2FollowsTransitiveDependencyEdge below:
 //
-//	cleanup_test.go:3931: expected foo.bar to survive via project A's
+//	cleanup_test.go:3998: expected foo.bar to survive via project A's
 //	cross-project requirement, stat .../MANIFEST.json: no such file or directory
-//	cleanup_test.go:3986: expected dep.leaf to survive via top.level's
+//	cleanup_test.go:4053: expected dep.leaf to survive via top.level's
 //	transitive dependency, stat .../MANIFEST.json: no such file or directory
 //	--- FAIL: TestBuildReachablePhase2ReachesDirectCrossProjectRequirement (0.01s)
 //	--- FAIL: TestBuildReachablePhase2FollowsTransitiveDependencyEdge (0.01s)
@@ -4046,7 +4113,7 @@ func buildSkippedProjectRootsFixture(t *testing.T, cacheDir string, requireFooBa
 // requirements" property from the opposite direction (an unparseable file
 // must still abort, rather than a valid file still being consulted):
 //
-//	cleanup_test.go:4074: expected foo.bar to survive via the skipped
+//	cleanup_test.go:4141: expected foo.bar to survive via the skipped
 //	project's own requirement, stat .../MANIFEST.json: no such file or directory
 //	--- FAIL: TestBuildReachableSkippedProjectStillContributesRoots (0.01s)
 //
@@ -4244,7 +4311,7 @@ func buildUnscannedProjectFixture(t *testing.T, cacheDir string, reqContent []by
 // something, so the unparseable content is never read and Start returns nil
 // instead of aborting:
 //
-//	cleanup_test.go:4259: expected ErrProjectRequirementsUnreadable, got <nil>
+//	cleanup_test.go:4326: expected ErrProjectRequirementsUnreadable, got <nil>
 //	--- FAIL: TestUnparseableRequirementsAbortsEvenForUnscannedProject (0.01s)
 func TestUnparseableRequirementsAbortsEvenForUnscannedProject(t *testing.T) {
 	t.Parallel()
@@ -4518,7 +4585,7 @@ func TestOpenProjectWorkspaceFallsBackToCollections(t *testing.T) {
 // `go test -run TestOpenProjectWorkspacePrefersRecordedCollectionsPathOverFallback -v`
 // against that mutation produced:
 //
-//	cleanup_test.go:4567: expected the recorded CollectionsPath's unreferenced install to be removed, stat error: <nil>
+//	cleanup_test.go:4634: expected the recorded CollectionsPath's unreferenced install to be removed, stat error: <nil>
 //	--- FAIL: TestOpenProjectWorkspacePrefersRecordedCollectionsPathOverFallback (0.01s)
 //
 // under the mutation, the fallback candidate wins the race instead: it is a

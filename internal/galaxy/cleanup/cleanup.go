@@ -115,7 +115,13 @@ func Start(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error 
 // backend - is left untouched. This is the only place that message is printed; the two
 // guarded functions themselves stay silent about why they no-op.
 func warnIfSnapshotNotPersisted(runtime *infra.Infra, st *store.Store) {
+	if st.HasRecordedContent() {
+		return
+	}
 	if st.WasPersisted() {
+		runtime.Output.Warnf(
+			"the persisted snapshot records nothing about what is installed or warmed; skipping the extracted-cache sweep this run",
+		)
 		return
 	}
 	runtime.Output.Warnf(
@@ -1267,7 +1273,7 @@ func sweepExtractedStore(
 	reachable map[string]bool,
 	installedByKey map[string][]installedCollection,
 ) {
-	if cfg == nil || cfg.CacheDir == "" || st == nil || !st.WasPersisted() {
+	if cfg == nil || cfg.CacheDir == "" || st == nil || !st.HasRecordedContent() {
 		return
 	}
 	extractedStore := extracted.NewStore(cfg.CacheDir)

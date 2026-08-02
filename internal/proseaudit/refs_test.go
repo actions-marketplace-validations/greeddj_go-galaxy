@@ -300,6 +300,20 @@ type failureSites struct {
 //     line instead of the assertion's own;
 //   - a function's declaration line, for the "see that test" citation, which
 //     names a test rather than a failure.
+//
+// The span rule is an over-approximation, and its cost is worth naming rather
+// than leaving to be discovered: a citation that drifts into the middle of a
+// multi-line helper call - onto one of its argument lines - still lands inside
+// that call's span and is accepted, even though the number no longer names the
+// assertion the comment quotes. Measured on this repository, an edit shifting
+// one test file by 67 lines produced four citations this gate caught and three
+// it accepted for exactly that reason. Narrowing the span to the call's first
+// and last lines would trade those false negatives for false positives, since
+// the line `go test` reports for a multi-line call depends on the call's
+// layout. The gate deliberately does not read the quoted message either: those
+// are rendered format strings, so matching them against source would be
+// fuzzy - and a gate that fails on correct prose is worse than one that misses
+// some incorrect prose.
 func failureLines(fset *token.FileSet, file *ast.File, helpers map[string]bool) map[int]bool {
 	sites := &failureSites{fset: fset, helpers: helpers, lines: make(map[int]bool)}
 	for _, decl := range file.Decls {

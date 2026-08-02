@@ -15,8 +15,15 @@ import (
 )
 
 // SnapshotMeta holds metadata about the cached snapshot.
+//
+// LastSnapshot and ContentRecorded answer two different questions and must
+// not be conflated. LastSnapshot is stamped by every persisted write and says
+// only that a snapshot exists. ContentRecorded is stamped only by a write
+// that carried records of what is on disk, and is what a destructive pass has
+// to consult - see HasRecordedContent.
 type SnapshotMeta struct {
 	LastSnapshot     time.Time `json:"last_snapshot"`
+	ContentRecorded  time.Time `json:"content_recorded"`
 	RequirementsHash string    `json:"requirements_hash"`
 	Server           string    `json:"server"`
 	SchemaVersion    int       `json:"schema_version"`
@@ -547,6 +554,38 @@ func (m *Store) WasPersisted() bool {
 	return !m.Meta.LastSnapshot.IsZero()
 }
 
+// HasRecordedContent reports whether any run has ever written records of
+// on-disk content into this cache - an installed entry or a warmed one. It is
+// the predicate a pass that deletes on-disk content must consult, and it is
+// deliberately not WasPersisted.
+//
+// The two differ on exactly one shape, and that shape is reachable: `lock` is
+// a real command that writes neither installed nor warmed entries, so on a
+// cache carrying no persisted snapshot it produces one whose two content sets
+// are empty and whose LastSnapshot is stamped. WasPersisted reads that as
+// evidence, and the emptiness then reads as "nothing is installed or warmed
+// anywhere" - which is how a plain `lock` run on a machine whose snapshot was
+// dropped by a schema bump, but whose extracted trees survived on disk, hands
+// the next cleanup the evidence to wipe the whole content-addressable store.
+//
+// The stamp is derived from the data rather than passed in by each command,
+// so no command has to remember to set it and none can set it wrongly: a save
+// stamps ContentRecorded when the store holds at least one installed or
+// warmed entry, and otherwise carries forward whatever was already recorded.
+// Carrying forward is what keeps the predicate true for a cache whose last
+// collection was legitimately cleaned up - the snapshot genuinely knows
+// nothing is installed there, which is evidence, not ignorance - while
+// leaving it false for a cache no content-recording command has ever
+// written.
+func (m *Store) HasRecordedContent() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return !m.Meta.ContentRecorded.IsZero()
+}
+
 // SetMetaRequirements stores the requirements hash and server.
 func (m *Store) SetMetaRequirements(hash, server string) {
 	if m == nil {
@@ -556,6 +595,33 @@ func (m *Store) SetMetaRequirements(hash, server string) {
 	defer m.mu.Unlock()
 	m.Meta.RequirementsHash = hash
 	m.Meta.Server = server
+}
+
+// stampSaveMeta applies the metadata every persisted write stamps, and is the
+// one place either backend's save decides what the snapshot claims about
+// itself: the local Bolt Save and the S3 MarshalSnapshot both go through it,
+// so the two cannot drift on what a snapshot asserts.
+//
+// SchemaVersion and LastSnapshot are unconditional - the snapshot was written,
+// by this binary, now. ContentRecorded is not: it is stamped only when the
+// data being written actually holds records of on-disk content, and otherwise
+// carries forward whatever the loaded snapshot already had. See
+// Store.HasRecordedContent for why that distinction exists and which pass
+// depends on it.
+//
+// hasContent is read from the live store BEFORE snapshotData's age eviction,
+// not from the payload after it, and the difference is load-bearing rather
+// than incidental: a cache whose only content record ages out on this very
+// save would otherwise have that record dropped and the evidence it ever
+// existed erased in the same write, leaving the extracted tree it named
+// unreclaimable forever. Recording it was a fact about the past; the eviction
+// does not unmake it.
+func stampSaveMeta(data *snapshotData, hasContent bool) {
+	data.Meta.SchemaVersion = helpers.StoreSnapshotSchemaVersion
+	data.Meta.LastSnapshot = time.Now().UTC()
+	if hasContent {
+		data.Meta.ContentRecorded = data.Meta.LastSnapshot
+	}
 }
 
 // snapshotData is a serialized view of Store contents.
@@ -579,8 +645,7 @@ type snapshotData struct {
 // last-snapshot timestamp are stamped exactly as Save does.
 func (m *Store) MarshalSnapshot() ([]byte, error) {
 	data := m.snapshotData()
-	data.Meta.SchemaVersion = helpers.StoreSnapshotSchemaVersion
-	data.Meta.LastSnapshot = time.Now().UTC()
+	stampSaveMeta(&data, m.hasContentEntries())
 
 	// snapshotData has no json tags of its own; assign its fields onto a
 	// throwaway Store so the encoding reuses Store's existing json tags and
@@ -597,6 +662,19 @@ func (m *Store) MarshalSnapshot() ([]byte, error) {
 		Meta:         data.Meta,
 	}
 	return json.Marshal(snapshot)
+}
+
+// hasContentEntries reports whether the live store currently holds any record
+// of on-disk content. It is what a save consults to decide whether to stamp
+// Meta.ContentRecorded; see stampSaveMeta for why it is read here, from the
+// store itself, rather than from the payload that save is about to write.
+func (m *Store) hasContentEntries() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.Installed) > 0 || len(m.Warmed) > 0
 }
 
 // ensureMaps re-allocates every map a decode may have nilled. The caller must
@@ -707,6 +785,33 @@ func (m *Store) snapshotData() snapshotData {
 		maps.Copy(clone, entry.Deps)
 		data.DepsCache[key] = DepsCacheEntry{FetchedAt: entry.FetchedAt, Deps: clone}
 	}
+	// Installed is copied whole, with no retention window, and that asymmetry
+	// with Warmed just below is a decision rather than an oversight.
+	//
+	// Its cost is known and bounded: a project whose workspace is gone is
+	// skipped by every cleanup run, so its keys never reach that pass's
+	// would-remove set, so the shas its installed entries name are kept in the
+	// extracted store forever. The consequence is disk growth in a
+	// reconstructible layer - nothing anyone else owns is deleted - and the
+	// existing remedy for an operator who wants that space back is
+	// `--clear-cache`.
+	//
+	// An age window here would cost more than it recovers. An installed entry
+	// is written by an install that actually did work; a collection already
+	// present is skipped before recordInstall is ever reached, so a stable
+	// cache in its steady state - every collection installed, every run a
+	// no-op - stops refreshing its entries entirely. Under a window they would
+	// age out from under a live project and take its extracted trees with
+	// them, so the common case pays a full re-extraction on a timer to reclaim
+	// space from the rare one. Making it safe would mean re-recording on the
+	// skip path too, which turns every no-op run into a snapshot write.
+	//
+	// What would change this: a rule keyed on evidence rather than the clock.
+	// A project whose registry entry names a requirements file that is gone
+	// AND a workspace that is gone is dead by two independent signals, and its
+	// installed entries could be dropped on that basis without a window and
+	// without touching a live project. That is a cleanup-pass design, not a
+	// snapshot-schema one, and it is what a revival of this should build.
 	maps.Copy(data.Installed, m.Installed)
 	for key, deps := range m.Graph {
 		clone := make([]string, len(deps))
@@ -788,8 +893,7 @@ func Save(dbs *DBs, store *Store) error {
 	}
 
 	data := store.snapshotData()
-	data.Meta.SchemaVersion = helpers.StoreSnapshotSchemaVersion
-	data.Meta.LastSnapshot = time.Now().UTC()
+	stampSaveMeta(&data, store.hasContentEntries())
 
 	return dbs.db.Update(func(tx *bolt.Tx) error {
 		if err := saveMeta(tx, data.Meta); err != nil {
@@ -884,6 +988,18 @@ func loadMeta(tx *bolt.Tx, store *Store) error {
 			return fmt.Errorf("invalid snapshot time: %w", err)
 		}
 		store.Meta.LastSnapshot = t
+	}
+	// An absent key leaves the zero value, which HasRecordedContent reads as
+	// "no run has recorded on-disk content here". That is the conservative
+	// answer and it is also what a snapshot written by a binary predating this
+	// key produces, so an older binary sharing the cache can only make a
+	// destructive pass do less, never more.
+	if v := metaBucket.Get([]byte(helpers.StoreMetaContentRecorded)); v != nil {
+		t, err := time.Parse(time.RFC3339Nano, string(v))
+		if err != nil {
+			return fmt.Errorf("invalid content-recorded time: %w", err)
+		}
+		store.Meta.ContentRecorded = t
 	}
 	if v := metaBucket.Get([]byte(helpers.StoreMetaRequirementsHash)); v != nil {
 		store.Meta.RequirementsHash = string(v)
@@ -996,6 +1112,15 @@ func saveMeta(tx *bolt.Tx, meta SnapshotMeta) error {
 	}
 	if err := metaBucket.Put([]byte(helpers.StoreMetaLastSnapshot), []byte(meta.LastSnapshot.Format(time.RFC3339Nano))); err != nil {
 		return err
+	}
+	// Written only when set, so a cache no content-recording run has ever
+	// touched carries no key at all rather than a zero timestamp - the same
+	// shape a binary predating this key leaves behind, which is what keeps
+	// loadMeta's absent-key path the one both produce.
+	if !meta.ContentRecorded.IsZero() {
+		if err := metaBucket.Put([]byte(helpers.StoreMetaContentRecorded), []byte(meta.ContentRecorded.Format(time.RFC3339Nano))); err != nil {
+			return err
+		}
 	}
 	if meta.RequirementsHash != "" {
 		if err := metaBucket.Put([]byte(helpers.StoreMetaRequirementsHash), []byte(meta.RequirementsHash)); err != nil {

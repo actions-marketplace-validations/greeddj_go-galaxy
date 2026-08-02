@@ -454,6 +454,11 @@ const (
 	StoreMetaSchemaVersion = "schema_version"
 	// StoreMetaLastSnapshot is the metadata key for the last snapshot time.
 	StoreMetaLastSnapshot = "last_snapshot"
+	// StoreMetaContentRecorded is the metadata key for the last time a save
+	// carried records of on-disk content - see store.Store.HasRecordedContent
+	// for what reads it and why it is not the same question as "was this
+	// snapshot ever written".
+	StoreMetaContentRecorded = "content_recorded"
 	// StoreMetaRequirementsHash is the metadata key for the requirements hash.
 	StoreMetaRequirementsHash = "requirements_hash"
 	// StoreMetaServer is the metadata key for the Galaxy server.
