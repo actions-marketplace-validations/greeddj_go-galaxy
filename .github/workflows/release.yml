@@ -10,6 +10,12 @@ permissions:
   packages: write
 
 jobs:
+  # The CI workflow does not run on tags, so the gate has to be called from
+  # here. `needs` only resolves job ids defined in this same file, which is why
+  # naming CI's job id alone was never enough to gate anything.
+  tests_and_checks:
+    uses: ./.github/workflows/ci.yml
+
   release:
     name: Release
     runs-on: ubuntu-latest
