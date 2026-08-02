@@ -707,6 +707,31 @@ COPY requirements.yml requirements.lock.yml ./
 RUN go-galaxy warm --frozen
 ```
 
+## Color
+
+Status markers (`✔`, `✗`, `!`) are colored only when the stream they are
+written to is a terminal, decided per stream: with `go-galaxy install >
+install.log`, stdout gets plain text while stderr, still a terminal, keeps its
+color. Redirecting both leaves the log free of escape sequences, so `grep '^✗'`
+matches the lines it names.
+
+Two environment variables override that check:
+
+| Variable                        | Effect                                                     |
+|---------------------------------|------------------------------------------------------------|
+| `NO_COLOR`                      | Set to any non-empty value: never emit color.               |
+| `CLICOLOR_FORCE` / `FORCE_COLOR`| Set to any non-empty value other than `0`: always emit color, terminal or not. |
+
+`NO_COLOR` wins when both are set: it is an opt-out, and an opt-out another
+variable can override is not one. The force variables exist for a CI that is
+not a terminal but does render escape sequences in its log viewer. A value of
+`0` for either force variable means "do not force" and falls through to the
+terminal check rather than disabling color outright.
+
+The spinner is a separate decision and is not affected by `NO_COLOR`: it is
+drawn only when stdout is a terminal, and under `NO_COLOR` it still runs, just
+without color.
+
 ## Exit codes
 
 `go-galaxy` exits with a class-specific code instead of a flat `1`, so CI

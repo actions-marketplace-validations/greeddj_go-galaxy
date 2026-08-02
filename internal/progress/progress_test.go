@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -122,7 +123,7 @@ func TestStateAResult(t *testing.T) {
 		p, out, errOut := stateA()
 		defer p.Close()
 		p.Okf("x")
-		assertBuf(t, out, ok+" x\n")
+		assertBuf(t, out, okMark()+"x\n")
 		assertEmpty(t, errOut)
 	})
 
@@ -130,7 +131,7 @@ func TestStateAResult(t *testing.T) {
 		p, out, errOut := stateA()
 		defer p.Close()
 		p.Errorf("x")
-		assertBuf(t, errOut, fail+" x\n")
+		assertBuf(t, errOut, failMark()+"x\n")
 		assertEmpty(t, out)
 	})
 
@@ -138,7 +139,7 @@ func TestStateAResult(t *testing.T) {
 		p, out, errOut := stateA()
 		defer p.Close()
 		p.Warnf("x")
-		assertBuf(t, errOut, warn+" x\n")
+		assertBuf(t, errOut, warnMark()+"x\n")
 		assertEmpty(t, out)
 	})
 }
@@ -206,7 +207,7 @@ func TestStateBResult(t *testing.T) {
 		p, out, errOut := stateB()
 		defer p.Close()
 		p.Okf("x")
-		assertBuf(t, out, ok+" x\n")
+		assertBuf(t, out, okMark()+"x\n")
 		assertEmpty(t, errOut)
 	})
 
@@ -214,7 +215,7 @@ func TestStateBResult(t *testing.T) {
 		p, out, errOut := stateB()
 		defer p.Close()
 		p.Errorf("x")
-		assertBuf(t, errOut, fail+" x\n")
+		assertBuf(t, errOut, failMark()+"x\n")
 		assertEmpty(t, out)
 	})
 }
@@ -302,7 +303,7 @@ func TestStateCResult(t *testing.T) {
 		p, out, errOut := stateC()
 		defer p.Close()
 		p.Okf("x")
-		assertBuf(t, out, ok+" x\n")
+		assertBuf(t, out, okMark()+"x\n")
 		assertEmpty(t, errOut)
 	})
 
@@ -310,7 +311,7 @@ func TestStateCResult(t *testing.T) {
 		p, out, errOut := stateC()
 		defer p.Close()
 		p.Errorf("x")
-		assertBuf(t, errOut, fail+" x\n")
+		assertBuf(t, errOut, failMark()+"x\n")
 		assertEmpty(t, out)
 	})
 }
@@ -358,11 +359,15 @@ func TestStateDResult(t *testing.T) {
 		assertEmpty(t, errOut)
 	})
 
+	// The markers here are plain, not colored: state D is the non-TTY case,
+	// and a destination that is not a terminal gets no escape sequences. That
+	// is the whole difference between this block and states A through C
+	// above, which assert the colored form on the same calls.
 	t.Run("Okf", func(t *testing.T) {
 		p, out, errOut := stateD()
 		defer p.Close()
 		p.Okf("x")
-		assertBuf(t, out, ok+" x\n")
+		assertBuf(t, out, okGlyph+" x\n")
 		assertEmpty(t, errOut)
 	})
 
@@ -370,7 +375,7 @@ func TestStateDResult(t *testing.T) {
 		p, out, errOut := stateD()
 		defer p.Close()
 		p.Errorf("x")
-		assertBuf(t, errOut, fail+" x\n")
+		assertBuf(t, errOut, failGlyph+" x\n")
 		assertEmpty(t, out)
 	})
 }
@@ -469,12 +474,12 @@ func TestConcurrentEmissionSerialized(t *testing.T) {
 	wg.Wait()
 
 	validStdout := func(line string) bool {
-		return strings.HasPrefix(line, "pp ") || strings.HasPrefix(line, ok+" ok ") || line == "wr"
+		return strings.HasPrefix(line, "pp ") || strings.HasPrefix(line, okMark()+"ok ") || line == "wr"
 	}
 	assertLines(t, out.String(), workers*iterations*3, validStdout, "stdout")
 
 	validStderr := func(line string) bool {
-		return strings.HasPrefix(line, fail+" err ")
+		return strings.HasPrefix(line, failMark()+"err ")
 	}
 	assertLines(t, errOut.String(), workers*iterations, validStderr, "stderr")
 }
@@ -515,7 +520,7 @@ func TestPackageLevelOkf(t *testing.T) {
 		t.Fatalf("failed to read pipe: %v", err)
 	}
 
-	if want := ok + " hello world\n"; string(got) != want {
+	if want := okGlyph + " hello world\n"; string(got) != want {
 		t.Fatalf("expected %q, got %q", want, string(got))
 	}
 }
@@ -541,7 +546,7 @@ func TestPackageLevelErrorf(t *testing.T) {
 		t.Fatalf("failed to read pipe: %v", err)
 	}
 
-	if want := fail + " bye world\n"; string(got) != want {
+	if want := failGlyph + " bye world\n"; string(got) != want {
 		t.Fatalf("expected %q, got %q", want, string(got))
 	}
 }
@@ -613,17 +618,17 @@ func sanitizingTiers() []tierCase {
 		{
 			name:    "Okf",
 			invoke:  func(p *Progress, msg string) { p.Okf("%s", msg) },
-			wantOut: func(_, clean string) string { return okPrefix + clean + "\n" },
+			wantOut: func(_, clean string) string { return okMark() + clean + "\n" },
 		},
 		{
 			name:    "Errorf",
 			invoke:  func(p *Progress, msg string) { p.Errorf("%s", msg) },
-			wantErr: func(_, clean string) string { return failPrefix + clean + "\n" },
+			wantErr: func(_, clean string) string { return failMark() + clean + "\n" },
 		},
 		{
 			name:    "Warnf",
 			invoke:  func(p *Progress, msg string) { p.Warnf("%s", msg) },
-			wantErr: func(_, clean string) string { return warnPrefix + clean + "\n" },
+			wantErr: func(_, clean string) string { return warnMark() + clean + "\n" },
 		},
 		{
 			name:    "Debugf",
@@ -728,8 +733,8 @@ func TestPackageLevelHelpersSanitizeCallerText(t *testing.T) {
 		invoke func(msg string)
 		prefix string
 	}{
-		{"Okf", &os.Stdout, func(msg string) { Okf("%s", msg) }, okPrefix},
-		{"Errorf", &os.Stderr, func(msg string) { Errorf("%s", msg) }, failPrefix},
+		{"Okf", &os.Stdout, func(msg string) { Okf("%s", msg) }, okGlyph + " "},
+		{"Errorf", &os.Stderr, func(msg string) { Errorf("%s", msg) }, failGlyph + " "},
 	}
 
 	for _, tc := range cases {
@@ -802,17 +807,17 @@ func TestResultMarkerEscapesSurviveAHostileMessage(t *testing.T) {
 		prefix string
 	}{
 		{
-			name: "Okf", prefix: okPrefix,
+			name: "Okf", prefix: okMark(),
 			invoke: func(p *Progress, msg string) { p.Okf("%s", msg) },
 			stream: func(out, _ *bytes.Buffer) *bytes.Buffer { return out },
 		},
 		{
-			name: "Errorf", prefix: failPrefix,
+			name: "Errorf", prefix: failMark(),
 			invoke: func(p *Progress, msg string) { p.Errorf("%s", msg) },
 			stream: func(_, errOut *bytes.Buffer) *bytes.Buffer { return errOut },
 		},
 		{
-			name: "Warnf", prefix: warnPrefix,
+			name: "Warnf", prefix: warnMark(),
 			invoke: func(p *Progress, msg string) { p.Warnf("%s", msg) },
 			stream: func(_, errOut *bytes.Buffer) *bytes.Buffer { return errOut },
 		},
@@ -859,5 +864,146 @@ func TestSpinnerWritesOutsideThisPackagesWriters(t *testing.T) {
 	}
 	if p.s.Writer == io.Writer(&errOut) {
 		t.Fatal("spinner.Writer must not be this package's errOut buffer")
+	}
+}
+
+// okMark, failMark and warnMark are the marker prefixes a destination that
+// accepts color receives, glyph and trailing space included. They are built
+// through the production marker builder rather than re-spelled here, so a
+// change to the escape sequences cannot leave these expectations describing a
+// form nothing emits.
+func okMark() string   { return marker(okGlyph, ansiGreen, true) }
+func failMark() string { return marker(failGlyph, ansiRed, true) }
+func warnMark() string { return marker(warnGlyph, ansiYellow, true) }
+
+// Color was previously printed by every marker unconditionally, including
+// into a redirected file: `go-galaxy install > install.log 2>&1` put
+// "\x1b[1m\x1b[32m✔\x1b[1m\x1b[0m " in front of the line an operator greps
+// for, so `grep '^✔'` silently matched nothing. The tests below pin the two
+// halves of the fix - the destination check and the environment overrides -
+// and pin them on the package-level helpers too, which own no Progress and so
+// never consulted anything at all.
+
+// charDeviceFile opens a file that satisfies the same os.ModeCharDevice test
+// a terminal does. It stands in for a terminal because the production check
+// is exactly that mode test and nothing more; a real pty is not needed to
+// exercise the branch, and would not be portable here.
+func charDeviceFile(t *testing.T) *os.File {
+	t.Helper()
+
+	f, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Skipf("no character device available to stand in for a terminal: %v", err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	if !isTerminal(f) {
+		t.Skipf("%s is not a character device on this platform", os.DevNull)
+	}
+	return f
+}
+
+// regularFile creates a plain file, the shape a redirected stream has.
+func regularFile(t *testing.T) *os.File {
+	t.Helper()
+
+	f, err := os.Create(filepath.Join(t.TempDir(), "redirected.log"))
+	if err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	return f
+}
+
+// TestColorEnabledPrecedence pins every rule colorEnabled applies and the
+// order it applies them in. Both destinations appear in the table so no row's
+// verdict can be read as "this is just what that destination always gives".
+func TestColorEnabledPrecedence(t *testing.T) {
+	for _, tc := range colorEnabledCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(envNoColor, tc.noColor)
+			t.Setenv(envClicolorForce, tc.clicolorForce)
+			t.Setenv(envForceColor, tc.forceColor)
+
+			target := regularFile(t)
+			if tc.charDevice {
+				target = charDeviceFile(t)
+			}
+			if got := colorEnabled(target); got != tc.want {
+				t.Errorf("colorEnabled() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// colorEnabledCase is one row of TestColorEnabledPrecedence.
+type colorEnabledCase struct {
+	name          string
+	noColor       string
+	clicolorForce string
+	forceColor    string
+	charDevice    bool
+	want          bool
+}
+
+// colorEnabledCases enumerates the rules and their interactions: the plain
+// destination check, each force variable on its own, the "0" value that is
+// not a force, NO_COLOR on its own, and NO_COLOR against a force - the one
+// combination where the precedence is a decision rather than a consequence.
+func colorEnabledCases() []colorEnabledCase {
+	return []colorEnabledCase{
+		{name: "redirected, no variables", want: false},
+		{name: "terminal, no variables", charDevice: true, want: true},
+		{name: "redirected, CLICOLOR_FORCE", clicolorForce: "1", want: true},
+		{name: "redirected, FORCE_COLOR", forceColor: "1", want: true},
+		{name: "redirected, FORCE_COLOR=0 is not a force", forceColor: "0", want: false},
+		{name: "terminal, FORCE_COLOR=0 leaves the check alone", forceColor: "0", charDevice: true, want: true},
+		{name: "terminal, NO_COLOR", noColor: "1", charDevice: true, want: false},
+		{name: "NO_COLOR beats CLICOLOR_FORCE", noColor: "1", clicolorForce: "1", want: false},
+		{name: "NO_COLOR beats FORCE_COLOR", noColor: "1", forceColor: "1", want: false},
+		{name: "NO_COLOR empty is unset", noColor: "", charDevice: true, want: true},
+	}
+}
+
+// TestMarkersFollowTheirOwnDestination proves the two destinations are
+// decided independently: a run whose stdout is redirected while stderr is
+// still a terminal must get a plain marker on one and a colored marker on the
+// other. A single process-wide decision would necessarily get one of the two
+// wrong, and with both halves asserted on the same Progress neither result
+// can be the fixture.
+func TestMarkersFollowTheirOwnDestination(t *testing.T) {
+	t.Parallel()
+
+	var out, errOut bytes.Buffer
+	p := newStreamProgress(false, false, false,
+		stream{w: &out, color: false}, stream{w: &errOut, color: true})
+	defer p.Close()
+
+	p.Okf("x")
+	p.Errorf("y")
+	p.Warnf("z")
+
+	assertBuf(t, &out, okGlyph+" x\n")
+	if got, want := errOut.String(), failMark()+"y\n"+warnMark()+"z\n"; got != want {
+		t.Errorf("errOut = %q, want %q", got, want)
+	}
+}
+
+// TestPackageLevelHelpersFollowTheEnvironment is the mandatory coverage for
+// the two helpers that own no Progress: they resolve their destination per
+// call, and they are what prints a run's final line. Both directions are
+// asserted on the identical pipe, so "no escapes" cannot be the pipe simply
+// never being written to.
+func TestPackageLevelHelpersFollowTheEnvironment(t *testing.T) {
+	t.Setenv(envNoColor, "1")
+	plain := capturePipe(t, &os.Stdout, func() { Okf("x") })
+	if want := okGlyph + " x\n"; plain != want {
+		t.Errorf("Okf under NO_COLOR = %q, want %q", plain, want)
+	}
+
+	t.Setenv(envNoColor, "")
+	t.Setenv(envForceColor, "1")
+	colored := capturePipe(t, &os.Stderr, func() { Errorf("y") })
+	if want := failMark() + "y\n"; colored != want {
+		t.Errorf("Errorf under FORCE_COLOR = %q, want %q", colored, want)
 	}
 }

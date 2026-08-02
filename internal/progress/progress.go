@@ -20,22 +20,86 @@ const (
 	ansiGreen      = "\x1b[1m\x1b[32m"
 	ansiYellow     = "\x1b[1m\x1b[33m"
 	ansiReset      = "\x1b[1m\x1b[0m"
-	ok             = ansiGreen + "✔" + ansiReset
-	fail           = ansiRed + "✗" + ansiReset
-	warn           = ansiYellow + "!" + ansiReset
-	okPrefix       = ok + " "
-	failPrefix     = fail + " "
-	warnPrefix     = warn + " "
+	okGlyph        = "✔"
+	failGlyph      = "✗"
+	warnGlyph      = "!"
 	debugPrefix    = "🚧 Debug: "
 )
+
+// Environment variables that override the terminal check, in the precedence
+// this package applies: envNoColor first, then either force variable.
+const (
+	// envNoColor disables color whatever the destination is, per no-color.org:
+	// present and non-empty is enough, whatever the value.
+	envNoColor = "NO_COLOR"
+	// envClicolorForce and envForceColor each enable color even when the
+	// destination is not a terminal, which is what makes color usable in a CI
+	// whose log viewer renders it. A literal "0" is not a request to force -
+	// it is the conventional way to say "do not force" - so it falls through
+	// to the terminal check rather than disabling color outright.
+	envClicolorForce = "CLICOLOR_FORCE"
+	envForceColor    = "FORCE_COLOR"
+)
+
+// stream is one destination together with whether lines written to it may
+// carry color. The two are bound together because the answer differs per
+// destination: `go-galaxy install > install.log` leaves stderr a terminal
+// while stdout is a file, and a single process-wide decision would get one of
+// the two wrong.
+type stream struct {
+	w     io.Writer
+	color bool
+}
+
+// ok, fail and warn return the marker prefix for this stream, colored only
+// when this destination accepts color.
+func (s stream) ok() string   { return marker(okGlyph, ansiGreen, s.color) }
+func (s stream) fail() string { return marker(failGlyph, ansiRed, s.color) }
+func (s stream) warn() string { return marker(warnGlyph, ansiYellow, s.color) }
+
+// marker builds one status prefix: the glyph, wrapped in seq and a full reset
+// when colored, and the single trailing space every marker carries either way.
+// The reset always precedes the payload, so no line can leave color state
+// applied to text that follows it.
+func marker(glyph, seq string, colored bool) string {
+	if !colored {
+		return glyph + " "
+	}
+	return seq + glyph + ansiReset + " "
+}
+
+// colorEnabled reports whether lines written to f may carry color.
+//
+// NO_COLOR wins over the force variables when both are set. That resolution is
+// a choice, and the reason is that the two are not symmetric: NO_COLOR is an
+// opt-out a user sets once in their environment, and an opt-out another
+// variable can override is not one. The force variables exist for the opposite
+// situation - a CI that is not a terminal but does render escapes - and such a
+// CI has no reason to also set NO_COLOR.
+func colorEnabled(f *os.File) bool {
+	if os.Getenv(envNoColor) != "" {
+		return false
+	}
+	if forcesColor(os.Getenv(envClicolorForce)) || forcesColor(os.Getenv(envForceColor)) {
+		return true
+	}
+	return isTerminal(f)
+}
+
+// forcesColor reports whether an environment value is a request to force color
+// on. Empty means unset; "0" is the conventional "do not force" and neither
+// forces nor disables, so it falls through to the terminal check.
+func forcesColor(value string) bool {
+	return value != "" && value != "0"
+}
 
 // Progress renders CLI progress output with optional spinner. Regular output
 // goes to out; error and failure lines go to errOut so diagnostics do not
 // contaminate stdout consumers.
 type Progress struct {
 	s      *spinner.Spinner
-	out    io.Writer
-	errOut io.Writer
+	out    stream
+	errOut stream
 	mu     sync.Mutex
 	v      bool
 	q      bool
@@ -47,6 +111,18 @@ type Progress struct {
 // interleaved spinner frames would clutter logs (typical in CI, where stdout is
 // not a TTY).
 func newProgress(verbose, quiet, terminal bool, out, errOut io.Writer) *Progress {
+	return newStreamProgress(verbose, quiet, terminal,
+		stream{w: out, color: terminal}, stream{w: errOut, color: terminal})
+}
+
+// newStreamProgress is newProgress with each destination's color decided
+// independently of the other, and independently of whether the spinner runs.
+// Those are two questions, not one: the spinner is drawn on stdout and a
+// spinner rendered into a file is the noise the terminal check has always
+// existed to avoid, while NO_COLOR asks for plain text on a terminal that is
+// still perfectly able to redraw a line. Conflating them would silently take
+// the spinner away from anyone who set NO_COLOR.
+func newStreamProgress(verbose, quiet, terminal bool, out, errOut stream) *Progress {
 	if quiet || verbose || !terminal {
 		return &Progress{
 			v:      verbose,
@@ -57,7 +133,9 @@ func newProgress(verbose, quiet, terminal bool, out, errOut io.Writer) *Progress
 	}
 
 	spin := spinner.New(spinner.CharSets[spinnerCharSet], spinnerDelay)
-	_ = spin.Color(spinnerColor)
+	if out.color {
+		_ = spin.Color(spinnerColor)
+	}
 
 	p := &Progress{
 		v:      verbose,
@@ -72,27 +150,38 @@ func newProgress(verbose, quiet, terminal bool, out, errOut io.Writer) *Progress
 
 // New creates a Progress printer configured for verbose/quiet output.
 func New(verbose, quiet bool) *Progress {
-	return newProgress(verbose, quiet, isStdoutTerminal(), os.Stdout, os.Stderr)
+	return newStreamProgress(verbose, quiet, isTerminal(os.Stdout),
+		stream{w: os.Stdout, color: colorEnabled(os.Stdout)},
+		stream{w: os.Stderr, color: colorEnabled(os.Stderr)})
 }
 
-// isStdoutTerminal reports whether stdout is connected to a terminal.
-func isStdoutTerminal() bool {
-	fi, err := os.Stdout.Stat()
+// isTerminal reports whether f is connected to a terminal.
+func isTerminal(f *os.File) bool {
+	fi, err := f.Stat()
 	if err != nil {
 		return false
 	}
 	return fi.Mode()&os.ModeCharDevice != 0
 }
 
-// Okf prints a success message with a colored marker. For standalone use.
+// Okf prints a success message with a marker to stdout. For standalone use.
+//
+// This helper and Errorf below own no Progress, so they resolve their
+// destination on every call rather than once at construction. They are the
+// path cmd/go-galaxy/main.go prints a run's final line through, which is
+// exactly why they cannot skip the check: before this they printed color
+// unconditionally, so `go-galaxy install > install.log 2>&1` put escape bytes
+// in front of the one line an operator greps for.
 func Okf(format string, args ...any) {
-	writeLine(os.Stdout, okPrefix, safeout.Clean(fmt.Sprintf(format, args...)))
+	s := stream{w: os.Stdout, color: colorEnabled(os.Stdout)}
+	writeLine(s.w, s.ok(), safeout.Clean(fmt.Sprintf(format, args...)))
 }
 
-// Errorf prints an error message with a colored marker to stderr. For
-// standalone use.
+// Errorf prints an error message with a marker to stderr. For standalone use;
+// see Okf for why the destination is resolved per call.
 func Errorf(format string, args ...any) {
-	writeLine(os.Stderr, failPrefix, safeout.Clean(fmt.Sprintf(format, args...)))
+	s := stream{w: os.Stderr, color: colorEnabled(os.Stderr)}
+	writeLine(s.w, s.fail(), safeout.Clean(fmt.Sprintf(format, args...)))
 }
 
 // Printf updates the spinner suffix when a spinner is active, otherwise
@@ -126,7 +215,7 @@ func (p *Progress) PersistentPrintf(format string, args ...any) {
 func (p *Progress) Okf(format string, args ...any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.emit(p.out, okPrefix, safeout.Clean(fmt.Sprintf(format, args...)))
+	p.emit(p.out, p.out.ok(), safeout.Clean(fmt.Sprintf(format, args...)))
 }
 
 // Errorf prints an error message with a colored marker to stderr, so failures
@@ -134,7 +223,7 @@ func (p *Progress) Okf(format string, args ...any) {
 func (p *Progress) Errorf(format string, args ...any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.emit(p.errOut, failPrefix, safeout.Clean(fmt.Sprintf(format, args...)))
+	p.emit(p.errOut, p.errOut.fail(), safeout.Clean(fmt.Sprintf(format, args...)))
 }
 
 // Warnf prints a warning message with a colored marker to stderr. Like
@@ -143,7 +232,7 @@ func (p *Progress) Errorf(format string, args ...any) {
 func (p *Progress) Warnf(format string, args ...any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.emit(p.errOut, warnPrefix, safeout.Clean(fmt.Sprintf(format, args...)))
+	p.emit(p.errOut, p.errOut.warn(), safeout.Clean(fmt.Sprintf(format, args...)))
 }
 
 // Debugf prints a debug message when verbose mode is enabled.
@@ -198,14 +287,14 @@ func (p *Progress) Close() {
 //
 // It is the funnel for every line a *Progress writes; the package-level
 // helpers, which own no spinner, reach writeLine directly instead.
-func (p *Progress) emit(w io.Writer, prefix string, msg safeout.Text) {
+func (p *Progress) emit(dst stream, prefix string, msg safeout.Text) {
 	if p.s != nil {
 		p.s.Stop()
-		writeLine(w, prefix, msg)
+		writeLine(dst.w, prefix, msg)
 		p.s.Restart()
 		return
 	}
-	writeLine(w, prefix, msg)
+	writeLine(dst.w, prefix, msg)
 }
 
 // writeLine is the one place this package turns a decorated line into bytes,
