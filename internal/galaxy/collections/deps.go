@@ -20,6 +20,11 @@ type collectionDeps struct {
 	// re-probed on every collection. Scoped to one collectionDeps: resolve,
 	// install, and prefetch each get their own memo (see newCollectionDeps).
 	apiRoots *apiRootMemo
+
+	// unmatchedSources memoizes the source: values already warned about this
+	// phase, so one misconfigured host produces one line rather than one per
+	// collection pinned to it. Scoped exactly like apiRoots above.
+	unmatchedSources *unmatchedSourceMemo
 }
 
 type installDeps struct {
@@ -49,7 +54,13 @@ type prefetchDeps struct {
 }
 
 func newCollectionDeps(cfg *config.Config, runtime *infra.Infra, st *store.Store) collectionDeps {
-	return collectionDeps{cfg: cfg, runtime: runtime, st: st, apiRoots: newAPIRootMemo()}
+	return collectionDeps{
+		cfg:              cfg,
+		runtime:          runtime,
+		st:               st,
+		apiRoots:         newAPIRootMemo(),
+		unmatchedSources: newUnmatchedSourceMemo(),
+	}
 }
 
 func newInstallDeps(

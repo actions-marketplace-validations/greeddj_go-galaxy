@@ -1,7 +1,9 @@
 package collections
 
 import (
+	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
@@ -246,10 +248,79 @@ func TestServerCandidates(t *testing.T) {
 	for _, tc := range serverCandidatesCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := serverCandidates(tc.cfg, tc.col)
+			got := serverCandidates(collectionDeps{cfg: tc.cfg}, tc.col)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("serverCandidates = %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestUnmatchedSourceIsWarnedAboutOncePerHost covers the signal a lockfile's
+// source: used to give nobody. A source naming a host no configured server
+// does is still requested - the run continues, mirroring the download path's
+// own host-mismatch warning rather than refusing - but it is now visible.
+//
+// The three rows are the three answers this can have, and each is needed:
+// silence on a match by id, silence on a match by origin (the case a
+// repo-scoped path under a configured host produces, which must not warn),
+// and exactly one warning on a host configured nowhere. Without the two silent
+// rows a warning that fired for every source would pass just as well.
+func TestUnmatchedSourceIsWarnedAboutOncePerHost(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range unmatchedSourceCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			printer := &capturingPrinter{}
+			deps := newCollectionDeps(tc.cfg, infra.New(printer, nil), nil)
+			// Called twice with the same source, which is what a lockfile
+			// pinning several collections to one host produces: the count
+			// below is what pins the deduplication, not just the warning.
+			serverCandidates(deps, collection{Namespace: "acme", Name: "widgets", Source: tc.source})
+			serverCandidates(deps, collection{Namespace: "acme", Name: "gadgets", Source: tc.source})
+
+			var warned int
+			for _, w := range printer.warns {
+				if strings.Contains(w, "matches no configured Galaxy server") {
+					warned++
+				}
+			}
+			if warned != tc.wantWarnings {
+				t.Fatalf("%d warnings, want %d: %v", warned, tc.wantWarnings, printer.warns)
+			}
+		})
+	}
+}
+
+// unmatchedSourceCase is one row of TestUnmatchedSourceIsWarnedAboutOncePerHost.
+type unmatchedSourceCase struct {
+	cfg          *config.Config
+	name         string
+	source       string
+	wantWarnings int
+}
+
+// unmatchedSourceCases pairs one configured server with the three kinds of
+// source: value that can point at it, or not.
+func unmatchedSourceCases() []unmatchedSourceCase {
+	configured := &config.Config{
+		Servers: []config.Server{{ID: "hub", URL: "https://hub.example/api/"}},
+	}
+	return []unmatchedSourceCase{
+		{name: "matched by id", cfg: configured, source: "hub", wantWarnings: 0},
+		{
+			name:         "matched by origin under a repo-scoped path",
+			cfg:          configured,
+			source:       "https://hub.example/api/content/published/",
+			wantWarnings: 0,
+		},
+		{
+			name:         "host configured nowhere",
+			cfg:          configured,
+			source:       "https://attacker.example/api/",
+			wantWarnings: 1,
+		},
 	}
 }

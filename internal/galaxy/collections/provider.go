@@ -179,7 +179,7 @@ func (p *MetadataProvider) Dependencies(fqdn string, v solver.Version) (map[stri
 // metadata now to settle which server actually serves it, recording the
 // binding via recordBinding so every later call for fqdn reuses it.
 func (p *MetadataProvider) boundBaseFor(col collection, fqdn string, policy cacheManager.Policy) (string, error) {
-	if candidates := serverCandidates(p.deps.cfg, col); len(candidates) == 1 {
+	if candidates := serverCandidates(p.deps, col); len(candidates) == 1 {
 		return candidates[0].base, nil
 	}
 	if base, ok := p.bindings[fqdn]; ok {

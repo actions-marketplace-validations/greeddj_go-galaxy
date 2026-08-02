@@ -78,7 +78,7 @@ func loadRootMetadataCached(
 	policy cacheManager.Policy,
 ) (*types.GalaxyCollection, string, error) {
 	var lastErr error
-	for _, srv := range serverCandidates(deps.cfg, col) {
+	for _, srv := range serverCandidates(deps, col) {
 		meta, ok, err := tryServerRootMetadata(ctx, deps, col, policy, srv)
 		if ok {
 			return meta, srv.base, nil

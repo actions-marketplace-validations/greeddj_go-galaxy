@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
@@ -50,14 +51,56 @@ func (s serverCandidate) label() string {
 //
 // cfg == nil never happens in production (BuildCollectionConfig always
 // returns a non-nil *Config) but is handled defensively, yielding nil.
-func serverCandidates(cfg *config.Config, col collection) []serverCandidate {
-	if cfg == nil {
+func serverCandidates(deps collectionDeps, col collection) []serverCandidate {
+	if deps.cfg == nil {
 		return nil
 	}
 	if col.Source != "" {
-		return []serverCandidate{pinnedServerCandidate(cfg, col.Source)}
+		candidate, matched := pinnedServerCandidate(deps.cfg, col.Source)
+		if !matched {
+			warnUnmatchedSource(deps, col, candidate.base)
+		}
+		return []serverCandidate{candidate}
 	}
-	return unpinnedServerCandidates(cfg)
+	return unpinnedServerCandidates(deps.cfg)
+}
+
+// warnUnmatchedSource reports a collection whose source: resolves to no
+// configured server. The run continues and the request is made, mirroring
+// warnIfOffServerDownloadHost rather than blocking: a source: is
+// operator-authored in the ordinary case, and refusing one would break a
+// working setup over a naming mismatch.
+//
+// The signal here is stronger than the one on the download path, and that is
+// worth stating rather than leaving for a reader to infer. Matching is by
+// network origin, so a source: naming a repo-scoped path under a configured
+// host already matches and is silent; reaching this function means a host the
+// operator configured nowhere. The request is still made, and with it up to
+// several probes per collection as the API-root candidates are tried, against
+// a host a lockfile named.
+//
+// No credential reaches that host and no TLS policy follows it there:
+// internal/galaxy/fetch dispatches both by normalized origin, so an origin
+// that matched nothing gets neither. That is why this is a warning about
+// where a request went rather than about what went with it.
+//
+// It fires once per distinct unmatched source per phase. A lockfile pinning
+// fifty collections to one unconfigured host is one misconfiguration, not
+// fifty, and fifty identical lines would bury it.
+//
+// A strict opt-in mode that refused instead was considered and not built: the
+// flag surface would have to say what it applies to (this check alone, or
+// every host mismatch including the download path), and nothing yet asks for
+// one. The warning is what makes the situation visible, which is the
+// precondition for anyone wanting more.
+func warnUnmatchedSource(deps collectionDeps, col collection, base string) {
+	if base == "" || deps.runtime == nil || !deps.unmatchedSources.first(base) {
+		return
+	}
+	deps.runtime.Output.Warnf(
+		"%s declares source %q, which matches no configured Galaxy server; requesting it anyway",
+		col.key(), base,
+	)
 }
 
 // pinnedServerCandidate resolves col.Source (already known non-empty) to a
@@ -74,10 +117,16 @@ func serverCandidates(cfg *config.Config, col collection) []serverCandidate {
 //     since internal/galaxy/fetch dispatches by origin, not by the exact
 //     configured URL: this is the origin-keying design paying off here.
 //  3. A source matching neither is an anonymous, unmatched base (id "").
-func pinnedServerCandidate(cfg *config.Config, source string) serverCandidate {
+//
+// The second return value reports whether the source matched a configured
+// server at all. It is not derivable from the returned id: a server
+// configured through --server alone carries no id, so an origin match against
+// it also yields id "", and reading that as "unmatched" would warn about the
+// commonest setup there is.
+func pinnedServerCandidate(cfg *config.Config, source string) (serverCandidate, bool) {
 	for _, srv := range cfg.Servers {
 		if srv.ID != "" && srv.ID == source {
-			return serverCandidate{base: srv.URL, id: srv.ID}
+			return serverCandidate{base: srv.URL, id: srv.ID}, true
 		}
 	}
 
@@ -85,11 +134,42 @@ func pinnedServerCandidate(cfg *config.Config, source string) serverCandidate {
 	if origin, ok := parsedOrigin(normalized); ok {
 		for _, srv := range cfg.Servers {
 			if srvOrigin, ok := parsedOrigin(normalizeServerBase(srv.URL)); ok && srvOrigin == origin {
-				return serverCandidate{base: normalized, id: srv.ID}
+				return serverCandidate{base: normalized, id: srv.ID}, true
 			}
 		}
 	}
-	return serverCandidate{base: normalized}
+	return serverCandidate{base: normalized}, false
+}
+
+// unmatchedSourceMemo remembers which unmatched sources a phase has already
+// warned about. Scoped to one collectionDeps, exactly like apiRootMemo beside
+// it, and nil-tolerant for the same reason: a collectionDeps built by hand in
+// a test carries none, and a warning is not worth a panic.
+type unmatchedSourceMemo struct {
+	seen map[string]bool
+	mu   sync.Mutex
+}
+
+// newUnmatchedSourceMemo returns an empty memo, presized to the one unmatched
+// source a misconfigured run almost always has.
+func newUnmatchedSourceMemo() *unmatchedSourceMemo {
+	return &unmatchedSourceMemo{seen: make(map[string]bool, 1)}
+}
+
+// first reports whether base has not been warned about yet, recording it if
+// so. A nil receiver reports true every time: without a memo there is nothing
+// to deduplicate against, and warning repeatedly is better than not at all.
+func (m *unmatchedSourceMemo) first(base string) bool {
+	if m == nil {
+		return true
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.seen[base] {
+		return false
+	}
+	m.seen[base] = true
+	return true
 }
 
 // unpinnedServerCandidates returns every cfg.Servers entry as a candidate,
