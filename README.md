@@ -585,15 +585,24 @@ Pin transitive collections with a lockfile, then drive CI from it:
 
 ```bash
 # once, when you change requirements.yml:
-go-galaxy lock                       # writes requirements.lock.yml
+go-galaxy lock             # writes requirements.lock.yml
 
 # in CI:
-go-galaxy install --frozen --offline # use lockfile, no network calls
+go-galaxy install --frozen # install exactly the locked versions
 ```
 
 A frozen install fails loudly if a cached or downloaded artifact does not match the
 lockfile's recorded SHA256, so a poisoned cache or a mutated upstream artifact cannot
 install silently; lockfiles with no recorded SHA (older lockfiles) are not pin-checked.
+
+`--frozen` decides *what* gets installed and needs no cache to do it. `--offline`
+is a separate, stronger promise: no network call at all, so an artifact that is
+not already cached is not a download but a failure. Against a cold cache the run
+exits `5` naming the collection it could not get. Add `--offline` only where the
+cache is known to be populated - a base image you baked it into ([container image
+bake](#container-image-bake) below), or a restored CI cache your job treats as
+mandatory. A restored CI cache is not that by default: the first run after any
+lockfile change misses by construction, because the key just changed.
 
 `go-galaxy hash` prints a deterministic `sha256:…` of the lockfile (or `requirements.yml`
 when no lockfile is present) - perfect as a CI cache key.
@@ -628,8 +637,12 @@ jobs:
           restore-keys: |
             go-galaxy-${{ runner.os }}-
 
-      - name: Install collections (frozen + offline)
-        run: go-galaxy install --frozen --offline -p ./collections
+      # --frozen, not --frozen --offline: restore-keys can hand this job a
+      # cache from an older lockfile, and the run after a lockfile change gets
+      # no hit at all. Offline would make either a failure instead of a
+      # download; frozen alone still installs exactly what the lockfile pins.
+      - name: Install collections (frozen)
+        run: go-galaxy install --frozen -p ./collections
 ```
 
 ### GitLab CI
@@ -692,10 +705,11 @@ Trust model](#security--trust-model) for why a prefix alone is not a boundary.
 
 Fail a pull request when `requirements.lock.yml` no longer matches
 `requirements.yml` - a root added, removed, or repinned without regenerating
-the lockfile. `lock --frozen` is not a network-free path the way install/warm
-`--frozen` is - it still resolves fresh to compare against the file, and only
-a warm cache lets that resolve stay off the network - so this is a separate
-job from the frozen-offline install above, not a replacement for it. Add
+the lockfile. `lock --frozen` reads the lockfile as the thing to check rather
+than as the answer, which is the opposite of what install/warm `--frozen` do -
+it still resolves fresh, and only a warm resolve cache lets that stay off the
+network - so this is a separate job from the install above, not a replacement
+for it. Add
 `--refresh` for a second, distinct gate on the same file: `lock --frozen`
 alone only catches a `requirements.yml` change, since it reuses the cached
 resolve; `lock --frozen --refresh` also catches a newer version simply
@@ -736,9 +750,33 @@ Pre-warm caches in your CI base image so jobs only hardlink into place:
 
 ```dockerfile
 FROM debian:stable-slim
-COPY --from=ghcr.io/greeddj/go-galaxy:latest /usr/local/bin/go-galaxy /usr/local/bin/
+
+# The published image is distroless: one static binary at /go-galaxy, and
+# nothing else - no shell, no CA bundle. Copy the binary out of it, and bring
+# your own certificates, or the first Galaxy request fails to verify its TLS
+# certificate.
+COPY --from=ghcr.io/greeddj/go-galaxy:latest /go-galaxy /usr/local/bin/go-galaxy
+RUN apt-get update -qq \
+ && apt-get install -y -qq --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# Pin the cache somewhere that does not depend on who runs the job: the
+# default is $HOME/.cache/go-galaxy, and the warm below runs as root while
+# your jobs may not.
+ENV GO_GALAXY_CACHE_DIR=/var/cache/go-galaxy
+
+WORKDIR /src
 COPY requirements.yml requirements.lock.yml ./
-RUN go-galaxy warm --frozen
+# A run needs the cache lock, so a job user that can only read the baked cache
+# fails to start with `cache backend cannot be used as configured` (exit 2).
+RUN go-galaxy warm --frozen && chmod -R a+rwX "$GO_GALAXY_CACHE_DIR"
+```
+
+Jobs built on that image are the case `--offline` is for, since the cache is
+part of the image rather than something a key might miss:
+
+```bash
+go-galaxy install --frozen --offline -p ./collections
 ```
 
 ## Color
