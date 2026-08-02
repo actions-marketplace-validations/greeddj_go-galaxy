@@ -326,3 +326,98 @@ func TestArtifactsMetaPresentWithNonHexSidecarReportsFoundNilMeta(t *testing.T) 
 	}
 	assertLocalMetaFoundMatchesHas(t, a, found)
 }
+
+// TestArtifactsNeverActThroughASymlinkedCacheEntry pins why this backend's
+// flat layout needs no containment root of its own, rather than leaving that
+// as an assertion in prose.
+//
+// Every path it builds is the cache directory plus exactly one element -
+// helpers.ArtifactKey percent-escapes the filename, so no key can contain a
+// separator - which leaves the entry itself as the only thing an attacker
+// with write access to the cache directory could turn into a symlink. Both
+// mutating operations refuse to act through one for a structural reason
+// rather than a check: os.Rename replaces the link, and os.Remove unlinks it,
+// so neither follows it to a target. The victim file's survival is what
+// proves that, and the cache entry's own state afterwards is what proves the
+// operation still did its job.
+func TestArtifactsNeverActThroughASymlinkedCacheEntry(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Commit replaces the symlink", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		victim := seedSymlinkedCacheEntry(t, dir)
+
+		a := NewArtifacts(dir)
+		commitTempArtifact(t, a, []byte("committed bytes"), map[string]string{"sha256": testSHA})
+
+		assertVictimIntact(t, victim)
+		entry := filepath.Join(dir, testArtifactKey)
+		info, err := os.Lstat(entry)
+		if err != nil {
+			t.Fatalf("lstat committed entry: %v", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			t.Error("expected Commit to replace the symlink with a real file, it is still a symlink")
+		}
+		//nolint:gosec // entry is under this test's own t.TempDir fixture.
+		body, err := os.ReadFile(entry)
+		if err != nil {
+			t.Fatalf("read committed entry: %v", err)
+		}
+		if string(body) != "committed bytes" {
+			t.Errorf("committed entry = %q, want the freshly committed bytes", body)
+		}
+	})
+
+	t.Run("Delete unlinks the symlink", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		victim := seedSymlinkedCacheEntry(t, dir)
+
+		a := NewArtifacts(dir)
+		if err := a.Delete(context.Background(), testArtifactKey); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+
+		assertVictimIntact(t, victim)
+		if _, err := os.Lstat(filepath.Join(dir, testArtifactKey)); !os.IsNotExist(err) {
+			t.Errorf("expected Delete to unlink the cache entry, lstat error = %v", err)
+		}
+	})
+}
+
+// seedSymlinkedCacheEntry plants a symlink at the cache entry testArtifactKey
+// resolves to, pointing at a file outside the cache directory, and returns
+// that file's path.
+func seedSymlinkedCacheEntry(t *testing.T, cacheDir string) string {
+	t.Helper()
+
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte(victimContent), helpers.FileMod); err != nil {
+		t.Fatalf("write victim: %v", err)
+	}
+	if err := os.Symlink(victim, filepath.Join(cacheDir, testArtifactKey)); err != nil {
+		t.Fatalf("symlink cache entry: %v", err)
+	}
+	return victim
+}
+
+// victimContent is the body seedSymlinkedCacheEntry writes and
+// assertVictimIntact expects back, unchanged.
+const victimContent = "the file a symlinked cache entry points at"
+
+// assertVictimIntact fails the test unless the file outside the cache
+// directory is still present with its original bytes.
+func assertVictimIntact(t *testing.T, victim string) {
+	t.Helper()
+
+	//nolint:gosec // victim is under this test's own t.TempDir fixture.
+	body, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatalf("expected the file outside the cache directory to survive: %v", err)
+	}
+	if string(body) != victimContent {
+		t.Errorf("file outside the cache directory was rewritten: %q", body)
+	}
+}

@@ -99,11 +99,11 @@ func handleTarEntry(tarReader *tar.Reader, header *tar.Header, dstDir string, ex
 
 	switch header.Typeflag {
 	case tar.TypeDir:
-		return extractDir(targetPath)
+		return extractDir(targetPath, verifiedDirs)
 	case tar.TypeReg:
-		return extractRegularFile(tarReader, header, targetPath, extracted)
+		return extractRegularFile(tarReader, header, targetPath, extracted, verifiedDirs)
 	case tar.TypeSymlink:
-		return extractSymlink(relPath, targetPath, header)
+		return extractSymlink(relPath, targetPath, header, verifiedDirs)
 	case tar.TypeLink:
 		return extractHardlink(dstDir, targetPath, header, verifiedDirs)
 	default:
@@ -111,14 +111,51 @@ func handleTarEntry(tarReader *tar.Reader, header *tar.Header, dstDir string, ex
 	}
 }
 
-func extractDir(targetPath string) error {
-	if err := os.MkdirAll(targetPath, helpers.DirMod); err != nil {
+func extractDir(targetPath string, verifiedDirs map[string]struct{}) error {
+	if err := ensureDir(targetPath, verifiedDirs); err != nil {
 		return fmt.Errorf("failed to create directory %s: %w", targetPath, err)
 	}
 	return nil
 }
 
-func extractRegularFile(tarReader *tar.Reader, header *tar.Header, targetPath string, extracted *int64) error {
+// ensureDir creates dir unless this extraction already proved it a real,
+// non-symlink directory, and records it as one afterwards. It is the only
+// place this package creates a directory.
+//
+// Skipping the syscall is sound for exactly the reason the memo itself is (see
+// ensureNoSymlinkParents): a memoized component is a real directory and stays
+// one for the rest of the extraction, so os.MkdirAll on it would find it
+// already there and return nil. The measured win is not the skipped mkdirat
+// alone but the whole walk os.MkdirAll performs - it Stats the full path and,
+// on a miss, every ancestor - repeated once per archive entry over a parent
+// chain the entries almost always share.
+//
+// Recording the directory afterwards is what makes the skip reachable at all,
+// since the first entry under a new parent has to create it, and it is safe
+// for a reason that comes from the caller rather than from here: every
+// component of the entry's own path, this one included, was Lstat'd by
+// ensureNoSymlinkParents before the entry was dispatched, so a symlink can
+// never be what os.MkdirAll found already present. A future caller that
+// reaches this function without that check first would break the memo's
+// invariant, not merely this optimization.
+func ensureDir(dir string, verifiedDirs map[string]struct{}) error {
+	if _, ok := verifiedDirs[dir]; ok {
+		return nil
+	}
+	if err := os.MkdirAll(dir, helpers.DirMod); err != nil {
+		return err
+	}
+	verifiedDirs[dir] = struct{}{}
+	return nil
+}
+
+func extractRegularFile(
+	tarReader *tar.Reader,
+	header *tar.Header,
+	targetPath string,
+	extracted *int64,
+	verifiedDirs map[string]struct{},
+) error {
 	if header.Size < 0 {
 		return fmt.Errorf("%w: %s ", helpers.ErrArchiveEntryHasNegativeSize, header.Name)
 	}
@@ -128,7 +165,7 @@ func extractRegularFile(tarReader *tar.Reader, header *tar.Header, targetPath st
 	if *extracted+header.Size > helpers.ArchiveMaxTotalSize {
 		return fmt.Errorf("%w: %d bytes", helpers.ErrArchiveExceedsMaxSize, helpers.ArchiveMaxTotalSize)
 	}
-	if err := os.MkdirAll(filepath.Dir(targetPath), helpers.DirMod); err != nil {
+	if err := ensureDir(filepath.Dir(targetPath), verifiedDirs); err != nil {
 		return fmt.Errorf("failed to create directories for %s: %w", targetPath, err)
 	}
 	// Strip every write bit at the moment the file is created. This is the
@@ -181,12 +218,12 @@ func classifyOpenRegularFileError(targetPath, entryName string, openErr error) e
 	return fmt.Errorf("failed to create file %s: %w", targetPath, openErr)
 }
 
-func extractSymlink(relPath, targetPath string, header *tar.Header) error {
+func extractSymlink(relPath, targetPath string, header *tar.Header, verifiedDirs map[string]struct{}) error {
 	linkTarget, err := safeSymlinkTarget(relPath, header.Linkname)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(targetPath), helpers.DirMod); err != nil {
+	if err := ensureDir(filepath.Dir(targetPath), verifiedDirs); err != nil {
 		return fmt.Errorf("failed to create directories for %s: %w", targetPath, err)
 	}
 	if err := os.Symlink(linkTarget, targetPath); err != nil {
@@ -207,7 +244,7 @@ func extractHardlink(dstDir, targetPath string, header *tar.Header, verifiedDirs
 		return err
 	}
 	target := filepath.Join(dstDir, linkRel)
-	if err := os.MkdirAll(filepath.Dir(targetPath), helpers.DirMod); err != nil {
+	if err := ensureDir(filepath.Dir(targetPath), verifiedDirs); err != nil {
 		return fmt.Errorf("failed to create directories for %s: %w", targetPath, err)
 	}
 	if err := os.Link(target, targetPath); err != nil {
@@ -262,14 +299,23 @@ func sanitizeArchivePath(name string) (string, error) {
 // Correctness theorem: without the memo, this function calls os.Lstat(C)
 // for every parent component C and rejects only if C is an existing
 // symlink (nonexistent, a real directory, or a regular file all pass). The
-// memo skips os.Lstat(C) ONLY when C was already Lstat'd earlier in this
-// extraction and found to be a real, non-symlink directory. By the
+// memo skips os.Lstat(C) ONLY when C is known to be a real, non-symlink
+// directory - either because it was Lstat'd earlier in this extraction and
+// found to be one, or because ensureDir created it as one. By the
 // no-overwrite invariant below, C is therefore still a real directory at
 // the time it is skipped, so a fresh Lstat(C) would still pass. Skipping
 // yields the identical decision. Components that are symlinks, nonexistent,
 // or non-directories are never memoized, so they are always Lstat'd exactly
 // as before. Therefore the memo produces the identical accept/reject
 // outcome for every entry, for every component.
+//
+// The two writers do not weaken each other. This function memoizes only
+// after an Lstat proved the component a directory and not a symlink;
+// ensureDir memoizes only after os.MkdirAll returned, which for an already
+// present path means it found a directory there - and that path is always
+// one this function already Lstat'd for the entry being extracted, so
+// os.MkdirAll's own symlink-following Stat cannot have accepted a symlink
+// that this function would have rejected.
 //
 // Load-bearing invariant: a directory confirmed non-symlink during an
 // extraction stays a non-symlink directory for the rest of that extraction,

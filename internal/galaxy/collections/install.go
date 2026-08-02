@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"path"
 	"strings"
 	"time"
@@ -959,17 +958,19 @@ func streamDownloadAndExtract(
 	closeErr := tmpFile.Close()
 	out := <-ingestCh
 
+	// Discard, not os.RemoveAll: the path came from the extracted store, so
+	// the store is what removes it, through its own containment root. A raw
+	// RemoveAll here would be the one place in this pipeline aiming that
+	// primitive at a path nothing re-validated.
 	if err := firstNonNil(copyErr, closeErr, out.err); err != nil {
-		if out.tmp != "" {
-			_ = os.RemoveAll(out.tmp)
-		}
+		_ = deps.extractStore.Discard(out.tmp)
 		cleanupIfNeeded(tmpCleanup)
 		return downloadResult{}, err
 	}
 
 	sha := hex.EncodeToString(hasher.Sum(nil))
 	if err := verifyDownloadSHA(meta, sha); err != nil {
-		_ = os.RemoveAll(out.tmp)
+		_ = deps.extractStore.Discard(out.tmp)
 		cleanupIfNeeded(tmpCleanup)
 		return downloadResult{}, err
 	}

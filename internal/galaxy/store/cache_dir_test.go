@@ -152,3 +152,41 @@ func assertFileAbsent(t *testing.T, dir, name string) {
 		t.Fatalf("expected %s to be removed, stat error: %v", name, err)
 	}
 }
+
+// TestClearCacheFilesUnlinksASymlinkedEntryWithoutFollowingIt pins the second
+// half of why the cache directory's flat layout needs no containment root:
+// the sweeps here delete by os.Remove, which unlinks a symlink rather than
+// following it, so a link planted at a sweepable name cannot redirect the
+// deletion at whatever it points to. The victim's survival is the refusal;
+// the link's disappearance is the positive control that the sweep ran at all
+// and did consider this entry.
+func TestClearCacheFilesUnlinksASymlinkedEntryWithoutFollowingIt(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	victimDir := t.TempDir()
+	victim := filepath.Join(victimDir, "victim.txt")
+	if err := os.WriteFile(victim, []byte("outside the cache directory"), helpers.FileMod); err != nil {
+		t.Fatalf("write victim: %v", err)
+	}
+
+	link := filepath.Join(dir, "ns.name-1.0.0.tar.gz")
+	if err := os.Symlink(victim, link); err != nil {
+		t.Fatalf("symlink cache entry: %v", err)
+	}
+
+	if err := ClearCacheFiles(dir); err != nil {
+		t.Fatalf("ClearCacheFiles: %v", err)
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Errorf("expected the symlinked entry to be unlinked, lstat error = %v", err)
+	}
+	//nolint:gosec // victim is under this test's own t.TempDir fixture.
+	body, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatalf("expected the file outside the cache directory to survive: %v", err)
+	}
+	if string(body) != "outside the cache directory" {
+		t.Errorf("file outside the cache directory was rewritten: %q", body)
+	}
+}

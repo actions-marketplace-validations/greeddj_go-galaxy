@@ -1280,7 +1280,15 @@ func sweepExtractedStore(
 		reportExtractedSweepPlan(runtime, extractedStore, keep)
 		return
 	}
-	_ = extractedStore.Sweep(keep)
+	// Reported, not discarded, and still not fatal. The sweep reclaims disk in
+	// a rebuildable layer, so one unreadable entry must not fail a cleanup run
+	// that has already done its real work; but the same return now also
+	// carries the containment root's refusal when the store directory itself
+	// leads out of the cache directory, and silence there would leave an
+	// operator with a run that reports success while reclaiming nothing.
+	if err := extractedStore.Sweep(keep); err != nil {
+		runtime.Output.Errorf("failed to sweep the extracted cache: %v", err)
+	}
 }
 
 // extractedKeepSet builds the set of extracted-store SHAs to keep: installed-

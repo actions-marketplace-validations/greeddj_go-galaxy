@@ -856,38 +856,59 @@ func TestStoreReady(t *testing.T) {
 
 // TestEnsureAndPromoteRejectTraversalSHA proves both of the store's
 // tree-creating entry points refuse an unsafe sha - one that is not a single
-// path element - rather than joining it into a filepath.Join/os.Rename target
-// that could escape the store root. Neither call may create or remove
-// anything outside store.Root().
+// path element - rather than joining it into a Rename target that could
+// escape the store root. Neither call may create or remove anything outside
+// store.Root().
+//
+// Promote's cleanup of the rejected call's temp tree is checked from both
+// sides, because that cleanup is a RemoveAll and it is now aimed through the
+// containment root: a temp that really does sit under the cache directory is
+// still removed, and one that does not is left untouched. Without the first
+// half, "the outside temp survived" would be indistinguishable from Promote
+// having stopped cleaning up at all.
 func TestEnsureAndPromoteRejectTraversalSHA(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	tarPath := filepath.Join(dir, "src.tar.gz")
 	writeTarball(t, tarPath, map[string]string{"foo.txt": helloFileContent})
 
-	store := NewStore(filepath.Join(dir, "cache"))
+	cacheDir := filepath.Join(dir, "cache")
+	store := NewStore(cacheDir)
 	const traversalSHA = "../../../../../../etc/ssh"
 
 	if _, err := store.Ensure(traversalSHA, tarPath); !errors.Is(err, ErrSHAUnsafe) {
 		t.Errorf("Ensure(%q, ...) error = %v, want ErrSHAUnsafe", traversalSHA, err)
 	}
-	// The rejection happens before Ensure ever reaches extractInto's own
-	// os.MkdirAll(s.root, ...), so the store root itself must not exist yet -
+	// The rejection happens before Ensure opens a containment root at all, so
+	// neither the store root nor the cache directory holding it exists yet -
 	// the strongest available proof that nothing was created anywhere, inside
 	// the root or out.
-	if _, err := os.Stat(store.Root()); !os.IsNotExist(err) {
-		t.Errorf("expected Ensure to create nothing at all for a rejected sha, store.Root() stat error = %v", err)
+	if _, err := os.Stat(cacheDir); !os.IsNotExist(err) {
+		t.Errorf("expected Ensure to create nothing at all for a rejected sha, cache dir stat error = %v", err)
 	}
 
-	tmpRoot := t.TempDir()
-	if _, err := store.Promote(tmpRoot, traversalSHA); !errors.Is(err, ErrSHAUnsafe) {
+	outsideTmp := t.TempDir()
+	if _, err := store.Promote(outsideTmp, traversalSHA); !errors.Is(err, ErrSHAUnsafe) {
 		t.Errorf("Promote(_, %q) error = %v, want ErrSHAUnsafe", traversalSHA, err)
 	}
-	if _, err := os.Stat(store.Root()); !os.IsNotExist(err) {
-		t.Errorf("expected Promote to create nothing at all for a rejected sha, store.Root() stat error = %v", err)
+	if _, err := os.Stat(cacheDir); !os.IsNotExist(err) {
+		t.Errorf("expected Promote to create nothing at all for a rejected sha, cache dir stat error = %v", err)
 	}
-	if _, err := os.Stat(tmpRoot); !os.IsNotExist(err) {
-		t.Errorf("expected Promote to still remove tmpRoot on rejection, stat error = %v", err)
+	if _, err := os.Stat(outsideTmp); err != nil {
+		t.Errorf("expected Promote to leave a temp outside the store alone, stat error = %v", err)
+	}
+
+	// Positive control for the assertion above: the identical rejection, with
+	// a temp that genuinely sits under the store, does remove it.
+	insideTmp := filepath.Join(store.Root(), "ingest-inside")
+	if err := os.MkdirAll(insideTmp, helpers.DirMod); err != nil {
+		t.Fatalf("mkdir in-store temp: %v", err)
+	}
+	if _, err := store.Promote(insideTmp, traversalSHA); !errors.Is(err, ErrSHAUnsafe) {
+		t.Errorf("Promote(inStoreTmp, %q) error = %v, want ErrSHAUnsafe", traversalSHA, err)
+	}
+	if _, err := os.Stat(insideTmp); !os.IsNotExist(err) {
+		t.Errorf("expected Promote to remove a temp inside the store on rejection, stat error = %v", err)
 	}
 }
 
@@ -1071,5 +1092,226 @@ func TestNewFilesCanStillBeCreatedInInstallTree(t *testing.T) {
 	}
 	if string(body) != "compiled" {
 		t.Fatalf("new file content = %q", body)
+	}
+}
+
+// escapingStoreFixture builds a cache directory whose store-directory name is
+// a symlink to a directory outside the cache, holding one victim entry named
+// so that every sweeping entry point would delete it if the symlink were
+// followed. It returns the store and the victim's real path.
+//
+// The symlink is absolute rather than relative, and that is the weaker of the
+// two forms on purpose: os.Root refuses an absolute target outright, so the
+// tests below would still pass against a root that had somehow been given
+// permission to follow in-root relative links. Nothing here is meant to prove
+// how os.Root distinguishes link shapes - only that the store operations run
+// through it at all.
+func escapingStoreFixture(t *testing.T) (*Store, string) {
+	t.Helper()
+
+	dir := t.TempDir()
+	cacheDir := filepath.Join(dir, "cache")
+	outside := filepath.Join(dir, "outside")
+	victim := filepath.Join(outside, "ingest-victim")
+	if err := os.MkdirAll(victim, helpers.DirMod); err != nil {
+		t.Fatalf("mkdir victim: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(victim, "keepme"), []byte("keep"), helpers.FileMod); err != nil {
+		t.Fatalf("write victim file: %v", err)
+	}
+	if err := os.MkdirAll(cacheDir, helpers.DirMod); err != nil {
+		t.Fatalf("mkdir cache: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(cacheDir, RootDirName)); err != nil {
+		t.Fatalf("symlink store dir: %v", err)
+	}
+	return NewStore(cacheDir), filepath.Join(victim, "keepme")
+}
+
+// realStoreFixture is escapingStoreFixture's positive control: the identical
+// layout with a real store directory instead of the symlink, so every
+// operation the escaping fixture must refuse is shown to succeed here.
+func realStoreFixture(t *testing.T) (*Store, string) {
+	t.Helper()
+
+	dir := t.TempDir()
+	cacheDir := filepath.Join(dir, "cache")
+	victim := filepath.Join(cacheDir, RootDirName, "ingest-victim")
+	if err := os.MkdirAll(victim, helpers.DirMod); err != nil {
+		t.Fatalf("mkdir victim: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(victim, "keepme"), []byte("keep"), helpers.FileMod); err != nil {
+		t.Fatalf("write victim file: %v", err)
+	}
+	return NewStore(cacheDir), filepath.Join(victim, "keepme")
+}
+
+// TestStoreRefusesAnEscapingStoreDirectory proves the containment root, not
+// the sha predicate, is what stops a store directory that leads out of the
+// cache directory: every entry point that lists, creates, renames, or removes
+// under it must refuse, and the tree the symlink points at must survive
+// untouched. Each row states what it needs from the control fixture too, so
+// "refused" is never confused with "never ran".
+func TestStoreRefusesAnEscapingStoreDirectory(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range escapingStoreCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store, victim := escapingStoreFixture(t)
+			if err := tc.run(t, store); err == nil {
+				t.Errorf("%s through an escaping store directory returned no error", tc.name)
+			}
+			if _, err := os.Stat(victim); err != nil {
+				t.Errorf("expected the tree outside the cache directory to survive, stat error: %v", err)
+			}
+
+			// Positive control: the same call against a real store directory
+			// succeeds, so the refusal above cannot be this operation failing
+			// for some reason of its own.
+			control, controlVictim := realStoreFixture(t)
+			if err := tc.run(t, control); err != nil {
+				t.Fatalf("%s against a real store directory: %v", tc.name, err)
+			}
+			if tc.sweeps {
+				if _, err := os.Stat(controlVictim); !os.IsNotExist(err) {
+					t.Errorf("expected %s to remove the entry inside a real store, stat error: %v", tc.name, err)
+				}
+			}
+		})
+	}
+}
+
+// escapingStoreCase is one row of TestStoreRefusesAnEscapingStoreDirectory.
+// sweeps marks the rows whose control run must actually delete the fixture
+// entry, which is what separates a sweeping operation from one that merely
+// has to succeed.
+type escapingStoreCase struct {
+	run    func(t *testing.T, s *Store) error
+	name   string
+	sweeps bool
+}
+
+// escapingStoreCases returns one row per store entry point that resolves a
+// path under the store directory.
+func escapingStoreCases() []escapingStoreCase {
+	return []escapingStoreCase{
+		{
+			name:   "Sweep",
+			sweeps: true,
+			run: func(_ *testing.T, s *Store) error {
+				return s.Sweep(nil)
+			},
+		},
+		{
+			name:   "SweepTemp",
+			sweeps: true,
+			run: func(_ *testing.T, s *Store) error {
+				return s.SweepTemp()
+			},
+		},
+		{
+			name: "SweepPlan",
+			run: func(_ *testing.T, s *Store) error {
+				_, err := s.SweepPlan(nil)
+				return err
+			},
+		},
+		{
+			name: "Ensure",
+			run: func(t *testing.T, s *Store) error {
+				t.Helper()
+				tarPath := filepath.Join(t.TempDir(), "src.tar.gz")
+				writeTarball(t, tarPath, map[string]string{"foo.txt": helloFileContent})
+				_, err := s.Ensure(mustHash(t, tarPath), tarPath)
+				return err
+			},
+		},
+		{
+			name: "IngestReader",
+			run: func(t *testing.T, s *Store) error {
+				t.Helper()
+				tarPath := filepath.Join(t.TempDir(), "src.tar.gz")
+				writeTarball(t, tarPath, map[string]string{"foo.txt": helloFileContent})
+				//nolint:gosec // tarPath is this test's own t.TempDir fixture.
+				f, err := os.Open(tarPath)
+				if err != nil {
+					t.Fatalf("open tarball: %v", err)
+				}
+				defer func() { _ = f.Close() }()
+				_, err = s.IngestReader(f)
+				return err
+			},
+		},
+	}
+}
+
+// TestStoreDirUnusableNamesWhatIsWrong pins that a write against a store
+// directory the root will not follow reports ErrStoreDirUnusable rather than
+// the operating system's own answer, which for both reachable shapes - an
+// escaping symlink and a regular file in that name - is a bare "file exists"
+// from mkdirat that names neither the path nor the problem.
+func TestStoreDirUnusableNamesWhatIsWrong(t *testing.T) {
+	t.Parallel()
+
+	t.Run("escaping symlink", func(t *testing.T) {
+		t.Parallel()
+		store, _ := escapingStoreFixture(t)
+		tarPath := filepath.Join(t.TempDir(), "src.tar.gz")
+		writeTarball(t, tarPath, map[string]string{"foo.txt": helloFileContent})
+		if _, err := store.Ensure(mustHash(t, tarPath), tarPath); !errors.Is(err, ErrStoreDirUnusable) {
+			t.Errorf("Ensure error = %v, want ErrStoreDirUnusable", err)
+		}
+	})
+
+	t.Run("regular file", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		cacheDir := filepath.Join(dir, "cache")
+		if err := os.MkdirAll(cacheDir, helpers.DirMod); err != nil {
+			t.Fatalf("mkdir cache: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(cacheDir, RootDirName), []byte("not a directory"), helpers.FileMod); err != nil {
+			t.Fatalf("write blocking file: %v", err)
+		}
+		tarPath := filepath.Join(dir, "src.tar.gz")
+		writeTarball(t, tarPath, map[string]string{"foo.txt": helloFileContent})
+		store := NewStore(cacheDir)
+		if _, err := store.Ensure(mustHash(t, tarPath), tarPath); !errors.Is(err, ErrStoreDirUnusable) {
+			t.Errorf("Ensure error = %v, want ErrStoreDirUnusable", err)
+		}
+	})
+}
+
+// TestDiscardRefusesATempOutsideTheStore pins the other half of Promote's
+// rooted cleanup as its own entry point: Discard removes a temp under the
+// store and refuses one outside it, rather than handing RemoveAll whatever
+// path it is given.
+func TestDiscardRefusesATempOutsideTheStore(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	store := NewStore(filepath.Join(dir, "cache"))
+
+	outside := filepath.Join(dir, "outside")
+	if err := os.MkdirAll(outside, helpers.DirMod); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	if err := store.Discard(outside); !errors.Is(err, ErrTempOutsideStore) {
+		t.Errorf("Discard(outside) error = %v, want ErrTempOutsideStore", err)
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Errorf("expected the outside temp to survive Discard, stat error: %v", err)
+	}
+
+	inside := filepath.Join(store.Root(), "ingest-inside")
+	if err := os.MkdirAll(inside, helpers.DirMod); err != nil {
+		t.Fatalf("mkdir inside: %v", err)
+	}
+	if err := store.Discard(inside); err != nil {
+		t.Errorf("Discard(inside): %v", err)
+	}
+	if _, err := os.Stat(inside); !os.IsNotExist(err) {
+		t.Errorf("expected the in-store temp to be removed, stat error: %v", err)
 	}
 }

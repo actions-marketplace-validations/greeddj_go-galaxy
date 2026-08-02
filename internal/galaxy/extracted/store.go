@@ -2,14 +2,27 @@
 // collection tarballs. Each artifact SHA256 is extracted at most once,
 // and per-project install paths are populated via hardlinks (with a
 // copy fallback for cross-device cases).
+//
+// Every path this package creates, renames, or removes is resolved through an
+// os.Root established at the configured cache directory, so no component
+// beneath it - the "extracted" directory itself above all - can redirect a
+// write or a recursive delete outside the tree the operator configured. The
+// root is established at the cache directory and never one level lower, for
+// the same reason the install side roots at the collections path rather than
+// at ansible_collections: os.OpenRoot follows a symlink when establishing the
+// root, so rooting at "extracted" would adopt whatever that name points at and
+// leave nothing to refuse. A symlinked cache directory itself still works, and
+// that is deliberate - it is the boundary, not something inside it.
 package extracted
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -28,6 +41,10 @@ const (
 	// ingestPrefix names the temp directories IngestReader creates under the
 	// store root before a stream is finalized via Promote.
 	ingestPrefix = "ingest-"
+	// ingestNameAttempts bounds how many random names mkdirTemp tries before
+	// giving up, matching os.MkdirTemp's own retry discipline for a name
+	// collision.
+	ingestNameAttempts = 10000
 
 	// ReadyMarkerPayload is the exact content a current binary writes into
 	// ReadyMarker, and the only content isReady accepts. This is a version
@@ -35,11 +52,11 @@ const (
 	// lock is taken, so a CAS tree extracted by an older binary - one that
 	// wrote the legacy "ok" sentinel and left its regular files writable -
 	// would otherwise be trusted verbatim and hard-linked into every install
-	// that references it, silently defeating the write-bit hardening this
-	// commit adds. Bumping this payload is what forces every pre-existing
-	// tree to fail isReady exactly once and rebuild hardened; a tree that
-	// already carries this payload was, by construction, extracted by a
-	// binary new enough to have applied the mask.
+	// that references it, silently defeating the write-bit hardening. Bumping
+	// this payload is what forces every pre-existing tree to fail isReady
+	// exactly once and rebuild hardened; a tree that already carries this
+	// payload was, by construction, extracted by a binary new enough to have
+	// applied the mask.
 	ReadyMarkerPayload = "ro1"
 	// readyMarkerMaxReadSize bounds the read of a ready marker file. A
 	// well-formed marker is a few bytes, so anything longer is either
@@ -56,16 +73,33 @@ var (
 	// ErrSHAEmpty indicates a missing SHA256 identifier.
 	ErrSHAEmpty = errors.New("artifact sha is empty")
 	// ErrSHAUnsafe indicates a SHA256 identifier that is not safe to use as a
-	// single path element - see storePath's own doc comment for where such a
+	// single path element - see entryRel's own doc comment for where such a
 	// value can originate.
 	ErrSHAUnsafe = errors.New("artifact sha is not a single path element")
+	// ErrTempOutsideStore indicates a temp path handed to Promote or Discard
+	// that does not sit under the store's own cache directory. Both take a
+	// path a caller received from IngestReader, and both would otherwise
+	// RemoveAll it; refusing is what keeps that primitive from being aimed at
+	// an arbitrary path.
+	ErrTempOutsideStore = errors.New("temp path is outside the extracted store")
+	// ErrStoreDirUnusable indicates the store directory under the cache
+	// directory exists but cannot serve as one: a symlink leading out of the
+	// cache directory, or a non-directory occupying the name. It exists
+	// because the containment root reports the first of those as a bare
+	// "file exists" from mkdirat and the second identically, which names
+	// neither the path nor what is wrong with it.
+	ErrStoreDirUnusable = errors.New("extracted store directory is not usable")
+	// errIngestTempExhausted indicates mkdirTemp could not find an unused
+	// name. It is unexported because no caller can act on it differently from
+	// any other ingest failure.
+	errIngestTempExhausted = errors.New("could not create an ingest temp directory")
 )
 
 // Store materializes tarballs once per SHA and reuses them via hardlinks.
 type Store struct {
-	locks map[string]*sync.Mutex
-	root  string
-	mu    sync.Mutex
+	locks    map[string]*sync.Mutex
+	cacheDir string
+	mu       sync.Mutex
 }
 
 // NewStore returns a Store rooted at cacheDir/extracted, or nil if cacheDir
@@ -75,22 +109,31 @@ func NewStore(cacheDir string) *Store {
 		return nil
 	}
 	return &Store{
-		root:  filepath.Join(cacheDir, RootDirName),
-		locks: make(map[string]*sync.Mutex),
+		cacheDir: cacheDir,
+		locks:    make(map[string]*sync.Mutex),
 	}
 }
 
-// Root returns the on-disk root of the store.
+// Root returns the on-disk root of the store. It is a display and test
+// affordance only: nothing in this package resolves a path by joining onto
+// it, since every real operation goes through the containment root instead.
 func (s *Store) Root() string {
 	if s == nil {
 		return ""
 	}
-	return s.root
+	return filepath.Join(s.cacheDir, RootDirName)
 }
 
 // Ensure extracts tarPath into the store under sha if not already present
 // and returns the path of the extracted tree. Concurrent callers for the
 // same sha share the work.
+//
+// The returned path is an ordinary string, deliberately: its consumer
+// (Materialize) walks the tree with fs.WalkDir, which does not follow
+// symlinks, and the tree it names was resolved through the containment root
+// moments earlier. A local writer racing between this return and that walk is
+// the same disclosed residual the install side carries for its own extraction
+// target, not a gap this root closes.
 func (s *Store) Ensure(sha, tarPath string) (string, error) {
 	if s == nil {
 		return "", ErrStoreNotConfigured
@@ -98,11 +141,12 @@ func (s *Store) Ensure(sha, tarPath string) (string, error) {
 	if sha == "" {
 		return "", ErrSHAEmpty
 	}
-	final, ok := s.storePath(sha)
+	rel, ok := entryRel(sha)
 	if !ok {
 		return "", ErrSHAUnsafe
 	}
-	if isReady(final) {
+	final := s.abs(rel)
+	if s.readyRel(rel) {
 		return final, nil
 	}
 
@@ -110,7 +154,7 @@ func (s *Store) Ensure(sha, tarPath string) (string, error) {
 	lock.Lock()
 	defer lock.Unlock()
 
-	if isReady(final) {
+	if s.readyRel(rel) {
 		return final, nil
 	}
 	// The CAS tree for sha is absent, so we are about to ingest tarPath's bytes
@@ -130,7 +174,7 @@ func (s *Store) Ensure(sha, tarPath string) (string, error) {
 	if err := verifyTarballSHA(tarPath, sha); err != nil {
 		return "", err
 	}
-	return s.extractInto(final, tarPath)
+	return s.extractInto(rel, tarPath)
 }
 
 // Ready reports whether sha's content-addressable tree is present and
@@ -146,14 +190,14 @@ func (s *Store) Ensure(sha, tarPath string) (string, error) {
 //
 // sha reaches this method from a lockfile pin or the persisted snapshot's
 // warmed record, neither of which is validated before it gets here (see
-// storePath), so an unsafe sha - one that is not a single path element -
+// entryRel), so an unsafe sha - one that is not a single path element -
 // reports false rather than joining it into a path at all.
 func (s *Store) Ready(sha string) bool {
 	if s == nil {
 		return false
 	}
-	p, ok := s.storePath(sha)
-	return ok && isReady(p)
+	rel, ok := entryRel(sha)
+	return ok && s.readyRel(rel)
 }
 
 // verifyTarballSHA reports nil when the file at tarPath hashes to sha,
@@ -173,7 +217,7 @@ func verifyTarballSHA(tarPath, sha string) error {
 
 // IngestReader extracts a tar.gz stream into a fresh tmp directory under
 // the store root. The caller must call Promote() with the resulting tmp
-// path and a SHA to finalize, or remove the tmp tree on error. The reader
+// path and a SHA to finalize, or Discard() it on error. The reader
 // is always drained to EOF so that an upstream io.Pipe writer cannot
 // deadlock when the gzip stream ends before the body does.
 func (s *Store) IngestReader(r io.Reader) (string, error) {
@@ -181,22 +225,25 @@ func (s *Store) IngestReader(r io.Reader) (string, error) {
 		_, _ = io.Copy(io.Discard, r)
 		return "", ErrStoreNotConfigured
 	}
-	if err := os.MkdirAll(s.root, helpers.DirMod); err != nil {
-		_, _ = io.Copy(io.Discard, r)
-		return "", err
-	}
-	tmpDir, err := os.MkdirTemp(s.root, ingestPrefix)
+	root, err := s.openRootForWrite()
 	if err != nil {
 		_, _ = io.Copy(io.Discard, r)
 		return "", err
 	}
-	extractErr := archive.ExtractTarGzStream(r, tmpDir)
+	defer func() { _ = root.Close() }()
+
+	tmpRel, err := mkdirTemp(root)
+	if err != nil {
+		_, _ = io.Copy(io.Discard, r)
+		return "", err
+	}
+	extractErr := archive.ExtractTarGzStream(r, s.abs(tmpRel))
 	_, _ = io.Copy(io.Discard, r)
 	if extractErr != nil {
-		_ = os.RemoveAll(tmpDir)
+		_ = root.RemoveAll(tmpRel)
 		return "", extractErr
 	}
-	return tmpDir, nil
+	return s.abs(tmpRel), nil
 }
 
 // Promote atomically renames a tmpRoot from IngestReader into <root>/<sha>.
@@ -204,60 +251,101 @@ func (s *Store) IngestReader(r io.Reader) (string, error) {
 // returned.
 //
 // sha is hex by construction on every caller today (a hash of the bytes just
-// streamed), so the storePath check below is defense in depth against a
+// streamed), so the entryRel check below is defense in depth against a
 // future caller, not a case reachable now - but it still guards a
 // RemoveAll-then-Rename pair, and a Rename target built from an unvalidated
 // sha is exactly the kind of path this package must never construct.
+//
+// The sha is validated before tmpRoot is even looked at, so a caller passing
+// both an unusable sha and an out-of-store temp still gets the sha's own
+// error: the sha is what this method is being asked to do something with,
+// while the temp is only what it would clean up on the way out.
 func (s *Store) Promote(tmpRoot, sha string) (string, error) {
 	if s == nil {
-		_ = os.RemoveAll(tmpRoot)
 		return "", ErrStoreNotConfigured
 	}
 	if sha == "" {
-		_ = os.RemoveAll(tmpRoot)
+		_ = s.Discard(tmpRoot)
 		return "", ErrSHAEmpty
 	}
-	final, ok := s.storePath(sha)
+	rel, ok := entryRel(sha)
 	if !ok {
-		_ = os.RemoveAll(tmpRoot)
+		_ = s.Discard(tmpRoot)
 		return "", ErrSHAUnsafe
+	}
+
+	root, err := s.openRootForWrite()
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = root.Close() }()
+
+	tmpRel, ok := s.rel(tmpRoot)
+	if !ok {
+		return "", fmt.Errorf("%w: %s", ErrTempOutsideStore, tmpRoot)
 	}
 
 	lock := s.lockFor(sha)
 	lock.Lock()
 	defer lock.Unlock()
 
-	if isReady(final) {
-		_ = os.RemoveAll(tmpRoot)
-		return final, nil
+	if isReady(root, rel) {
+		_ = root.RemoveAll(tmpRel)
+		return s.abs(rel), nil
 	}
-	if err := writeReadyMarker(tmpRoot); err != nil {
-		_ = os.RemoveAll(tmpRoot)
+	if err := writeReadyMarker(root, tmpRel); err != nil {
+		_ = root.RemoveAll(tmpRel)
 		return "", err
 	}
-	_ = os.RemoveAll(final)
-	if err := os.Rename(tmpRoot, final); err != nil {
-		_ = os.RemoveAll(tmpRoot)
-		return "", err
+	return s.finalize(root, tmpRel, rel)
+}
+
+// Discard removes a temp tree IngestReader created, refusing any path outside
+// the store's own cache directory rather than turning RemoveAll loose on it.
+// It exists so a caller that has to abandon an ingest does not have to reach
+// for os.RemoveAll on a path this package handed it.
+func (s *Store) Discard(tmpRoot string) error {
+	if s == nil || tmpRoot == "" {
+		return nil
 	}
-	return final, nil
+	tmpRel, ok := s.rel(tmpRoot)
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrTempOutsideStore, tmpRoot)
+	}
+	root, err := s.openRoot()
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return root.RemoveAll(tmpRel)
 }
 
 // Remove deletes the extracted entry for sha. Best-effort: it has zero
 // production callers today, so this exists for a future caller that will
 // pass whatever the persisted snapshot or a lockfile pin recorded, neither
-// validated (see storePath) - an unsafe sha makes Remove refuse rather than
+// validated (see entryRel) - an unsafe sha makes Remove refuse rather than
 // remove, returning nil exactly as it does for an empty sha, so the nil must
 // not be read as "the entry is gone"; it means "nothing was touched".
 func (s *Store) Remove(sha string) error {
 	if s == nil || sha == "" {
 		return nil
 	}
-	p, ok := s.storePath(sha)
+	rel, ok := entryRel(sha)
 	if !ok {
 		return nil
 	}
-	return os.RemoveAll(p)
+	root, err := s.openRoot()
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return root.RemoveAll(rel)
 }
 
 // SweepPlan lists the extracted entries under the store root whose name is
@@ -270,12 +358,21 @@ func (s *Store) SweepPlan(keep map[string]bool) ([]string, error) {
 	if s == nil {
 		return nil, nil
 	}
-	entries, err := os.ReadDir(s.root)
+	root, err := s.openRoot()
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+
+	entries, exists, err := readStoreDir(root)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, nil
 	}
 	planned := make([]string, 0, len(entries))
 	for _, entry := range entries {
@@ -289,7 +386,13 @@ func (s *Store) SweepPlan(keep map[string]bool) ([]string, error) {
 	return planned, nil
 }
 
-// Sweep removes extracted entries whose SHA is not in keep.
+// Sweep removes extracted entries whose SHA is not in keep. It is
+// best-effort per entry - one undeletable tree must not stop the rest from
+// being reclaimed - but it no longer discards the outcome entirely: the first
+// removal failure is remembered and returned once every other entry has been
+// attempted, so a caller has something to report. A refusal by the
+// containment root, which is what an escaping "extracted" symlink produces,
+// surfaces through exactly that path.
 func (s *Store) Sweep(keep map[string]bool) error {
 	if s == nil {
 		return nil
@@ -298,10 +401,26 @@ func (s *Store) Sweep(keep map[string]bool) error {
 	if err != nil {
 		return err
 	}
-	for _, name := range planned {
-		_ = os.RemoveAll(filepath.Join(s.root, name))
+	if len(planned) == 0 {
+		return nil
 	}
-	return nil
+
+	root, err := s.openRoot()
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	defer func() { _ = root.Close() }()
+
+	var firstErr error
+	for _, name := range planned {
+		if removeErr := root.RemoveAll(path.Join(RootDirName, name)); removeErr != nil && firstErr == nil {
+			firstErr = removeErr
+		}
+	}
+	return firstErr
 }
 
 // SweepTemp removes leftover temporary entries under the store root left by a
@@ -316,11 +435,17 @@ func (s *Store) SweepTemp() error {
 	if s == nil {
 		return nil
 	}
-	entries, err := os.ReadDir(s.root)
+	root, err := s.openRoot()
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
+		return err
+	}
+	defer func() { _ = root.Close() }()
+
+	entries, _, err := readStoreDir(root)
+	if err != nil {
 		return err
 	}
 	for _, entry := range entries {
@@ -328,7 +453,7 @@ func (s *Store) SweepTemp() error {
 		if !isTempEntryName(name) {
 			continue
 		}
-		if err := os.RemoveAll(filepath.Join(s.root, name)); err != nil {
+		if err := root.RemoveAll(path.Join(RootDirName, name)); err != nil {
 			return err
 		}
 	}
@@ -342,43 +467,202 @@ func isTempEntryName(name string) bool {
 	return strings.HasPrefix(name, ingestPrefix) || strings.HasSuffix(name, tmpSuffix)
 }
 
-// storePath returns the on-disk path of sha's content-addressable tree, or
-// ok=false when sha is not a single, safe path element. Every method that
-// turns a sha into a path goes through this: a sha reaches this package from
-// a lockfile pin (lockfile.File.validate checks only duplicate names, never
-// hex shape) and from the persisted snapshot's warmed and installed records,
-// neither of which is validated, and filepath.Join would happily clean
-// "../../.." into an escape from the store root.
-func (s *Store) storePath(sha string) (string, bool) {
+// entryRel returns sha's content-addressable tree as a slash path relative to
+// the containment root, or ok=false when sha is not a single, safe path
+// element. Every method that turns a sha into a path goes through this: a sha
+// reaches this package from a lockfile pin (lockfile.File.validate checks only
+// duplicate names, never hex shape) and from the persisted snapshot's warmed
+// and installed records, neither of which is validated, and path.Join would
+// happily clean "../../.." into an escape.
+//
+// The containment root refuses such an escape too, so this predicate is no
+// longer the only thing standing between an unvalidated sha and a RemoveAll.
+// It is kept ahead of the root anyway, because it is what lets the store
+// answer "this sha is unusable" without creating the cache directory, opening
+// a descriptor, or reporting an operating-system error for what is really a
+// bad identifier.
+func entryRel(sha string) (string, bool) {
 	if !helpers.IsPathElement(sha) {
 		return "", false
 	}
-	return filepath.Join(s.root, sha), true
+	return path.Join(RootDirName, sha), true
 }
 
-func (s *Store) extractInto(final, tarPath string) (string, error) {
-	if err := os.MkdirAll(s.root, helpers.DirMod); err != nil {
+// abs turns a root-relative slash path into the absolute path callers outside
+// this package receive.
+func (s *Store) abs(rel string) string {
+	return filepath.Join(s.cacheDir, filepath.FromSlash(rel))
+}
+
+// rel is abs's inverse, refusing a path that does not sit under the store's
+// cache directory. The check is lexical and therefore only a fast, precise
+// refusal for a caller that passed the wrong path outright; containment
+// itself is enforced by the root, which re-resolves every component.
+func (s *Store) rel(abs string) (string, bool) {
+	relPath, err := filepath.Rel(s.cacheDir, abs)
+	if err != nil {
+		return "", false
+	}
+	if relPath == "." || relPath == ".." || strings.HasPrefix(relPath, ".."+string(os.PathSeparator)) {
+		return "", false
+	}
+	return filepath.ToSlash(relPath), true
+}
+
+// openRoot opens a containment root at the store's cache directory without
+// creating it, so a read-only caller against a cache that does not exist yet
+// gets fs.ErrNotExist to degrade on rather than a directory it did not ask
+// for.
+func (s *Store) openRoot() (*os.Root, error) {
+	return os.OpenRoot(s.cacheDir)
+}
+
+// openRootForWrite opens the containment root, creating the cache directory
+// and the store directory under it first. The MkdirAll of the cache directory
+// itself is deliberately not rooted: that directory is the boundary, and
+// creating the boundary cannot be contained by it.
+func (s *Store) openRootForWrite() (*os.Root, error) {
+	if err := os.MkdirAll(s.cacheDir, helpers.DirMod); err != nil {
+		return nil, err
+	}
+	root, err := os.OpenRoot(s.cacheDir)
+	if err != nil {
+		return nil, err
+	}
+	if err := root.MkdirAll(RootDirName, helpers.DirMod); err != nil {
+		classified := classifyStoreDirError(root, err)
+		_ = root.Close()
+		return nil, classified
+	}
+	return root, nil
+}
+
+// classifyStoreDirError names what is actually wrong when an operation on the
+// store directory fails, rather than passing on the operating system's own
+// answer. The root refuses an escaping symlink at that name with the same
+// bare "file exists" a regular file in its place produces, so an operator
+// reading either would learn nothing about the cache directory they need to
+// fix. Anything the Lstat below does not recognize is returned unchanged: a
+// permission problem or a full disk is not this condition and must not be
+// renamed into it.
+func classifyStoreDirError(root *os.Root, err error) error {
+	info, statErr := root.Lstat(RootDirName)
+	if statErr != nil {
+		return err
+	}
+	switch {
+	case info.Mode()&fs.ModeSymlink != 0:
+		return fmt.Errorf("%w: %s is a symlink that does not resolve to a directory inside the cache directory",
+			ErrStoreDirUnusable, RootDirName)
+	case !info.IsDir():
+		return fmt.Errorf("%w: %s is not a directory", ErrStoreDirUnusable, RootDirName)
+	default:
+		return err
+	}
+}
+
+// readStoreDir lists the store directory through root, reporting exists=false
+// when it is simply not there yet - the cache has nothing in it, which is not
+// a failure - and distinguishing that from a directory that is present and
+// empty, which callers report differently. A directory that exists and cannot
+// be listed is classified rather than passed on raw.
+func readStoreDir(root *os.Root) ([]fs.DirEntry, bool, error) {
+	entries, err := fs.ReadDir(root.FS(), RootDirName)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, classifyStoreDirError(root, err)
+	}
+	return entries, true, nil
+}
+
+// readyRel reports whether the tree at rel carries a current ready marker,
+// opening and closing its own containment root. A cache directory that does
+// not exist yet reports false rather than an error, which is what every
+// caller would do with one anyway.
+func (s *Store) readyRel(rel string) bool {
+	root, err := s.openRoot()
+	if err != nil {
+		return false
+	}
+	defer func() { _ = root.Close() }()
+	return isReady(root, rel)
+}
+
+// extractInto unpacks tarPath into a temp tree beside rel and renames it into
+// place. Unlike the store's own path operations, the unpack itself is handed
+// an ordinary path: the temp directory was created through the root
+// immediately above, so nothing can have been pre-planted inside it, and
+// archive's own per-entry symlink-parent check governs what the tarball
+// itself may create - the same split extractCollection documents for the
+// collections tree.
+func (s *Store) extractInto(rel, tarPath string) (string, error) {
+	root, err := s.openRootForWrite()
+	if err != nil {
 		return "", err
 	}
-	tmp := final + tmpSuffix
-	_ = os.RemoveAll(tmp)
-	if err := os.MkdirAll(tmp, helpers.DirMod); err != nil {
+	defer func() { _ = root.Close() }()
+
+	tmpRel := rel + tmpSuffix
+	// Checked, not discarded: this and the RemoveAll in finalize are the two
+	// destructive primitives here, and a refusal by the root is exactly the
+	// signal that something under the cache directory is redirecting them.
+	if err := root.RemoveAll(tmpRel); err != nil {
 		return "", err
 	}
-	if err := archive.ExtractTarGz(tarPath, tmp); err != nil {
-		_ = os.RemoveAll(tmp)
+	if err := root.MkdirAll(tmpRel, helpers.DirMod); err != nil {
 		return "", err
 	}
-	if err := writeReadyMarker(tmp); err != nil {
-		_ = os.RemoveAll(tmp)
+	if err := archive.ExtractTarGz(tarPath, s.abs(tmpRel)); err != nil {
+		_ = root.RemoveAll(tmpRel)
 		return "", err
 	}
-	_ = os.RemoveAll(final)
-	if err := os.Rename(tmp, final); err != nil {
-		_ = os.RemoveAll(tmp)
+	if err := writeReadyMarker(root, tmpRel); err != nil {
+		_ = root.RemoveAll(tmpRel)
 		return "", err
 	}
-	return final, nil
+	return s.finalize(root, tmpRel, rel)
+}
+
+// finalize replaces the tree at rel with the finished temp tree at tmpRel,
+// cleaning the temp up on either failure so a refused promotion never leaves
+// a half-named directory behind for SweepTemp to find later.
+func (s *Store) finalize(root *os.Root, tmpRel, rel string) (string, error) {
+	if err := root.RemoveAll(rel); err != nil {
+		_ = root.RemoveAll(tmpRel)
+		return "", err
+	}
+	if err := root.Rename(tmpRel, rel); err != nil {
+		_ = root.RemoveAll(tmpRel)
+		return "", err
+	}
+	return s.abs(rel), nil
+}
+
+// mkdirTemp creates a uniquely named ingest directory under the store
+// directory through root, returning its root-relative path. os.Root has no
+// MkdirTemp, so this reproduces the part of os.MkdirTemp that matters:
+// os.Root.Mkdir fails with fs.ErrExist rather than reusing an existing name,
+// which is what makes retrying on collision safe, and never follows a symlink
+// planted at the name it is about to create.
+//
+// The name comes from crypto/rand rather than a counter or the clock. Not
+// because a guessed name would defeat the Mkdir - it would only cost a
+// retry - but because it makes the retry loop's bound unreachable in practice
+// instead of merely unlikely.
+func mkdirTemp(root *os.Root) (string, error) {
+	for range ingestNameAttempts {
+		rel := path.Join(RootDirName, ingestPrefix+rand.Text())
+		err := root.Mkdir(rel, helpers.DirMod)
+		if err == nil {
+			return rel, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return "", err
+		}
+	}
+	return "", errIngestTempExhausted
 }
 
 func (s *Store) lockFor(sha string) *sync.Mutex {
@@ -392,29 +676,28 @@ func (s *Store) lockFor(sha string) *sync.Mutex {
 	return lock
 }
 
-// writeReadyMarker writes ReadyMarkerPayload into dir's ready marker,
+// writeReadyMarker writes ReadyMarkerPayload into dirRel's ready marker,
 // removing any existing file at that path first (ignoring fs.ErrNotExist).
 // The remove-then-write is not decorative: a tarball can ship its own
-// root-level ".ready" entry, which archive.extractRegularFile now extracts
-// read-only along with every other regular file, so a plain os.WriteFile
+// root-level ".ready" entry, which archive.extractRegularFile extracts
+// read-only along with every other regular file, so a plain WriteFile
 // here would fail EACCES trying to truncate it in place. Removing first
 // always starts from a clean, writable slate regardless of what extraction
 // left behind at that path.
-func writeReadyMarker(dir string) error {
-	path := filepath.Join(dir, ReadyMarker)
-	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+func writeReadyMarker(root *os.Root, dirRel string) error {
+	p := path.Join(dirRel, ReadyMarker)
+	if err := root.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	return os.WriteFile(path, []byte(ReadyMarkerPayload), helpers.FileMod)
+	return root.WriteFile(p, []byte(ReadyMarkerPayload), helpers.FileMod)
 }
 
-// readReadyMarker reads path with a hard cap of readyMarkerMaxReadSize+1
+// readReadyMarker reads rel with a hard cap of readyMarkerMaxReadSize+1
 // bytes, reporting ok=false for a missing/unreadable file and for a file at
 // least one byte over the cap - mirroring
 // collections.readExtractMarker's same bounded-read shape.
-func readReadyMarker(path string) (string, bool) {
-	//nolint:gosec // path is built from storePath's validated single sha element under s.root, never a raw untrusted path.
-	f, err := os.Open(path)
+func readReadyMarker(root *os.Root, rel string) (string, bool) {
+	f, err := root.Open(rel)
 	if err != nil {
 		return "", false
 	}
@@ -434,17 +717,17 @@ func readReadyMarker(path string) (string, bool) {
 	}
 }
 
-// isReady reports whether dir holds a finalized CAS tree written by a
-// binary new enough to apply the write-bit hardening. It checks the marker's
-// exact content, not merely its presence: a tree extracted by an older
-// binary carries the legacy "ok" sentinel (or, on a much older binary,
+// isReady reports whether the tree at dirRel holds a finalized CAS tree
+// written by a binary new enough to apply the write-bit hardening. It checks
+// the marker's exact content, not merely its presence: a tree extracted by an
+// older binary carries the legacy "ok" sentinel (or, on a much older binary,
 // nothing at all in this format) and its regular files are still writable,
 // so isReady must reject it here rather than let Ensure/Materialize trust it
 // verbatim and hand out unhardened hard links. Rejecting forces
 // extractInto/Promote's own RemoveAll-then-rebuild path, which re-extracts
 // the tree through the current, hardened archive package.
-func isReady(dir string) bool {
-	content, ok := readReadyMarker(filepath.Join(dir, ReadyMarker))
+func isReady(root *os.Root, dirRel string) bool {
+	content, ok := readReadyMarker(root, path.Join(dirRel, ReadyMarker))
 	return ok && content == ReadyMarkerPayload
 }
 
