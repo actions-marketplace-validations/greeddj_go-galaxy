@@ -6,7 +6,7 @@ before:
 builds:
   - id: go-galaxy
     main: ./cmd/go-galaxy/main.go
-    binary: ./dist/go-galaxy
+    binary: go-galaxy
     env:
       - CGO_ENABLED=0
     goos:
@@ -22,7 +22,9 @@ builds:
       - -X main.Date={{.Date}}
       - -X main.BuiltBy=goreleaser
 archives:
-  - id: go-galaxy
+  - id: archive
+    ids:
+      - go-galaxy
     name_template: >-
       {{ .ProjectName }}_
       {{- .Version }}_
@@ -34,6 +36,16 @@ archives:
     files:
       - LICENSE
       - README.md
+  # The raw binaries the README's install snippet curls. An archive cannot
+  # serve that flow: `releases/latest/download/<name>` resolves only a name
+  # that does not carry the version, and a CI step dropping one file into
+  # /usr/local/bin should not have to untar it first.
+  - id: binary
+    ids:
+      - go-galaxy
+    formats:
+      - binary
+    name_template: "{{ .ProjectName }}-{{ .Os }}-{{ .Arch }}"
 checksum:
   name_template: 'checksums.txt'
 snapshot:
@@ -91,6 +103,8 @@ docker_manifests:
       - "ghcr.io/greeddj/{{ .ProjectName }}:latest-arm64"
 homebrew_casks:
   - name: go-galaxy
+    ids:
+      - archive
     repository:
       owner: greeddj
       name: homebrew-tap
@@ -99,12 +113,12 @@ homebrew_casks:
     description: "Fast Ansible Galaxy collections installer for CI."
     license: MIT
     binaries:
-      - dist/go-galaxy
+      - go-galaxy
     hooks:
       post:
         install: |
           if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/dist/go-galaxy"]
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/go-galaxy"]
           end
 release:
   github:
