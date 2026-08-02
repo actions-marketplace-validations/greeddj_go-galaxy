@@ -57,8 +57,12 @@ func collectionPathFlags() []cli.Flag {
 			Sources: cli.EnvVars("GO_GALAXY_TOKEN"),
 		},
 		&cli.StringFlag{
-			Name:    "timeout",
-			Usage:   "Timeout as seconds (e.g. 60) or Go duration (e.g. 90s, 1m30s)",
+			Name: "timeout",
+			// Names the semantics, not just the format: this bounds a lack of
+			// progress, and an operator who reads it as a cap on the whole
+			// transfer sets it far too low for a large collection.
+			Usage: "No-progress budget: wait for response headers, and gap between body reads. " +
+				"Not a total-transfer cap. Seconds (e.g. 60) or Go duration (e.g. 90s, 1m30s)",
 			Value:   defaultTimeout.String(),
 			Sources: cli.EnvVars("GO_GALAXY_SERVER_TIMEOUT", "ANSIBLE_GALAXY_SERVER_TIMEOUT"),
 		},

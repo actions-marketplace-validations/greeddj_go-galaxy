@@ -87,7 +87,9 @@ Read `CLAUDE.md` for the full picture; these are the load-bearing ones.
 - **Vendored build.** `vendor/` is regenerated via `just deps`; do not assume
   module download in tooling.
 - **Drop-in `ansible.cfg`** is limited to `[defaults] collections_path`,
-  `[galaxy] server`, `[galaxy] cache_dir`. New keys are scope expansion - flag
+  `[galaxy] server`, `[galaxy] server_list`, `[galaxy] cache_dir`, and
+  `[galaxy_server.<id>]` (`url`, `token`, `validate_certs`, plus a no-op
+  `api_version: v3`). New keys are scope expansion - flag
   them.
 
 ## Efficiency bar

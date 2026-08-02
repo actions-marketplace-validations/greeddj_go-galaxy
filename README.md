@@ -80,6 +80,72 @@ so pipelines finish sooner and changes ship faster.
   - `[galaxy_server.<id>]` sections (`url`, `token`, `validate_certs`; see
     [Galaxy servers and authentication](#galaxy-servers-and-authentication))
 
+## Compatibility with ansible-galaxy
+
+Drop-in means the same `requirements.yml`, the same `ansible.cfg` keys and the
+same `ANSIBLE_*` environment variables, for the collections subset above. It
+does not mean identical behavior everywhere: three things differ on purpose,
+and each is called out below rather than left to be discovered in CI.
+
+### Configuration go-galaxy reads
+
+`ansible.cfg` is discovered in ansible's own order - `$ANSIBLE_CONFIG`,
+`./ansible.cfg`, `~/.ansible.cfg`, `/etc/ansible/ansible.cfg` - and parsed as
+INI the way ansible parses it (CPython's `configparser`), not as TOML. Two
+consequences follow from matching ansible rather than a stricter parser: a
+quoted value keeps its quotes, so `collections_path = "./c"` sets the literal
+`"./c"` and you should drop the quotes; and an inline comment is part of the
+value, so `server = https://galaxy.ansible.com # note` is a bad URL rather
+than a URL with a note.
+
+| Setting                            | Environment                                                   |
+|:-----------------------------------|:--------------------------------------------------------------|
+| `[defaults] collections_path`      | `ANSIBLE_COLLECTIONS_PATH`                                    |
+| `[galaxy] server`                  | `ANSIBLE_GALAXY_SERVER`                                       |
+| `[galaxy] server_list`             | `ANSIBLE_GALAXY_SERVER_LIST`                                  |
+| `[galaxy] cache_dir`               | `ANSIBLE_GALAXY_CACHE_DIR`                                    |
+| `[galaxy_server.<id>]`             | `ANSIBLE_GALAXY_SERVER_<ID>_URL`, `_TOKEN`, `_VALIDATE_CERTS` |
+| (the config file itself)           | `ANSIBLE_CONFIG`                                              |
+| (requirements file)                | `ANSIBLE_GALAXY_REQUIREMENTS_FILE`                            |
+| (request timeout)                  | `ANSIBLE_GALAXY_SERVER_TIMEOUT`                               |
+
+Anything else in `ansible.cfg` is ignored. Within `[galaxy_server.<id>]` the
+exceptions are deliberate and loud: `username`/`password` (Basic auth) and
+`auth_url`/`client_id` (Keycloak/SSO) are refused as config errors naming the
+key rather than ignored, because silently dropping a credential would send an
+unauthenticated request to a private hub. See [Galaxy servers and
+authentication](#galaxy-servers-and-authentication) for the full table, token
+precedence, and TLS.
+
+### Deliberate differences
+
+- **A collection comes from one server, not from a union.** ansible queries
+  every configured server and merges the results; go-galaxy walks
+  `server_list` in order and the first server that has the collection owns it
+  for the whole run. Merging means the same `namespace.name@version` can
+  arrive from two servers with different bytes, with an arbitrary tie-break
+  deciding which one you install.
+- **A failing server stops the run instead of being skipped.** Only a 404
+  means "this server does not have it, try the next". A 401/403, or a
+  5xx/network failure that survives the retry budget, aborts and names the
+  server. ansible swallows those and moves on, which turns a wrong token or a
+  five-minute hub outage into an install from the public Galaxy - dependency
+  confusion by accident.
+- **`--timeout` is a no-progress budget, not a total-transfer cap.** It bounds
+  the wait for response headers and the gap between two body reads, so a large
+  download that keeps streaming is never cut off by it, however long it takes.
+  ansible's own `--timeout` behaves the same way; what changed here is that
+  go-galaxy used to apply it to the whole response as well. The gap it leaves -
+  a server dribbling a few bytes into every idle window makes progress on every
+  read and so never trips it - is closed by separate fixed ceilings on the whole
+  acquisition, described under [install options](#install-options). A transfer
+  that does stall reports `network read stalled` and exits `4`, or `5` when it
+  fails one collection of an install; it is never reported as an interrupt.
+
+Resolution itself is stricter than ansible's: a constraint set with no solution
+is a failure with a proof, not a lenient pick. See [Exit codes](#exit-codes) for
+what each failure class exits with.
+
 ## Features
 
 - Dependency resolution with snapshot reuse.
