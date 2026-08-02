@@ -89,8 +89,33 @@ func parseCollectionList(raw any, defaultSource string) (Collections, error) {
 	return items, nil
 }
 
-// parseCollectionItem parses a single collection entry.
+// parseCollectionItem parses a single collection entry and checks the
+// resulting identity against the collection-name alphabet.
+//
+// The check lives here rather than inside helpers.SplitFQDN because the
+// explicit form - a mapping with its own `namespace:` and `name:` keys - never
+// reaches SplitFQDN at all: normalizeCollectionName calls it only when the
+// name still carries a dot. So a requirements file could name a collection its
+// own lockfile could not, and an explicit namespace carrying a newline reached
+// the resolver, which printed it, before anything looked at it. Both parse
+// branches converge here, which is what makes this the boundary rather than
+// one of the two paths through it.
 func parseCollectionItem(item any, defaultSource string) (CollectionRequirement, error) {
+	req, err := parseCollectionItemByShape(item, defaultSource)
+	if err != nil {
+		return CollectionRequirement{}, err
+	}
+	if !helpers.IsCollectionNamePart(req.Namespace) || !helpers.IsCollectionNamePart(req.Name) {
+		return CollectionRequirement{}, fmt.Errorf("%w: %q.%q must each match ^[a-z][a-z0-9_]*$",
+			helpers.ErrInvalidCollectionName, req.Namespace, req.Name)
+	}
+	return req, nil
+}
+
+// parseCollectionItemByShape dispatches on the entry's YAML shape; it is the
+// former body of parseCollectionItem, split out so the alphabet check above
+// covers both branches without either having to remember it.
+func parseCollectionItemByShape(item any, defaultSource string) (CollectionRequirement, error) {
 	switch v := item.(type) {
 	case string:
 		return parseCollectionStringItem(v, defaultSource)

@@ -43,14 +43,40 @@ func TestBuildInstallLevelsCycle(t *testing.T) {
 	}
 }
 
+// TestParseDependenciesMalformedKey covers the shapes a Galaxy server can put
+// in a dependency map that this program must not carry any further. The
+// forged-line row is the reason the check is on the alphabet and not just on
+// the split: that key has exactly one dot and two non-empty halves, so it used
+// to pass, and the solver then printed it - on an ordinary run, with no flags,
+// through "probing highest version of %s" - which is a line of the attacker's
+// choosing on the operator's stderr.
 func TestParseDependenciesMalformedKey(t *testing.T) {
 	t.Parallel()
-	_, err := parseDependencies(map[string]string{"notanfqdn": ">=1.0.0"})
-	if err == nil {
-		t.Fatalf("expected error for malformed dependency key")
+	for _, tc := range malformedDependencyKeyCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := parseDependencies(map[string]string{tc.key: ">=1.0.0"})
+			if !errors.Is(err, helpers.ErrInvalidDependencyKey) {
+				t.Fatalf("parseDependencies(%q) error = %v, want errors.Is helpers.ErrInvalidDependencyKey", tc.key, err)
+			}
+		})
 	}
-	if !errors.Is(err, helpers.ErrInvalidDependencyKey) {
-		t.Fatalf("expected ErrInvalidDependencyKey, got %v", err)
+}
+
+// malformedDependencyKeyCase is one row of TestParseDependenciesMalformedKey.
+type malformedDependencyKeyCase struct {
+	name string
+	key  string
+}
+
+// malformedDependencyKeyCases covers a key that fails the split and three that
+// pass it and fail the alphabet.
+func malformedDependencyKeyCases() []malformedDependencyKeyCase {
+	return []malformedDependencyKeyCase{
+		{name: "no dot", key: "notanfqdn"},
+		{name: "forged line", key: "evil.pkg\n[CRITICAL] FORGED DEP LINE"},
+		{name: "uppercase half", key: "Evil.pkg"},
+		{name: "path separator", key: "../../etc.passwd"},
 	}
 }
 

@@ -36,7 +36,11 @@ func loadCollectionMetadata(
 	if !strings.HasSuffix(versionsURL, "/") {
 		versionsURL += "/"
 	}
-	runtime.Output.Debugf("versions_url resolved: base=%s ref=%s -> %s", base, rootMetadata.VersionsURL, versionsURL)
+	// The server-supplied reference is quoted, the two derived values are
+	// not: a URL this program built is its own, while rootMetadata.VersionsURL
+	// is raw JSON a server chose and safeout.Clean keeps the one character it
+	// would need to add a line of its own.
+	runtime.Output.Debugf("versions_url resolved: base=%s ref=%q -> %s", base, rootMetadata.VersionsURL, versionsURL)
 
 	versionURL := rootMetadata.HighestVersion.Href
 

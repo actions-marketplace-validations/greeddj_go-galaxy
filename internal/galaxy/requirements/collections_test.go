@@ -220,23 +220,38 @@ func TestParseCollectionsDottedNameWithoutNamespace(t *testing.T) {
 	}
 }
 
-// TestParseCollectionsNamespaceWithThreePartNameUnaffected checks that a
-// three-part dotted name (e.g. "a.b.c"), for which helpers.SplitFQDN does
-// not succeed (it only splits exactly two parts), does not trigger a false
-// conflict even with an explicit namespace set: there is no ambiguous split
-// for it to conflict with, so the name passes through unchanged.
-func TestParseCollectionsNamespaceWithThreePartNameUnaffected(t *testing.T) {
+// TestParseCollectionsNamespaceWithThreePartNameIsRejectedAsAName checks a
+// three-part dotted name (e.g. "a.b.c") with an explicit namespace set, and
+// checks it for two things at once. It is rejected - no Galaxy server has a
+// collection whose name contains a dot - and it is rejected as an invalid
+// name rather than as a namespace/name conflict, which is the property this
+// test has always existed to pin: helpers.SplitFQDN does not split three
+// parts, so there is no ambiguous split for the explicit namespace to
+// conflict with, and reporting one would send the operator looking for a
+// contradiction that is not there.
+//
+// Until the name alphabet existed this entry parsed successfully and was
+// carried as a collection called "a.b.c".
+func TestParseCollectionsNamespaceWithThreePartNameIsRejectedAsAName(t *testing.T) {
 	t.Parallel()
 	input := "- namespace: foo\n  name: a.b.c\n"
-	collections, _, err := ParseCollections([]byte(input), "https://default")
+	_, _, err := ParseCollections([]byte(input), "https://default")
+	if !errors.Is(err, helpers.ErrInvalidCollectionName) {
+		t.Fatalf("ParseCollections error = %v, want errors.Is helpers.ErrInvalidCollectionName", err)
+	}
+	if errors.Is(err, helpers.ErrConflictingNamespaceName) {
+		t.Fatalf("a three-part name must not be reported as a namespace conflict: %v", err)
+	}
+
+	// Positive control on the same shape: an explicit namespace with a
+	// dot-free name is accepted, so the rejection above is the dots and not
+	// the explicit-namespace form itself.
+	collections, _, err := ParseCollections([]byte("- namespace: acme\n  name: widgets\n"), "https://default")
 	if err != nil {
-		t.Fatalf("ParseCollections error: %v", err)
+		t.Fatalf("ParseCollections with an explicit namespace and a plain name: %v", err)
 	}
-	if len(collections) != 1 {
-		t.Fatalf("expected 1 collection, got %d", len(collections))
-	}
-	if collections[0].Namespace != "foo" || collections[0].Name != "a.b.c" {
-		t.Fatalf("unexpected collection[0]: %#v", collections[0])
+	if len(collections) != 1 || collections[0].Namespace != "acme" || collections[0].Name != "widgets" {
+		t.Fatalf("unexpected collections: %#v", collections)
 	}
 }
 
@@ -315,5 +330,60 @@ func TestParseCollectionsSourcePlainURLAllowed(t *testing.T) {
 	}
 	if len(collections) != 1 || collections[0].Source != "https://hub.example/api/" {
 		t.Fatalf("unexpected collections: %#v", collections)
+	}
+}
+
+// TestParseCollectionsRejectsNamesOutsideTheAlphabet covers the boundary a
+// requirements file is: every identity it declares is checked against the
+// alphabet a Galaxy server itself accepts, so a name this file could not
+// install is refused where it was written rather than much later.
+//
+// The explicit-namespace row is why the check sits at the entry level and not
+// inside helpers.SplitFQDN: that form never reaches SplitFQDN, since the name
+// carries no dot for it to split. Before this, such a namespace was carried
+// into the resolver, which printed it - on an ordinary run with no flags -
+// and the run then failed while a URL was being built, unclassified.
+func TestParseCollectionsRejectsNamesOutsideTheAlphabet(t *testing.T) {
+	t.Parallel()
+	for _, tc := range rejectedRequirementNameCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, _, err := ParseCollections([]byte(tc.input), "https://default")
+			if !errors.Is(err, helpers.ErrInvalidCollectionName) {
+				t.Fatalf("ParseCollections error = %v, want errors.Is helpers.ErrInvalidCollectionName", err)
+			}
+		})
+	}
+
+	// Control on the same two shapes: the dotted form and the explicit form
+	// both parse when their identities are inside the alphabet, so neither
+	// rejection above is the shape itself being refused.
+	for _, input := range []string{"- name: acme.widgets\n", "- namespace: acme\n  name: widgets\n"} {
+		collections, _, err := ParseCollections([]byte(input), "https://default")
+		if err != nil {
+			t.Fatalf("ParseCollections(%q): %v", input, err)
+		}
+		if len(collections) != 1 || collections[0].Namespace != "acme" || collections[0].Name != "widgets" {
+			t.Fatalf("ParseCollections(%q) = %#v", input, collections)
+		}
+	}
+}
+
+// rejectedRequirementNameCase is one row of
+// TestParseCollectionsRejectsNamesOutsideTheAlphabet.
+type rejectedRequirementNameCase struct {
+	name  string
+	input string
+}
+
+// rejectedRequirementNameCases covers the forged-line shape in each of the two
+// places a requirements entry can declare an identity, plus the two ordinary
+// alphabet violations.
+func rejectedRequirementNameCases() []rejectedRequirementNameCase {
+	return []rejectedRequirementNameCase{
+		{name: "forged line in an explicit namespace", input: "- namespace: \"acme\\n[CRITICAL] X\"\n  name: widgets\n"},
+		{name: "forged line in a dotted name", input: "- name: \"acme.widgets\\n[CRITICAL] X\"\n"},
+		{name: "uppercase", input: "- name: Acme.Widgets\n"},
+		{name: "hyphen", input: "- name: acme.my-widgets\n"},
 	}
 }

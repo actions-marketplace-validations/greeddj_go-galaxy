@@ -267,7 +267,12 @@ func extractDependencies(info *types.GalaxyCollectionVersionInfo) map[string]str
 func parseDependencies(deps map[string]string) (map[string]string, error) {
 	parsedDeps := make(map[string]string, len(deps))
 	for dep, constraint := range deps {
-		if _, _, ok := helpers.SplitFQDN(dep); !ok {
+		// A dependency key is a collection name a Galaxy server chose, and
+		// this is the boundary it enters through. Checked for alphabet, not
+		// just shape: a key like "evil.pkg\n[CRITICAL] ..." satisfies the
+		// shape check, and the solver prints it - on an ordinary run, with no
+		// flags - long before anything else would look at it.
+		if !helpers.IsCollectionName(dep) {
 			return nil, fmt.Errorf("%w: %q", helpers.ErrInvalidDependencyKey, dep)
 		}
 		parsedDeps[dep] = strings.TrimSpace(constraint)
