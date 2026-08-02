@@ -1,9 +1,9 @@
 ---
 name: go-galaxy-deps
-description: Run mutating maintenance commands for the go-galaxy Go repo — go mod tidy/vendor sync and automated fixers (go fix, fieldalignment -fix). Use ONLY when the user explicitly asks to update dependencies, re-vendor, or apply automated code fixes. These commands rewrite go.mod, go.sum, and source files (and regenerate the git-ignored local vendor/ tree) — do not invoke them as part of routine validation.
+description: Run mutating maintenance commands for the go-galaxy Go repo - go mod tidy/vendor sync and automated fixers (go fix, fieldalignment -fix). Use ONLY when the user explicitly asks to update dependencies, re-vendor, or apply automated code fixes. These commands rewrite go.mod, go.sum, and source files (and regenerate the git-ignored local vendor/ tree) - do not invoke them as part of routine validation.
 ---
 
-# go-galaxy — Dependency Sync & Auto-Fix (mutating)
+# go-galaxy - Dependency Sync & Auto-Fix (mutating)
 
 ## When to use
 
@@ -37,7 +37,7 @@ go tool fieldalignment -fix ./...
 ## Adding a new direct dependency
 
 1. `go get <module>@<version>`.
-2. Add the **exact import path** to `linters.settings.depguard.rules.main.allow` in [.golangci.yml](.golangci.yml). **`just lint` fails otherwise** — the allowlist is enforced.
+2. Add the **exact import path** to `linters.settings.depguard.rules.main.allow` in [.golangci.yml](.golangci.yml). **`just lint` fails otherwise** - the allowlist is enforced.
 3. `just deps` to sync `vendor/`.
 4. `just lint` to confirm.
 
@@ -47,9 +47,9 @@ The current allowlist (stdlib `$gostd` plus): `go/ast`, `go/parser`, `go/token` 
 
 `fieldalignment -fix` reorders struct fields. This is normally safe for internal types, but be careful with:
 
-- **`internal/galaxy/store`** — `Store`/snapshot types are JSON-serialized for the S3 backend and BoltDB-bucketed locally. Field order doesn't affect JSON, but a bumped `helpers.StoreSnapshotSchemaVersion` is required if semantics change. Don't change the meaning under cover of `-fix`.
-- **`internal/galaxy/config`** — fields are tagged for env/CLI bindings (`urfave/cli/v3`). Tags travel with fields, but review the diff to make sure tag-bound fields still group logically.
-- **`cacheManager.Backend` and `ArtifactStore` interfaces** ([internal/galaxy/cache/backend.go](internal/galaxy/cache/backend.go)) — interfaces themselves aren't reordered, but implementations in `internal/cache/{local,s3}` should keep reviewable diffs.
+- **`internal/galaxy/store`** - `Store`/snapshot types are JSON-serialized for the S3 backend and BoltDB-bucketed locally. Field order doesn't affect JSON, but a bumped `helpers.StoreSnapshotSchemaVersion` is required if semantics change. Don't change the meaning under cover of `-fix`.
+- **`internal/galaxy/config`** - fields are tagged for env/CLI bindings (`urfave/cli/v3`). Tags travel with fields, but review the diff to make sure tag-bound fields still group logically.
+- **`cacheManager.Backend` and `ArtifactStore` interfaces** ([internal/galaxy/cache/backend.go](internal/galaxy/cache/backend.go)) - interfaces themselves aren't reordered, but implementations in `internal/cache/{local,s3}` should keep reviewable diffs.
 
 Apply selectively: run `go tool fieldalignment ./...` first to see suggestions, then decide whether `-fix` makes sense package-by-package.
 

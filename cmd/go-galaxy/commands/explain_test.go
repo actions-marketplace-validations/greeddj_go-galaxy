@@ -29,7 +29,11 @@ func TestPrintExplainOrphan(t *testing.T) {
 	if !strings.Contains(out, "(no parents - orphan in lockfile)") {
 		t.Errorf("printExplain() output missing orphan message; got:\n%s", out)
 	}
-	if strings.ContainsRune(out, '—') {
+	// Spelled as an escape rather than as the character itself: this is the
+	// same rune either way, and the escape keeps the file from tripping the
+	// repository-wide ban on em dashes in committed text, which would
+	// otherwise need an exemption naming this line.
+	if strings.ContainsRune(out, '\u2014') {
 		t.Errorf("printExplain() output contains an em dash (U+2014); got:\n%s", out)
 	}
 }

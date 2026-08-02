@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# bench.sh — measure ansible-galaxy vs go-galaxy across requirements-{1,10,100}.yml.
+# bench.sh - measure ansible-galaxy vs go-galaxy across requirements-{1,10,100}.yml.
 #
 # Scenarios per file:
-#   1. cold cache  — both caches and the install dir are wiped before each run
-#   2. warm cache  — caches primed once, only install dir wiped between runs
-#   3. frozen      — go-galaxy only: warm + lockfile + --frozen --offline
+#   1. cold cache  - both caches and the install dir are wiped before each run
+#   2. warm cache  - caches primed once, only install dir wiped between runs
+#   3. frozen      - go-galaxy only: warm + lockfile + --frozen --offline
 #
 # Output:
 #   dist/bench/cold-{N}.md
