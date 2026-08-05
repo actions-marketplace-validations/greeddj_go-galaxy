@@ -38,7 +38,22 @@ type ArtifactStore interface {
 type Backend interface {
 	Open(ctx context.Context) error
 	Close(ctx context.Context) error
-	Lock(ctx context.Context) (func() error, error)
+	// Lock takes the backend's exclusive lock and returns the HOLDER CONTEXT
+	// alongside the release closure. The holder context is derived from ctx
+	// and is canceled the moment the backend can no longer guarantee this run
+	// still holds the lock; context.Cause of it then satisfies errors.Is(cause,
+	// helpers.ErrCacheLockLost), which is what lets a caller turn a run's
+	// outcome into that verdict through LockLostError. A backend whose lock
+	// cannot be taken away from a live holder returns ctx unchanged, so a
+	// caller needs no per-backend branch.
+	//
+	// The caller never cancels the returned context: it may be ctx itself, and
+	// canceling it would then tear down the caller's own context out from
+	// under everything else derived from it. Ownership of the cancellation
+	// belongs to the release closure, and a backend that DOES derive a context
+	// must cancel it from that closure, so a clean release leaves no child
+	// hanging off the parent for the rest of the process's life.
+	Lock(ctx context.Context) (context.Context, func() error, error)
 	LoadStore(ctx context.Context) (*store.Store, error)
 	SaveStore(ctx context.Context, st *store.Store) error
 	ClearFiles(ctx context.Context) error

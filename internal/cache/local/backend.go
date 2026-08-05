@@ -44,15 +44,27 @@ func (b *Backend) Close(_ context.Context) error {
 // Lock obtains an exclusive lock for the cache directory. It ensures the
 // directory exists first so the lock file has a parent even if Open was
 // never called, then acquires the lock before any Bolt file is opened.
-func (b *Backend) Lock(_ context.Context) (func() error, error) {
+//
+// The holder context is ctx itself, unchanged. That is a property of a
+// flock(2) rather than an unimplemented half of the Backend contract: the
+// kernel holds the advisory lock for as long as this process holds the
+// descriptor open, and no other process can take it away: a contender's own
+// non-blocking flock fails immediately (helpers.ErrAnotherInstanceIsRunning)
+// instead of displacing this holder.
+// There is therefore no moment at which this backend could learn it had lost
+// ownership, and the holder context coincides with the parent by
+// construction. cacheManager.LockLostError reads context.Cause on whatever
+// this returns, so returning ctx also means a caller's own cancellation is
+// reported as cancellation rather than as a lost lock.
+func (b *Backend) Lock(ctx context.Context) (context.Context, func() error, error) {
 	if err := b.ensureDir(); err != nil {
-		return nil, classifyCacheFailure(err)
+		return nil, nil, classifyCacheFailure(err)
 	}
 	release, err := store.AcquireLock(b.cacheDir)
 	if err != nil {
-		return nil, classifyCacheFailure(err)
+		return nil, nil, classifyCacheFailure(err)
 	}
-	return release, nil
+	return ctx, release, nil
 }
 
 // LoadStore loads the persistent snapshot store.

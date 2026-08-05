@@ -16,6 +16,7 @@
 package extracted
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -350,7 +351,7 @@ func (s *Store) Remove(sha string) error {
 
 // SweepPlan lists the extracted entries under the store root whose name is
 // not present in keep, sorted for deterministic output. It performs no
-// filesystem mutation, so callers can use it to report what Sweep(keep)
+// filesystem mutation, so callers can use it to report what Sweep
 // would remove without actually removing anything (e.g. a dry-run). A
 // missing root directory is not an error: it yields (nil, nil), matching
 // Sweep's own behavior when there is nothing to sweep yet.
@@ -388,12 +389,21 @@ func (s *Store) SweepPlan(keep map[string]bool) ([]string, error) {
 
 // Sweep removes extracted entries whose SHA is not in keep. It is
 // best-effort per entry - one undeletable tree must not stop the rest from
-// being reclaimed - but it no longer discards the outcome entirely: the first
+// being reclaimed - but it does not discard the outcome entirely: the first
 // removal failure is remembered and returned once every other entry has been
 // attempted, so a caller has something to report. A refusal by the
 // containment root, which is what an escaping "extracted" symlink produces,
 // surfaces through exactly that path.
-func (s *Store) Sweep(keep map[string]bool) error {
+//
+// ctx is read before each entry, so a caller that stopped owning the store -
+// cleanup's own holder context being canceled after another holder took the
+// cache lock - stops removing trees that holder may already be rebuilding.
+// The granularity is one entry: a root.RemoveAll already walking a tree is
+// not interruptible and runs to completion. Its error preempts a removal
+// failure recorded earlier in the same pass, deliberately: a caller that no
+// longer owns the store needs to know that, not which of the trees it was
+// permitted to reclaim resisted.
+func (s *Store) Sweep(ctx context.Context, keep map[string]bool) error {
 	if s == nil {
 		return nil
 	}
@@ -416,6 +426,9 @@ func (s *Store) Sweep(keep map[string]bool) error {
 
 	var firstErr error
 	for _, name := range planned {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if removeErr := root.RemoveAll(path.Join(RootDirName, name)); removeErr != nil && firstErr == nil {
 			firstErr = removeErr
 		}

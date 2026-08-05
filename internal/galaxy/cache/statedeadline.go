@@ -136,8 +136,12 @@ func (b *stateDeadlineBackend) Close(ctx context.Context) error {
 // own timings (lockWaitCeiling, heartbeatOpTimeout, lockReleaseTimeout), and
 // bounding the whole acquisition with a 60-second state-object budget would
 // break legitimate contention outright - a lock wait can and does take
-// longer than that while a live holder finishes its own work.
-func (b *stateDeadlineBackend) Lock(ctx context.Context) (func() error, error) {
+// longer than that while a live holder finishes its own work. The holder
+// context passes through verbatim for the same reason: it spans the whole
+// run, not one state operation, so layering this budget onto it would cancel
+// every run that holds the lock for longer than the budget - and it is the
+// underlying backend, not this decorator, that knows when ownership was lost.
+func (b *stateDeadlineBackend) Lock(ctx context.Context) (context.Context, func() error, error) {
 	return b.Backend.Lock(ctx)
 }
 

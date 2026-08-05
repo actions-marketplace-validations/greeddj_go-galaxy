@@ -190,7 +190,7 @@ func openedBackend(t *testing.T, dir string) *Backend {
 // lockOrFatal acquires b's lock, failing the test on any error.
 func lockOrFatal(t *testing.T, b *Backend) func() error {
 	t.Helper()
-	release, err := b.Lock(context.Background())
+	_, release, err := b.Lock(context.Background())
 	if err != nil {
 		t.Fatalf("Lock failed: %v", err)
 	}
@@ -209,7 +209,7 @@ func assertLockFailsFast(t *testing.T, b *Backend) {
 	}
 	resultCh := make(chan lockResult, 1)
 	go func() {
-		release, err := b.Lock(context.Background())
+		_, release, err := b.Lock(context.Background())
 		resultCh <- lockResult{release: release, err: err}
 	}()
 
@@ -247,7 +247,7 @@ func TestBackendClassifiesItsOwnFailures(t *testing.T) {
 		// exists whatever its mode, so Open on a read-only cache directory
 		// succeeds and the permission failure lands where the lock file is
 		// created - which is exactly where a real run meets it.
-		_, err := New(dir).Lock(context.Background())
+		_, _, err := New(dir).Lock(context.Background())
 		if !errors.Is(err, helpers.ErrCacheBackendUnusable) {
 			t.Fatalf("Lock on a read-only cache dir = %v, want errors.Is helpers.ErrCacheBackendUnusable", err)
 		}
@@ -290,13 +290,13 @@ func TestBackendClassifiesItsOwnFailures(t *testing.T) {
 func testContentionKeepsItsOwnClass(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	release, err := New(dir).Lock(context.Background())
+	_, release, err := New(dir).Lock(context.Background())
 	if err != nil {
 		t.Fatalf("first Lock: %v", err)
 	}
 	defer func() { _ = release() }()
 
-	_, err = New(dir).Lock(context.Background())
+	_, _, err = New(dir).Lock(context.Background())
 	if !errors.Is(err, helpers.ErrAnotherInstanceIsRunning) {
 		t.Fatalf("second Lock = %v, want errors.Is helpers.ErrAnotherInstanceIsRunning", err)
 	}

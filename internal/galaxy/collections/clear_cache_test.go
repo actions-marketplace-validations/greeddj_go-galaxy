@@ -219,7 +219,7 @@ func TestInitInstallClearCacheWipesArtifactsAndMetadataCaches(t *testing.T) {
 	printer := &capturingPrinter{}
 	runtime := infra.New(printer, http.DefaultClient)
 
-	state, err := initInstall(context.Background(), fx.cfg, runtime)
+	_, state, err := initInstall(context.Background(), fx.cfg, runtime)
 	if err != nil {
 		t.Fatalf("initInstall: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestInitInstallClearCacheFailureReleasesLock(t *testing.T) {
 		printer := &capturingPrinter{}
 		runtime := infra.New(printer, http.DefaultClient)
 
-		state, err := initInstall(context.Background(), cfg, runtime)
+		_, state, err := initInstall(context.Background(), cfg, runtime)
 		if err != nil {
 			t.Fatalf("initInstall: %v", err)
 		}
@@ -362,7 +362,7 @@ func TestInitInstallClearCacheFailureReleasesLock(t *testing.T) {
 		cacheDir, cfg := clearCacheFixture(t, true)
 		runtime := infra.New(&capturingPrinter{}, http.DefaultClient)
 
-		_, err := initInstall(context.Background(), cfg, runtime)
+		_, _, err := initInstall(context.Background(), cfg, runtime)
 		if err == nil {
 			t.Fatalf("expected initInstall to fail against a read-only cache dir")
 		}

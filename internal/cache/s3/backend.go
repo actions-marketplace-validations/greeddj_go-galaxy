@@ -97,10 +97,14 @@ func (b *Backend) Close(_ context.Context) error {
 	return nil
 }
 
-// Lock acquires an S3-based distributed lock.
-func (b *Backend) Lock(ctx context.Context) (func() error, error) {
+// Lock acquires an S3-based distributed lock. The holder context it returns
+// alongside the release closure is canceled, with a cause matching
+// helpers.ErrCacheLockLost, as soon as the heartbeat sees another acquirer's
+// token on the lock object - see acquireLock and the cacheManager.Backend
+// interface's own contract for Lock.
+func (b *Backend) Lock(ctx context.Context) (context.Context, func() error, error) {
 	if err := b.Open(ctx); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	lockKey := b.key(locksPrefix, lockObject)
 	return b.acquireLock(ctx, lockKey)

@@ -689,7 +689,7 @@ func TestInitInstallDryRunSkipsClearCache(t *testing.T) {
 	printer := &capturingPrinter{}
 	runtime := infra.New(printer, http.DefaultClient)
 
-	state, err := initInstall(context.Background(), cfg, runtime)
+	_, state, err := initInstall(context.Background(), cfg, runtime)
 	if err != nil {
 		t.Fatalf("initInstall: %v", err)
 	}
@@ -729,7 +729,7 @@ func TestInitInstallDryRunSkipsRecordProject(t *testing.T) {
 	}
 	runtime := infra.New(noopPrinter{}, http.DefaultClient)
 
-	state, err := initInstall(context.Background(), cfg, runtime)
+	_, state, err := initInstall(context.Background(), cfg, runtime)
 	if err != nil {
 		t.Fatalf("initInstall: %v", err)
 	}

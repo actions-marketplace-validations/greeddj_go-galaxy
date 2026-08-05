@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"errors"
 	"io/fs"
 	"os"
@@ -189,7 +190,7 @@ func TestStoreSweep(t *testing.T) {
 	seedFinalizedEntry(t, store, "keep")
 	seedFinalizedEntry(t, store, "drop")
 
-	if err := store.Sweep(map[string]bool{"keep": true}); err != nil {
+	if err := store.Sweep(t.Context(), map[string]bool{"keep": true}); err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(store.Root(), "keep")); err != nil {
@@ -197,6 +198,36 @@ func TestStoreSweep(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(store.Root(), "drop")); !os.IsNotExist(err) {
 		t.Fatalf("drop survived sweep: err=%v", err)
+	}
+}
+
+// TestStoreSweepStopsWhenTheContextEnds proves Sweep reads its context before
+// each entry: a caller that stopped owning the store - cleanup's holder
+// context canceled after another holder took the cache lock - removes no
+// further trees, and hears why rather than being told the sweep succeeded.
+//
+// TestStoreSweep above is the positive control on the identical fixture: it
+// removes "drop" through the same call with a live context, so "drop
+// survived" here means the context check fired rather than that the entry was
+// never a candidate.
+func TestStoreSweepStopsWhenTheContextEnds(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	store := NewStore(filepath.Join(dir, "cache"))
+
+	seedFinalizedEntry(t, store, "keep")
+	seedFinalizedEntry(t, store, "drop")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	if err := store.Sweep(ctx, map[string]bool{"keep": true}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Sweep = %v, want errors.Is context.Canceled", err)
+	}
+	for _, name := range []string{"keep", "drop"} {
+		if _, err := os.Stat(filepath.Join(store.Root(), name)); err != nil {
+			t.Fatalf("%s was removed by a canceled sweep: %v", name, err)
+		}
 	}
 }
 
@@ -1017,7 +1048,7 @@ func TestRemovalPathsWithReadOnlyFiles(t *testing.T) {
 			name: "Sweep",
 			remove: func(t *testing.T, store *Store, target string) (string, error) {
 				t.Helper()
-				return target, store.Sweep(map[string]bool{})
+				return target, store.Sweep(t.Context(), map[string]bool{})
 			},
 		},
 		{
@@ -1200,8 +1231,9 @@ func escapingStoreCases() []escapingStoreCase {
 		{
 			name:   "Sweep",
 			sweeps: true,
-			run: func(_ *testing.T, s *Store) error {
-				return s.Sweep(nil)
+			run: func(t *testing.T, s *Store) error {
+				t.Helper()
+				return s.Sweep(t.Context(), nil)
 			},
 		},
 		{

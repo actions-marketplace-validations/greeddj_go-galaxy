@@ -56,29 +56,59 @@ type cleanupState struct {
 
 // Start runs the cleanup process for unused collections.
 func Start(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
-	var err error
-	defer func() {
-		if err != nil {
-			runtime.Output.Errorf("Error: %s", err.Error())
-		}
-	}()
-
-	state, err := initCleanup(ctx, cfg, runtime)
+	err := runCleanup(ctx, cfg, runtime)
 	if err != nil {
-		return err
+		runtime.Output.Errorf("Error: %s", err.Error())
+	}
+	return err
+}
+
+// runCleanup owns the backend lifecycle for the cleanup command: it opens the
+// backend, takes its exclusive lock, and registers the release/close defers
+// that must run on every exit path - including one from cleanupWithState,
+// which owns the actual work once state is initialized. This is the same
+// lifecycle/work split collections.runInstall/installWithState already draw,
+// and it exists here for one concrete reason: the lock-loss verdict
+// (cacheManager.LockLostError) needs exactly ONE place to wrap this command's
+// outcome. The work half returns from several places and nonamedreturns is
+// enabled, so a defer cannot wrap them, and a wrap repeated at every return
+// site would silently drift apart.
+//
+// lockCtx is the backend's holder context (see cacheManager.Backend's Lock
+// contract): the work runs under it, so a run whose lock is stolen mid-flight
+// stops deleting, and both the init error and the work's return are judged
+// against it here. "Stops" has a stated granularity, and it is the only thing
+// this pipeline can honestly claim: the work reads the holder context before
+// each next collection in removeUnused, once more between that pass and the
+// sweeps, before each next legacy artifact key in sweepLegacyArtifacts, and
+// before each next entry in the extracted-store sweep (extracted.Store.Sweep).
+// The residual is one unit of work in flight: a RemoveAll already walking a
+// collection's tree, and an ArtifactStore.Delete already issued, both run to
+// completion - neither is interruptible, and abandoning a tree half-removed
+// would be worse than finishing it. Those same checks are what makes cleanup
+// answer an operator's Ctrl-C between collections rather than only once every
+// project has been walked; that path stays a plain context cancellation and
+// keeps its own exit class, since only a genuine lock-loss cause reaches the
+// verdict.
+func runCleanup(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
+	lockCtx, state, err := initCleanup(ctx, cfg, runtime)
+	if err != nil {
+		return cacheManager.LockLostError(ctx, lockCtx, err)
 	}
 	if state == nil {
 		// initCleanup returns a non-nil state on success; this guard is
 		// defensive and has nothing acquired to release.
 		return nil
 	}
-	// Register the lock release and backend close before the empty-registry
-	// check: initCleanup has already acquired the lock and opened the backend
-	// by this point, so the no-op branch below must still release both instead
-	// of leaking them.
+	// Register the lock release and backend close before any work: initCleanup
+	// has already acquired the lock and opened the backend by this point, so
+	// even cleanupWithState's empty-registry no-op must still release both
+	// instead of leaking them.
 	defer func() {
 		if state.release != nil {
-			_ = state.release()
+			if err := state.release(); err != nil {
+				runtime.Output.Errorf("lock release: %v", err)
+			}
 		}
 	}()
 	defer func() {
@@ -87,6 +117,16 @@ func Start(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error 
 		}
 	}()
 
+	return cacheManager.LockLostError(ctx, lockCtx, cleanupWithState(lockCtx, cfg, runtime, state))
+}
+
+// cleanupWithState performs cleanup's actual work against an
+// already-initialized state: compute reachability across every recorded
+// project, remove what nothing reaches, sweep the legacy artifact keys and
+// the extracted store, then save. It assumes the backend is already open and
+// locked - runCleanup holds that lifecycle - so it never touches
+// state.release or state.backend.Close itself.
+func cleanupWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra, state *cleanupState) error {
 	if state.registry == nil || len(state.registry.Projects) == 0 {
 		runtime.Output.Printf("ℹ️ No projects recorded for GC.")
 		return nil
@@ -101,8 +141,17 @@ func Start(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error 
 	if err != nil {
 		return err
 	}
+	// removeUnused returning cleanly means it deleted every unreachable
+	// collection it found, not that this run still owns the cache: the last
+	// key's own check passed before that key was removed, and the holder
+	// context can have ended during the removal itself. Re-read it here so a
+	// run that lost the lock during the final collection does not go on to
+	// sweep artifact keys under a cache another holder is already writing.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("cleanup stopped before sweeping cached artifacts: %w", err)
+	}
 	sweepLegacyArtifacts(ctx, cfg, runtime, state.backend, installedByKey)
-	sweepExtractedStore(cfg, runtime, state.store, reachable, installedByKey)
+	sweepExtractedStore(ctx, cfg, runtime, state.store, reachable, installedByKey)
 	return finalizeCleanup(ctx, cfg, runtime, state.backend, state.store, removed)
 }
 
@@ -129,11 +178,23 @@ func warnIfSnapshotNotPersisted(runtime *infra.Infra, st *store.Store) {
 	)
 }
 
-func initCleanup(ctx context.Context, cfg *config.Config, runtime *infra.Infra) (*cleanupState, error) {
+// initCleanup opens the cache backend, takes its exclusive lock, and loads
+// the snapshot and the project registry this run reasons about, releasing
+// and closing whatever it already acquired on any failure after that point.
+//
+// The returned context is the backend's HOLDER CONTEXT (see
+// cacheManager.Backend's own Lock contract): every step below that runs after
+// the lock is taken uses it rather than ctx, and it is returned on the
+// post-lock failure paths too, not only on success - so a LoadStore or
+// LoadProjectRegistry failure caused by this run's lock being stolen is
+// reported as exactly that instead of as an ordinary backend failure.
+// backend.Open runs before the lock exists and backend.Close must still run
+// after ownership is gone, so both keep the caller's own ctx.
+func initCleanup(ctx context.Context, cfg *config.Config, runtime *infra.Infra) (context.Context, *cleanupState, error) {
 	runtime.Output.Printf("🚀 init cache backend")
 	backend, err := cacheBackend.New(cfg, runtime)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Every persisted cache-state operation this run makes (LoadStore and
 	// LoadProjectRegistry below) runs under its own bounded budget from here
@@ -145,28 +206,28 @@ func initCleanup(ctx context.Context, cfg *config.Config, runtime *infra.Infra) 
 	// several call sites (this file's own finalizeCleanup among them).
 	backend = cacheManager.WithStateDeadline(backend, runtime.StateDeadline())
 	if err := backend.Open(ctx); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	releaseLock, err := backend.Lock(ctx)
+	lockCtx, releaseLock, err := backend.Lock(ctx)
 	if err != nil {
 		_ = backend.Close(ctx)
-		return nil, err
+		return nil, nil, err
 	}
 	runtime.Output.Printf("🚀 load storage")
-	st, err := backend.LoadStore(ctx)
+	st, err := backend.LoadStore(lockCtx)
 	if err != nil {
 		_ = releaseLock()
 		_ = backend.Close(ctx)
-		return nil, err
+		return lockCtx, nil, err
 	}
 	runtime.Output.Printf("🚀 load projects registry")
-	registry, err := backend.LoadProjectRegistry(ctx)
+	registry, err := backend.LoadProjectRegistry(lockCtx)
 	if err != nil {
 		_ = releaseLock()
 		_ = backend.Close(ctx)
-		return nil, err
+		return lockCtx, nil, err
 	}
-	return &cleanupState{
+	return lockCtx, &cleanupState{
 		backend:  backend,
 		store:    st,
 		registry: registry,
@@ -306,6 +367,16 @@ func removeUnused(
 	// iteration order - the same failure, on the same recorded keys, must
 	// leave the same partial result on disk every time.
 	for _, key := range slices.Sorted(maps.Keys(installedByKey)) {
+		// Read before the reachable skip below, deliberately, and this is the
+		// difference between a claim that holds and one that only looks like
+		// it does: placed after the skip, the loop would stop only once it
+		// reached a key it was actually going to remove, so a cancellation
+		// landing in a long run of reachable keys would be honored an
+		// arbitrary number of iterations late. Placed here, "this loop stops
+		// at the next collection" is a property of every iteration.
+		if err := ctx.Err(); err != nil {
+			return removed, fmt.Errorf("cleanup stopped at %s: %w", key, err)
+		}
 		insts := installedByKey[key]
 		if reachable[key] {
 			continue
@@ -316,9 +387,10 @@ func removeUnused(
 		// rejects every control character, \n and \t included (see
 		// IsPathElement's own doc comment). key therefore can never carry a
 		// character able to forge an extra line or a terminal command, so
-		// this and the "removed" line below print it with a bare %s rather
-		// than %q: quoting would change the exact, greppable shape CI
-		// tooling matches against (e.g. "🧹 removed ns.name@1.0.0").
+		// this line, the "removed" line below, and the stop error above all
+		// print it with a bare %s rather than %q: quoting would change the
+		// exact, greppable shape CI tooling matches against (e.g.
+		// "🧹 removed ns.name@1.0.0").
 		if cfg.DryRun {
 			runtime.Output.Printf("🧹 would remove %s", key)
 			continue
@@ -1174,12 +1246,27 @@ func sweepLegacyArtifacts(
 		return
 	}
 	// Sorted rather than ranged directly, mirroring removeUnused's own
-	// ordering fix, even though this loop never returns early: a Delete
-	// failure is ignored below rather than propagated, so map order here
-	// cannot randomize which entries actually get swept - only the order
-	// dry-run report lines are printed in, and the order a test fixture
-	// asserting on those lines would otherwise have to tolerate.
+	// ordering fix: a Delete failure is ignored below rather than propagated,
+	// so map order cannot randomize which entries a completed pass sweeps -
+	// only the order dry-run report lines are printed in, and the order a
+	// test fixture asserting on those lines would otherwise have to tolerate.
+	// A pass cut short by the context check below stops on a prefix of that
+	// same order rather than on an arbitrary subset.
 	for _, mapKey := range slices.Sorted(maps.Keys(installedByKey)) {
+		// Stopping silently suffices for a pass that is void by design: on
+		// the common path the caller has already returned an error
+		// (cleanupWithState reads the same context immediately before
+		// calling this), and a context that ends inside this loop instead is
+		// still judged once the work returns - runCleanup hands
+		// cleanupWithState's outcome to cacheManager.LockLostError, which
+		// turns even a nil into the lock-loss verdict whenever the holder
+		// context ended because another holder took the cache. A plain
+		// cancellation costs at most a deferred purge: what this pass
+		// reclaims is disk under a key shape nothing can look up again,
+		// never correctness.
+		if ctx.Err() != nil {
+			return
+		}
 		insts := installedByKey[mapKey]
 		if len(insts) == 0 {
 			continue
@@ -1267,6 +1354,7 @@ func reportLegacyArtifactSweepCandidate(ctx context.Context, runtime *infra.Infr
 // anywhere", which would wipe the entire extracted store on the strength of
 // having no evidence at all.
 func sweepExtractedStore(
+	ctx context.Context,
 	cfg *config.Config,
 	runtime *infra.Infra,
 	st *store.Store,
@@ -1288,11 +1376,13 @@ func sweepExtractedStore(
 	}
 	// Reported, not discarded, and still not fatal. The sweep reclaims disk in
 	// a rebuildable layer, so one unreadable entry must not fail a cleanup run
-	// that has already done its real work; but the same return now also
-	// carries the containment root's refusal when the store directory itself
-	// leads out of the cache directory, and silence there would leave an
-	// operator with a run that reports success while reclaiming nothing.
-	if err := extractedStore.Sweep(keep); err != nil {
+	// that has already done its real work; but the same return also carries
+	// the containment root's refusal when the store directory itself leads out
+	// of the cache directory, and ctx's own error when this run stopped owning
+	// the cache partway through the entries - and silence for either would
+	// leave an operator with a run that reports success while reclaiming
+	// nothing.
+	if err := extractedStore.Sweep(ctx, keep); err != nil {
 		runtime.Output.Errorf("failed to sweep the extracted cache: %v", err)
 	}
 }

@@ -32,7 +32,7 @@ import (
 //     creating the bucket, so the only way this sentinel escapes is a PUT or
 //     list answered 404 mid-run against a bucket Open already ensured exists -
 //     a remote-state condition, not a configuration one. errS3LockWaitNoHolderObserved
-//     carries it too: acquireLock's wait-ceiling arm (waitCeilingErr, lock.go)
+//     carries it too: acquireLockLoop's wait-ceiling arm (waitCeilingErr, lock.go)
 //     reports it when the wait ceiling elapses without this wait ever having
 //     observed another acquirer holding the lock - covering an endpoint that
 //     accepts connections and never replies, and one that contradicts itself
@@ -72,13 +72,17 @@ import (
 //     errS3ClientNil, errS3HTTPClientNil, and errS3BucketEmpty guard
 //     construction-time state no operator input reaches; (b) errS3LockLost is
 //     a real runtime ownership race (another acquirer reclaimed the lock
-//     after this holder's heartbeat stalled past its TTL) that stays
-//     unclassified because it never reaches exitcode.FromError at all - every
-//     caller only logs it (internal/galaxy/collections/start.go's three
-//     `state.release()` sites) rather than propagating it as this run's own
-//     error; (c) errS3TokenGeneration is a crypto/rand failure deliberately
-//     left generic, since a source that cannot be trusted to generate a lock
-//     token is not a cache-backend condition this partition is about.
+//     after this holder's heartbeat stalled past its TTL) that carries none
+//     of the three classes because it is a fourth condition with an exit
+//     class of its own: it wraps helpers.ErrCacheLockLost, which maps to
+//     ExitCacheBusy, the same way ExitCacheCorrupt's own sentinels sit
+//     outside this three-way partition. Ownership taken away mid-run says
+//     nothing about whether the backend can be reached or can serve as one -
+//     it served this acquisition and every heartbeat perfectly - so none of
+//     the three would be an honest answer; (c) errS3TokenGeneration is a
+//     crypto/rand failure deliberately left generic, since a source that
+//     cannot be trusted to generate a lock token is not a cache-backend
+//     condition this partition is about.
 //     errS3NotFound and errS3PreconditionFailed are consumed as control flow
 //     by their own callers - Has, LoadStore, LoadProjectRegistry, and the
 //     lock protocol's tryAcquireOnce/reclaimIfExpired (lock.go) and
@@ -100,7 +104,7 @@ import (
 // first, making the classification depend on FromError's own ordering rather
 // than on what the sentinel means.
 var (
-	errS3LockLost                 = errors.New("s3 lock ownership was lost to another holder")
+	errS3LockLost                 = fmt.Errorf("%w: s3 lock ownership was lost to another holder", helpers.ErrCacheLockLost)
 	errS3LockWaitTimeout          = fmt.Errorf("%w: s3 lock wait ceiling exceeded", helpers.ErrCacheBusy)
 	errS3LockWaitNoHolderObserved = fmt.Errorf(
 		"%w: s3 lock wait ceiling elapsed without ever observing a lock holder",
@@ -180,7 +184,7 @@ const (
 	lockBackoffCap  = 5 * time.Second
 
 	// maxImmediateLockRetries bounds how many consecutive retryNow handoffs
-	// acquireLock's loop honors with an immediate retry (no backoff sleep)
+	// acquireLockLoop's loop honors with an immediate retry (no backoff sleep)
 	// before it degrades to the normal backoff path. It exists purely as an
 	// acquirer-side guard against a misbehaving S3-compatible backend that
 	// answers the create-if-absent PUT with 412 (precondition failed) while

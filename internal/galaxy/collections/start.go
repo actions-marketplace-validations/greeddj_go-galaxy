@@ -69,9 +69,9 @@ func runWarm(ctx context.Context, cfg *config.Config, runtime *infra.Infra) erro
 	}
 	runtime.Output.Printf("🔥 Warming caches")
 	start := time.Now()
-	state, err := initInstall(ctx, cfg, runtime)
+	lockCtx, state, err := initInstall(ctx, cfg, runtime)
 	if err != nil {
-		return err
+		return cacheManager.LockLostError(ctx, lockCtx, err)
 	}
 	defer func() {
 		if state.release != nil {
@@ -84,7 +84,12 @@ func runWarm(ctx context.Context, cfg *config.Config, runtime *infra.Infra) erro
 		_ = state.backend.Close(ctx)
 	}()
 
-	return warmWithState(ctx, cfg, runtime, state, start)
+	// The work runs under lockCtx and its outcome is judged against lockCtx,
+	// as a direct expression rather than a defer: this function returns the
+	// work's outcome from one place, so there is nothing a defer would buy,
+	// and a named return value would be needed to make one work at all. See
+	// runInstall for the full rationale behind this shape.
+	return cacheManager.LockLostError(ctx, lockCtx, warmWithState(lockCtx, cfg, runtime, state, start))
 }
 
 // warmWithState performs warm's actual work against an already-initialized
@@ -318,9 +323,9 @@ func runLock(ctx context.Context, cfg *config.Config, runtime *infra.Infra) erro
 	// truthfully claim either without branching on cfg.Frozen.
 	runtime.Output.Printf("🔒 Resolving for lockfile")
 	start := time.Now()
-	state, err := initInstall(ctx, cfg, runtime)
+	lockCtx, state, err := initInstall(ctx, cfg, runtime)
 	if err != nil {
-		return err
+		return cacheManager.LockLostError(ctx, lockCtx, err)
 	}
 	defer func() {
 		if state.release != nil {
@@ -333,7 +338,9 @@ func runLock(ctx context.Context, cfg *config.Config, runtime *infra.Infra) erro
 		_ = state.backend.Close(ctx)
 	}()
 
-	return lockWithState(ctx, cfg, runtime, state, start)
+	// Same shape as runInstall and runWarm: the work runs under lockCtx and
+	// its outcome is judged against lockCtx, as a direct expression.
+	return cacheManager.LockLostError(ctx, lockCtx, lockWithState(lockCtx, cfg, runtime, state, start))
 }
 
 // lockWithState performs lock's actual work against an already-initialized
@@ -532,12 +539,36 @@ func saveLockSnapshot(ctx context.Context, cfg *config.Config, runtime *infra.In
 // installWithState, which owns the actual work once state is initialized.
 // This is what makes the save/metrics tail reachable from a test with an
 // already-initialized state and no production seam.
+//
+// It also owns the lock-loss verdict for this command. lockCtx is the
+// backend's holder context (see cacheManager.Backend's Lock contract): every
+// piece of real work runs under it, so a run whose lock is stolen mid-flight
+// stops rather than continuing to install, commit, and persist
+// non-exclusively, and both the init error and the work's own return are
+// judged against it through cacheManager.LockLostError.
+//
+// "Stops" has a granularity, and it is one unit of work per worker - the same
+// shape runCleanup states for its own loops. A collection whose artifact
+// bytes are already in hand finishes extracting into the collections tree,
+// since neither the untar nor the extracted store's rename is interruptible.
+// What does stop is every write to the shared cache: on the S3 backend, the
+// only one whose lock can be taken away, the artifact commit and the tail
+// SaveStore both run under this context and fail once it ends.
+//
+// Judging through LockLostError is a direct expression rather than a defer
+// for two reasons: nonamedreturns is enabled, so a defer would need a named
+// return this function does not have, and both call sites are single returns
+// where a defer buys nothing anyway. The release defers are deliberately left
+// alone: releasing and closing must happen regardless of the verdict, and the
+// lock-loss error a release closure returns stays a logged line rather than
+// becoming the run's error, since by then the verdict has already been made
+// from the same fact.
 func runInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
 	runtime.Output.Printf("🚀 Starting installation process")
 	start := time.Now()
-	state, err := initInstall(ctx, cfg, runtime)
+	lockCtx, state, err := initInstall(ctx, cfg, runtime)
 	if err != nil {
-		return err
+		return cacheManager.LockLostError(ctx, lockCtx, err)
 	}
 	defer func() {
 		if state.release != nil {
@@ -550,7 +581,7 @@ func runInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) e
 		_ = state.backend.Close(ctx)
 	}()
 
-	return installWithState(ctx, cfg, runtime, state, start)
+	return cacheManager.LockLostError(ctx, lockCtx, installWithState(lockCtx, cfg, runtime, state, start))
 }
 
 // installWithState performs install's actual work against an
@@ -754,7 +785,20 @@ func prepareInstallPlan(
 // comment for why), and emitting the disclosure from this one funnel is what
 // makes "no run silently drops a flag" structural here too, rather than a
 // convention install/warm/lock would each have to remember on their own.
-func initInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) (*installState, error) {
+//
+// The returned context is the backend's HOLDER CONTEXT (see
+// cacheManager.Backend's own Lock contract): every step below that runs after
+// the lock is taken uses it rather than ctx, and it is returned on the
+// post-lock failure paths too, not only on success. That matters because the
+// window between acquiring the lock and returning covers sweepDeadRunTemps,
+// LoadStore, clearCacheIfRequested and recordProjectUnlessDryRun - a
+// --clear-cache bulk delete against a large bucket is exactly the kind of
+// work long enough for a heartbeat tick to land inside it - so discarding the
+// holder context there would report a failure CAUSED by the lock being stolen
+// as an ordinary backend failure. backend.Open runs before the lock exists
+// and backend.Close must still run after ownership is gone, so both keep the
+// caller's own ctx.
+func initInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) (context.Context, *installState, error) {
 	if cfg.DryRun {
 		dryRunBanner(runtime)
 	}
@@ -781,7 +825,7 @@ func initInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) 
 	runtime.Output.Printf("🚀 init cache backend")
 	backend, err := cacheBackend.New(cfg, runtime)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Every persisted cache-state operation this run makes (LoadStore and
 	// SaveStore below, plus RecordProject inside recordProjectUnlessDryRun)
@@ -793,37 +837,37 @@ func initInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) 
 	// backend once here rather than at each of its several call sites.
 	backend = cacheManager.WithStateDeadline(backend, runtime.StateDeadline())
 	if err := backend.Open(ctx); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	releaseLock, err := backend.Lock(ctx)
+	lockCtx, releaseLock, err := backend.Lock(ctx)
 	if err != nil {
 		_ = backend.Close(ctx)
-		return nil, err
+		return nil, nil, err
 	}
 
 	extractStore := newExtractStore(cfg)
 	// The exclusive backend lock is held now, so no other go-galaxy process can
 	// be mid-write: every leftover download-temp and extract-temp is a dead-run
 	// orphan and is safe to reclaim.
-	sweepDeadRunTemps(ctx, runtime, backend, extractStore)
+	sweepDeadRunTemps(lockCtx, runtime, backend, extractStore)
 
 	snapshotStart := time.Now()
 	runtime.Output.Printf("🚀 load storage")
-	st, err := backend.LoadStore(ctx)
+	st, err := backend.LoadStore(lockCtx)
 	if err != nil {
 		_ = releaseLock()
 		_ = backend.Close(ctx)
-		return nil, err
+		return lockCtx, nil, err
 	}
 	runtime.Output.DebugSincef(snapshotStart, "%s", "load snapshot")
-	if err := clearCacheIfRequested(ctx, cfg, runtime, backend, st); err != nil {
+	if err := clearCacheIfRequested(lockCtx, cfg, runtime, backend, st); err != nil {
 		_ = releaseLock()
 		_ = backend.Close(ctx)
-		return nil, err
+		return lockCtx, nil, err
 	}
-	recordProjectUnlessDryRun(ctx, cfg, runtime, backend)
+	recordProjectUnlessDryRun(lockCtx, cfg, runtime, backend)
 
-	return &installState{
+	return lockCtx, &installState{
 		backend:      backend,
 		store:        st,
 		release:      releaseLock,

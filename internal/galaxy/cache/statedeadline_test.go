@@ -69,17 +69,19 @@ func (s *stubStateBackend) Close(_ context.Context) error { return nil }
 // Lock waits out s.lockDelay (or the context ending, whichever comes first)
 // before reporting success, so a test can prove this call is never bounded
 // by the state-object budget.
-func (s *stubStateBackend) Lock(ctx context.Context) (func() error, error) {
+func (s *stubStateBackend) Lock(ctx context.Context) (context.Context, func() error, error) {
 	if s.lockDelay > 0 {
 		timer := time.NewTimer(s.lockDelay)
 		defer timer.Stop()
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, nil, ctx.Err()
 		case <-timer.C:
 		}
 	}
-	return func() error { return nil }, nil
+	// ctx unchanged, matching the local backend's own holder-context contract:
+	// this stub's lock cannot be taken away from a live holder either.
+	return ctx, func() error { return nil }, nil
 }
 
 // LoadStore blocks on ctx until it ends and returns ctx.Err() when blocking
@@ -246,7 +248,7 @@ func TestWithStateDeadlineDoesNotBoundLockOrClearFiles(t *testing.T) {
 	}
 	wrapped := cacheManager.WithStateDeadline(stub, stateDeadlineTestBudget)
 
-	release, err := wrapped.Lock(context.Background())
+	_, release, err := wrapped.Lock(context.Background())
 	if err != nil {
 		t.Fatalf("Lock() error = %v, want nil (Lock must not be bounded by the state-object budget)", err)
 	}

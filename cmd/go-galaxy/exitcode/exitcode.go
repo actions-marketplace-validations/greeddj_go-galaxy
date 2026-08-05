@@ -44,24 +44,43 @@ const (
 	// the same run cannot repair it, because the bytes or the digest are wrong
 	// at the source.
 	ExitIntegrity = 7
-	// ExitCacheBusy indicates the cache could not be acquired because
-	// something else already holds it, across three producers with different
-	// shapes: a local process's flock(2) refusing immediately with no wait at
-	// all (helpers.ErrAnotherInstanceIsRunning - EWOULDBLOCK from a
-	// non-blocking LOCK_EX|LOCK_NB, nothing "reached and answered" since
-	// there is no remote party involved), a local Bolt file open timing out
-	// against another process's held lock, or an S3 distributed-lock
-	// acquisition exhausting its own wait ceiling against a live foreign
-	// holder. This is a contention class, distinct from ExitNetwork: the
-	// operator's actionable remedy is to retry, possibly after the other
-	// holder finishes, rather than to treat it as a dead or misconfigured
-	// backend. On the S3 backend this class requires positive evidence: the
-	// run observed another acquirer holding the lock at least once before its
-	// wait ceiling elapsed. A wait that never obtained that evidence
-	// classifies as ExitNetwork instead, so an endpoint that answered nothing
-	// is never reported as a busy one - see internal/cache/s3/variables.go's
-	// partition doc and lock.go's waitCeilingErr for the mechanism and its
-	// one disclosed residual.
+	// ExitCacheBusy indicates this run does not have the cache to itself.
+	// Three of its producers say the cache could not be acquired in the first
+	// place, because something else already holds it, across three shapes: a
+	// local process's flock(2) refusing immediately with no wait at all
+	// (helpers.ErrAnotherInstanceIsRunning - EWOULDBLOCK from a non-blocking
+	// LOCK_EX|LOCK_NB, nothing "reached and answered" since there is no
+	// remote party involved), a local Bolt file open timing out against
+	// another process's held lock, or an S3 distributed-lock acquisition
+	// exhausting its own wait ceiling against a live foreign holder. This is
+	// a contention class, distinct from ExitNetwork: the operator's
+	// actionable remedy is to retry, possibly after the other holder
+	// finishes, rather than to treat it as a dead or misconfigured backend.
+	// On the S3 backend an acquisition reaches this class only on positive
+	// evidence: the run observed another acquirer holding the lock at least
+	// once before its wait ceiling elapsed. A wait that never obtained that
+	// evidence classifies as ExitNetwork instead, so an endpoint that
+	// answered nothing is never reported as a busy one - see
+	// internal/cache/s3/variables.go's partition doc and lock.go's
+	// waitCeilingErr for the mechanism and its one disclosed residual.
+	//
+	// A fourth producer reaches this class from the other side of the same
+	// question: helpers.ErrCacheLockLost, a lock this run DID acquire and then
+	// had taken away by another holder. It shares the class because it shares
+	// the remedy - rerun once nothing else holds the cache - and it
+	// SUPERSEDES every other class rather than merely joining them: a run that
+	// both lost the lock and failed an integrity check exits 8, not 7. That is
+	// not a taxonomy bug. Once another holder is writing the same cache, this
+	// run's own verdicts stop being trustworthy on their own terms - the
+	// checksum mismatch it reports may be the other holder rewriting an
+	// artifact underneath it - so the exclusivity failure is the actionable
+	// fact and everything else is evidence for it. The supersession is
+	// mechanical, not positional: cacheManager.LockLostError renders the run's
+	// own error with %v, flattening its tree so no other class can match it
+	// through errors.Is. This case's own position in fromErrorTail carries
+	// none of that weight: the reasons it sits where it sits are stated at
+	// the isCacheBusyError case itself, and every one of them is about the
+	// acquisition producers.
 	ExitCacheBusy = 8
 	// ExitCacheCorrupt indicates the persisted cache state itself - a project
 	// registry that exists but fails to decode, a state object that could
@@ -255,13 +274,17 @@ func isLockError(err error) bool {
 		errors.Is(err, helpers.ErrLockfileDrift)
 }
 
-// isCacheBusyError reports whether err is a cache-contention sentinel: the
-// cache backend (a local Bolt file or the S3 distributed lock) was reached
-// and answered, but held by another holder past this backend's own wait
-// ceiling, or another go-galaxy instance was already running.
+// isCacheBusyError reports whether err says this run does not have the cache
+// to itself, in either of the two ways that can be true: the lock was refused
+// because another holder had it (helpers.ErrCacheBusy past a backend's own
+// wait ceiling, or helpers.ErrAnotherInstanceIsRunning with no wait at all),
+// or the lock was granted and then taken away mid-run
+// (helpers.ErrCacheLockLost). Both share one remedy - rerun once nothing else
+// holds the cache - which is what makes them one exit class rather than two.
 func isCacheBusyError(err error) bool {
 	return errors.Is(err, helpers.ErrCacheBusy) ||
-		errors.Is(err, helpers.ErrAnotherInstanceIsRunning)
+		errors.Is(err, helpers.ErrAnotherInstanceIsRunning) ||
+		errors.Is(err, helpers.ErrCacheLockLost)
 }
 
 // isInstallError reports whether err is an install-time sentinel (unsafe

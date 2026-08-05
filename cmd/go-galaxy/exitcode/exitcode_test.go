@@ -215,6 +215,43 @@ var fromErrorCases = []exitCase{
 		wantCode: ExitCacheBusy,
 	},
 	{
+		// A lock this run DID acquire and then had taken away mid-run: the
+		// same exit class as one it never got at all, because the remedy is
+		// the same - rerun once nothing else holds the cache.
+		name:     "cache lock lost",
+		err:      helpers.ErrCacheLockLost,
+		wantCode: ExitCacheBusy,
+	},
+	{
+		// A shape-fidelity row, and deliberately not a guard on the
+		// rendering: the literal below hard-codes what
+		// cacheManager.LockLostError has ALREADY produced - the sentinel
+		// with its cause flattened in by %v - so no edit to that rendering
+		// can change what this row hands FromError, and a %v-to-%w edit
+		// there cannot fail it. What it does pin is the exit code a CI
+		// script actually reads for the commonest lock-loss shape: the run's
+		// own error carrying context.Canceled, since canceling the holder
+		// context is how a backend signals the loss. The rendering is
+		// guarded where it lives, by TestLockLostError's own mustNotMatch
+		// rows in internal/galaxy/cache.
+		name:     "cache lock lost carrying a flattened cancellation cause",
+		err:      fmt.Errorf("%w: %v", helpers.ErrCacheLockLost, context.Canceled), //nolint:errorlint
+		wantCode: ExitCacheBusy,
+	},
+	{
+		// The same shape-fidelity row for the supersession case, and it
+		// cannot pin supersession either: helpers.ErrSHA256Mismatch is text
+		// in this literal rather than a matchable sentinel, so the integrity
+		// class never competes for FromError's ordering here at all.
+		// Supersession is a property of the rendering and is pinned by
+		// TestLockLostError's "supersedes the run's own integrity failure"
+		// row; what this row adds is that the string that rendering produces
+		// still reaches a CI script as 8 rather than 7.
+		name:     "cache lock lost carrying a flattened integrity cause",
+		err:      fmt.Errorf("%w: %v", helpers.ErrCacheLockLost, helpers.ErrSHA256Mismatch), //nolint:errorlint
+		wantCode: ExitCacheBusy,
+	},
+	{
 		name:     "corrupt project registry",
 		err:      fmt.Errorf("%w: ctx", helpers.ErrCorruptProjectRegistry),
 		wantCode: ExitCacheCorrupt,
@@ -448,7 +485,7 @@ func TestIntegritySentinelsMapToExitIntegrity(t *testing.T) {
 // moving the isIntegrityError case below isLockError/isInstallError in
 // FromError, which makes isInstallError claim the headline first; verified,
 // that mutation makes this test fail with:
-// "exitcode_test.go:457: FromError(integrity join) = 5, want 7".
+// "exitcode_test.go:494: FromError(integrity join) = 5, want 7".
 func TestIntegrityOutranksInstallFailureHeadline(t *testing.T) {
 	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
 
@@ -796,7 +833,7 @@ func TestStateObjectDeadlineClassification(t *testing.T) {
 // fromErrorTail above isInstallError's case in FromError makes this test
 // fail with:
 //
-//	exitcode_test.go:804: FromError(joined) = 8, want 5
+//	exitcode_test.go:841: FromError(joined) = 8, want 5
 func TestCacheBusyFoldedBehindInstallFailureClassifiesAsInstall(t *testing.T) {
 	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
 	joined := errors.Join(headline, helpers.ErrCacheBusy)

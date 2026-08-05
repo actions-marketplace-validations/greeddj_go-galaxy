@@ -623,7 +623,7 @@ investigate, not a configuration mistake.
 When `--s3-bucket` (or `GO_GALAXY_S3_BUCKET`) is set, go-galaxy uses S3 as the cache backend.
 Artifacts and cache metadata are stored in S3; collections are still installed locally.
 
-A run against the S3 backend distinguishes three ways the cache can fail to serve it. A
+A run against the S3 backend distinguishes four ways the cache can fail to serve it. A
 bucket that cannot be reached, or that answers a request with a failure of its own, exits
 `4` - retry once the outage clears. A bucket that parses but cannot back the distributed
 lock's mutual-exclusion guarantee (it does not enforce conditional PUT), or an
@@ -632,8 +632,10 @@ has to change. A bucket whose lock this run does not acquire before its own wait
 elapses exits `8` only when this run actually saw another acquirer holding that lock
 during the wait; a wait that reached the bucket but never got that answer - an endpoint
 that never replies, replies only with failures, or contradicts itself - exits `4` instead,
-alongside the other unreachable-backend cases. See "Exit codes" below for the exact
-messages to grep for.
+alongside the other unreachable-backend cases. And a lock this run does acquire and then
+loses - a later heartbeat finds another acquirer's token on the lock object - exits `8`
+too: the run stops there instead of finishing its writes against a cache it no longer has
+to itself. See "Exit codes" below for the exact messages to grep for.
 
 ## Security / Trust model
 
@@ -943,7 +945,7 @@ pipelines can branch on failure type without parsing log output:
 |    5 | Install-time failure (unsafe archive/symlink content, empty file, missing artifact cache)                                                                                                                                                                                                                                                                                                                                                                         |
 |    6 | Lockfile error (missing, invalid, mismatched with requirements, or out of date under `lock --frozen`)                                                                                                                                                                                                                                                                                                                                                             |
 |    7 | Artifact-integrity failure (content does not authenticate against its naming sha256, or the digest is malformed)                                                                                                                                                                                                                                                                                                                                                  |
-|    8 | Cache contention (the cache lock is held elsewhere, or the S3 lock's wait ceiling elapsed after this run observed another holder)                                                                                                                                                                                                                                                                                                                                 |
+|    8 | Cache contention (the cache lock is held elsewhere, the S3 lock's wait ceiling elapsed after this run observed another holder, or a lock this run did hold was taken away by another holder mid-run)                                                                                                                                                                                                                                                              |
 |    9 | Persisted cache state is corrupt or oversized and must be discarded (a project registry that fails to decode, a state object that exceeds its size ceiling, or - local backend only - a Bolt snapshot file that fails one of its own corruption checks)                                                                                                                                                                                                           |
 |  130 | Interrupted (a caught SIGINT, or the caller's own context canceled)                                                                                                                                                                                                                                                                                                                                                                                               |
 
@@ -964,6 +966,15 @@ wrong at the source, not transiently unavailable. It also outranks the network
 class: a run that hits both an integrity failure and a network failure exits
 `7`, not `4`.
 
+Exit `8`'s lock-loss half outranks exit `7` in turn: a run that both lost the
+cache lock mid-run and failed an integrity check exits `8`. Once another holder
+is writing the same cache, this run's own checksum verdict is no longer
+evidence about the artifact - it may simply be that other holder rewriting the
+artifact underneath it - so the exclusivity failure is the actionable fact and
+the mismatch is a symptom of it. Fix the contention first, then rerun; if the
+integrity failure is real, the rerun reports it as exit `7` with nothing else
+touching the cache.
+
 A stalled or byte-dripped transfer is never reported as an interrupt, even
 though the underlying mechanism that unblocks it is a context cancellation:
 the tool distinguishes its own no-progress cancellation from a genuine SIGINT
@@ -982,18 +993,23 @@ conditional PUT, so the distributed lock cannot guarantee mutual exclusion),
 answered with a failure that is not this program's own doing), `another
 process holds the cache` (exit `8` - a local Bolt file open timed out against
 another process's held lock, or the S3 lock's wait ceiling elapsed after this
-run observed another acquirer holding it), and `another instance is running`
+run observed another acquirer holding it), `another instance is running`
 (exit `8` - a second local run found the lock already held and refused to
-start immediately).
+start immediately), and `cache lock ownership was lost to another holder`
+(exit `8` - this run acquired the lock and a later heartbeat found another
+acquirer's token on it, so the work it had already done was not exclusive).
 
-On the S3 backend, exit `8` means this run saw another acquirer holding the
-cache lock at some point during the wait - not that the backend was still
-healthy when the wait gave up, since one observation early in the wait is
-enough even if the backend answers nothing at all for the rest of it. A run
-that never got such an answer from the bucket in the first place - one that
-accepts connections and never replies, replies only with failures, or
+On the S3 backend, exit `8` reached through the wait means this run saw another
+acquirer holding the cache lock at some point during the wait - not that the
+backend was still healthy when the wait gave up, since one observation early in
+the wait is enough even if the backend answers nothing at all for the rest of
+it. A run that never got such an answer from the bucket in the first place -
+one that accepts connections and never replies, replies only with failures, or
 contradicts itself about whether the lock object exists - exits `4` with
-`cache backend unavailable` instead.
+`cache backend unavailable` instead. The `cache lock ownership was lost to
+another holder` half has the opposite shape and is not covered by that
+sentence: there was no wait at all, the lock was granted, and the positive
+observation of another holder came afterward, from a heartbeat during the run.
 
 Exit `9` means the persisted cache state itself - not this reader's ability
 to interpret it - cannot be trusted by anyone and must be discarded before the

@@ -215,7 +215,7 @@ func assertLockIsFree(t *testing.T, cfg *config.Config, runtime *infra.Infra) {
 			t.Errorf("failed to close the fresh backend: %v", err)
 		}
 	}()
-	release, err := backend.Lock(t.Context())
+	_, release, err := backend.Lock(t.Context())
 	if err != nil {
 		t.Fatalf("expected the lock to be free after an empty-registry cleanup, got %v", err)
 	}
@@ -296,7 +296,7 @@ func TestInitCleanupLockFailure(t *testing.T) {
 	if err := holder.Open(t.Context()); err != nil {
 		t.Fatalf("failed to open the lock-holding backend: %v", err)
 	}
-	release, err := holder.Lock(t.Context())
+	_, release, err := holder.Lock(t.Context())
 	if err != nil {
 		t.Fatalf("failed to acquire the holding lock: %v", err)
 	}
@@ -364,12 +364,33 @@ func TestInitCleanupLoadStoreFailure(t *testing.T) {
 		t.Fatalf("exitcode.FromError(err) = %d, want ExitCacheCorrupt (%d)", got, exitcode.ExitCacheCorrupt)
 	}
 	assertLockIsFree(t, cfg, runtime)
+	assertInitCleanupReturnsHolderContext(t, cfg, runtime)
 
 	if err := os.Remove(dbPath); err != nil {
 		t.Fatalf("failed to remove the corrupt store db: %v", err)
 	}
 	if err := Start(t.Context(), cfg, runtime); err != nil {
 		t.Fatalf("expected Start to succeed once the corrupt store db is removed, got %v", err)
+	}
+}
+
+// assertInitCleanupReturnsHolderContext calls the same failing arm directly,
+// for the one thing Start's return cannot show: the CONTEXT initCleanup hands
+// back alongside its error. That arm runs with the exclusive lock already
+// held, so its failure can be a symptom of the lock being stolen rather than
+// of the snapshot being bad - and runCleanup can only tell those apart by
+// passing this context to cacheManager.LockLostError, which returns the error
+// untouched when handed a nil one. The local backend's Lock returns the
+// caller's own context unchanged, so identity is the whole assertion.
+func assertInitCleanupReturnsHolderContext(t *testing.T, cfg *config.Config, runtime *infra.Infra) {
+	t.Helper()
+	ctx := t.Context()
+	lockCtx, state, err := initCleanup(ctx, cfg, runtime)
+	if err == nil {
+		t.Fatalf("expected initCleanup to fail against the corrupt store db, got state %+v", state)
+	}
+	if lockCtx != ctx {
+		t.Fatalf("initCleanup returned holder context %v, want the ctx it was handed", lockCtx)
 	}
 }
 
@@ -594,7 +615,7 @@ func TestRemoveInstalledRejectsTraversalVersion(t *testing.T) {
 // -run TestRemoveUnusedCannotForgeAReportLine -v` against that mutation
 // produced:
 //
-//	cleanup_test.go:635: recorded output line contains a raw newline,
+//	cleanup_test.go:656: recorded output line contains a raw newline,
 //	forged-line defect is not closed: "🧹 removed ns.hostile@1.0.0
 //	forged plain-text line"
 //	--- FAIL: TestRemoveUnusedCannotForgeAReportLine (0.01s)
@@ -3462,7 +3483,7 @@ func TestSweepExtractedStoreNoopWhenCacheDirEmpty(t *testing.T) {
 	runtime := newTestRuntime()
 	st := store.New()
 
-	sweepExtractedStore(cfg, runtime, st, map[string]bool{}, map[string][]installedCollection{})
+	sweepExtractedStore(t.Context(), cfg, runtime, st, map[string]bool{}, map[string][]installedCollection{})
 }
 
 // TestStartLeavesExtractedCacheWhenNoSnapshotPersisted is THE regression test
@@ -3743,7 +3764,7 @@ func seedManifestWithIdentity(t *testing.T, root, dirNs, dirName, jsonNs, jsonNa
 // TestRemoveInstalledArtifactAndSidecarFollowWalkedIdentity (see that
 // test's own doc comment for why). This test's own share of that run:
 //
-//	cleanup_test.go:3797: expected victim.collection to survive, stat error: stat .../MANIFEST.json: no such file or directory
+//	cleanup_test.go:3818: expected victim.collection to survive, stat error: stat .../MANIFEST.json: no such file or directory
 //	--- FAIL: TestScanIdentityComesFromWalkedDirectoryNotManifest (0.00s)
 //	    --- PASS: TestScanIdentityComesFromWalkedDirectoryNotManifest/positive_control:_evil.pkg_survives_its_own_requirement (0.02s)
 //	    --- FAIL: TestScanIdentityComesFromWalkedDirectoryNotManifest/hostile_manifest_cannot_redirect_deletion (0.02s)
@@ -3887,7 +3908,7 @@ func seedEmptyDirs(t *testing.T, dirs ...string) {
 // (byKey["evil.pkg@9.9.9"]) finds nothing at all rather than the one record
 // it expects:
 //
-//	cleanup_test.go:3849: expected exactly one scanned record keyed evil.pkg@9.9.9, got 0: []
+//	cleanup_test.go:3870: expected exactly one scanned record keyed evil.pkg@9.9.9, got 0: []
 //	--- FAIL: TestRemoveInstalledArtifactAndSidecarFollowWalkedIdentity (0.00s)
 func TestRemoveInstalledArtifactAndSidecarFollowWalkedIdentity(t *testing.T) {
 	t.Parallel()
@@ -3946,9 +3967,9 @@ func TestRemoveInstalledArtifactAndSidecarFollowWalkedIdentity(t *testing.T) {
 // exactly two top-level failures - this test and
 // TestBuildReachablePhase2FollowsTransitiveDependencyEdge below:
 //
-//	cleanup_test.go:3998: expected foo.bar to survive via project A's
+//	cleanup_test.go:4019: expected foo.bar to survive via project A's
 //	cross-project requirement, stat .../MANIFEST.json: no such file or directory
-//	cleanup_test.go:4053: expected dep.leaf to survive via top.level's
+//	cleanup_test.go:4074: expected dep.leaf to survive via top.level's
 //	transitive dependency, stat .../MANIFEST.json: no such file or directory
 //	--- FAIL: TestBuildReachablePhase2ReachesDirectCrossProjectRequirement (0.01s)
 //	--- FAIL: TestBuildReachablePhase2FollowsTransitiveDependencyEdge (0.01s)
@@ -4113,7 +4134,7 @@ func buildSkippedProjectRootsFixture(t *testing.T, cacheDir string, requireFooBa
 // requirements" property from the opposite direction (an unparseable file
 // must still abort, rather than a valid file still being consulted):
 //
-//	cleanup_test.go:4141: expected foo.bar to survive via the skipped
+//	cleanup_test.go:4162: expected foo.bar to survive via the skipped
 //	project's own requirement, stat .../MANIFEST.json: no such file or directory
 //	--- FAIL: TestBuildReachableSkippedProjectStillContributesRoots (0.01s)
 //
@@ -4311,7 +4332,7 @@ func buildUnscannedProjectFixture(t *testing.T, cacheDir string, reqContent []by
 // something, so the unparseable content is never read and Start returns nil
 // instead of aborting:
 //
-//	cleanup_test.go:4326: expected ErrProjectRequirementsUnreadable, got <nil>
+//	cleanup_test.go:4347: expected ErrProjectRequirementsUnreadable, got <nil>
 //	--- FAIL: TestUnparseableRequirementsAbortsEvenForUnscannedProject (0.01s)
 func TestUnparseableRequirementsAbortsEvenForUnscannedProject(t *testing.T) {
 	t.Parallel()
@@ -4585,7 +4606,7 @@ func TestOpenProjectWorkspaceFallsBackToCollections(t *testing.T) {
 // `go test -run TestOpenProjectWorkspacePrefersRecordedCollectionsPathOverFallback -v`
 // against that mutation produced:
 //
-//	cleanup_test.go:4634: expected the recorded CollectionsPath's unreferenced install to be removed, stat error: <nil>
+//	cleanup_test.go:4655: expected the recorded CollectionsPath's unreferenced install to be removed, stat error: <nil>
 //	--- FAIL: TestOpenProjectWorkspacePrefersRecordedCollectionsPathOverFallback (0.01s)
 //
 // under the mutation, the fallback candidate wins the race instead: it is a

@@ -125,6 +125,20 @@ func newLockBackendWithFake(t *testing.T, timing lockTiming) (*Backend, *fakeS3)
 	return newLockBackendAt(t, srv.URL, srv.Client(), timing), fake
 }
 
+// testHolderCancel returns a holder-context cancel function shaped exactly
+// like the one acquireLock threads through the acquisition protocol, for the
+// tests below that call one step of that protocol directly instead of going
+// through Lock. The context it belongs to is discarded: those tests assert on
+// the returned lockAttempt, while the holder context's own behavior is
+// covered end to end by TestLockHolderContextCanceledWhenOwnershipLost and
+// its positive control. t.Cleanup cancels it so nothing outlives the test.
+func testHolderCancel(t *testing.T) context.CancelCauseFunc {
+	t.Helper()
+	_, cancel := context.WithCancelCause(context.Background())
+	t.Cleanup(func() { cancel(nil) })
+	return cancel
+}
+
 // seedLockObject writes the lock object directly (bypassing acquireLock),
 // under foreignToken, to set up contention/reclaim scenarios ahead of a real
 // Lock call - every caller in this suite simulates a different acquirer, so
@@ -148,7 +162,7 @@ func TestLockAcquiresOnEmptyBucket(t *testing.T) {
 	b.lock = testLockTiming(time.Minute)
 	ctx := context.Background()
 
-	release, err := b.Lock(ctx)
+	_, release, err := b.Lock(ctx)
 	if err != nil {
 		t.Fatalf("Lock: %v", err)
 	}
@@ -200,7 +214,7 @@ func TestLockConcurrentFreshAcquireSingleWinner(t *testing.T) {
 	var wg sync.WaitGroup
 	for i, b := range []*Backend{b1, b2} {
 		wg.Go(func() {
-			release, err := b.Lock(context.Background())
+			_, release, err := b.Lock(context.Background())
 			results[i] = lockResult{release: release, err: err}
 		})
 	}
@@ -246,7 +260,7 @@ func TestLockReclaimsExpiredLock(t *testing.T) {
 	pastDeadline := time.Now().UTC().Add(-time.Hour)
 	seedLockObject(ctx, t, b, pastDeadline)
 
-	release, err := b.Lock(ctx)
+	_, release, err := b.Lock(ctx)
 	if err != nil {
 		t.Fatalf("Lock: %v", err)
 	}
@@ -283,7 +297,7 @@ func TestLockWaitsThenTimesOutOnLiveLock(t *testing.T) {
 	seedLockObject(ctx, t, b, time.Now().UTC().Add(b.lock.ttl))
 
 	start := time.Now()
-	_, err := b.Lock(ctx)
+	_, _, err := b.Lock(ctx)
 	elapsed := time.Since(start)
 
 	if !errors.Is(err, errS3LockWaitTimeout) {
@@ -309,9 +323,9 @@ func TestLockWaitsThenTimesOutOnLiveLock(t *testing.T) {
 // newAcceptingNeverRespondingListener). client is built and assigned to the
 // Backend directly, bypassing Open's ensureBucket/probeConditionalPut calls:
 // both would otherwise run on the raw ctx Backend.Lock passes to Open, before
-// acquireLock ever constructs waitCtx, so they are unbounded by waitCeiling -
+// acquireLockLoop ever constructs waitCtx, so they are unbounded by waitCeiling -
 // calling them against a listener that never answers would hang the test
-// itself rather than exercising acquireLock's own wait ceiling, which is
+// itself rather than exercising acquireLockLoop's wait ceiling, which is
 // this helper's entire point.
 func newSilentEndpointBackend(t *testing.T, waitCeiling time.Duration) *Backend {
 	t.Helper()
@@ -385,7 +399,7 @@ func TestLockWaitCeilingDistinguishesSilentBackendFromContention(t *testing.T) {
 			t.Parallel()
 			b := tc.build(t)
 
-			_, err := b.Lock(context.Background())
+			_, _, err := b.Lock(context.Background())
 			if err == nil {
 				t.Fatalf("expected Lock to fail, got nil")
 			}
@@ -403,12 +417,12 @@ func TestLockWaitCeilingDistinguishesSilentBackendFromContention(t *testing.T) {
 	}
 }
 
-// TestLockAcquireTimesOutAfterObservationThenSilence pins acquireLock's
+// TestLockAcquireTimesOutAfterObservationThenSilence pins acquireLockLoop's
 // accumulation of observedHolder across attempts, not just the attempt in
 // flight when the wait ceiling fires: a live foreign lock is seeded so the
 // very first HEAD observes it, and every HEAD after that one hangs - never
 // answering at all - until the wait ceiling itself ends the wait. The
-// attempt actually in flight when acquireLock gives up therefore observed
+// attempt actually in flight when acquireLockLoop gives up therefore observed
 // nothing; Lock must still report errS3LockWaitTimeout, proving the
 // accumulation is a logical OR across the whole wait, not the last attempt's
 // own answer. This is also waitCeilingErr's own "stale evidence" residual
@@ -457,7 +471,7 @@ func TestLockAcquireTimesOutAfterObservationThenSilence(t *testing.T) {
 
 	seedLockObject(context.Background(), t, b, time.Now().UTC().Add(b.lock.ttl))
 
-	_, err := b.Lock(context.Background())
+	_, _, err := b.Lock(context.Background())
 	if !errors.Is(err, errS3LockWaitTimeout) {
 		t.Fatalf("expected errS3LockWaitTimeout, got %v", err)
 	}
@@ -512,7 +526,7 @@ func TestLockAcquireSurfacesAHardFailureOverTheCeiling(t *testing.T) {
 
 	seedLockObject(context.Background(), t, b, time.Now().UTC().Add(b.lock.ttl))
 
-	_, err := b.Lock(context.Background())
+	_, _, err := b.Lock(context.Background())
 	if !errors.Is(err, errS3HeadFailed) {
 		t.Fatalf("expected errS3HeadFailed, got %v", err)
 	}
@@ -551,7 +565,7 @@ func TestLockAcquirePropagatesCallerCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := b.Lock(ctx)
+		_, _, err := b.Lock(ctx)
 		errCh <- err
 	}()
 
@@ -701,7 +715,7 @@ func TestHeartbeatRefreshesDeadline(t *testing.T) {
 	b.lock = testLockTiming(10 * time.Second)
 	ctx := context.Background()
 
-	release, err := b.Lock(ctx)
+	_, release, err := b.Lock(ctx)
 	if err != nil {
 		t.Fatalf("Lock: %v", err)
 	}
@@ -760,7 +774,7 @@ func TestHeartbeatDetectsLostOwnershipAndReleaseSkipsDelete(t *testing.T) {
 	b.lock = testLockTiming(10 * time.Second)
 	ctx := context.Background()
 
-	release, err := b.Lock(ctx)
+	_, release, err := b.Lock(ctx)
 	if err != nil {
 		t.Fatalf("Lock: %v", err)
 	}
@@ -772,17 +786,23 @@ func TestHeartbeatDetectsLostOwnershipAndReleaseSkipsDelete(t *testing.T) {
 		t.Fatalf("seed foreign takeover: %v", err)
 	}
 
-	// Deliberately a sleep, unlike the two heartbeat tests above. Loss
-	// detection has no observable downstream of itself: the heartbeat's
-	// answer to a takeover is to store the flag and exit, issuing no further
-	// request, and the fake counts a request when it is served - before the
-	// holder has processed the response. Waiting on the fake's HEAD counter
-	// therefore lets release's hbCancel abort the very HEAD that would have
-	// revealed the takeover, leaving the flag unset; polled tightly, that
-	// variant fails outright. Three intervals of a heartbeat that needs one
-	// round trip is a scheduling margin only, and releaseLock's own token
-	// check - not this flag - is what keeps the foreign lock from being
-	// deleted.
+	// Deliberately a sleep, unlike the two heartbeat tests above, and
+	// deliberately NOT the holder context this same Lock call returns. Loss
+	// detection does have an observable downstream - a takeover closes the
+	// holder context - but consuming it here would make this test assert
+	// through the very mechanism TestLockHolderContextCanceledWhenOwnershipLost
+	// exists to pin, leaving the flag-and-release half with no test of its
+	// own: the two are one fact with two independent consumers (see
+	// heartbeatTick), so removing the cancel must not be able to hide behind
+	// this test still passing. What is left as a synchronization source is
+	// the request stream, and it does not work: the fake counts a request
+	// when it is served - before the holder has processed the response - so
+	// waiting on the fake's HEAD counter lets release's hbCancel abort the
+	// very HEAD that would have revealed the takeover, leaving the flag
+	// unset; polled tightly, that variant fails outright. Three intervals of
+	// a heartbeat that needs one round trip is a scheduling margin only, and
+	// releaseLock's own token check - not this flag - is what keeps the
+	// foreign lock from being deleted.
 	time.Sleep(3 * b.lock.heartbeatInterval)
 
 	if err := release(); !errors.Is(err, errS3LockLost) {
@@ -795,6 +815,143 @@ func TestHeartbeatDetectsLostOwnershipAndReleaseSkipsDelete(t *testing.T) {
 	}
 	if got := headers.Get("X-Amz-Meta-Token"); got != foreignToken {
 		t.Fatalf("expected the foreign lock to remain in place, got token %q", got)
+	}
+}
+
+// TestLockHolderContextCanceledWhenOwnershipLost pins the other consumer of
+// the same takeover TestHeartbeatDetectsLostOwnershipAndReleaseSkipsDelete
+// covers: the holder context Lock returns must close, with a cause matching
+// helpers.ErrCacheLockLost, so the run itself stops working under a lock it
+// no longer holds instead of finishing and reporting the loss in one line
+// afterward. The takeover is seeded out-of-band with putLock, the same way
+// that test does it, rather than with raceTokenOnNextHead: that knob is a
+// one-shot swap armed for a specific HEAD and exists to race claim's own
+// verification during acquisition, not to model an acquirer that arrives
+// while a lock is already held.
+//
+// TestLockHolderContextStaysLiveWhileOwned is this test's positive control on
+// the identical fixture: without it, "the context closed" would be
+// indistinguishable from a holder context that is simply never live.
+//
+// What release does to that same cause on its way out is deliberately not
+// re-asserted below: a cause is immutable once set, so a second read after
+// release could not differ from the one above whatever release did. That
+// ordering is pinned by TestReleaseRacingTheTickKeepsTheLossCause instead,
+// which races release against a tick that has not decided yet.
+func TestLockHolderContextCanceledWhenOwnershipLost(t *testing.T) {
+	t.Parallel()
+	b := newTestBackend(t)
+	b.lock = testLockTiming(10 * time.Second)
+	ctx := context.Background()
+
+	holderCtx, release, err := b.Lock(ctx)
+	if err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+
+	key := b.key(locksPrefix, lockObject)
+	if err := b.putLock(ctx, key, foreignToken, time.Now().UTC().Add(b.lock.ttl), false); err != nil {
+		t.Fatalf("seed foreign takeover: %v", err)
+	}
+
+	// A bounded select, not a sleep: the closing of the holder context IS the
+	// event this test is about, so it can be waited on directly. The ceiling
+	// is a liveness bound - a slow machine only makes this slower, never
+	// wrong - matching waitForLockEvent's own contract.
+	select {
+	case <-holderCtx.Done():
+	case <-time.After(lockEventWaitCeiling):
+		t.Fatalf("holder context still live %v after a takeover; the run would keep writing without the lock", lockEventWaitCeiling)
+	}
+	if cause := context.Cause(holderCtx); !errors.Is(cause, helpers.ErrCacheLockLost) {
+		t.Fatalf("context.Cause(holderCtx) = %v, want errors.Is helpers.ErrCacheLockLost", cause)
+	}
+
+	assertReleaseReportsLossAndKeepsForeignLock(t, b, release, key)
+}
+
+// assertReleaseReportsLossAndKeepsForeignLock runs the release half of a
+// takeover scenario: release must report errS3LockLost and must leave the
+// foreign holder's object in place. Split out of
+// TestLockHolderContextCanceledWhenOwnershipLost purely to stay under the
+// funlen budget.
+func assertReleaseReportsLossAndKeepsForeignLock(t *testing.T, b *Backend, release func() error, key string) {
+	t.Helper()
+	if err := release(); !errors.Is(err, errS3LockLost) {
+		t.Fatalf("release = %v, want errS3LockLost", err)
+	}
+	headers, err := b.client.headObject(context.Background(), key)
+	if err != nil {
+		t.Fatalf("headObject: %v", err)
+	}
+	if got := headers.Get("X-Amz-Meta-Token"); got != foreignToken {
+		t.Fatalf("expected the foreign lock to remain in place, got token %q", got)
+	}
+}
+
+// TestLockHolderContextStaysLiveWhileOwned is
+// TestLockHolderContextCanceledWhenOwnershipLost's positive control on the
+// identical acquisition, with the one difference that matters: nobody takes
+// the lock away. The holder context must still be live after several
+// heartbeat ticks have observably happened, proving the cancellation that
+// test observes is a response to the takeover rather than a context that was
+// never usable in the first place.
+//
+// It also pins the no-leak half of the Backend.Lock contract: a clean release
+// must end the holder context too, so a long-lived parent does not accumulate
+// a child per run - and must end it with a plain cancellation, never a
+// lock-loss cause, or every successful run would classify as exit 8.
+func TestLockHolderContextStaysLiveWhileOwned(t *testing.T) {
+	t.Parallel()
+	fake := newFakeS3()
+	b := newTestBackendWithFake(t, fake)
+	b.lock = testLockTiming(10 * time.Second)
+	ctx := context.Background()
+
+	holderCtx, release, err := b.Lock(ctx)
+	if err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+
+	key := b.key(locksPrefix, lockObject)
+	putsAtAcquire := fake.requestCount(key, http.MethodPut)
+	// Three refresh PUTs the fake actually served, rather than three sleeps:
+	// each one proves a whole heartbeat tick ran to completion under this
+	// token, which is exactly the window a takeover would have been noticed
+	// in.
+	waitForLockEvent(t, "three heartbeat refresh PUTs under our own token", func() bool {
+		return fake.requestCount(key, http.MethodPut) >= putsAtAcquire+3
+	})
+	if err := holderCtx.Err(); err != nil {
+		t.Fatalf("holderCtx.Err() = %v, want nil while this run still holds the lock", err)
+	}
+
+	if err := release(); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if _, err := b.client.headObject(ctx, key); !errors.Is(err, errS3NotFound) {
+		t.Fatalf("expected the lock object to be deleted, headObject error = %v", err)
+	}
+	assertHolderContextEndedCleanly(t, holderCtx.Err(), context.Cause(holderCtx))
+}
+
+// assertHolderContextEndedCleanly asserts the three things a clean release
+// owes the holder context, in an order where each is reachable while every
+// check above it passes: it ended at all (no leaked child), it did not end
+// with a lock-loss cause (which would classify a successful run as exit 8),
+// and the cause it did end with is plain cancellation. It takes the two
+// already-read values rather than the context itself, so the helper keeps
+// *testing.T first without tripping revive's context-as-argument rule.
+func assertHolderContextEndedCleanly(t *testing.T, ctxErr, cause error) {
+	t.Helper()
+	if ctxErr == nil {
+		t.Fatalf("holder context still live after a clean release; the parent leaks a child per run")
+	}
+	if errors.Is(cause, helpers.ErrCacheLockLost) {
+		t.Fatalf("holder context cause after a clean release = %v, must not be a lock-loss cause", cause)
+	}
+	if !errors.Is(cause, context.Canceled) {
+		t.Fatalf("holder context cause after a clean release = %v, want context.Canceled", cause)
 	}
 }
 
@@ -823,7 +980,7 @@ func TestHeartbeatSurvivesTransientHeadFailures(t *testing.T) {
 	b.lock = testLockTiming(10 * time.Second)
 	ctx := context.Background()
 
-	release, err := b.Lock(ctx)
+	_, release, err := b.Lock(ctx)
 	if err != nil {
 		t.Fatalf("Lock: %v", err)
 	}
@@ -886,7 +1043,7 @@ func TestReclaimIfExpiredLosesRaceOnRecreate(t *testing.T) {
 	// acquirer's create winning the race for the just-deleted key.
 	fake.failNext(key, http.MethodPut, http.StatusPreconditionFailed, 1)
 
-	attempt, err := b.reclaimIfExpired(ctx, key, "our-token")
+	attempt, err := b.reclaimIfExpired(ctx, key, "our-token", testHolderCancel(t))
 	if err != nil {
 		t.Fatalf("reclaimIfExpired: %v", err)
 	}
@@ -915,7 +1072,7 @@ func TestReclaimIfExpiredRetriesImmediatelyWhenObjectVanished(t *testing.T) {
 	}
 
 	key := b.key(locksPrefix, "never-written-lock")
-	attempt, err := b.reclaimIfExpired(ctx, key, "token")
+	attempt, err := b.reclaimIfExpired(ctx, key, "token", testHolderCancel(t))
 	if err != nil {
 		t.Fatalf("reclaimIfExpired: %v", err)
 	}
@@ -1037,7 +1194,7 @@ func assertTryAcquireOnceObservation(t *testing.T, tc tryAcquireOnceObservationC
 
 	tc.setup(t, b, fake, key)
 
-	attempt, err := b.tryAcquireOnce(context.Background(), key, "our-token")
+	attempt, err := b.tryAcquireOnce(context.Background(), key, "our-token", testHolderCancel(t))
 	if err != nil {
 		t.Fatalf("tryAcquireOnce: %v", err)
 	}
@@ -1058,11 +1215,11 @@ func assertTryAcquireOnceObservation(t *testing.T, tc tryAcquireOnceObservationC
 }
 
 // TestLockAcquireBoundsImmediateRetrySpin forces the pathological PUT/HEAD
-// inconsistency that acquireLock's retryNow handoff exists to survive: a
+// inconsistency that acquireLockLoop's retryNow handoff exists to survive: a
 // misbehaving S3-compatible backend that answers the create-if-absent PUT
 // with 412 (precondition failed) while a follow-up HEAD on the very same key
 // keeps reporting the object as missing. Before maxImmediateLockRetries
-// bounded this, acquireLock would spin PUT+HEAD with no backoff sleep at all
+// bounded this, acquireLockLoop would spin PUT+HEAD with no backoff sleep at all
 // for the entire waitCeiling window; this test shrinks waitCeiling so the
 // spin (if unbounded) would produce a very large number of requests in a
 // short, deterministic window, and confirms both that Lock still terminates
@@ -1095,7 +1252,7 @@ func TestLockAcquireBoundsImmediateRetrySpin(t *testing.T) {
 	fake.failNext(key, http.MethodHead, http.StatusNotFound, -1)
 
 	start := time.Now()
-	_, err := b.Lock(ctx)
+	_, _, err := b.Lock(ctx)
 	elapsed := time.Since(start)
 
 	if !errors.Is(err, errS3LockWaitNoHolderObserved) {
@@ -1199,7 +1356,7 @@ func TestReleaseDeletesOwnedLock(t *testing.T) {
 	b.lock = testLockTiming(time.Second)
 	ctx := context.Background()
 
-	release, err := b.Lock(ctx)
+	_, release, err := b.Lock(ctx)
 	if err != nil {
 		t.Fatalf("Lock: %v", err)
 	}
@@ -1224,7 +1381,7 @@ func TestReleaseUsesFreshContextAfterInstallCancel(t *testing.T) {
 	b.lock = testLockTiming(time.Minute)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	release, err := b.Lock(ctx)
+	_, release, err := b.Lock(ctx)
 	if err != nil {
 		t.Fatalf("Lock: %v", err)
 	}
@@ -1252,7 +1409,7 @@ func TestReleaseTimeoutIsBounded(t *testing.T) {
 	timing.releaseTimeout = 50 * time.Millisecond
 	b, fake := newLockBackendWithFake(t, timing)
 
-	release, err := b.Lock(context.Background())
+	_, release, err := b.Lock(context.Background())
 	if err != nil {
 		t.Fatalf("Lock: %v", err)
 	}

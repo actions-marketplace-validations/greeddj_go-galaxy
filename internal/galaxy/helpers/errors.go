@@ -93,6 +93,29 @@ var (
 	// timeout against an observed holder alike; neither names the other's
 	// mechanism.
 	ErrCacheBusy = errors.New("another process holds the cache")
+	// ErrCacheLockLost indicates the cache lock was acquired by this run and
+	// then taken away mid-run: a backend observed the lock object recording
+	// some other holder's token while this run was still working under it.
+	// That is a different condition from ErrCacheBusy, which says the lock
+	// was never acquired in the first place, and the remedy differs with it -
+	// a busy cache invites a retry once the other holder finishes, a lost one
+	// says everything this run wrote after the takeover was written without
+	// exclusivity and cannot be trusted.
+	//
+	// It carries none of the three cache-backend classes
+	// (ErrCacheBackendUnavailable, ErrCacheBackendUnusable, ErrCacheBusy):
+	// those describe a backend's ability to reach or serve its store, while
+	// this describes ownership of a lock the backend served perfectly well.
+	// It is a fourth condition with its own exit class, the same way
+	// ErrCorruptSnapshotStore sits outside that partition.
+	//
+	// A carrier must never wrap a context sentinel behind it with %w. The
+	// holder context a backend cancels on loss carries context.Canceled, and
+	// cmd/go-galaxy/exitcode's FromError checks context.Canceled ahead of
+	// every other class, so a %w would report a stolen lock as an operator's
+	// own Ctrl-C. Render the cause with %v - see internal/galaxy/cache's
+	// LockLostError, the single producer of a run's own lock-loss verdict.
+	ErrCacheLockLost = errors.New("cache lock ownership was lost to another holder")
 	// ErrCacheBackendUnavailable indicates a remote cache backend could not
 	// be reached, or answered a request with a failure that is not this
 	// program's own doing.
