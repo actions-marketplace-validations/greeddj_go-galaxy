@@ -477,6 +477,30 @@ func (f *fakeS3) raceTokenOnNextHead(key, token string) {
 	f.headTokenSwaps[key] = token
 }
 
+// storeLockObject writes a lock object directly into the fake's object map,
+// carrying exactly the two X-Amz-Meta-* headers the lock protocol reads back
+// (token and deadline) and a fresh Last-Modified. It bypasses HTTP on
+// purpose: the tests that use it place a competing acquirer's write at an
+// exact point in another acquirer's request sequence - from inside a handler
+// that has just served a request, or between two requests of an in-flight
+// reclaim - and a real PUT would add a round trip of its own, and its own
+// entry in the request counters, right where the ordering is being set up.
+//
+// Like every other write path here it publishes a fresh meta map rather than
+// mutating a stored one, so handleHead and handleGet can still read obj.meta
+// after releasing f.mu without racing this call.
+func (f *fakeS3) storeLockObject(key, token string, deadline time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.objects[key] = fakeObject{
+		meta: map[string]string{
+			"X-Amz-Meta-Token":    token,
+			"X-Amz-Meta-Deadline": deadline.UTC().Format(time.RFC3339),
+		},
+		modified: time.Now(),
+	}
+}
+
 // handleHead reports the stored object's metadata headers and Last-Modified
 // verbatim, or 404 if absent. This backs the lock protocol's HEAD-only reads
 // (token/deadline verification never needs to transfer the body). A forced

@@ -55,6 +55,7 @@ func New(cfg config.S3CacheConfig, httpClient *http.Client, tempDir string) (*Ba
 			heartbeatOpTimeout: heartbeatOpTimeout,
 			releaseTimeout:     lockReleaseTimeout,
 			waitCeiling:        lockWaitCeiling,
+			reclaimSettle:      lockReclaimSettle,
 			backoffBase:        lockBackoffBase,
 			backoffCap:         lockBackoffCap,
 		},

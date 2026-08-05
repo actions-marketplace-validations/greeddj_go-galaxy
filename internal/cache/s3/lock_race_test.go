@@ -41,6 +41,17 @@ const (
 // self-healing - a cycle that somehow leaves a live lock object behind is
 // reclaimed by the next acquisition instead of stalling it until the wait
 // ceiling.
+//
+// reclaimSettle is zero for the same budget reason, and it is the one field
+// here that testLockTiming sets above zero. Every cycle but the first
+// reclaims the previous cycle's leftover object, so a settle is paid 300
+// times over: measured here, even a 1ms settle takes the loop from 0.53s to
+// 0.97s, and from 0.93s to 1.31s under -race - the "well under a second"
+// claim above turning false. Nothing this file asserts involves the settle -
+// the window it sweeps is inside a heartbeat tick, long after acquisition -
+// so disabling it costs the test no coverage. claimReclaimed's own settle is
+// exercised by TestReclaimSettleRefusesAStolenClaim and by every reclaiming
+// test on testLockTiming.
 func lockRaceTiming() lockTiming {
 	return lockTiming{
 		ttl:                100 * time.Millisecond,
@@ -48,6 +59,7 @@ func lockRaceTiming() lockTiming {
 		heartbeatOpTimeout: 200 * time.Millisecond,
 		releaseTimeout:     200 * time.Millisecond,
 		waitCeiling:        5 * time.Second,
+		reclaimSettle:      0,
 		backoffBase:        time.Millisecond,
 		backoffCap:         5 * time.Millisecond,
 	}
@@ -89,9 +101,10 @@ func lockRaceTiming() lockTiming {
 // `<-done` join in startHeartbeat's release closure - the edit that removes
 // the happens-before while leaving first-cancel-wins intact, so every
 // existing test in this package stays green. Nine runs failed, at cycles 12,
-// 20, 23, 29, 30, 32, 35, 41 and 66 - what was measured, never a bound; one:
+// 20, 23, 29, 30, 32, 35, 41 and 66 - what was measured, never a bound. A
+// later run against this file, quoted here, failed at cycle 17:
 //
-//	lock_race_test.go:104: cycle 30: release reported the lock lost, context.Cause(holderCtx) = context canceled
+//	lock_race_test.go:117: cycle 17: release reported the lock lost, context.Cause(holderCtx) = context canceled
 func TestReleaseRacingTheTickKeepsTheLossCause(t *testing.T) {
 	t.Parallel()
 	fake := newFakeS3()

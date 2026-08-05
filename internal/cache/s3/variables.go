@@ -178,6 +178,24 @@ const (
 	// if this wait ever observed another acquirer holding the lock, or
 	// errS3LockWaitNoHolderObserved otherwise (see waitCeilingErr).
 	lockWaitCeiling = 5 * time.Minute
+	// lockReclaimSettle is how long a reclaiming acquirer pauses between
+	// recreating a dead holder's lock object under its own token and
+	// verifying that the object still records that token. Its size is
+	// arithmetic on the constants below rather than a measurement: a
+	// competing reclaimer reaches its own delete through the same retry
+	// ladder every idempotent verb uses, s3RetryMaxAttempts = 4 attempts and
+	// therefore three full-jitter sleeps drawn from [0,200ms), [0,400ms) and
+	// [0,800ms) (s3RetryBackoffBase = 200ms; s3RetryBackoffCap = 5s never
+	// binds at these exponents) - under 1.4s of sleeping, worst case. Two
+	// seconds clears that sleeping ceiling. It does not claim to clear that
+	// ladder's own round trips on top of it, and it is small enough beside
+	// lockWaitCeiling that paying it costs an acquisition little. It narrows
+	// the window in which two reclaimers both believe they hold the lock; it
+	// is not evidence that they will not, since the only conditional write
+	// this client issues is create-if-absent, which two writers that each
+	// observed the object absent can both satisfy (see reclaimIfExpired and
+	// settleReclaim).
+	lockReclaimSettle = 2 * time.Second
 	// lockBackoffBase and lockBackoffCap bound the full-jitter exponential
 	// backoff between failed acquisition attempts.
 	lockBackoffBase = 250 * time.Millisecond

@@ -32,6 +32,11 @@ var errRawInFlightPlaceholder = errors.New("raw in-flight transport failure")
 // deterministic in tests. Callers needing a non-default waitCeiling,
 // heartbeatInterval, etc. can copy the returned value and override fields.
 //
+// reclaimSettle is shrunk like the rest but deliberately kept above zero, so
+// every reclaiming test in this suite pays a real settle rather than the
+// disabled path: a settle skipped everywhere by default would leave
+// claimReclaimed's ordering exercised only by the tests written for it.
+//
 // These shrunken intervals sit on top of the client's fixed retry policy
 // (s3RetryPolicy, base s3RetryBackoffBase = 200ms, 4 attempts), which tests
 // cannot shrink; heartbeatOpTimeout and releaseTimeout are sized for clean
@@ -46,6 +51,7 @@ func testLockTiming(ttl time.Duration) lockTiming {
 		heartbeatOpTimeout: 200 * time.Millisecond,
 		releaseTimeout:     200 * time.Millisecond,
 		waitCeiling:        time.Second,
+		reclaimSettle:      20 * time.Millisecond,
 		backoffBase:        10 * time.Millisecond,
 		backoffCap:         50 * time.Millisecond,
 	}
