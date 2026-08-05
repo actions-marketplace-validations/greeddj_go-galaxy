@@ -20,6 +20,17 @@ var (
 	ErrArchivePathContainsSymlinkComponent = errors.New("archive path contains symlink component")
 	// ErrArchiveExceedsMaxSize indicates an archive exceeds the maximum total size.
 	ErrArchiveExceedsMaxSize = errors.New("archive exceeds maximum total size")
+	// ErrArchiveDecompressedTooLarge indicates an archive made the extractor
+	// pull more raw bytes out of its decompressor than ArchiveMaxDecompressedSize
+	// allows. It is a separate sentinel from ErrArchiveExceedsMaxSize on
+	// purpose: that one fires on the sizes an archive's headers DECLARE, this
+	// one on the bytes archive/tar actually reads, and the two disagree for
+	// every shape whose declared sizes understate what the reader consumes - a
+	// sparse entry, or a chain of PAX/GNU meta headers the extractor never sees
+	// a header for at all. Pinning which of the two gates fired is what tells a
+	// reader of a failing test whether the declared-size budget or the stream
+	// cap is the rule doing the work.
+	ErrArchiveDecompressedTooLarge = errors.New("archive decompressed stream exceeds maximum size")
 	// ErrArchiveEntryHasNegativeSize indicates an archive entry has a negative size.
 	ErrArchiveEntryHasNegativeSize = errors.New("archive entry has negative size")
 	// ErrArchiveEntryIsTooLarge indicates an archive entry is too large.

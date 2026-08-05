@@ -274,6 +274,26 @@ var fromErrorCases = []exitCase{
 		wantCode: ExitInstall,
 	},
 	{
+		// The byte-budget sibling of the row above: the per-entry cap is
+		// charged against the declared size of every header the extractor is
+		// handed, whatever its typeflag, not only against the regular files
+		// extraction actually writes to disk.
+		name:     "archive entry too large",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrArchiveEntryIsTooLarge),
+		wantCode: ExitInstall,
+	},
+	{
+		// The declared-size budget's counterpart on the bytes actually read: an
+		// archive whose headers understate what archive/tar consumes for them is
+		// refused by the decompressed-stream cap rather than by either row above,
+		// and only once it pulls a byte past that ceiling - below it, the
+		// understatement is accepted. It classifies with the archive family, not
+		// as a transport failure, which is why it is not ErrResponseTooLarge.
+		name:     "archive decompressed stream too large",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrArchiveDecompressedTooLarge),
+		wantCode: ExitInstall,
+	},
+	{
 		// Paired with "response too large, aggregated" below: this row is the
 		// bare/unaggregated shape, reached wherever a capped body overruns
 		// its ceiling outside any per-collection worker - an oversized Galaxy
@@ -428,7 +448,7 @@ func TestIntegritySentinelsMapToExitIntegrity(t *testing.T) {
 // moving the isIntegrityError case below isLockError/isInstallError in
 // FromError, which makes isInstallError claim the headline first; verified,
 // that mutation makes this test fail with:
-// "exitcode_test.go:437: FromError(integrity join) = 5, want 7".
+// "exitcode_test.go:457: FromError(integrity join) = 5, want 7".
 func TestIntegrityOutranksInstallFailureHeadline(t *testing.T) {
 	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
 
@@ -776,7 +796,7 @@ func TestStateObjectDeadlineClassification(t *testing.T) {
 // fromErrorTail above isInstallError's case in FromError makes this test
 // fail with:
 //
-//	exitcode_test.go:784: FromError(joined) = 8, want 5
+//	exitcode_test.go:804: FromError(joined) = 8, want 5
 func TestCacheBusyFoldedBehindInstallFailureClassifiesAsInstall(t *testing.T) {
 	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
 	joined := errors.Join(headline, helpers.ErrCacheBusy)

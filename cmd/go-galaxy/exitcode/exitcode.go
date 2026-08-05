@@ -285,9 +285,9 @@ func isFileIntegrityError(err error) bool {
 
 // isArchiveError reports whether err is an unsafe-archive sentinel.
 // helpers.ErrArchiveTooManyEntries and helpers.ErrArchiveDuplicateEntry are
-// listed here alongside the other seven for consistency, not because either
-// changes classification: both are raised only from inside
-// archive.ExtractTarGz, which is reached only from a per-collection install
+// listed here alongside every other archive sentinel for consistency, not
+// because either changes classification: both are raised only from inside
+// the archive extractor, which is reached only from a per-collection install
 // or warm worker (extractCollection's unpack, directly or through the
 // extracted store's ingest, and warmVerifyAndEnsure on the warm path), so
 // both always reach isInstallError already joined behind
@@ -298,6 +298,7 @@ func isFileIntegrityError(err error) bool {
 func isArchiveError(err error) bool {
 	return errors.Is(err, helpers.ErrArchivePathContainsSymlinkComponent) ||
 		errors.Is(err, helpers.ErrArchiveExceedsMaxSize) ||
+		errors.Is(err, helpers.ErrArchiveDecompressedTooLarge) ||
 		errors.Is(err, helpers.ErrArchiveEntryHasNegativeSize) ||
 		errors.Is(err, helpers.ErrArchiveEntryIsTooLarge) ||
 		errors.Is(err, helpers.ErrArchiveEntryEscapesDestination) ||

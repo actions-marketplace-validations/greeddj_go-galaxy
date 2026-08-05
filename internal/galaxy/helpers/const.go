@@ -36,17 +36,51 @@ const (
 	// CacheLatestMetadataTTL is the TTL for cached metadata before revalidation.
 	CacheLatestMetadataTTL = 10 * time.Minute
 
-	// ArchiveMaxEntrySize caps a single archive entry size during extraction.
+	// ArchiveMaxEntrySize caps the byte size a single archive entry DECLARES in
+	// its tar header. Extraction charges that declared size for every entry it
+	// reads, before it dispatches on the entry's typeflag, so an entry that is
+	// read past and never extracted is charged exactly like one that is
+	// written to disk. What this bounds is the declaration, not the reading: a
+	// header can name a size far under what archive/tar then consumes for it
+	// (see archive.chargeEntrySize for which shapes do that). The bytes are
+	// bounded by ArchiveMaxDecompressedSize instead.
 	ArchiveMaxEntrySize = int64(512 << 20) // 512 MiB per file
-	// ArchiveMaxTotalSize caps total extracted bytes per archive.
+	// ArchiveMaxTotalSize caps the declared header sizes of an archive's
+	// entries, summed as extraction reads them. Charged at the same point and
+	// with the same meaning as ArchiveMaxEntrySize: it bounds what an archive's
+	// headers claim in total, which is a cheap refusal available before a body
+	// byte is read, and not what the tar reader is made to consume.
 	ArchiveMaxTotalSize = int64(4 << 30) // 4 GiB per archive
-	// ArchiveMaxEntryCount caps the number of entries extracted from a single
-	// archive. It complements the byte caps above by bounding inode
-	// exhaustion: a tarbomb of many zero-byte directories or hardlinks never
-	// trips ArchiveMaxEntrySize or ArchiveMaxTotalSize but can still exhaust
-	// filesystem inodes one cheap entry at a time. It is set well above any
-	// real collection (typically a few thousand to ~10-20k files) and well
-	// below a count that would meaningfully exhaust inodes.
+	// ArchiveMaxDecompressedSize caps the RAW DECOMPRESSED BYTES one archive
+	// may make the extractor pull out of its gzip reader - every byte of the
+	// stream, tar framing and inter-entry padding included, not just the entry
+	// bodies. This is the cap that actually bounds a decompression bomb; the
+	// declared-size budgets above are an earlier, cheaper refusal that a
+	// hostile archive can understate at will.
+	//
+	// No headroom is granted over ArchiveMaxTotalSize for that framing, even
+	// though a legitimate 4 GiB-of-content archive also carries a 512-byte
+	// header per entry plus padding. Any such headroom would have to be
+	// computed from ArchiveMaxEntryCount, and framing is precisely what that
+	// count does not bound: archive/tar consumes 'x', 'L' and 'K' meta headers
+	// inside Next() and never returns them, so they are never counted as
+	// entries, and a headroom allowance sized for them would be an allowance
+	// for the meta-header chain itself. The narrowing this costs a legitimate
+	// archive is about 102 MB of framing at ArchiveMaxEntryCount entries, and
+	// only for one already at the 4 GiB ceiling - which is far outside any real
+	// collection.
+	ArchiveMaxDecompressedSize = ArchiveMaxTotalSize
+	// ArchiveMaxEntryCount caps how many headers tar.Reader.Next may hand back
+	// for a single archive, whatever their typeflag. It is the bound aimed at a
+	// tarbomb of zero-byte directories or hardlinks: such an entry costs an
+	// archive nothing to declare, so it never trips ArchiveMaxEntrySize or
+	// ArchiveMaxTotalSize, and this count is what refuses it. What it bounds is
+	// headers, not inodes - archive.ensureDir creates every missing ancestor of
+	// an entry's path, so one entry named a/b/c/f costs four - and inodes are
+	// bounded only transitively, by ArchiveMaxDecompressedSize, since every
+	// path component's name bytes have to leave the decompressor. The value
+	// sits well above any real collection (typically a few thousand to ~10-20k
+	// files).
 	ArchiveMaxEntryCount = int64(100_000)
 
 	// ArtifactMaxDownloadSize caps the raw (compressed, on-the-wire) bytes

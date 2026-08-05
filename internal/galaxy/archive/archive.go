@@ -40,6 +40,20 @@ func ExtractTarGz(tarGzFile, dstDir string) error {
 // ExtractTarGzStream extracts a tar.gz stream into dstDir with safety checks.
 // It does not close r.
 func ExtractTarGzStream(r io.Reader, dstDir string) error {
+	return extractTarGzStream(r, dstDir, helpers.ArchiveMaxDecompressedSize)
+}
+
+// extractTarGzStream is ExtractTarGzStream with the decompressed-stream cap
+// injected, so a test can drive that cap with a fixture measured in kilobytes
+// instead of one that has to reach the production ceiling. The entry cap has
+// no such seam here, and needs none: a test that drives it hands its own
+// tar.Reader to extractTarEntries and skips the decompressor entirely.
+//
+// The stream cap is the extractor's real bound on decompression bombs, and it
+// is deliberately applied here rather than inside extractTarEntries: it has to
+// count what leaves the gzip reader, which includes every byte archive/tar
+// consumes without ever handing a header back (see chargeEntrySize).
+func extractTarGzStream(r io.Reader, dstDir string, maxDecompressed int64) error {
 	uncompressedStream, err := pgzip.NewReader(r)
 	if err != nil {
 		return fmt.Errorf("failed to create gzip reader: %w", err)
@@ -48,12 +62,78 @@ func ExtractTarGzStream(r io.Reader, dstDir string) error {
 		_ = uncompressedStream.Close()
 	}()
 
-	tarReader := tar.NewReader(uncompressedStream)
+	limited := &decompressedLimitReader{r: uncompressedStream, max: maxDecompressed}
+	tarReader := tar.NewReader(limited)
 	return extractTarEntries(tarReader, dstDir, helpers.ArchiveMaxEntryCount)
 }
 
+// decompressedLimitReader counts the bytes read out of an archive's
+// decompressor and fails once they exceed max, so an archive is bounded by
+// what it actually costs to read rather than by what its headers declare.
+//
+// helpers.NewSizeLimitedReader is deliberately not reused here, and the
+// mechanics are not identical either: one of the differences is the point
+// this reader's refusal turns on, since it returns zero bytes alongside that
+// refusal (see Read below) while sizeLimitedReader hands back the bytes it
+// read. The reason not to reuse it stands on its own regardless - it reports
+// helpers.ErrResponseTooLarge, which exitcode.isTransportError classifies
+// ExitNetwork, so a decompression bomb would be reported to CI as a network
+// fault and retried forever.
+type decompressedLimitReader struct {
+	r   io.Reader
+	err error
+	max int64
+	n   int64
+}
+
+// Read passes bytes through and fails with
+// helpers.ErrArchiveDecompressedTooLarge once the cumulative count exceeds
+// max, replacing whatever the decompressor itself returned (its own io.EOF
+// included), since a stream past the ceiling must never be reported as a
+// clean read.
+//
+// The crossing call returns zero and drops the bytes it just read, which
+// io.Reader permits. Returning them instead is what makes the refusal
+// disappear, and the predicate is general: any caller that treats a
+// fully-satisfied request as success discards a non-nil error returned
+// alongside it. Three instances of that predicate sit between this reader and
+// an archive's bytes, all measured: io.ReadAtLeast's `if n >= min { err = nil }`,
+// reached by archive/tar's readHeader for every 512-byte header block;
+// io.CopyN's `if written == n { return n, nil }`, reached by archive/tar's
+// discard when it reads past a skipped entry body; and that same io.CopyN,
+// reached by this package's own extractRegularFile. The zero return is what
+// produces the refusal against all three.
+//
+// The refusal is sticky: once it fires, every later call returns it without
+// touching the underlying reader, so a caller that keeps reading cannot drain
+// further bytes past the ceiling.
+//
+// Clamping p bounds the overrun to a single byte rather than to a whole read
+// buffer, which is also what makes the byte count the error reports exact. It
+// is not what produces the refusal.
+func (r *decompressedLimitReader) Read(p []byte) (int, error) {
+	if r.err != nil {
+		return 0, r.err
+	}
+	// Keeps p[:remaining+1] in range: a max below zero drives remaining
+	// negative, and at -2 or lower that reslice panics.
+	remaining := max(r.max-r.n, 0)
+	// Taking this branch means remaining < len(p), hence remaining+1 <= len(p),
+	// so the reslice is always within p.
+	if remaining < int64(len(p)) {
+		p = p[:remaining+1]
+	}
+	n, err := r.r.Read(p)
+	r.n += int64(n)
+	if r.n > r.max {
+		r.err = fmt.Errorf("%w: read %d bytes, limit is %d bytes", helpers.ErrArchiveDecompressedTooLarge, r.n, r.max)
+		return 0, r.err
+	}
+	return n, err
+}
+
 func extractTarEntries(tarReader *tar.Reader, dstDir string, maxEntries int64) error {
-	var extracted, entries int64
+	var declared, entries int64
 	// verifiedDirs memoizes parent-chain components already confirmed, this
 	// extraction, to be real (non-symlink) directories. It is scoped to one
 	// extraction (one goroutine, one dstDir) and never shared, so a plain
@@ -68,23 +148,162 @@ func extractTarEntries(tarReader *tar.Reader, dstDir string, maxEntries int64) e
 		if err != nil {
 			return fmt.Errorf("error reading tar archive: %w", err)
 		}
-		// entries counts every header regardless of typeflag, so a tarbomb of
-		// many zero-byte directories or hardlinks - which never trips the
-		// byte caps in extractRegularFile - is still rejected. The check
-		// runs before handleTarEntry, so the (maxEntries+1)th entry is
-		// rejected before it is ever extracted: at most maxEntries inodes get
-		// created before the caller discards the whole destination.
+		// entries counts every header tar.Reader.Next hands back, whatever its
+		// typeflag, so a tarbomb of many zero-byte directories or hardlinks -
+		// which charges nothing against the declared-size budget - is still
+		// rejected. Three bounds split the work, and none subsumes another: the
+		// counter bounds headers, the declared-size budget charged alongside it
+		// bounds what the headers CLAIM, and helpers.ArchiveMaxDecompressedSize
+		// bounds the bytes actually read. Only the first two are applied here,
+		// at the same level, for every header; the third has to sit one layer
+		// out, in decompressedLimitReader, because the bytes it counts include
+		// those archive/tar consumes without ever handing a header back, and
+		// because a header's declared size is not an upper bound on what that
+		// entry costs to read past at all (see chargeEntrySize). The count
+		// check runs before handleTarEntry, so the (maxEntries+1)th entry is
+		// rejected before it is ever extracted. What the counter bounds is
+		// headers, not inodes: ensureDir creates every missing ancestor of an
+		// entry's path, so one entry named a/b/c/f costs four. Inodes are
+		// bounded only transitively - every path component's name bytes have to
+		// leave the decompressor, so the stream cap is what caps them - and no
+		// test pins that weaker bound.
 		entries++
 		if entries > maxEntries {
 			return fmt.Errorf("%w: %d", helpers.ErrArchiveTooManyEntries, maxEntries)
 		}
-		if err := handleTarEntry(tarReader, header, dstDir, &extracted, verifiedDirs); err != nil {
+		if err := chargeEntrySize(header, &declared); err != nil {
+			return err
+		}
+		if err := handleTarEntry(tarReader, header, dstDir, verifiedDirs); err != nil {
 			return err
 		}
 	}
 }
 
-func handleTarEntry(tarReader *tar.Reader, header *tar.Header, dstDir string, extracted *int64, verifiedDirs map[string]struct{}) error {
+// chargeEntrySize charges header.Size against the per-entry and per-archive
+// byte budgets and, on success, adds it to the running total. It runs on every
+// header extractTarEntries is handed, before handleTarEntry dispatches on the
+// typeflag, so every typeflag tar.Reader.Next returns is charged - including
+// the two shapes that write nothing at all: an entry whose name normalizes
+// away (sanitizeArchivePath returning an empty path) and one whose typeflag
+// the dispatch switch skips. Three typeflags are structurally exempt, because
+// they never reach this function at all: 'x' (PAX extended), 'L'
+// (GNULongName) and 'K' (GNULongLink), described below.
+//
+// header.Size is NOT an upper bound on the bytes archive/tar reads out of the
+// decompressed stream for that entry, and this budget must never be read as if
+// it were. The size is exact for a regular file, and for a skipped entry that
+// still carries a body - tar.Reader.Next must read and discard that body
+// before it can parse the following header, so the bytes leave the
+// decompressor whether or not anything is written to disk. It is conservative
+// for a header-only type, where the reader reads no body. But three shapes
+// make it an understatement, by a margin the archive itself chooses:
+//
+//   - An old-GNU sparse entry ('S'). archive/tar's handleRegularFile sizes the
+//     body reader from the header's size field - the physical bytes, which the
+//     following Next() discards - and readOldGNUSparseMap then overwrites
+//     hdr.Size with the header's realsize field, the logical file size. They
+//     are two independent fields, both attacker-chosen, and validateSparseEntries
+//     checks the fragment map against the logical one only, so nothing ties
+//     them together. What arrives here is the logical size; what is read is the
+//     physical one.
+//   - A PAX sparse entry: GNU.sparse.size or GNU.sparse.realsize records in an
+//     'x' header preceding an ordinary TypeReg entry. Read from archive/tar's
+//     readGNUSparsePAXHeaders, which applies those records to hdr.Size after
+//     the body reader has already been sized from the entry's own size field,
+//     this is the same divergence in a second encoding. That is stated as read
+//     from archive/tar's source, not as something measured against this
+//     extractor.
+//   - The 'x', 'L' and 'K' meta headers. tar.Reader.Next reads each one's body
+//     and continues its own loop without ever returning a header, so neither
+//     extractTarEntries' entry counter nor this charge observes one. Each body
+//     is capped at 1 MiB by archive/tar itself, but their number is capped by
+//     nothing: a chain of them is arbitrarily long and costs an archive one
+//     compressed kilobyte per megabyte read.
+//
+// So the declared charge is an early, cheap refusal - it rejects an archive
+// that admits its own size before a single body byte is read - and not the
+// guarantee. The guarantee is helpers.ArchiveMaxDecompressedSize, enforced by
+// decompressedLimitReader on the bytes that actually leave the gzip reader,
+// which is the one counter all three shapes above are visible to. Visibility
+// is necessary and not sufficient: those bytes were always counted here, and
+// what turns counting them into a refusal is that decompressedLimitReader.Read
+// hands back none of them, so neither of the two stdlib helpers between it and
+// this loop can report a satisfied request and drop the error on the way.
+//
+// The residual is bounded, not eliminated. The stream cap refuses an artifact
+// once it has pulled one byte past helpers.ArchiveMaxDecompressedSize out of
+// the decompressor; below that ceiling the amplification is untouched, and it
+// is the archive that picks how far below. Measured against this extractor at
+// the production cap: eight old-GNU sparse entries, each declaring 1 logical
+// byte and each carrying the largest whole number of 512-byte blocks that
+// still leaves room for eight headers and the trailer - that is
+// (ArchiveMaxDecompressedSize - 8*512 - 1024) / 8 rounded down to a block, so
+// 536,869,888 bytes apiece - make a 4,294,964,224-byte stream, 3,072 bytes
+// under the cap. It is accepted and returns nil: 3.98 MiB compressed, 1028.7x,
+// charged 8 bytes in total. The sparse under-charge is capped, never closed.
+//
+// Those figures are a recorded measurement that no committed test reproduces,
+// and none is required: the fixture pins a shape this extractor deliberately
+// accepts, so there is nothing whose removal it would catch, and building it
+// costs a 4 GiB compression pass per run. Read them accordingly. The stream
+// length and the 8-byte charge follow from the arithmetic above; the
+// compressed size and the ratio are a property of the Go release's deflate at
+// the time of measurement, so they drift with it and are not invariants.
+//
+// A header-only type normally charges zero, and every writer measured writes
+// zero. Python's tarfile does so on both of its construction paths (gettarinfo
+// assigns st_size only for REGTYPE, and TarInfo's own default is 0), which
+// covers the corpus this extractor is aimed at, since `ansible-galaxy
+// collection build` builds through it; libarchive 3.7.4 writes 0 for a
+// directory; and Go's own tar.FileInfoHeader assigns Size only in its
+// regular-file arm. GNU tar was not measured, so nothing here claims anything
+// about what it writes.
+//
+// Zero is a convention rather than a rule, and it is the rule for exactly two
+// typeflags: ustar states that the size field shall be specified as zero for a
+// hardlink and for a symlink. For a directory a nonzero size is sanctioned,
+// under two different readings - POSIX.1 reads the field as the number of
+// octets the directory may hold, tar(5) as the total size of the files inside
+// it - so under the first of those the declared figure is tied to nothing on
+// disk at all. Either way the charge here sums size over every header, so an
+// archive whose directories declare their subtree totals is charged the sum of
+// size * (1 + depth): a file at depth N counts once for itself and once per
+// containing directory.
+//
+// What that costs such an archive is arithmetic on those assumptions, not a
+// measurement: at a uniform depth of 8 the 4 GiB total budget is reached at
+// about 455 MiB of real content, and below depth 7 the 512 MiB per-entry cap
+// binds first anyway, since the outermost directory entry declares the whole
+// subtree. Exempting tar.TypeDir from the charge is the remedy if such a
+// writer turns up in this corpus; it is not taken now because it buys nothing
+// against any writer measured above, and it costs this function the property
+// it exists for - charging without branching on the typeflag, which is what
+// the two shapes named at the top of this comment, a name that normalizes away
+// and a typeflag the dispatch skips, need in order to be charged at all.
+//
+// This is also why handleTarEntry's default arm carries no refusal of its own.
+// Every entry is already charged here and every byte is already counted by the
+// stream cap, so a rule down there would put the byte limits back into the
+// per-typeflag branches this function exists to lift them out of - and it
+// would narrow the set of archives this extractor accepts, since tar.Reader
+// hands an old-GNU sparse entry back under its own 'S' typeflag, which that
+// arm skips.
+func chargeEntrySize(header *tar.Header, declared *int64) error {
+	if header.Size < 0 {
+		return fmt.Errorf("%w: %s ", helpers.ErrArchiveEntryHasNegativeSize, header.Name)
+	}
+	if header.Size > helpers.ArchiveMaxEntrySize {
+		return fmt.Errorf("%w %s: %d bytes", helpers.ErrArchiveEntryIsTooLarge, header.Name, header.Size)
+	}
+	if *declared+header.Size > helpers.ArchiveMaxTotalSize {
+		return fmt.Errorf("%w: %d bytes", helpers.ErrArchiveExceedsMaxSize, helpers.ArchiveMaxTotalSize)
+	}
+	*declared += header.Size
+	return nil
+}
+
+func handleTarEntry(tarReader *tar.Reader, header *tar.Header, dstDir string, verifiedDirs map[string]struct{}) error {
 	relPath, err := sanitizeArchivePath(header.Name)
 	if err != nil {
 		return err
@@ -101,12 +320,20 @@ func handleTarEntry(tarReader *tar.Reader, header *tar.Header, dstDir string, ex
 	case tar.TypeDir:
 		return extractDir(targetPath, verifiedDirs)
 	case tar.TypeReg:
-		return extractRegularFile(tarReader, header, targetPath, extracted, verifiedDirs)
+		return extractRegularFile(tarReader, header, targetPath, verifiedDirs)
 	case tar.TypeSymlink:
 		return extractSymlink(relPath, targetPath, header, verifiedDirs)
 	case tar.TypeLink:
 		return extractHardlink(dstDir, targetPath, header, verifiedDirs)
 	default:
+		// Skipped, not refused. An unnamed typeflag is subject to all three of
+		// the extractor's bounds without this arm adding a fourth: it was
+		// counted against the entry cap in extractTarEntries and charged
+		// against the declared-size budgets in chargeEntrySize before reaching
+		// here, and every byte archive/tar reads for it - this header now, its
+		// body when the following Next discards it - goes through
+		// decompressedLimitReader. See chargeEntrySize for why this arm adds no
+		// rule of its own on top.
 		return nil
 	}
 }
@@ -149,22 +376,7 @@ func ensureDir(dir string, verifiedDirs map[string]struct{}) error {
 	return nil
 }
 
-func extractRegularFile(
-	tarReader *tar.Reader,
-	header *tar.Header,
-	targetPath string,
-	extracted *int64,
-	verifiedDirs map[string]struct{},
-) error {
-	if header.Size < 0 {
-		return fmt.Errorf("%w: %s ", helpers.ErrArchiveEntryHasNegativeSize, header.Name)
-	}
-	if header.Size > helpers.ArchiveMaxEntrySize {
-		return fmt.Errorf("%w %s: %d bytes", helpers.ErrArchiveEntryIsTooLarge, header.Name, header.Size)
-	}
-	if *extracted+header.Size > helpers.ArchiveMaxTotalSize {
-		return fmt.Errorf("%w: %d bytes", helpers.ErrArchiveExceedsMaxSize, helpers.ArchiveMaxTotalSize)
-	}
+func extractRegularFile(tarReader *tar.Reader, header *tar.Header, targetPath string, verifiedDirs map[string]struct{}) error {
 	if err := ensureDir(filepath.Dir(targetPath), verifiedDirs); err != nil {
 		return fmt.Errorf("failed to create directories for %s: %w", targetPath, err)
 	}
@@ -181,12 +393,10 @@ func extractRegularFile(
 	if err != nil {
 		return classifyOpenRegularFileError(targetPath, header.Name, err)
 	}
-	written, err := io.CopyN(file, tarReader, header.Size)
-	if err != nil {
+	if _, err := io.CopyN(file, tarReader, header.Size); err != nil {
 		_ = file.Close()
 		return fmt.Errorf("failed to write file %s: %w", targetPath, err)
 	}
-	*extracted += written
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("failed to close file %s: %w", targetPath, err)
 	}
