@@ -98,6 +98,15 @@ var fromErrorCases = []exitCase{
 		wantCode: ExitNetwork,
 	},
 	{
+		// validateDownloadInputs refuses a download_url whose scheme is not
+		// http or https. It classifies with the rest of isMetadataFetchError
+		// rather than as an integrity failure: nothing was fetched, hashed, or
+		// compared - the metadata simply cannot name a fetchable artifact.
+		name:     "unsupported download url scheme",
+		err:      fmt.Errorf("%w: %q", helpers.ErrUnsupportedDownloadURLScheme, "file:///etc/passwd"),
+		wantCode: ExitNetwork,
+	},
+	{
 		name:     "galaxy server auth failed",
 		err:      fmt.Errorf("%w: server a: ctx", helpers.ErrGalaxyAuthFailed),
 		wantCode: ExitNetwork,
@@ -485,7 +494,7 @@ func TestIntegritySentinelsMapToExitIntegrity(t *testing.T) {
 // moving the isIntegrityError case below isLockError/isInstallError in
 // FromError, which makes isInstallError claim the headline first; verified,
 // that mutation makes this test fail with:
-// "exitcode_test.go:494: FromError(integrity join) = 5, want 7".
+// "exitcode_test.go:503: FromError(integrity join) = 5, want 7".
 func TestIntegrityOutranksInstallFailureHeadline(t *testing.T) {
 	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
 
@@ -833,7 +842,7 @@ func TestStateObjectDeadlineClassification(t *testing.T) {
 // fromErrorTail above isInstallError's case in FromError makes this test
 // fail with:
 //
-//	exitcode_test.go:841: FromError(joined) = 8, want 5
+//	exitcode_test.go:850: FromError(joined) = 8, want 5
 func TestCacheBusyFoldedBehindInstallFailureClassifiesAsInstall(t *testing.T) {
 	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
 	joined := errors.Join(headline, helpers.ErrCacheBusy)

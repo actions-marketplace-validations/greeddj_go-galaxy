@@ -452,6 +452,12 @@ func isTransportError(err error) bool {
 // root-metadata fetch, so the headline's bare, unaggregated shape - no cause
 // joined behind it - names a metadata-fetch failure.
 //
+// helpers.ErrUnsupportedDownloadURLScheme belongs here for the same reason
+// helpers.ErrMissingDownloadURL does: metadata that parsed into the expected
+// shape and still cannot yield a fetchable artifact is the same defect as
+// metadata carrying no download URL at all, so it classifies alike rather
+// than earning an exit class of its own.
+//
 // helpers.ErrLatestVersionLookupFailed is also an aggregation headline whose
 // per-entry causes are joined behind it via errors.Join, exactly like
 // helpers.ErrInstallationFailed elsewhere in this package - so this function
@@ -467,6 +473,7 @@ func isMetadataFetchError(err error) bool {
 	return errors.Is(err, helpers.ErrMetadataUnavailable) ||
 		errors.Is(err, helpers.ErrMetadataIsNil) ||
 		errors.Is(err, helpers.ErrMissingDownloadURL) ||
+		errors.Is(err, helpers.ErrUnsupportedDownloadURLScheme) ||
 		errors.Is(err, helpers.ErrVersionsPayloadEmpty) ||
 		errors.Is(err, helpers.ErrVersionsPayloadUnsupported) ||
 		errors.Is(err, helpers.ErrVersionsPagingExceeded) ||

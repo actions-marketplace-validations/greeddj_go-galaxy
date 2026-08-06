@@ -74,6 +74,15 @@ var (
 	ErrMetadataIsNil = errors.New("metadata is nil")
 	// ErrMissingDownloadURL indicates a collection download URL is missing.
 	ErrMissingDownloadURL = errors.New("missing download url")
+	// ErrUnsupportedDownloadURLScheme indicates a collection's download URL
+	// names something other than the two schemes this tool fetches over. The
+	// value is judged against an allow-list rather than a blocklist because it
+	// is not this program's own: it arrives from a Galaxy server's version
+	// metadata, or from a cached snapshot a bucket writer could poison. A
+	// blocklist would have to name every scheme worth refusing and would admit
+	// anything it forgot; the allow-list admits exactly what the pipeline
+	// speaks and refuses the rest by default.
+	ErrUnsupportedDownloadURLScheme = errors.New("collection download url scheme is not http or https")
 	// ErrConfigIsNil indicates a nil config was provided.
 	ErrConfigIsNil = errors.New("config is nil")
 	// ErrSHA256Mismatch indicates a checksum mismatch.

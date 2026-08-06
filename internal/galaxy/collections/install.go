@@ -993,12 +993,39 @@ func firstNonNil(errs ...error) error {
 	return nil
 }
 
+// downloadURLAllowed reports whether raw is a URL this pipeline may fetch: an
+// absolute http or https URL that names a host. Anything else - a relative
+// reference, a scheme this program never speaks, or a URL with no host at all
+// - is refused before a request is built.
+//
+// This is hardening rather than a live hole today: runtime.HTTP is an ordinary
+// *http.Client that registers no additional protocols, so net/http already
+// refuses a scheme like file: with "unsupported protocol scheme". What the
+// check adds is that the refusal is classified and raised once per artifact
+// acquisition, ahead of the request, instead of surfacing per attempt as an
+// opaque transport failure - and that registering a protocol on this client
+// later cannot silently turn a poisoned download_url into a fetch.
+func downloadURLAllowed(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	return (scheme == "http" || scheme == "https") && u.Host != ""
+}
+
 func validateDownloadInputs(cfg *config.Config, artifacts cacheManager.ArtifactStore, meta *types.GalaxyCollectionVersionInfo) error {
 	if meta == nil {
 		return helpers.ErrMetadataIsNil
 	}
 	if meta.DownloadURL == "" {
 		return helpers.ErrMissingDownloadURL
+	}
+	if !downloadURLAllowed(meta.DownloadURL) {
+		// %q, not %s: this string came off a server or out of a cached
+		// snapshot, no name alphabet ever judged it, and internal/safeout's
+		// printer boundary does not reach the text of a returned error.
+		return fmt.Errorf("%w: %q", helpers.ErrUnsupportedDownloadURLScheme, meta.DownloadURL)
 	}
 	if cfg == nil {
 		return helpers.ErrConfigIsNil
