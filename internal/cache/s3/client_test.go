@@ -439,7 +439,7 @@ func newRedirectRefusalFixture(t *testing.T, redirect bool) (*Client, *atomic.In
 		Bucket:    "test",
 		Region:    "us-east-1",
 		AccessKey: "x",
-		SecretKey: "y",
+		SecretKey: config.NewSecret("y"),
 		PathStyle: true,
 		Enabled:   true,
 	}
@@ -550,7 +550,7 @@ func TestS3RedirectPolicyDoesNotAffectTheSharedClient(t *testing.T) {
 		Bucket:    "test",
 		Region:    "us-east-1",
 		AccessKey: "x",
-		SecretKey: "y",
+		SecretKey: config.NewSecret("y"),
 		PathStyle: true,
 		Enabled:   true,
 	}
@@ -630,7 +630,7 @@ func TestGetObjectRetriesAResponseHeaderTimeout(t *testing.T) {
 		Bucket:    "test",
 		Region:    "us-east-1",
 		AccessKey: "x",
-		SecretKey: "y",
+		SecretKey: config.NewSecret("y"),
 		PathStyle: true,
 		Enabled:   true,
 	}
@@ -701,7 +701,7 @@ func TestGetObjectRecoversFromATransientTransportFailure(t *testing.T) {
 		Bucket:    "test",
 		Region:    "us-east-1",
 		AccessKey: "x",
-		SecretKey: "y",
+		SecretKey: config.NewSecret("y"),
 		PathStyle: true,
 		Enabled:   true,
 	}
@@ -726,5 +726,66 @@ func TestGetObjectRecoversFromATransientTransportFailure(t *testing.T) {
 	}
 	if got := requests.Load(); got != 3 {
 		t.Fatalf("expected exactly 3 requests (2 transport failures + 1 success), got %d", got)
+	}
+}
+
+// sessionTokenHeaderCase is one row for TestSessionTokenHeader.
+type sessionTokenHeaderCase struct {
+	name  string
+	token config.Secret
+	want  string
+}
+
+// TestSessionTokenHeader pins the branch that decides whether an S3 request
+// carries X-Amz-Security-Token, and what it carries. The zero-value row is
+// what pins IsSet as the predicate: a Secret that was never configured must
+// leave the header off entirely rather than send an empty one, which is a
+// header a strict endpoint rejects rather than ignores.
+func TestSessionTokenHeader(t *testing.T) {
+	t.Parallel()
+
+	cases := []sessionTokenHeaderCase{
+		{name: "configured token is sent", token: config.NewSecret("st"), want: "st"},
+		{name: "unset token sends no header", token: config.Secret{}, want: ""},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var got string
+			var seen atomic.Bool
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.Header.Get("X-Amz-Security-Token")
+				seen.Store(true)
+				w.WriteHeader(http.StatusOK)
+			}))
+			t.Cleanup(srv.Close)
+
+			cfg := config.S3CacheConfig{
+				Endpoint:     srv.URL,
+				Bucket:       "test",
+				Region:       "us-east-1",
+				AccessKey:    "x",
+				SecretKey:    config.NewSecret("y"),
+				SessionToken: tt.token,
+				PathStyle:    true,
+				Enabled:      true,
+			}
+			c, err := newClient(cfg, srv.Client())
+			if err != nil {
+				t.Fatalf("newClient: %v", err)
+			}
+			resp, err := c.getObject(context.Background(), "any-object")
+			if err != nil {
+				t.Fatalf("getObject: %v", err)
+			}
+			_ = resp.Body.Close()
+
+			if !seen.Load() {
+				t.Fatalf("the endpoint was never reached, so the header assertion below proves nothing")
+			}
+			if got != tt.want {
+				t.Fatalf("X-Amz-Security-Token = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

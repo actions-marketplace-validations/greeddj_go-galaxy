@@ -864,8 +864,11 @@ func (c *Client) newRequest(
 	req.Header.Set("X-Amz-Content-Sha256", payloadHash)
 	amzDate := time.Now().UTC().Format("20060102T150405Z")
 	req.Header.Set("X-Amz-Date", amzDate)
-	if c.cfg.SessionToken != "" {
-		req.Header.Set("X-Amz-Security-Token", c.cfg.SessionToken)
+	if c.cfg.SessionToken.IsSet() {
+		// Reveal here is the value going onto the wire: this header is where
+		// a session token is transmitted, so there is nothing further to
+		// protect it from.
+		req.Header.Set("X-Amz-Security-Token", c.cfg.SessionToken.Reveal())
 	}
 	for key, value := range meta {
 		trimmed := strings.TrimSpace(value)
@@ -930,7 +933,11 @@ func (c *Client) signingKeyForDate(date string) []byte {
 	c.signing.mu.Lock()
 	defer c.signing.mu.Unlock()
 	if c.signing.key == nil || c.signing.date != date {
-		c.signing.key = deriveSigningKey(c.cfg.SecretKey, date, c.cfg.Region)
+		// Reveal here feeds the SigV4 HMAC chain, the one operation that needs
+		// the plaintext secret. deriveSigningKey keeps a plain-string
+		// signature deliberately: it is cryptography over key material and has
+		// no business knowing this program's configuration types.
+		c.signing.key = deriveSigningKey(c.cfg.SecretKey.Reveal(), date, c.cfg.Region)
 		c.signing.date = date
 	}
 	return c.signing.key

@@ -761,7 +761,7 @@ func newTestBackendWithFake(t *testing.T, fake *fakeS3) *Backend {
 		Bucket:    fake.bucket,
 		Region:    "us-east-1",
 		AccessKey: "x",
-		SecretKey: "y",
+		SecretKey: config.NewSecret("y"),
 		PathStyle: true,
 		Enabled:   true,
 	}

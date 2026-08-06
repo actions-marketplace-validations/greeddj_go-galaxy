@@ -41,10 +41,15 @@ func newHTTPClient(cfg *config.Config) *http.Client {
 }
 
 // serverAuths converts cfg.Servers into fetch's own ServerAuth view. This is
-// the one call site of config.Secret.Reveal() in the whole program: fetch
+// the only call site of config.Secret.Reveal() for a Galaxy token: fetch
 // cannot import config (config is a layer above it) and so cannot hold a
 // Secret itself, only the plain token string handed to it once, here, at
 // client-construction time.
+//
+// It satisfies the rule every Reveal call site is bound by - the plaintext is
+// taken only where it is going onto the wire in that same statement, here an
+// Authorization header - which is a predicate rather than a headcount. The S3
+// cache client meets the same rule twice for its own credentials.
 func serverAuths(servers []config.Server) []fetch.ServerAuth {
 	auths := make([]fetch.ServerAuth, 0, len(servers))
 	for _, s := range servers {

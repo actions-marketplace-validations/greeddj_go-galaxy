@@ -102,7 +102,7 @@ func TestClientDoClassifiesConnectionFailureAsCacheBackendUnavailable(t *testing
 		Bucket:    "test",
 		Region:    "us-east-1",
 		AccessKey: "x",
-		SecretKey: "y",
+		SecretKey: config.NewSecret("y"),
 		PathStyle: true,
 		Enabled:   true,
 	}
@@ -225,7 +225,7 @@ func assertLiveTimeoutClassifiesAsCacheBackendUnavailable(
 		Bucket:    "test",
 		Region:    "us-east-1",
 		AccessKey: "x",
-		SecretKey: "y",
+		SecretKey: config.NewSecret("y"),
 		PathStyle: true,
 		Enabled:   true,
 	}
@@ -297,7 +297,7 @@ func TestClientDoExcludesCallerCancellationFromCacheBackendUnavailable(t *testin
 		Bucket:    "test",
 		Region:    "us-east-1",
 		AccessKey: "x",
-		SecretKey: "y",
+		SecretKey: config.NewSecret("y"),
 		PathStyle: true,
 		Enabled:   true,
 	}

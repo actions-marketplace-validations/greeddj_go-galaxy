@@ -70,7 +70,7 @@ func newRequestURLTestClient(t *testing.T, pathStyle bool) *Client {
 		Bucket:    "test-bucket",
 		Region:    "us-east-1",
 		AccessKey: "AKIAEXAMPLE",
-		SecretKey: "secret",
+		SecretKey: config.NewSecret("secret"),
 		PathStyle: pathStyle,
 	}
 	c, err := newClient(cfg, &http.Client{})
@@ -148,7 +148,7 @@ func assertCachedEndpointCase(t *testing.T, tt cachedEndpointCase) {
 		Bucket:    "test-bucket",
 		Region:    "us-east-1",
 		AccessKey: "AKIAEXAMPLE",
-		SecretKey: "secret",
+		SecretKey: config.NewSecret("secret"),
 		PathStyle: tt.pathStyle,
 	}
 	c, err := newClient(cfg, &http.Client{})

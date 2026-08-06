@@ -16,9 +16,12 @@ import (
 // internal/galaxy/config - config is a layer above fetch, and depending on
 // it here would invert that boundary. The command layer builds this slice
 // from config.Config.Servers immediately before calling New; that
-// construction site is the one place config.Secret.Reveal() is called in
-// the whole program, since only the command layer can see the Secret-typed
-// field this is derived from.
+// construction site is the only place config.Secret.Reveal() is called for
+// a Galaxy token, since only the command layer can see the Secret-typed
+// field this is derived from. The rule Reveal is governed by is a predicate
+// rather than a count - the plaintext may be taken only where the value goes
+// onto the wire in that same statement - and the S3 cache client satisfies it
+// at two sites of its own for its own credentials.
 type ServerAuth struct {
 	// Origin is helpers.Origin(parsed server URL), already normalized, so
 	// New never has to reparse or renormalize a server's configured URL.

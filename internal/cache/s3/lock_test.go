@@ -107,7 +107,7 @@ func newLockBackendAt(t *testing.T, endpoint string, client *http.Client, timing
 		Bucket:    "test",
 		Region:    "us-east-1",
 		AccessKey: "x",
-		SecretKey: "y",
+		SecretKey: config.NewSecret("y"),
 		PathStyle: true,
 		Enabled:   true,
 	}
@@ -341,7 +341,7 @@ func newSilentEndpointBackend(t *testing.T, waitCeiling time.Duration) *Backend 
 		Bucket:    "test",
 		Region:    "us-east-1",
 		AccessKey: "x",
-		SecretKey: "y",
+		SecretKey: config.NewSecret("y"),
 		PathStyle: true,
 		Enabled:   true,
 	}

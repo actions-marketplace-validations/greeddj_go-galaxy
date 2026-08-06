@@ -19,7 +19,7 @@ func newSigningKeyTestClient(t *testing.T) *Client {
 		Bucket:    "test-bucket",
 		Region:    "us-east-1",
 		AccessKey: "AKIAEXAMPLE",
-		SecretKey: "secret",
+		SecretKey: config.NewSecret("secret"),
 	}
 	c, err := newClient(cfg, &http.Client{})
 	if err != nil {
@@ -39,7 +39,7 @@ func TestSigningKeyMemoizedEqualsFreshDerivation(t *testing.T) {
 
 	const date = "20260724"
 	got := c.signingKeyForDate(date)
-	want := deriveSigningKey(c.cfg.SecretKey, date, c.cfg.Region)
+	want := deriveSigningKey(c.cfg.SecretKey.Reveal(), date, c.cfg.Region)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("signingKeyForDate(%q) = %x, want %x", date, got, want)
 	}
@@ -69,7 +69,7 @@ func TestSigningKeyRecomputesOnDateChange(t *testing.T) {
 	if bytes.Equal(k2, k1) {
 		t.Fatal("expected the signing key to change when the date rolls over")
 	}
-	wantK2 := deriveSigningKey(c.cfg.SecretKey, dateTwo, c.cfg.Region)
+	wantK2 := deriveSigningKey(c.cfg.SecretKey.Reveal(), dateTwo, c.cfg.Region)
 	if !bytes.Equal(k2, wantK2) {
 		t.Fatalf("signingKeyForDate(%q) = %x, want %x", dateTwo, k2, wantK2)
 	}
@@ -77,7 +77,7 @@ func TestSigningKeyRecomputesOnDateChange(t *testing.T) {
 	// The cache now holds dateTwo, so a call back to dateOne must recompute
 	// rather than returning the stale dateTwo key.
 	k1Recomputed := c.signingKeyForDate(dateOne)
-	wantK1 := deriveSigningKey(c.cfg.SecretKey, dateOne, c.cfg.Region)
+	wantK1 := deriveSigningKey(c.cfg.SecretKey.Reveal(), dateOne, c.cfg.Region)
 	if !bytes.Equal(k1Recomputed, wantK1) {
 		t.Fatalf("signingKeyForDate(%q) after rollback = %x, want %x", dateOne, k1Recomputed, wantK1)
 	}
@@ -96,7 +96,7 @@ func TestSigningKeyConcurrent(t *testing.T) {
 	dates := []string{"20260724", "20260725"}
 	wants := make(map[string][]byte, len(dates))
 	for _, date := range dates {
-		wants[date] = deriveSigningKey(c.cfg.SecretKey, date, c.cfg.Region)
+		wants[date] = deriveSigningKey(c.cfg.SecretKey.Reveal(), date, c.cfg.Region)
 	}
 
 	const goroutines = 50

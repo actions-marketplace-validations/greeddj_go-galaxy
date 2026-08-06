@@ -14,18 +14,19 @@ import (
 	"github.com/urfave/cli/v3"
 )
 
-// Secret wraps a Galaxy API token so that leaking it by accident is
-// structurally hard rather than merely a matter of remembering to redact
-// it: fmt (%v %s %q %x %X %+v %#v), encoding/json, and yaml.v3 all render a
+// Secret wraps any credential this tool holds - a Galaxy API token, the S3
+// cache's secret key, its session token - so that leaking one by accident is
+// structurally hard rather than merely a matter of remembering to redact it:
+// fmt (%v %s %q %x %X %+v %#v), encoding/json, and yaml.v3 all render a
 // Secret as a fixed redacted placeholder, and the plaintext is reachable
 // through exactly one method, Reveal, whose name is deliberately loud and
 // rare so every call site is easy to find by grep.
 //
-// No token, and no value derived from a token - not even a hash - may ever
+// No credential, and no value derived from one - not even a hash - may ever
 // be persisted: not to the Bolt snapshot, the S3 snapshot, the project
 // registry, the lockfile, the metrics file, or GALAXY.yml. Those are all
 // state that outlives a single run and can be read by a principal who does
-// not need the token itself to install anything. A Secret's redacted
+// not need the credential itself to install anything. A Secret's redacted
 // renderings are safe to write to any of them; Reveal's return value is
 // not.
 //

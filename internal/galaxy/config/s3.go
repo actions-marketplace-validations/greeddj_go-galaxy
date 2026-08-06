@@ -6,14 +6,22 @@ import (
 )
 
 // S3CacheConfig defines configuration for S3 cache backend.
+//
+// SecretKey and SessionToken are credentials and carry the Secret type, so
+// no %v, %+v, %#v, JSON, or YAML rendering of this struct - or of the
+// *Config that holds it - can print them. AccessKey deliberately stays a
+// plain string: an AWS access key id travels in cleartext inside the
+// Authorization header of every signed request by construction, so redacting
+// it in logs prevents no disclosure while adding a third Reveal call site
+// that buys nothing. That asymmetry is a decision, not an oversight.
 type S3CacheConfig struct {
+	SecretKey    Secret
+	SessionToken Secret
 	Endpoint     string
 	Region       string
 	Bucket       string
 	Prefix       string
 	AccessKey    string
-	SecretKey    string
-	SessionToken string
 	Enabled      bool
 	PathStyle    bool
 }
@@ -26,8 +34,8 @@ func loadS3CacheConfig(c *cli.Command) (S3CacheConfig, error) {
 		Endpoint:     c.String("s3-endpoint"),
 		Region:       c.String("s3-region"),
 		AccessKey:    c.String("s3-access-key"),
-		SecretKey:    c.String("s3-secret-key"),
-		SessionToken: c.String("s3-session-token"),
+		SecretKey:    NewSecret(c.String("s3-secret-key")),
+		SessionToken: NewSecret(c.String("s3-session-token")),
 	}
 
 	if cfg.Bucket == "" {
@@ -35,7 +43,7 @@ func loadS3CacheConfig(c *cli.Command) (S3CacheConfig, error) {
 	}
 	cfg.Enabled = true
 
-	if cfg.AccessKey == "" || cfg.SecretKey == "" {
+	if cfg.AccessKey == "" || !cfg.SecretKey.IsSet() {
 		return cfg, helpers.ErrS3EmptyCreds
 	}
 
