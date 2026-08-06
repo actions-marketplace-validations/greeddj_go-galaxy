@@ -3,7 +3,9 @@ package s3
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/xml"
+	"fmt"
 	"io"
 	"maps"
 	"net"
@@ -37,7 +39,19 @@ const bucketDeleteObjectsKey = "delete-objects"
 type fakeObject struct {
 	modified time.Time
 	meta     map[string]string
+	etag     string
 	data     []byte
+}
+
+// fakeETag mints a distinct entity tag per stored version. A real S3 ETag is
+// the object's MD5 for a single-part upload, which would make two writes of
+// identical bytes indistinguishable - and the lock protocol writes a JSON
+// record whose fields can repeat within a clock second. The sequence number
+// is what guarantees every write gets a new tag, which is the property a
+// compare-and-swap test actually depends on.
+func fakeETag(body []byte, modified time.Time, seq uint64) string {
+	sum := sha256.Sum256(body)
+	return fmt.Sprintf("%q", fmt.Sprintf("%x-%d-%d", sum[:8], modified.UnixNano(), seq))
 }
 
 // fakeS3 is a minimal in-memory, path-style S3 fake used to exercise Backend
@@ -65,14 +79,32 @@ type fakeS3 struct {
 	// the next HEAD served for that key rewrites the stored object's token
 	// first, simulating another writer's PUT landing in between this call's
 	// own write and its own follow-up HEAD.
-	headTokenSwaps        map[string]string
-	failDeleteObjects     *deleteObjectsFailure
-	lastDeleteHeaders     http.Header
-	bucket                string
-	lastDeleteReq         deleteRequest
-	deleteDelay           time.Duration
-	mu                    sync.Mutex
-	ignoreIfNoneMatch     bool
+	headTokenSwaps    map[string]string
+	failDeleteObjects *deleteObjectsFailure
+	lastDeleteHeaders http.Header
+	bucket            string
+	lastDeleteReq     deleteRequest
+	deleteDelay       time.Duration
+	mu                sync.Mutex
+	// etagSeq numbers stored versions so no two writes share an entity tag.
+	etagSeq           uint64
+	ignoreIfNoneMatch bool
+	// ignoreIfMatch simulates a backend that accepts a compare-and-swap PUT
+	// without enforcing it, which is what Open's capability probe must catch.
+	ignoreIfMatch bool
+	// refuseIfMatch simulates a backend that answers every compare-and-swap
+	// with 412, matching ETag or not - a plausible shape for one that parses
+	// the header without implementing it. It is the inverse of ignoreIfMatch
+	// and the only one of the three that a probe checking refusals alone would
+	// pass: nothing about it looks permissive, and every reclaim on it would
+	// simply never succeed.
+	refuseIfMatch bool
+	// suppressETag simulates a backend that stores objects but never names
+	// their version on a read, leaving a caller nothing to swap against. It is
+	// the other non-conforming shape the same probe must catch, and it is not
+	// reducible to ignoreIfMatch: this one refuses the swap honestly rather
+	// than accepting it without arbitration.
+	suppressETag          bool
 	oversizedList         bool
 	oversizedDeleteResult bool
 }
@@ -489,16 +521,35 @@ func (f *fakeS3) raceTokenOnNextHead(key, token string) {
 // Like every other write path here it publishes a fresh meta map rather than
 // mutating a stored one, so handleHead and handleGet can still read obj.meta
 // after releasing f.mu without racing this call.
+//
+// It mints an ETag exactly as handlePut does, because the lock protocol reads
+// one back for every object it intends to swap against: an object stored here
+// without one would report a HEAD that names no version, which reclaimIfExpired
+// refuses outright, and every fixture seeding an expired holder this way would
+// then measure that refusal instead of the swap it meant to drive. A distinct
+// ETag per call is also what makes a write installed behind another acquirer's
+// HEAD observable as a version change rather than only as a token change.
 func (f *fakeS3) storeLockObject(key, token string, deadline time.Time) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.objects[key] = fakeObject{
+	stored := fakeObject{
 		meta: map[string]string{
 			"X-Amz-Meta-Token":    token,
 			"X-Amz-Meta-Deadline": deadline.UTC().Format(time.RFC3339),
 		},
 		modified: time.Now(),
 	}
+	stored.etag = fakeETag(nil, stored.modified, f.nextETagSeq())
+	f.objects[key] = stored
+}
+
+// dropObject removes an object from the fake's map directly, standing in for a
+// holder releasing its lock at an exact point in another acquirer's request
+// sequence. It bypasses HTTP for the same reason storeLockObject does.
+func (f *fakeS3) dropObject(key string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.objects, key)
 }
 
 // handleHead reports the stored object's metadata headers and Last-Modified
@@ -537,12 +588,13 @@ func (f *fakeS3) handleHead(w http.ResponseWriter, key string) {
 			delete(f.headTokenSwaps, key)
 		}
 	}
+	withETag := !f.suppressETag
 	f.mu.Unlock()
 	if !ok {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	writeObjectHeaders(w.Header(), obj)
+	writeObjectHeaders(w.Header(), obj, withETag)
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -563,6 +615,7 @@ func (f *fakeS3) handleGet(w http.ResponseWriter, r *http.Request, key string) {
 	syntheticSize, synthetic := f.syntheticBodies[key]
 	obj, ok := f.objects[key]
 	interval, dripping := f.drips[key]
+	withETag := !f.suppressETag
 	f.mu.Unlock()
 	if synthetic {
 		writeSyntheticBody(w, "application/json", syntheticSize)
@@ -572,7 +625,7 @@ func (f *fakeS3) handleGet(w http.ResponseWriter, r *http.Request, key string) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	writeObjectHeaders(w.Header(), obj)
+	writeObjectHeaders(w.Header(), obj, withETag)
 	w.WriteHeader(http.StatusOK)
 	if dripping {
 		driveDripGet(w, r, interval)
@@ -622,14 +675,28 @@ func driveDripGet(w http.ResponseWriter, r *http.Request, interval time.Duration
 	}
 }
 
+// nextETagSeq returns the next version number for a stored object. The caller
+// already holds mu, which is where every write to the object map happens.
+func (f *fakeS3) nextETagSeq() uint64 {
+	f.etagSeq++
+	return f.etagSeq
+}
+
 // handlePut stores the request body and its X-Amz-Meta-* headers under key,
-// honoring the conditional If-None-Match: * header used by the distributed
-// lock's "create if absent" semantics: it fails with 412 when the key
-// already exists - unless ignoreIfNoneMatch simulates a non-conforming
-// backend that always overwrites regardless of the header. A forced failure
-// armed via failNext takes precedence over both of those behaviors (e.g. to
+// honoring both conditional headers the distributed lock uses. If-None-Match:
+// * ("create if absent") fails with 412 when the key already exists. If-Match:
+// <etag> ("compare and swap") answers the two statuses S3 itself distinguishes
+// here: 412 when the key exists under a different ETag, and 404 when the key is
+// absent entirely, since a swap names a version of an object rather than the
+// bucket. Answering 412 for both would hide the arm reclaimIfExpired reads as
+// "the holder released between our HEAD and our swap".
+//
+// ignoreIfNoneMatch simulates a non-conforming backend that overwrites
+// regardless of the create-if-absent header; ignoreIfMatch does the same for
+// the swap, which is what lets a test drive Open's own capability probe. A
+// forced failure armed via failNext takes precedence over all of that (e.g. to
 // simulate another writer's create winning a race, regardless of what this
-// fake's own object map currently holds for key).
+// fake's own object map holds).
 func (f *fakeS3) handlePut(w http.ResponseWriter, r *http.Request, key string) {
 	f.countRequest(key, http.MethodPut)
 	body, err := io.ReadAll(r.Body)
@@ -647,18 +714,46 @@ func (f *fakeS3) handlePut(w http.ResponseWriter, r *http.Request, key string) {
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !f.ignoreIfNoneMatch && r.Header.Get("If-None-Match") == "*" {
-		if _, exists := f.objects[key]; exists {
-			w.WriteHeader(http.StatusPreconditionFailed)
-			return
-		}
+	if status, refused := f.conditionalRefusal(r, key); refused {
+		w.WriteHeader(status)
+		return
 	}
-	f.objects[key] = fakeObject{
+	stored := fakeObject{
 		data:     body,
 		meta:     captureMeta(r.Header),
 		modified: time.Now(),
 	}
+	stored.etag = fakeETag(body, stored.modified, f.nextETagSeq())
+	f.objects[key] = stored
+	w.Header().Set("ETag", stored.etag)
 	w.WriteHeader(http.StatusOK)
+}
+
+// conditionalRefusal evaluates a PUT's conditional headers against what is
+// stored, reporting the status to answer with and whether the write is refused
+// at all. The caller already holds mu.
+//
+// It is split out of handlePut rather than inlined so the write path stays one
+// statement per outcome; the two conditions are independent rules, and a
+// request carrying neither falls through both.
+func (f *fakeS3) conditionalRefusal(r *http.Request, key string) (int, bool) {
+	if !f.ignoreIfNoneMatch && r.Header.Get("If-None-Match") == "*" {
+		if _, exists := f.objects[key]; exists {
+			return http.StatusPreconditionFailed, true
+		}
+	}
+	want := r.Header.Get("If-Match")
+	if want == "" || f.ignoreIfMatch {
+		return 0, false
+	}
+	current, exists := f.objects[key]
+	switch {
+	case f.refuseIfMatch, exists && current.etag != want:
+		return http.StatusPreconditionFailed, true
+	case !exists:
+		return http.StatusNotFound, true
+	}
+	return 0, false
 }
 
 // captureMeta extracts the X-Amz-Meta-* headers from an incoming request,
@@ -676,13 +771,33 @@ func captureMeta(header http.Header) map[string]string {
 }
 
 // writeObjectHeaders sets obj's captured metadata headers plus a
-// Last-Modified timestamp on the response, mirroring what a real S3 HEAD or
-// GET response carries.
-func writeObjectHeaders(header http.Header, obj fakeObject) {
+// Last-Modified timestamp and, when withETag says so, the object's ETag,
+// mirroring what a real S3 HEAD or GET response carries. The ETag is what the
+// lock's reclaim conditions its compare-and-swap on, which is why withholding
+// it is a shape worth driving: a backend that answers reads without naming a
+// version is one the protocol has to refuse rather than guess around.
+//
+// withETag is a parameter rather than a read of f.suppressETag because this
+// runs after handleHead/handleGet have released f.mu, so reading the field
+// here would race a test arming it mid-run; the caller samples it inside its
+// own critical section instead.
+func writeObjectHeaders(header http.Header, obj fakeObject, withETag bool) {
 	for name, value := range obj.meta {
 		header.Set(name, value)
 	}
 	header.Set("Last-Modified", obj.modified.UTC().Format(http.TimeFormat))
+	if obj.etag != "" && withETag {
+		header.Set("ETag", obj.etag)
+	}
+}
+
+// setSuppressETag arms (or disarms) the ETag-withholding shape mid-run, under
+// mu, so a fixture can let Open's own probe pass and only then take the
+// guarantee away.
+func (f *fakeS3) setSuppressETag(suppress bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.suppressETag = suppress
 }
 
 // handleDelete removes the object, always reporting success like S3 does

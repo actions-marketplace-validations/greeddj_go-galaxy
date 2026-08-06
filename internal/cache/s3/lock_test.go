@@ -32,11 +32,6 @@ var errRawInFlightPlaceholder = errors.New("raw in-flight transport failure")
 // deterministic in tests. Callers needing a non-default waitCeiling,
 // heartbeatInterval, etc. can copy the returned value and override fields.
 //
-// reclaimSettle is shrunk like the rest but deliberately kept above zero, so
-// every reclaiming test in this suite pays a real settle rather than the
-// disabled path: a settle skipped everywhere by default would leave
-// claimReclaimed's ordering exercised only by the tests written for it.
-//
 // These shrunken intervals sit on top of the client's fixed retry policy
 // (s3RetryPolicy, base s3RetryBackoffBase = 200ms, 4 attempts), which tests
 // cannot shrink; heartbeatOpTimeout and releaseTimeout are sized for clean
@@ -51,7 +46,6 @@ func testLockTiming(ttl time.Duration) lockTiming {
 		heartbeatOpTimeout: 200 * time.Millisecond,
 		releaseTimeout:     200 * time.Millisecond,
 		waitCeiling:        time.Second,
-		reclaimSettle:      20 * time.Millisecond,
 		backoffBase:        10 * time.Millisecond,
 		backoffCap:         50 * time.Millisecond,
 	}
@@ -155,7 +149,7 @@ func seedLockObject(ctx context.Context, t *testing.T, b *Backend, deadline time
 		t.Fatalf("Open: %v", err)
 	}
 	key := b.key(locksPrefix, lockObject)
-	if err := b.putLock(ctx, key, foreignToken, deadline, false); err != nil {
+	if err := b.putLock(ctx, key, foreignToken, deadline, putCondition{}); err != nil {
 		t.Fatalf("seed lock object: %v", err)
 	}
 }
@@ -746,7 +740,7 @@ func TestHeartbeatRefreshesDeadline(t *testing.T) {
 	// follows is observable without waiting for the wall clock to cross the
 	// second boundary RFC3339 resolution otherwise requires.
 	rolledBack := time.Now().UTC().Add(-time.Hour)
-	if err := b.putLock(ctx, key, token, rolledBack, false); err != nil {
+	if err := b.putLock(ctx, key, token, rolledBack, putCondition{}); err != nil {
 		t.Fatalf("roll the deadline back: %v", err)
 	}
 
@@ -788,7 +782,7 @@ func TestHeartbeatDetectsLostOwnershipAndReleaseSkipsDelete(t *testing.T) {
 	key := b.key(locksPrefix, lockObject)
 	// Simulate a foreign acquirer reclaiming the lock out-of-band (e.g.
 	// after this holder stalled past its TTL from S3's point of view).
-	if err := b.putLock(ctx, key, foreignToken, time.Now().UTC().Add(b.lock.ttl), false); err != nil {
+	if err := b.putLock(ctx, key, foreignToken, time.Now().UTC().Add(b.lock.ttl), putCondition{}); err != nil {
 		t.Fatalf("seed foreign takeover: %v", err)
 	}
 
@@ -856,7 +850,7 @@ func TestLockHolderContextCanceledWhenOwnershipLost(t *testing.T) {
 	}
 
 	key := b.key(locksPrefix, lockObject)
-	if err := b.putLock(ctx, key, foreignToken, time.Now().UTC().Add(b.lock.ttl), false); err != nil {
+	if err := b.putLock(ctx, key, foreignToken, time.Now().UTC().Add(b.lock.ttl), putCondition{}); err != nil {
 		t.Fatalf("seed foreign takeover: %v", err)
 	}
 
@@ -1040,7 +1034,7 @@ func TestReclaimIfExpiredLosesRaceOnRecreate(t *testing.T) {
 
 	key := b.key(locksPrefix, lockObject)
 	pastDeadline := time.Now().UTC().Add(-time.Hour)
-	if err := b.putLock(ctx, key, foreignToken, pastDeadline, false); err != nil {
+	if err := b.putLock(ctx, key, foreignToken, pastDeadline, putCondition{}); err != nil {
 		t.Fatalf("seed expired lock: %v", err)
 	}
 
@@ -1312,7 +1306,7 @@ func TestReleaseLockOnForeignTokenDoesNotDelete(t *testing.T) {
 	}
 
 	key := b.key(locksPrefix, "foreign-lock")
-	if err := b.putLock(ctx, key, foreignToken, time.Now().UTC().Add(time.Hour), false); err != nil {
+	if err := b.putLock(ctx, key, foreignToken, time.Now().UTC().Add(time.Hour), putCondition{}); err != nil {
 		t.Fatalf("seed foreign lock: %v", err)
 	}
 

@@ -41,12 +41,6 @@ type lockTiming struct {
 	// ever observed another acquirer holding the lock, or
 	// errS3LockWaitNoHolderObserved otherwise (see waitCeilingErr).
 	waitCeiling time.Duration
-	// reclaimSettle is how long claimReclaimed pauses between recreating a
-	// dead holder's lock object under our token and verifying that the
-	// object still records it, giving a competing reclaimer's own write time
-	// to arrive where that verification can see it. Zero disables the pause,
-	// which is what a test wanting the pre-settle timing sets.
-	reclaimSettle time.Duration
 	// backoffBase and backoffCap bound the full-jitter exponential backoff
 	// between failed acquisition attempts.
 	backoffBase time.Duration
@@ -218,7 +212,7 @@ func (b *Backend) tryAcquireOnce(
 	opCtx context.Context, key, token string, holderCancel context.CancelCauseFunc,
 ) (lockAttempt, error) {
 	deadline := time.Now().UTC().Add(b.lock.ttl)
-	putErr := b.putLock(opCtx, key, token, deadline, true)
+	putErr := b.putLock(opCtx, key, token, deadline, putCondition{ifNoneMatch: true})
 	if putErr == nil {
 		// claim itself decides whether this counts as an observation of
 		// another acquirer (a foreign token raced in ahead of us) or a
@@ -232,34 +226,37 @@ func (b *Backend) tryAcquireOnce(
 }
 
 // reclaimIfExpired runs after a failed create-if-absent PUT: it HEADs the
-// existing object and, if its TTL has elapsed, reclaims it (delete then
-// recreate under our token). See tryAcquireOnce for the return contract.
+// existing object and, if its TTL has elapsed, takes it over with a
+// compare-and-swap write conditioned on the ETag that same HEAD returned. See
+// tryAcquireOnce for the return contract.
 //
 // Observing an expired holder is deliberately NOT recorded as observed: an
 // expired lock is ours to take, not evidence that another acquirer holds it.
-// Three outcomes below do count: a live, unexpired holder; another creator
-// winning the race for the object this call just deleted; or, via the
-// recreate's own call into claim, a foreign token found on the object this
-// call just recreated - the post-reclaim counterpart to claim's own
-// fresh-create race (see claim's doc comment).
+// Two outcomes below do count: a live, unexpired holder, and a compare-and-swap
+// that loses to another writer, which is that writer observed.
 //
-// The delete this function issues is unconditional, so the decision it rests
-// on - the HEAD above - is re-read immediately before it (recheckBeforeDelete)
-// and the recreate's own ownership check is taken after a settle interval
-// (claimReclaimed). Both narrow the interval in which two acquirers acting on
-// the same expired object end up believing they hold the lock; neither
-// arbitrates between them. The only conditional write this client issues is
-// create-if-absent (If-None-Match: *), and its delete carries no condition at
-// all, so nothing on this path can arbitrate between two writers that each
-// observed the object absent, and two reclaimers can still diverge here. What
-// bounds a divergence that survives them is the heartbeat's own token check,
-// which cancels the holder context (see startHeartbeat and heartbeatTick) once
-// the object records somebody else's token.
+// The swap replaces what used to be an unconditional delete followed by a
+// create. That pair could not arbitrate between two acquirers acting on the
+// same expired object - each observed the object absent and each created it -
+// so the code around it narrowed the window probabilistically instead: a
+// re-read immediately before the delete, and an ownership check taken after a
+// settle interval. A conditional write settles it directly: both reclaimers
+// swap against the ETag their own HEAD read, the object has exactly one
+// current ETag, so exactly one swap can match it and the other gets 412.
 //
-// Every error return taken after the reclaim PUT has been issued abandons the
-// object that PUT may have created, so a lock this run never held is released
-// on the way out - and when that release itself fails, expires with the TTL
-// exactly as it would have anyway; abandonReclaimedLock states what it costs.
+// This does not make the path provably exclusive, and it must not be sold as
+// closing the race. putObject's own rule states the residual it inherits
+// unchanged: a conditional PUT whose response is lost is indistinguishable
+// from a lost success, which is why it is never retried. So a swap may have
+// landed while this call reports failure, and the run that reports failure is
+// then not the run holding the object. What bounds a divergence surviving that
+// is the same thing as before - the heartbeat's own token check, which cancels
+// the holder context once the object records somebody else's token.
+//
+// An error taken after the swap PUT has been issued abandons the object that
+// PUT may have written, so a lock this run never held is released on the way
+// out - and when that release itself fails, expires with the TTL exactly as it
+// would have anyway; abandonLockObject states what it costs.
 func (b *Backend) reclaimIfExpired(
 	opCtx context.Context, key, token string, holderCancel context.CancelCauseFunc,
 ) (lockAttempt, error) {
@@ -278,27 +275,41 @@ func (b *Backend) reclaimIfExpired(
 		// primary contention signal.
 		return lockAttempt{observed: true}, nil
 	}
-	staleToken := headers.Get("X-Amz-Meta-Token")
 
-	// The holder's TTL has elapsed: reclaim by deleting unconditionally and
-	// recreating the object with a fresh deadline under our token.
-	if attempt, proceed, err := b.recheckBeforeDelete(opCtx, key, staleToken); !proceed {
-		return attempt, err
+	etag := strings.TrimSpace(headers.Get("ETag"))
+	if etag == "" {
+		// The endpoint answered a HEAD without identifying the version it
+		// described, so there is nothing to condition a swap on. Refused
+		// rather than downgraded to an unconditional overwrite: this is the
+		// same missing guarantee Open's own probe rejects, reached against
+		// real remote state instead of against the probe, and silently taking
+		// a lock without arbitration is exactly what the swap exists to
+		// prevent.
+		return lockAttempt{}, errS3CompareAndSwapUnsupported
 	}
-	if err := b.client.deleteObject(opCtx, key); err != nil {
-		return lockAttempt{}, err
-	}
+
 	reclaimDeadline := time.Now().UTC().Add(b.lock.ttl)
-	putErr := b.putLock(opCtx, key, token, reclaimDeadline, true)
+	putErr := b.putLock(opCtx, key, token, reclaimDeadline, putCondition{ifMatch: etag})
 	if putErr == nil {
-		attempt, err := b.claimReclaimed(opCtx, key, token, holderCancel)
+		attempt, err := b.claim(opCtx, key, token, holderCancel)
 		if err != nil {
-			//nolint:contextcheck // abandonReclaimedLock builds its own fresh context instead of
+			//nolint:contextcheck // abandonLockObject builds its own fresh context instead of
 			// taking opCtx, and must: opCtx dying is one of the ways the claim above fails, so a
 			// cleanup running on opCtx would fail for the very reason it was needed.
-			b.abandonReclaimedLock(key, token)
+			b.abandonLockObject(key, token)
 		}
 		return attempt, err
+	}
+	if errors.Is(putErr, errS3NotFound) {
+		// The object was deleted between the HEAD above and this swap, so
+		// there was no version left to swap against - the shape S3 answers
+		// with 404 rather than 412. Every deleter of this key is a holder
+		// releasing it, so this is the same race the HEAD's own 404 arm
+		// already handles, arriving one step later: the create is worth
+		// attempting again at once. Nothing is abandoned, for the same reason
+		// the 412 arm abandons nothing - a refusal the remote itself answered
+		// proves this call wrote nothing that could outlive it.
+		return lockAttempt{retryNow: true}, nil
 	}
 	if !errors.Is(putErr, errS3PreconditionFailed) {
 		// A conditional PUT that failed without answering 412 may still have
@@ -313,149 +324,30 @@ func (b *Backend) reclaimIfExpired(
 		// came back, which the in-memory fake cannot model - arming a PUT
 		// failure here only ever produces the other reading, where nothing
 		// landed and the abandon is a HEAD that finds no object. Removing the
-		// call loses exactly the unmodelable case: a reclaim whose PUT landed
+		// call loses exactly the unmodelable case: a swap whose PUT landed
 		// under a dropped response leaves an object carrying this run's token,
 		// with no heartbeat behind it, blocking every other acquirer for a
 		// full lock TTL.
 		//
-		//nolint:contextcheck // abandonReclaimedLock builds its own fresh context instead of
+		//nolint:contextcheck // abandonLockObject builds its own fresh context instead of
 		// taking opCtx for the same reason as the arm above: opCtx is a plausible cause of the
 		// PUT failure being cleaned up after, so it cannot be what the cleanup runs on.
-		b.abandonReclaimedLock(key, token)
+		b.abandonLockObject(key, token)
 		return lockAttempt{}, putErr
 	}
-	// Somebody else's create won the race for the object this call just
-	// deleted: that creator is another acquirer we observed, even though
-	// the reclaim itself lost. Nothing is abandoned here - a 412 proves the
-	// object exists and was written by somebody else, so this call created
-	// nothing that could outlive it.
+	// Somebody else's write reached the object between our HEAD and our swap,
+	// so its ETag no longer matches: that writer is another acquirer we
+	// observed, even though the reclaim itself lost. Nothing is abandoned
+	// here - a 412 proves this call wrote nothing that could outlive it.
 	return lockAttempt{observed: true}, nil
-}
-
-// recheckBeforeDelete re-reads the lock object immediately before
-// reclaimIfExpired's unconditional delete and reports whether that delete
-// should still be issued. Its purpose is what the delete would otherwise
-// destroy: between the HEAD that judged the holder expired and the delete
-// itself, another acquirer can have reclaimed the object and be holding it
-// under a fresh deadline, and deleting there takes a live lock away from a
-// run that is already working under it. Only an object that still looks like
-// the one the expiry decision was taken about - expired, and still recording
-// staleToken - is deleted; anything else hands the decision back to the
-// acquisition loop untouched.
-//
-// The three outcomes that decline the delete map onto lockAttempt as follows.
-// A vanished object is retryNow, exactly as reclaimIfExpired's own HEAD treats
-// it: the create is worth attempting again immediately. A live holder is
-// observed, the same contention signal a live holder produces anywhere else. A
-// different but still expired token is neither: whoever wrote it holds nothing,
-// so it is a lost round rather than a sighting - reporting it as observed
-// would let an expired object decide the wait's final classification, which
-// reclaimIfExpired's own doc comment states it may not.
-//
-// A tokenless object stays reclaimable: an absent header compares equal to an
-// absent staleToken, so a lock object written without one is deleted rather
-// than left to block acquisition until somebody removes it by hand.
-//
-// This is a narrowing, not a decision procedure. The window it removes is the
-// span between the two HEADs; a competing reclaim landing between this HEAD
-// and the delete a moment later is still deleted, since this client's delete
-// is unconditional and cannot express "only if it still records this token".
-func (b *Backend) recheckBeforeDelete(opCtx context.Context, key, staleToken string) (lockAttempt, bool, error) {
-	headers, err := b.client.headObject(opCtx, key)
-	switch {
-	case errors.Is(err, errS3NotFound):
-		return lockAttempt{retryNow: true}, false, nil
-	case err != nil:
-		return lockAttempt{}, false, err
-	}
-	live := !lockExpired(headers, b.lock.ttl)
-	if live || headers.Get("X-Amz-Meta-Token") != staleToken {
-		return lockAttempt{observed: live}, false, nil
-	}
-	return lockAttempt{}, true, nil
-}
-
-// claimReclaimed is claim with a settle interval in front of it, used only by
-// the reclaim path. The reclaim's create-if-absent PUT proves the object was
-// absent when it landed, which is a weaker fact than it looks: a second
-// reclaimer working from the same expired object deletes ours and creates its
-// own straight after, and both then verify a token each has just written.
-// Waiting b.lock.reclaimSettle before verifying gives such a delete-and-create
-// time to arrive, so this call's own verifyOwner has a chance to read the
-// other acquirer's token and report the loss instead of holding alongside it.
-//
-// The settle runs BEFORE claim, and that ordering is load-bearing rather than
-// stylistic. Verifying after a successful claim would mean undoing one:
-// acquireLock builds holderCtx and holderCancel once per acquisition and
-// threads the same holderCancel through every attempt of acquireLockLoop, so
-// releasing a claim here would cancel the shared holder context, and a later
-// attempt in the same loop would then succeed while handing the caller an
-// already-canceled context. Settling first leaves nothing to undo: no
-// heartbeat has started, no release closure exists, and claim is reused
-// unchanged.
-//
-// Nothing here makes the reclaim mutually exclusive, but the residual is
-// narrower than "two writes inside one settle", and the derivation is what
-// says how much narrower. Each reclaimer verifies one settle after its own
-// PUT, so inside a cluster of writes spanning less than a settle only the last
-// writer reads its own token back; every earlier one sees the later write and
-// stands down. Two reclaimers both proceed only when their PUTs are separated
-// by MORE than a settle, which requires the second one to stall between its
-// own recheck HEAD and its own PUT for longer than that. The heartbeat's
-// ongoing token check is what ends such a divergence, by canceling the holder
-// context of whichever run stops being the object's writer.
-func (b *Backend) claimReclaimed(
-	opCtx context.Context, key, token string, holderCancel context.CancelCauseFunc,
-) (lockAttempt, error) {
-	b.settleReclaim(opCtx)
-	return b.claim(opCtx, key, token, holderCancel)
-}
-
-// settleReclaim waits b.lock.reclaimSettle, or returns early if opCtx ends
-// first. A zero or negative interval disables it, which is how a test asks
-// for the timing this path had before the settle existed.
-//
-// A settle that would not fit inside opCtx's remaining budget is skipped
-// rather than truncated to what is left of it. opCtx is the acquisition's
-// wait-ceiling context, and by the time this runs the reclaim PUT has already
-// landed, so budget spent inside the settle is budget the ownership check
-// after it never gets. Truncating would make that the ordinary outcome of
-// every reclaim near the ceiling; skipping degrades this path to the behavior
-// it had before the settle existed, which is the wider double-acquisition
-// window this settle set out to narrow.
-//
-// What the fit rule guarantees is a property of the settle alone, and narrower
-// than it reads: the settle itself completes inside the budget, never that the
-// ownership check after it does. A budget exceeding the settle by less than
-// one round trip passes the check here, pays the settle in full, and then
-// fails that ownership check against what is left. A caller cancellation
-// reaches the same place from the other side, cutting the settle short and
-// failing the check that follows it. Both release the object on the way out:
-// every error return taken after the reclaim PUT abandons it
-// (abandonReclaimedLock), and a release that itself fails leaves the object to
-// expire with the TTL exactly as it would have anyway - which is what bounds
-// the consequence this rule does not.
-func (b *Backend) settleReclaim(ctx context.Context) {
-	if b.lock.reclaimSettle <= 0 {
-		return
-	}
-	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= b.lock.reclaimSettle {
-		return
-	}
-	timer := time.NewTimer(b.lock.reclaimSettle)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-	case <-timer.C:
-	}
 }
 
 // claim verifies that the lock object this call just wrote is still ours
 // (guarding against a concurrent writer racing in between the PUT and this
 // check) and, if so, starts the heartbeat and returns the release closure. A
 // foreign token found on the object counts as observing another acquirer,
-// covering both paths that reach it: the fresh-create race and, through
-// claimReclaimed, the post-reclaim race.
+// covering both paths that reach it: the fresh-create race, and the one
+// following a reclaim's compare-and-swap.
 // holderCancel is handed to the heartbeat this call starts, which is the only
 // thing that ever invokes it on a loss.
 func (b *Backend) claim(
@@ -494,11 +386,12 @@ func (b *Backend) verifyOwner(ctx context.Context, key, token string) (bool, err
 
 // putLock writes the lock object's four authoritative metadata headers
 // (token, deadline, owner, updated) plus a JSON body mirroring them for
-// human debugging. create selects create-if-absent (If-None-Match: *) for
-// the initial acquisition and for reclaiming a dead holder's object, versus
-// an unconditional overwrite used by the heartbeat to refresh the deadline
-// under the same token.
-func (b *Backend) putLock(ctx context.Context, key, token string, deadline time.Time, create bool) error {
+// human debugging. cond selects which of the three writes on this path this
+// one is: create-if-absent (If-None-Match: *) for the initial acquisition,
+// compare-and-swap (If-Match, the ETag a HEAD just reported) for taking over
+// a dead holder's object, and an unconditional overwrite for the heartbeat's
+// own deadline refresh under a token the object already carries.
+func (b *Backend) putLock(ctx context.Context, key, token string, deadline time.Time, cond putCondition) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	owner := lockOwner()
 	deadlineStr := deadline.Format(time.RFC3339)
@@ -519,7 +412,7 @@ func (b *Backend) putLock(ctx context.Context, key, token string, deadline time.
 		return err // unreachable for this fixed four-string struct; kept as a defensive guard.
 	}
 	reader := bytes.NewReader(body)
-	return b.client.putObject(ctx, key, reader, int64(len(body)), "application/json", "", meta, create, "")
+	return b.client.putObject(ctx, key, reader, int64(len(body)), "application/json", "", meta, cond, "")
 }
 
 // lockOwner identifies this process for the lock object's diagnostic Owner
@@ -745,7 +638,7 @@ func (b *Backend) heartbeatTick(
 	}
 	// A failure here is transient (e.g. a dropped connection): the next
 	// tick will retry with a deadline computed at that later time.
-	_ = b.putLock(opCtx, key, token, time.Now().UTC().Add(b.lock.ttl), false)
+	_ = b.putLock(opCtx, key, token, time.Now().UTC().Add(b.lock.ttl), putCondition{})
 	return true
 }
 
@@ -756,9 +649,10 @@ func (b *Backend) heartbeatTick(
 //
 // The delete itself is unconditional, so one round trip stands between the HEAD
 // and it: a competing acquirer whose write lands in that window is deleted
-// anyway, the same residual recheckBeforeDelete discloses for the reclaim
-// path's own delete, and bounded by the same backstop - the heartbeat's token
-// check cancels the holder context of whichever run stops being the writer.
+// anyway. This is now the only unarbitrated write left on the lock path - the
+// reclaim's own take-over became a compare-and-swap - and it is bounded by the
+// same backstop as before: the heartbeat's token check cancels the holder
+// context of whichever run stops being the object's writer.
 func (b *Backend) releaseLock(ctx context.Context, key, token string) error {
 	headers, err := b.client.headObject(ctx, key)
 	if errors.Is(err, errS3NotFound) {
@@ -773,20 +667,22 @@ func (b *Backend) releaseLock(ctx context.Context, key, token string) error {
 	return b.client.deleteObject(ctx, key)
 }
 
-// abandonReclaimedLock releases the lock object a reclaim just created, as the
-// cleanup behind one rule: any error reclaimIfExpired returns after its reclaim
-// PUT was issued does a best-effort, token-guarded release first, so an object
-// created by a reclaim this run never went on to hold is released on the way
-// out - and when that release itself fails, is left to expire with the TTL
+// abandonLockObject releases the lock object a reclaim's swap just wrote, as
+// the cleanup behind one rule: any error reclaimIfExpired returns after its
+// swap PUT was issued does a best-effort, token-guarded release first, so an
+// object written by a reclaim this run never went on to hold is released on the
+// way out - and when that release itself fails, is left to expire with the TTL
 // exactly as it would have without this call. Without the call that expiry is
 // the only outcome: such an object sits in the bucket recording our token with
 // no heartbeat behind it to refresh or release it, and every other acquirer
 // waits out a full lock TTL against a holder that does not exist - lockTTL is
-// twice lockWaitCeiling, so each of them burns its whole wait and gives up. The
-// rule is the reclaim path's alone because that is where the settle widens the
-// window: tryAcquireOnce's own arms leave the identical orphan - a claim error
-// after a successful fresh-create PUT, and a PUT failure that is not a 412 -
-// and abandon neither, a residual one round trip wide rather than a settle.
+// twice lockWaitCeiling, so each of them burns its whole wait and gives up.
+//
+// The window this closes is one round trip wide, and so is the identical orphan
+// tryAcquireOnce leaves on both of its own arms - a claim error after a
+// successful fresh-create PUT, and a PUT failure that is not a 412 - which this
+// function is not applied to. Nothing about the helper is reclaim-specific:
+// what it takes is a key and the token whose object it may delete.
 //
 // A nil error is deliberately excluded even when the attempt reports observed:
 // the object then records the competing writer's token, so releaseLock's own
@@ -801,14 +697,14 @@ func (b *Backend) releaseLock(ctx context.Context, key, token string) error {
 // error as the cause once the error returned here reaches it. Cancel-cause is
 // first-cancel-wins, so a cancel from here would preempt that cause with a less
 // informative one. And it declines the delete for any object releaseLock's own
-// HEAD read under a foreign token, so a competing reclaimer's write - the very
-// outcome the settle exists to catch - is left untouched; the residual is the
+// HEAD read under a foreign token, so a competing acquirer's write is left
+// untouched rather than cleaned up as if it were ours; the residual is the
 // one round trip between that HEAD and the delete, bounded by the same
 // heartbeat token check that bounds every other divergence on this path (see
 // releaseLock). Its own failure is discarded because there is nothing further to
 // do with it: the run is already returning an error, and an object this call
 // could not delete expires on its own after a lock TTL.
-func (b *Backend) abandonReclaimedLock(key, token string) {
+func (b *Backend) abandonLockObject(key, token string) {
 	// A fresh context, deliberately not the acquisition's: a dead acquisition
 	// context - canceled by the caller, or out of wait-ceiling budget - is one
 	// of the ways this cleanup is reached, so reusing it would fail the cleanup

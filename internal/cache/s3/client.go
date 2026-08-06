@@ -303,7 +303,7 @@ func s3StatusError(sentinel error, resp *http.Response) error {
 func (c *Client) getObject(ctx context.Context, key string) (*http.Response, error) {
 	var success *http.Response
 	err := helpers.Retry(ctx, s3RetryPolicy(), func() error {
-		req, err := c.newRequest(ctx, http.MethodGet, key, nil, nil, emptySHA256, nil, false)
+		req, err := c.newRequest(ctx, http.MethodGet, key, nil, nil, emptySHA256, nil, putCondition{})
 		if err != nil {
 			return err
 		}
@@ -336,7 +336,7 @@ func (c *Client) getObject(ctx context.Context, key string) (*http.Response, err
 func (c *Client) headObject(ctx context.Context, key string) (http.Header, error) {
 	var headers http.Header
 	err := helpers.Retry(ctx, s3RetryPolicy(), func() error {
-		req, err := c.newRequest(ctx, http.MethodHead, key, nil, nil, emptySHA256, nil, false)
+		req, err := c.newRequest(ctx, http.MethodHead, key, nil, nil, emptySHA256, nil, putCondition{})
 		if err != nil {
 			return err
 		}
@@ -362,18 +362,41 @@ func (c *Client) headObject(ctx context.Context, key string) (http.Header, error
 	return headers, nil
 }
 
-// putObject uploads an object with optional metadata. A conditional
-// create-if-absent PUT (ifNoneMatch) is single-shot and never retried,
-// deliberately including a transport failure that never produced a
+// putCondition is the conditional header a write carries, and the two forms
+// are mutually exclusive in practice rather than by construction: a
+// create-if-absent write (ifNoneMatch) asserts the object is not there, while
+// a compare-and-swap write (ifMatch, an ETag) asserts it is there and is
+// still exactly the version the caller last read. The zero value is an
+// unconditional overwrite.
+//
+// The type exists rather than a second bool parameter because the retry rule
+// below turns on "is this write conditional at all", which a caller must not
+// be able to get wrong by passing the two flags independently.
+type putCondition struct {
+	ifMatch     string
+	ifNoneMatch bool
+}
+
+// isConditional reports whether this write carries any precondition, which is
+// what decides whether it may be retried.
+func (c putCondition) isConditional() bool {
+	return c.ifNoneMatch || c.ifMatch != ""
+}
+
+// putObject uploads an object with optional metadata. A conditional PUT -
+// create-if-absent or compare-and-swap alike - is single-shot and never
+// retried, deliberately including a transport failure that never produced a
 // response: such a failure is indistinguishable from a lost success (the PUT
 // may already have landed on the remote before the response was lost), so
-// retrying it would observe 412 (the object it just created now exists) and
-// misreport its own success as contention, which the distributed lock's
-// acquireLock loop cannot distinguish from a live holder - see
-// reclaimIfExpired/tryAcquireOnce, whose own loop is the sole retrier of
-// conditional PUTs, transport failures included. An unconditional overwrite
-// is safe to retry: each attempt reseeks body to its start and rebuilds the
-// request (fresh signature) before resending.
+// retrying it would observe 412 (the object it just wrote now exists, or no
+// longer carries the ETag it swapped against) and misreport its own success
+// as contention, which the distributed lock's acquireLock loop cannot
+// distinguish from a live holder - see reclaimIfExpired/tryAcquireOnce, whose
+// own loop is the sole retrier of conditional PUTs, transport failures
+// included. That ambiguity is unchanged by compare-and-swap: a CAS write
+// narrows who may win, not whether a lost response can be read two ways. An
+// unconditional overwrite is safe to retry: each attempt reseeks body to its
+// start and rebuilds the request (fresh signature) before resending.
 func (c *Client) putObject(
 	ctx context.Context,
 	key string,
@@ -381,7 +404,7 @@ func (c *Client) putObject(
 	size int64,
 	contentType, contentEncoding string,
 	meta map[string]string,
-	ifNoneMatch bool,
+	cond putCondition,
 	payloadHash string,
 ) error {
 	payloadHash, err := resolvePayloadHash(body, payloadHash)
@@ -389,7 +412,7 @@ func (c *Client) putObject(
 		return err
 	}
 	attempt := func() error {
-		req, err := c.newRequest(ctx, http.MethodPut, key, nil, body, payloadHash, meta, ifNoneMatch)
+		req, err := c.newRequest(ctx, http.MethodPut, key, nil, body, payloadHash, meta, cond)
 		if err != nil {
 			return err
 		}
@@ -402,9 +425,9 @@ func (c *Client) putObject(
 		defer func() {
 			_ = resp.Body.Close()
 		}()
-		return handlePutResponse(resp)
+		return handlePutResponse(resp, cond)
 	}
-	if ifNoneMatch {
+	if cond.isConditional() {
 		return attempt()
 	}
 	return helpers.Retry(ctx, s3RetryPolicy(), func() error {
@@ -420,7 +443,7 @@ func (c *Client) putObject(
 // S3's own idempotent DELETE semantics.
 func (c *Client) deleteObject(ctx context.Context, key string) error {
 	return helpers.Retry(ctx, s3RetryPolicy(), func() error {
-		req, err := c.newRequest(ctx, http.MethodDelete, key, nil, nil, emptySHA256, nil, false)
+		req, err := c.newRequest(ctx, http.MethodDelete, key, nil, nil, emptySHA256, nil, putCondition{})
 		if err != nil {
 			return err
 		}
@@ -545,7 +568,7 @@ func (c *Client) deleteObjectsBatch(ctx context.Context, keys []string) error {
 
 	return helpers.Retry(ctx, s3RetryPolicy(), func() error {
 		req, err := c.newRequest(ctx, http.MethodPost, "", url.Values{"delete": {""}},
-			bytes.NewReader(payload), payloadHash, nil, false)
+			bytes.NewReader(payload), payloadHash, nil, putCondition{})
 		if err != nil {
 			return err
 		}
@@ -625,11 +648,29 @@ func applyContentHeaders(req *http.Request, contentType, contentEncoding string)
 	}
 }
 
-func handlePutResponse(resp *http.Response) error {
+// handlePutResponse turns one PUT response into this package's vocabulary.
+// Every status but 404 means the same thing whatever the write carried; 404 is
+// the one whose meaning is decided by the precondition, which is why cond is a
+// parameter rather than something the caller compensates for afterwards.
+//
+// A 404 answering an unconditional or create-if-absent PUT names the bucket:
+// the write asserted nothing about an existing object, so the only thing S3
+// can report missing is the container. A 404 answering a compare-and-swap
+// names the object instead - S3 answers one when the key no longer exists,
+// which happens exactly when a delete lands between the caller's read of the
+// ETag and this write. Reporting that as errS3BucketNotFound would be wrong
+// twice over: it accuses a bucket that is demonstrably there, and it hands a
+// caller that could have retried immediately an unavailable-backend error
+// instead (see reclaimIfExpired, whose lock object is deleted by any holder
+// releasing it).
+func handlePutResponse(resp *http.Response, cond putCondition) error {
 	switch resp.StatusCode {
 	case http.StatusPreconditionFailed:
 		return errS3PreconditionFailed
 	case http.StatusNotFound:
+		if cond.ifMatch != "" {
+			return errS3NotFound
+		}
 		return errS3BucketNotFound
 	case http.StatusOK, http.StatusNoContent:
 		return nil
@@ -724,7 +765,7 @@ func (c *Client) ensureBucket(ctx context.Context) error {
 // transient failure like the other idempotent verbs.
 func (c *Client) headBucket(ctx context.Context) error {
 	return helpers.Retry(ctx, s3RetryPolicy(), func() error {
-		req, err := c.newRequest(ctx, http.MethodHead, "", nil, nil, emptySHA256, nil, false)
+		req, err := c.newRequest(ctx, http.MethodHead, "", nil, nil, emptySHA256, nil, putCondition{})
 		if err != nil {
 			return err
 		}
@@ -766,7 +807,7 @@ func (c *Client) createBucket(ctx context.Context) error {
 		contentType = "application/xml"
 		contentSize = int64(len(payload))
 	}
-	req, err := c.newRequest(ctx, http.MethodPut, "", nil, body, payloadHash, nil, false)
+	req, err := c.newRequest(ctx, http.MethodPut, "", nil, body, payloadHash, nil, putCondition{})
 	if err != nil {
 		return err
 	}
@@ -797,7 +838,7 @@ func (c *Client) createBucket(ctx context.Context) error {
 // than nesting two. On a non-2xx it closes the response body and returns; on
 // 200 it returns the response with its body still open for the caller to read.
 func (c *Client) bucketRequest(ctx context.Context, method string, query url.Values) (*http.Response, error) {
-	req, err := c.newRequest(ctx, method, "", query, nil, emptySHA256, nil, false)
+	req, err := c.newRequest(ctx, method, "", query, nil, emptySHA256, nil, putCondition{})
 	if err != nil {
 		return nil, err
 	}
@@ -850,7 +891,7 @@ func (c *Client) newRequest(
 	body io.ReadSeeker,
 	payloadHash string,
 	meta map[string]string,
-	ifNoneMatch bool,
+	cond putCondition,
 ) (*http.Request, error) {
 	reqURL, host, canonicalURI, canonicalQuery := c.requestURL(key, query)
 	if payloadHash == "" {
@@ -878,8 +919,11 @@ func (c *Client) newRequest(
 		name := "X-Amz-Meta-" + helpers.UpperFirstRune(strings.TrimSpace(key))
 		req.Header.Set(name, trimmed)
 	}
-	if ifNoneMatch {
+	if cond.ifNoneMatch {
 		req.Header.Set("If-None-Match", "*")
+	}
+	if cond.ifMatch != "" {
+		req.Header.Set("If-Match", cond.ifMatch)
 	}
 	canonicalHeaders, signedHeaders := canonicalizeHeaders(host, req.Header)
 	req.Header.Set("Authorization", c.signRequest(method, canonicalURI, canonicalQuery, amzDate, payloadHash, canonicalHeaders, signedHeaders))

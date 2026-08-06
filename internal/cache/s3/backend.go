@@ -55,7 +55,6 @@ func New(cfg config.S3CacheConfig, httpClient *http.Client, tempDir string) (*Ba
 			heartbeatOpTimeout: heartbeatOpTimeout,
 			releaseTimeout:     lockReleaseTimeout,
 			waitCeiling:        lockWaitCeiling,
-			reclaimSettle:      lockReclaimSettle,
 			backoffBase:        lockBackoffBase,
 			backoffCap:         lockBackoffCap,
 		},
@@ -183,7 +182,7 @@ func (b *Backend) SaveStore(ctx context.Context, st *store.Store) error {
 	}
 	key := b.key(statePrefix, storeObject)
 	reader := bytes.NewReader(buf.Bytes())
-	return b.client.putObject(ctx, key, reader, int64(buf.Len()), "application/json", "gzip", nil, false, "")
+	return b.client.putObject(ctx, key, reader, int64(buf.Len()), "application/json", "gzip", nil, putCondition{}, "")
 }
 
 // ClearFiles removes cached artifacts from S3, batching the deletes via
@@ -265,14 +264,19 @@ func (b *Backend) SweepTemp(_ context.Context) error {
 }
 
 // probeConditionalPut verifies that the configured backend actually enforces
-// If-None-Match: * before the lock protocol is allowed to rely on it. It
-// writes a small, per-process-unique probe object under the locks prefix
-// with a create-if-absent PUT (which must succeed since the key is new),
-// then repeats the same create-if-absent PUT against the same now-existing
-// key: a conforming backend must reject the second write with a
+// the conditional writes the lock protocol relies on, before it is allowed to
+// rely on them. It writes a small, per-process-unique probe object under the
+// locks prefix with a create-if-absent PUT (which must succeed since the key is
+// new), then repeats the same create-if-absent PUT against the same
+// now-existing key: a conforming backend must reject the second write with a
 // precondition-failed error. If it instead reports success, the backend
 // silently overwrote the object despite If-None-Match, meaning it cannot be
 // trusted to enforce the create-if-absent semantics the lock depends on.
+//
+// It owns the probe object's whole lifetime, including for the compare-and-swap
+// half it hands off to probeCompareAndSwap once create-if-absent has been
+// proven: one object, one deferred cleanup, and the swap probe inherits an
+// object that demonstrably exists.
 func (b *Backend) probeConditionalPut(ctx context.Context) error {
 	suffix, err := generateLockToken()
 	if err != nil {
@@ -281,7 +285,8 @@ func (b *Backend) probeConditionalPut(ctx context.Context) error {
 	key := b.key(locksPrefix, conditionalProbeObject+"-"+suffix)
 	body := []byte("probe")
 
-	if err := b.client.putObject(ctx, key, bytes.NewReader(body), int64(len(body)), "text/plain", "", nil, true, ""); err != nil {
+	if err := b.client.putObject(ctx, key, bytes.NewReader(body), int64(len(body)),
+		"text/plain", "", nil, putCondition{ifNoneMatch: true}, ""); err != nil {
 		return err
 	}
 	//nolint:contextcheck // best-effort cleanup deliberately uses a fresh context, not ctx:
@@ -294,13 +299,68 @@ func (b *Backend) probeConditionalPut(ctx context.Context) error {
 		_ = b.client.deleteObject(cleanupCtx, key)
 	}()
 
-	switch putErr := b.client.putObject(ctx, key, bytes.NewReader(body), int64(len(body)), "text/plain", "", nil, true, ""); {
+	switch putErr := b.client.putObject(ctx, key, bytes.NewReader(body), int64(len(body)),
+		"text/plain", "", nil, putCondition{ifNoneMatch: true}, ""); {
 	case putErr == nil:
 		return errS3ConditionalPutUnsupported
 	case errors.Is(putErr, errS3PreconditionFailed):
-		return nil
+		return b.probeCompareAndSwap(ctx, key, body)
 	default:
 		return putErr
+	}
+}
+
+// probeCompareAndSwap verifies that the backend honors If-Match against an
+// ETag, the second conditional write the lock protocol is built on: it is how
+// reclaimIfExpired takes over an expired holder's object, and the only thing
+// that arbitrates between two acquirers doing so at once. It runs against the
+// probe object probeConditionalPut has already created, and that object's own
+// deferred cleanup covers it.
+//
+// Three answers are required, and each rules out a different non-conforming
+// backend. The HEAD must name an ETag at all, since a backend that omits it
+// leaves nothing to condition a swap on. A swap against a stale ETag must be
+// refused, since a backend that accepts it arbitrates nothing and lets two
+// reclaimers both believe they won. And a swap against the CURRENT ETag must
+// succeed, which is the check with the least obvious failure mode: a backend
+// that refuses every If-Match alike would pass the first two and then fail
+// every reclaim at runtime, turning one dead holder's lock object into a
+// permanent one - the acquirers waiting on it would each read the refusal as
+// another acquirer winning the race, which is indistinguishable from ordinary
+// contention and would never resolve.
+//
+// The stale ETag is this package's own literal rather than a real earlier
+// version of the object: a value no backend can have minted is exactly what
+// must not match, and using one avoids depending on whether the endpoint
+// changes an ETag when identical bytes are rewritten.
+func (b *Backend) probeCompareAndSwap(ctx context.Context, key string, body []byte) error {
+	headers, err := b.client.headObject(ctx, key)
+	if err != nil {
+		return err
+	}
+	etag := strings.TrimSpace(headers.Get("ETag"))
+	if etag == "" {
+		return errS3CompareAndSwapUnsupported
+	}
+
+	switch staleErr := b.client.putObject(ctx, key, bytes.NewReader(body), int64(len(body)),
+		"text/plain", "", nil, putCondition{ifMatch: staleProbeETag}, ""); {
+	case staleErr == nil:
+		return errS3CompareAndSwapUnsupported
+	case errors.Is(staleErr, errS3PreconditionFailed):
+		// The refusal this probe requires; fall through to the positive half.
+	default:
+		return staleErr
+	}
+
+	switch currentErr := b.client.putObject(ctx, key, bytes.NewReader(body), int64(len(body)),
+		"text/plain", "", nil, putCondition{ifMatch: etag}, ""); {
+	case currentErr == nil:
+		return nil
+	case errors.Is(currentErr, errS3PreconditionFailed), errors.Is(currentErr, errS3NotFound):
+		return errS3CompareAndSwapUnsupported
+	default:
+		return currentErr
 	}
 }
 
@@ -385,7 +445,7 @@ func (b *Backend) saveProjectRegistry(ctx context.Context, registry *store.Proje
 	}
 	key := b.key(statePrefix, projectsObject)
 	reader := bytes.NewReader(payload)
-	return b.client.putObject(ctx, key, reader, int64(len(payload)), "application/json", "", nil, false, "")
+	return b.client.putObject(ctx, key, reader, int64(len(payload)), "application/json", "", nil, putCondition{}, "")
 }
 
 // key builds a key under the configured S3 prefix.

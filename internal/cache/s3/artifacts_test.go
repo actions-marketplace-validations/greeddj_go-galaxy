@@ -143,7 +143,7 @@ func TestFetchRefusesAnObjectWhoseRecordedDigestDisagreesWithItsBytes(t *testing
 func putArtifactWithRecordedDigest(ctx context.Context, t *testing.T, b *Backend, key string, body []byte, digest string) {
 	t.Helper()
 	if err := b.client.putObject(ctx, b.artifacts.objectKey(key), bytes.NewReader(body), int64(len(body)),
-		"application/gzip", "", map[string]string{"sha256": digest}, false, ""); err != nil {
+		"application/gzip", "", map[string]string{"sha256": digest}, putCondition{}, ""); err != nil {
 		t.Fatalf("putObject: %v", err)
 	}
 }

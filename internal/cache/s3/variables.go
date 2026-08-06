@@ -29,9 +29,13 @@ import (
 //     this class means "the remote was reached and is the one saying no or
 //     staying silent", not "retrying is expected to help". errS3BucketNotFound
 //     carries it too: ensureBucket already resolves a bucket-absent HEAD by
-//     creating the bucket, so the only way this sentinel escapes is a PUT or
-//     list answered 404 mid-run against a bucket Open already ensured exists -
-//     a remote-state condition, not a configuration one. errS3LockWaitNoHolderObserved
+//     creating the bucket, so the only way this sentinel escapes is a list, or
+//     a PUT carrying no If-Match, answered 404 mid-run against a bucket Open
+//     already ensured exists - a remote-state condition, not a configuration
+//     one. The If-Match exception is not a special case but the same rule read
+//     precisely: a 404 answering a compare-and-swap names the object the write
+//     was conditioned on, never the bucket, and is consumed as control flow
+//     like every other 404 (see handlePutResponse, client.go). errS3LockWaitNoHolderObserved
 //     carries it too: acquireLockLoop's wait-ceiling arm (waitCeilingErr, lock.go)
 //     reports it when the wait ceiling elapses without this wait ever having
 //     observed another acquirer holding the lock - covering an endpoint that
@@ -43,10 +47,16 @@ import (
 //     class anyway only because errS3*Failed already carries it.
 //   - helpers.ErrCacheBackendUnusable: the configured backend cannot provide a
 //     guarantee this tool requires, and never retryable - a backend that does
-//     not enforce conditional PUT (errS3ConditionalPutUnsupported) or an
+//     not enforce create-if-absent (errS3ConditionalPutUnsupported) or does not
+//     honor compare-and-swap (errS3CompareAndSwapUnsupported), the two
+//     conditional writes the lock protocol is built on, or an
 //     endpoint that fails to parse into a usable host (errS3InvalidEndpoint),
-//     both discovered once at Open against a probe this tool controls rather
-//     than against arbitrary remote state; or an endpoint that answers any
+//     all discovered once at Open against a probe this tool controls rather
+//     than against arbitrary remote state - except for the one runtime path
+//     that can reach errS3CompareAndSwapUnsupported after Open passed: a HEAD
+//     answered without an ETag leaves reclaimIfExpired nothing to condition its
+//     swap on, which is the same missing guarantee observed against real remote
+//     state rather than against the probe; or an endpoint that answers any
 //     request with an HTTP redirect (errS3RedirectRefused), discovered
 //     wherever it first happens rather than only at Open. SigV4 signs the
 //     Host header and the canonical URI, so a redirect to a different path or
@@ -56,9 +66,9 @@ import (
 //     addressed, not a retry.
 //   - helpers.ErrCacheBusy: this acquisition observed another acquirer
 //     holding the lock - a live, unexpired holder; a foreign token on the
-//     object this call just wrote; or another creator winning the race for
-//     an expired holder's just-deleted object - and the wait ceiling
-//     elapsed before it was released (errS3LockWaitTimeout). The verdict
+//     object this call just wrote; or a writer whose own write beat this
+//     call's compare-and-swap to an expired holder's object - and the wait
+//     ceiling elapsed before it was released (errS3LockWaitTimeout). The verdict
 //     rests on an answer the backend gave during this wait, never on what
 //     happened to be in flight when the ceiling fired, so it does not
 //     depend on where in the acquisition loop the ceiling falls. It claims
@@ -131,6 +141,11 @@ var (
 		"%w: s3 backend does not enforce conditional PUT (If-None-Match); distributed locking cannot guarantee mutual exclusion",
 		helpers.ErrCacheBackendUnusable,
 	)
+	errS3CompareAndSwapUnsupported = fmt.Errorf(
+		"%w: s3 backend does not support compare-and-swap PUT (If-Match against an ETag); "+
+			"an expired lock holder cannot be reclaimed safely",
+		helpers.ErrCacheBackendUnusable,
+	)
 	errS3RedirectRefused = fmt.Errorf("%w: s3 endpoint answered with a redirect", helpers.ErrCacheBackendUnusable)
 )
 
@@ -151,11 +166,19 @@ const (
 	s3ErrorBodyLimit = 8 << 10
 
 	// conditionalProbeObject is the base name of the probe object written
-	// under the locks prefix at Open to verify the backend enforces
-	// conditional PUT (If-None-Match); a per-process random suffix is
-	// appended to avoid colliding with a stale probe left behind by a
-	// crashed prior run.
+	// under the locks prefix at Open to verify the backend enforces both
+	// conditional writes the lock protocol uses (If-None-Match and If-Match);
+	// a per-process random suffix is appended to avoid colliding with a stale
+	// probe left behind by a crashed prior run.
 	conditionalProbeObject = ".conditional-probe"
+
+	// staleProbeETag is the entity tag Open's compare-and-swap probe swaps
+	// against to prove the backend refuses a mismatch. It names a version no
+	// backend can ever have minted, so "it did not match" is a property of the
+	// value rather than of what the probe object happens to hold - which is
+	// what lets the probe assert a refusal without first having to produce a
+	// genuinely superseded ETag.
+	staleProbeETag = `"go-galaxy-stale-probe-etag"`
 
 	// lockTokenBytes is the number of random bytes read from crypto/rand to
 	// build a lock token; hex-encoded, this yields a 32-character token.
@@ -178,24 +201,6 @@ const (
 	// if this wait ever observed another acquirer holding the lock, or
 	// errS3LockWaitNoHolderObserved otherwise (see waitCeilingErr).
 	lockWaitCeiling = 5 * time.Minute
-	// lockReclaimSettle is how long a reclaiming acquirer pauses between
-	// recreating a dead holder's lock object under its own token and
-	// verifying that the object still records that token. Its size is
-	// arithmetic on the constants below rather than a measurement: a
-	// competing reclaimer reaches its own delete through the same retry
-	// ladder every idempotent verb uses, s3RetryMaxAttempts = 4 attempts and
-	// therefore three full-jitter sleeps drawn from [0,200ms), [0,400ms) and
-	// [0,800ms) (s3RetryBackoffBase = 200ms; s3RetryBackoffCap = 5s never
-	// binds at these exponents) - under 1.4s of sleeping, worst case. Two
-	// seconds clears that sleeping ceiling. It does not claim to clear that
-	// ladder's own round trips on top of it, and it is small enough beside
-	// lockWaitCeiling that paying it costs an acquisition little. It narrows
-	// the window in which two reclaimers both believe they hold the lock; it
-	// is not evidence that they will not, since the only conditional write
-	// this client issues is create-if-absent, which two writers that each
-	// observed the object absent can both satisfy (see reclaimIfExpired and
-	// settleReclaim).
-	lockReclaimSettle = 2 * time.Second
 	// lockBackoffBase and lockBackoffCap bound the full-jitter exponential
 	// backoff between failed acquisition attempts.
 	lockBackoffBase = 250 * time.Millisecond

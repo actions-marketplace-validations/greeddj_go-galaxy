@@ -172,7 +172,8 @@ func (s *Artifacts) Commit(ctx context.Context, key, tmpPath string, meta map[st
 		payloadHash = hash
 		meta["sha256"] = hash
 	}
-	if err := s.client.putObject(ctx, s.objectKey(key), file, info.Size(), "application/gzip", "", meta, false, payloadHash); err != nil {
+	if err := s.client.putObject(ctx, s.objectKey(key), file, info.Size(),
+		"application/gzip", "", meta, putCondition{}, payloadHash); err != nil {
 		return cacheManager.ArtifactFile{}, err
 	}
 	cleanup := func() {

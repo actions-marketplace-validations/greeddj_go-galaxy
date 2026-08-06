@@ -76,7 +76,7 @@ func TestArtifactsMetaPresentWithValidDigestReturnsIt(t *testing.T) {
 
 	body := []byte("tarball bytes")
 	if err := b.client.putObject(ctx, b.artifacts.objectKey(artifactsMetaTestKey), bytes.NewReader(body), int64(len(body)),
-		"application/gzip", "", map[string]string{"sha256": testSHA}, false, ""); err != nil {
+		"application/gzip", "", map[string]string{"sha256": testSHA}, putCondition{}, ""); err != nil {
 		t.Fatalf("putObject: %v", err)
 	}
 
@@ -109,7 +109,7 @@ func TestArtifactsMetaPresentWithNoMetadataReportsFoundNilMeta(t *testing.T) {
 
 	body := []byte("tarball bytes")
 	if err := b.client.putObject(ctx, b.artifacts.objectKey(artifactsMetaTestKey), bytes.NewReader(body), int64(len(body)),
-		"application/gzip", "", nil, false, ""); err != nil {
+		"application/gzip", "", nil, putCondition{}, ""); err != nil {
 		t.Fatalf("putObject: %v", err)
 	}
 
@@ -144,7 +144,7 @@ func TestArtifactsMetaPresentWithNonHexDigestReturnsItVerbatim(t *testing.T) {
 	const nonHex = "not-a-hex-digest-zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
 	body := []byte("tarball bytes")
 	if err := b.client.putObject(ctx, b.artifacts.objectKey(artifactsMetaTestKey), bytes.NewReader(body), int64(len(body)),
-		"application/gzip", "", map[string]string{"sha256": nonHex}, false, ""); err != nil {
+		"application/gzip", "", map[string]string{"sha256": nonHex}, putCondition{}, ""); err != nil {
 		t.Fatalf("putObject: %v", err)
 	}
 
@@ -221,7 +221,7 @@ func TestArtifactsHasSharesHeadArtifactWithMetaOneHeadRequest(t *testing.T) {
 	const absentKey = "absent.tar.gz"
 	body := []byte("tarball bytes")
 	if err := b.client.putObject(ctx, b.artifacts.objectKey(presentKey), bytes.NewReader(body), int64(len(body)),
-		"application/gzip", "", map[string]string{"sha256": testSHA}, false, ""); err != nil {
+		"application/gzip", "", map[string]string{"sha256": testSHA}, putCondition{}, ""); err != nil {
 		t.Fatalf("putObject: %v", err)
 	}
 

@@ -233,7 +233,7 @@ func assertLiveTimeoutClassifiesAsCacheBackendUnavailable(
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}
-	req, err := client.newRequest(context.Background(), http.MethodGet, "some-key", nil, nil, emptySHA256, nil, false)
+	req, err := client.newRequest(context.Background(), http.MethodGet, "some-key", nil, nil, emptySHA256, nil, putCondition{})
 	if err != nil {
 		t.Fatalf("newRequest: %v", err)
 	}
@@ -307,7 +307,7 @@ func TestClientDoExcludesCallerCancellationFromCacheBackendUnavailable(t *testin
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	req, err := client.newRequest(ctx, http.MethodGet, "some-key", nil, nil, emptySHA256, nil, false)
+	req, err := client.newRequest(ctx, http.MethodGet, "some-key", nil, nil, emptySHA256, nil, putCondition{})
 	if err != nil {
 		t.Fatalf("newRequest: %v", err)
 	}

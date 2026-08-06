@@ -631,10 +631,25 @@ investigate, not a configuration mistake.
 When `--s3-bucket` (or `GO_GALAXY_S3_BUCKET`) is set, go-galaxy uses S3 as the cache backend.
 Artifacts and cache metadata are stored in S3; collections are still installed locally.
 
+**The endpoint must support conditional writes - both of them.** The distributed lock that
+keeps concurrent runs off each other's cache is built on `If-None-Match: *` to take the
+lock and `If-Match` against an object's ETag to take over one whose holder died, so an
+endpoint providing either one only nominally cannot back it. Amazon S3 supports both;
+an S3-compatible implementation may not, and versions predating conditional-write support
+do not. `Open` proves it rather than assuming it: on every run it writes a throwaway probe
+object and checks that a create-if-absent write is refused when the key exists, that reads
+name an ETag, that a write conditioned on a stale ETag is refused, and that one
+conditioned on the current ETag is accepted. A backend failing any of those exits `2` with
+`cache backend cannot be used as configured` - no retry helps, and the remedy is a
+different endpoint. The last check matters most for an implementation that refuses every
+`If-Match` alike: nothing about it looks permissive, and without that check it would pass
+here and instead leave a dead holder's lock unreclaimable, which every waiting run reads
+as ordinary contention.
+
 A run against the S3 backend distinguishes four ways the cache can fail to serve it. A
 bucket that cannot be reached, or that answers a request with a failure of its own, exits
 `4` - retry once the outage clears. A bucket that parses but cannot back the distributed
-lock's mutual-exclusion guarantee (it does not enforce conditional PUT), or an
+lock's guarantees (it does not enforce one of the two conditional writes), or an
 `--s3-endpoint` that fails to parse, exits `2` - no retry helps; the configuration itself
 has to change. A bucket whose lock this run does not acquire before its own wait ceiling
 elapses exits `8` only when this run actually saw another acquirer holding that lock
@@ -996,7 +1011,7 @@ Exit codes `2`, `4`, and `8` each fold in more than one cache-backend
 condition too, distinguishable the same way - grep the run's output for the
 message: `cache backend cannot be used as configured` (exit `2` - an
 `--s3-endpoint` that fails to parse, or a bucket that does not enforce
-conditional PUT, so the distributed lock cannot guarantee mutual exclusion),
+create-if-absent or compare-and-swap, so the distributed lock cannot work),
 `cache backend unavailable` (exit `4` - the backend could not be reached, or
 answered with a failure that is not this program's own doing), `another
 process holds the cache` (exit `8` - a local Bolt file open timed out against
