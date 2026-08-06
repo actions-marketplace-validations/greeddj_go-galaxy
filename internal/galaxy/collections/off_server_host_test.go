@@ -19,7 +19,7 @@ import (
 // offHostWarnSubstring is the fixed fragment every off-server-host warning
 // line contains, used by every test in this file to detect (or rule out) the
 // warning without depending on its exact wording.
-const offHostWarnSubstring = "differs from the configured server host"
+const offHostWarnSubstring = "differs from the configured server origin"
 
 // offServerHostGuardCase is one table entry for
 // TestWarnIfOffServerDownloadHostGuards.
@@ -32,12 +32,38 @@ type offServerHostGuardCase struct {
 
 // offServerHostGuardCases builds the guard-branch table for
 // warnIfOffServerDownloadHost, factored out of the test function itself so
-// the test body stays short: a genuine host mismatch, a same-host match
-// under varying scheme/port/case, and every input this function
-// deliberately declines to warn about (a blank base, an unparseable base or
-// download URL, and a download URL with no host at all) so a false alarm
+// the test body stays short, and split in two halves by expected outcome:
+// every origin mismatch that must warn, then every input that must stay
+// silent - a real origin match under varying spelling, and each branch this
+// function deliberately declines to judge (a blank base, an unparseable base
+// or download URL, and a download URL with no host at all) so a false alarm
 // never reaches CI output.
+//
+// Killing mutation, run: comparing lowercased Hostname() instead of
+// helpers.Origin fails the row "scheme downgrade on the same host warns" (and
+// the port row alongside it) with
+//
+//	downloadURL "http://galaxy.example.com/artifact.tar.gz" against base
+//	"https://galaxy.example.com": warned=false, want true (warns=[])
+//
+// A second mutation, also run - dropping the dl.Hostname() == "" guard - fails
+// the row "download URL without a host no warn" with
+//
+//	downloadURL "/local/artifact.tar.gz" against base
+//	"https://galaxy.example.com": warned=true, want false (warns=[Downloading
+//	/local/artifact.tar.gz from origin "://:", which differs from the
+//	configured server origin "https://galaxy.example.com:443"])
+//
+// which is what that guard is for: a hostname-less URL yields a degenerate
+// origin that matches nothing, so without it every relative download URL
+// raises a false alarm.
 func offServerHostGuardCases() []offServerHostGuardCase {
+	return append(offServerOriginMismatchCases(), offServerOriginSilentCases()...)
+}
+
+// offServerOriginMismatchCases holds the rows that must warn: an origin
+// differing in each of the three components Origin normalizes over.
+func offServerOriginMismatchCases() []offServerHostGuardCase {
 	return []offServerHostGuardCase{
 		{
 			name:        "differing host warns",
@@ -46,22 +72,50 @@ func offServerHostGuardCases() []offServerHostGuardCase {
 			wantWarn:    true,
 		},
 		{
+			// The same host reached over a different scheme and port is a
+			// different origin, and origin is what decides whether the request
+			// carries the operator's token and TLS policy at all - so this
+			// warns, where a hostname-only comparison stayed silent.
+			name:        "same host different scheme and port warns",
+			base:        "https://galaxy.example.com:443",
+			downloadURL: "http://galaxy.example.com:8080/artifact.tar.gz",
+			wantWarn:    true,
+		},
+		{
+			// The narrow shape the row above generalizes, and the reason this
+			// item exists: nothing about the host changes, the transport
+			// silently stops being TLS, and no credential follows the request.
+			name:        "scheme downgrade on the same host warns",
+			base:        "https://galaxy.example.com",
+			downloadURL: "http://galaxy.example.com/artifact.tar.gz",
+			wantWarn:    true,
+		},
+	}
+}
+
+// offServerOriginSilentCases holds the rows that must stay silent: a genuine
+// origin match under varying spelling, and every guard branch that declines to
+// judge the comparison at all.
+func offServerOriginSilentCases() []offServerHostGuardCase {
+	return []offServerHostGuardCase{
+		{
 			name:        "same host no warn",
 			base:        "https://galaxy.example.com",
 			downloadURL: "https://galaxy.example.com/artifact.tar.gz",
 			wantWarn:    false,
 		},
 		{
-			// Hostname() strips the port, so a differing port on an otherwise
-			// identical (and differently schemed) host is not a mismatch -
-			// this is the intended semantics: only the host is compared.
-			name:        "same host different scheme and port no warn",
-			base:        "https://galaxy.example.com:443",
-			downloadURL: "http://galaxy.example.com:8080/artifact.tar.gz",
+			// Origin fills in the scheme's default port, so an explicit :443
+			// against an implicit one is the same endpoint. This is also the
+			// table's proof that it can still fall silent under the stricter
+			// comparison, rather than warning about everything.
+			name:        "same origin with implicit default port no warn",
+			base:        "https://galaxy.example.com",
+			downloadURL: "https://galaxy.example.com:443/artifact.tar.gz",
 			wantWarn:    false,
 		},
 		{
-			name:        "host comparison is case-insensitive",
+			name:        "origin comparison is case-insensitive",
 			base:        "https://Galaxy.Example.COM",
 			downloadURL: "https://galaxy.example.com/artifact.tar.gz",
 			wantWarn:    false,

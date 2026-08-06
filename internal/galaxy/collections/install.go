@@ -821,9 +821,9 @@ func downloadCollectionToCache(
 }
 
 // warnIfOffServerDownloadHost emits a warning when an artifact's download URL
-// points at a host other than base, the server that actually resolved this
-// collection (col.Source, non-empty by construction at install time - every
-// resolved collection is stamped with its winning server by
+// points at an origin other than base's, the server that actually resolved
+// this collection (col.Source, non-empty by construction at install time -
+// every resolved collection is stamped with its winning server by
 // solverResultToResolvedGraph). The metadata that supplies the download URL
 // can come from a cached snapshot, which a bucket writer could poison to
 // redirect a download off-server; surfacing the mismatch gives a visible
@@ -835,26 +835,45 @@ func downloadCollectionToCache(
 // so it must survive --quiet (Warnf always emits, to stderr, unlike the
 // transient Printf tier) rather than risk being silenced in the very CI mode
 // where it matters most.
+//
+// The comparison is by normalized origin (helpers.Origin: scheme, hostname,
+// and port with the scheme's default filled in), not by hostname alone. That
+// is the same key internal/galaxy/fetch dispatches on when it decides whether
+// to attach a token and whether to relax TLS verification, so the signal now
+// has the granularity of the mechanisms it exists to illuminate: a download
+// URL that keeps the host and downgrades https to http, or moves to another
+// port, reaches an endpoint that gets neither the operator's credential nor
+// the operator's TLS policy, and it used to reach it silently. The cost is
+// accepted rather than unnoticed - a deployment legitimately serving
+// downloads from another port of the same host now warns where it did not -
+// and it stays a warning: the install proceeds either way.
 func warnIfOffServerDownloadHost(runtime *infra.Infra, base, downloadURL string) {
 	if strings.TrimSpace(base) == "" {
 		return
 	}
+	// The hostname, not the origin, decides silence, and it is checked before
+	// any origin is computed: Origin over a URL with no hostname still returns
+	// a well-formed string ("https://:443"), so a hostname-less value would
+	// compare unequal to a real server and raise the false alarm this guard
+	// exists to prevent. Hostname() rather than Host, deliberately: they differ
+	// on a degenerate authority like "https://:8080", where Host is non-empty
+	// and Hostname is not, and this guard has always been the wider of the two.
 	server, err := url.Parse(base)
-	if err != nil {
+	if err != nil || server.Hostname() == "" {
 		return
 	}
 	dl, err := url.Parse(downloadURL)
-	if err != nil {
+	if err != nil || dl.Hostname() == "" {
 		return
 	}
-	serverHost := strings.ToLower(server.Hostname())
-	dlHost := strings.ToLower(dl.Hostname())
-	if serverHost == "" || dlHost == "" || serverHost == dlHost {
+	serverOrigin := helpers.Origin(server)
+	dlOrigin := helpers.Origin(dl)
+	if serverOrigin == dlOrigin {
 		return
 	}
 	runtime.Output.Warnf(
-		"Downloading %s from host %q, which differs from the configured server host %q",
-		downloadURL, dlHost, serverHost,
+		"Downloading %s from origin %q, which differs from the configured server origin %q",
+		downloadURL, dlOrigin, serverOrigin,
 	)
 }
 

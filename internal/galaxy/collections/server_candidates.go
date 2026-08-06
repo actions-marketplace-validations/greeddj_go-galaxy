@@ -71,13 +71,16 @@ func serverCandidates(deps collectionDeps, col collection) []serverCandidate {
 // operator-authored in the ordinary case, and refusing one would break a
 // working setup over a naming mismatch.
 //
-// The signal here is stronger than the one on the download path, and that is
-// worth stating rather than leaving for a reader to infer. Matching is by
-// network origin, so a source: naming a repo-scoped path under a configured
-// host already matches and is silent; reaching this function means a host the
-// operator configured nowhere. The request is still made, and with it up to
-// several probes per collection as the API-root candidates are tried, against
-// a host a lockfile named.
+// Both this warning and the download path's match by normalized origin, so
+// what separates them is what each one asserts, not how carefully it looks. A
+// source: naming a repo-scoped path under a configured host matches here and
+// stays silent; reaching this function means an origin the operator
+// configured nowhere at all. The download path's warning says something
+// narrower - the artifact is arriving from a different origin than the server
+// that resolved the collection, which a legitimate content host does too. The
+// request is still made either way, and here it costs up to several probes
+// per collection as the API-root candidates are tried, against a host a
+// lockfile named.
 //
 // No credential reaches that host and no TLS policy follows it there:
 // internal/galaxy/fetch dispatches both by normalized origin, so an origin
