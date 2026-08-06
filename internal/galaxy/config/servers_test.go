@@ -36,7 +36,7 @@ func newServerCmd(t *testing.T, args []string) *cli.Command {
 			&cli.StringFlag{
 				Name:    "server",
 				Value:   testServerFlagDefault,
-				Sources: cli.EnvVars("GO_GALAXY_SERVER", "ANSIBLE_GALAXY_SERVER"),
+				Sources: cli.EnvVars("GO_GALAXY_SERVER"),
 			},
 			&cli.StringFlag{
 				Name:    "token",

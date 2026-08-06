@@ -45,10 +45,19 @@ func CollectionFlags() []cli.Flag {
 func collectionPathFlags() []cli.Flag {
 	return []cli.Flag{
 		&cli.StringFlag{
+			// ANSIBLE_GALAXY_SERVER is deliberately NOT a source here, and is
+			// read in internal/galaxy/config instead. ansible treats it as the
+			// env spelling of the [galaxy] server key - the fallback used only
+			// when no server_list and no -s apply - while a flag source makes
+			// it outrank server_list entirely, since urfave/cli exposes no way
+			// to tell a CLI-set flag from an env-set one: Command.IsSet returns
+			// FlagBase.hasBeenSet, which Set (CLI parsing) and PostParse (value
+			// source) write identically, and ValueSourceChain.LookupWithSource
+			// is not reachable through the cli.Flag interface.
 			Name:    "server",
 			Usage:   "Galaxy server URL",
 			Value:   defaultServerURL,
-			Sources: cli.EnvVars("GO_GALAXY_SERVER", "ANSIBLE_GALAXY_SERVER"),
+			Sources: cli.EnvVars("GO_GALAXY_SERVER"),
 		},
 		&cli.StringFlag{
 			Name: "token",

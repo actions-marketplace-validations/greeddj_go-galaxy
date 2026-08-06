@@ -365,7 +365,13 @@ Clean unreachable collections:
   but it does write one externally consumed report - the metrics file - so `--dry-run` suppresses
   that report and prints a stderr warning naming the path, and changes nothing else about the run.
 - `--cache-dir` (`$GO_GALAXY_CACHE_DIR`, `$ANSIBLE_GALAXY_CACHE_DIR`)
-- `--server` (`$GO_GALAXY_SERVER`, `$ANSIBLE_GALAXY_SERVER`)
+- `--server` (`$GO_GALAXY_SERVER`) - **Breaking change:** `$ANSIBLE_GALAXY_SERVER`
+  is no longer read as a spelling of this flag. It now behaves as `[galaxy] server`
+  does, which is what ansible itself does with it: a fallback consulted only when
+  no `server_list` and no `--server` apply, rather than an override that collapses
+  a configured `server_list` to one anonymous server. A pipeline that exported it
+  to force a single server now gets `server_list` instead, and should set
+  `$GO_GALAXY_SERVER` (or pass `--server`) to keep the old behavior.
 - `--token` (`$GO_GALAXY_TOKEN`) - Galaxy API token for the single effective server;
   an error if a multi-entry `server_list` is configured, and setting it to the
   empty string clears a previously configured token (see
@@ -563,12 +569,14 @@ without editing any config.
 
 Highest wins:
 
-1. An explicit `--server` collapses everything to one server: if its value
-   matches a configured `server_list` id exactly, that server's own token and
-   `validate_certs` apply; otherwise the value is used verbatim as an anonymous
-   URL, and `server_list` plays no further part - not even to validate it.
+1. An explicit `--server` (or `$GO_GALAXY_SERVER`) collapses everything to one
+   server: if its value matches a configured `server_list` id exactly, that
+   server's own token and `validate_certs` apply; otherwise the value is used
+   verbatim as an anonymous URL, and `server_list` plays no further part - not
+   even to validate it.
 2. Otherwise a non-empty `server_list` wins, in list order.
-3. Otherwise `[galaxy] server` from ansible.cfg.
+3. Otherwise `[galaxy] server` from ansible.cfg, or `$ANSIBLE_GALAXY_SERVER`,
+   which outranks that key whenever it is set but nothing above it.
 4. Otherwise the `--server` flag's built-in default.
 
 ### Server selection at resolve time

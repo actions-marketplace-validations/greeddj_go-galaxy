@@ -663,3 +663,65 @@ func assertDiscoveryFallsThroughCleanly(t *testing.T, gotPath string, err error)
 		t.Errorf("path = %q, want %q, %q, or empty", gotPath, wantHomePath, "/etc/ansible/ansible.cfg")
 	}
 }
+
+// TestAnsibleGalaxyServerEnv pins where ANSIBLE_GALAXY_SERVER sits in the
+// precedence chain: it is the env spelling of the [galaxy] server key, so it
+// outranks that key and nothing above it. The rows are the three states the
+// variable can be in, and the third is the one that decides a design question
+// rather than restating the other two - an exported but empty value must not
+// name a server with no URL, so it has to read as absent rather than as an
+// override that won.
+//
+// No t.Parallel anywhere here: t.Setenv forbids it, and the neighboring
+// applyAnsibleConfig tests do not use it either.
+//
+// KILLING MUTATION, run and reverted: making ansibleGalaxyServer prefer the
+// ini value over the env one (returning ini whenever it is non-empty). Two
+// rows fail - the first, on the precedence itself:
+//
+//	config_test.go:695: Server = "https://ini.example", want "https://env.example"
+//
+// and the third, because a non-empty ini value shadows the empty-env case too:
+//
+//	config_test.go:720: Server = "https://ini.example", want the flag default "https://default.example"
+func TestAnsibleGalaxyServerEnv(t *testing.T) {
+	const envServer = "https://env.example"
+
+	t.Run("env beats the ansible.cfg key", func(t *testing.T) {
+		t.Setenv("ANSIBLE_GALAXY_SERVER", envServer)
+		ansCfg := ansibleConfig{Galaxy: ansibleGalaxyConfig{Server: "https://ini.example"}}
+		got := runApplyAnsibleConfig(t, nil, ansCfg)
+		if got.Server != envServer {
+			t.Fatalf("Server = %q, want %q", got.Server, envServer)
+		}
+		if !got.AnsibleServerUsed || !got.AnsibleServerEnvUsed {
+			t.Fatalf("AnsibleServerUsed = %v, AnsibleServerEnvUsed = %v, want both true",
+				got.AnsibleServerUsed, got.AnsibleServerEnvUsed)
+		}
+	})
+
+	t.Run("env unset keeps the ansible.cfg key", func(t *testing.T) {
+		ansCfg := ansibleConfig{Galaxy: ansibleGalaxyConfig{Server: "https://ini.example"}}
+		got := runApplyAnsibleConfig(t, nil, ansCfg)
+		if got.Server != "https://ini.example" {
+			t.Fatalf("Server = %q, want %q", got.Server, "https://ini.example")
+		}
+		if !got.AnsibleServerUsed || got.AnsibleServerEnvUsed {
+			t.Fatalf("AnsibleServerUsed = %v, AnsibleServerEnvUsed = %v, want true and false",
+				got.AnsibleServerUsed, got.AnsibleServerEnvUsed)
+		}
+	})
+
+	t.Run("env set empty falls through to the flag default", func(t *testing.T) {
+		t.Setenv("ANSIBLE_GALAXY_SERVER", "")
+		ansCfg := ansibleConfig{Galaxy: ansibleGalaxyConfig{Server: "https://ini.example"}}
+		got := runApplyAnsibleConfig(t, nil, ansCfg)
+		if got.Server != testDefaultServer {
+			t.Fatalf("Server = %q, want the flag default %q", got.Server, testDefaultServer)
+		}
+		if got.AnsibleServerUsed || got.AnsibleServerEnvUsed {
+			t.Fatalf("AnsibleServerUsed = %v, AnsibleServerEnvUsed = %v, want both false",
+				got.AnsibleServerUsed, got.AnsibleServerEnvUsed)
+		}
+	})
+}

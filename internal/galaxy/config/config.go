@@ -58,6 +58,11 @@ type Config struct {
 	AnsibleCollectionsPathUsed bool
 	AnsibleCacheDirUsed        bool
 	AnsibleServerUsed          bool
+	// AnsibleServerEnvUsed narrows AnsibleServerUsed: the ansible-side server
+	// value was taken, and it came from ANSIBLE_GALAXY_SERVER rather than from
+	// the ansible.cfg file, so debug output does not credit a file that did
+	// not supply it.
+	AnsibleServerEnvUsed bool
 }
 
 // IsNoCache reports whether cache reads and writes are disabled.
@@ -348,7 +353,9 @@ func applyAnsibleConfig(cfg *Config, c *cli.Command, ansibleConfig ansibleConfig
 	}
 	cfg.DownloadPath, cfg.AnsibleCollectionsPathUsed = pickConfigValue(c, "download-path", ansibleConfig.Defaults.CollectionsPath)
 	cfg.CacheDir, cfg.AnsibleCacheDirUsed = pickConfigValue(c, "cache-dir", ansibleConfig.Galaxy.CacheDir)
-	cfg.Server, cfg.AnsibleServerUsed = pickConfigValue(c, "server", ansibleConfig.Galaxy.Server)
+	serverValue, serverFromEnv := ansibleGalaxyServer(ansibleConfig.Galaxy.Server)
+	cfg.Server, cfg.AnsibleServerUsed = pickConfigValue(c, "server", serverValue)
+	cfg.AnsibleServerEnvUsed = cfg.AnsibleServerUsed && serverFromEnv
 
 	// ansible accepts a POSIX ":"-separated list for collections_path (both
 	// the [defaults] collections_path ansible.cfg key and the
@@ -388,6 +395,28 @@ func firstCollectionsPath(value string) (string, []string) {
 // pickConfigValue picks a string config value with precedence:
 // explicit CLI/ENV (IsSet) > ansible.cfg > CLI default. The bool reports
 // whether the value came from ansible.cfg.
+// ansibleGalaxyServer resolves the ansible-side galaxy server value: the
+// ANSIBLE_GALAXY_SERVER env var when it is set at all, otherwise the
+// [galaxy] server key from ansible.cfg. It reports whether the value came
+// from the environment.
+//
+// The env var wins outright over the ini key whenever set, which is the rule
+// resolveServerList already applies to ANSIBLE_GALAXY_SERVER_LIST. What it
+// does NOT do is outrank server_list or --server, which is why this is read
+// here rather than declared as a flag source: ansible treats the variable as
+// the env spelling of the [galaxy] server config, so it belongs to that slot
+// in the precedence chain (see resolveServers) and nowhere earlier.
+//
+// An empty env value resolves to the empty string, which pickConfigValue
+// treats as absent, so it falls through to the flag default rather than
+// naming a server with no URL.
+func ansibleGalaxyServer(ini string) (string, bool) {
+	if v, ok := os.LookupEnv("ANSIBLE_GALAXY_SERVER"); ok {
+		return v, true
+	}
+	return ini, false
+}
+
 func pickConfigValue(c *cli.Command, flag, ansibleValue string) (string, bool) {
 	if c.IsSet(flag) {
 		return c.String(flag), false

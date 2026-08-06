@@ -167,15 +167,19 @@ var serverIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 // flag default) for the case where no server_list is configured at all.
 //
 // Precedence, in order:
-//  1. An explicit --server (c.IsSet("server"), covering the flag and both
-//     its env names) collapses everything to one server: if its value
-//     matches a server_list id exactly (case-sensitive), that server is
+//  1. An explicit --server (c.IsSet("server"), covering the flag and its
+//     GO_GALAXY_SERVER spelling) collapses everything to one server: if its
+//     value matches a server_list id exactly (case-sensitive), that server is
 //     used with its own token and TLS setting; otherwise the value is used
 //     verbatim as an anonymous single-server URL, and server_list plays no
 //     further part - not even to validate it.
 //  2. Otherwise a non-empty server_list wins, in list order.
-//  3. Otherwise [galaxy] server from ansible.cfg (already folded into
-//     cfg.Server by pickConfigValue).
+//  3. Otherwise [galaxy] server from ansible.cfg, or its ANSIBLE_GALAXY_SERVER
+//     env spelling, which outranks the ini key but nothing above it (both
+//     already folded into cfg.Server by pickConfigValue via
+//     ansibleGalaxyServer). The ANSIBLE_ variable belongs here rather than in
+//     rule 1 because that is where ansible itself puts it - as the env name of
+//     the GALAXY_SERVER config, not as a way to override server_list.
 //  4. Otherwise the --server flag default (likewise already in cfg.Server).
 //
 // cfg.Servers is never empty on success: cfg.Server always ends up equal to
@@ -285,7 +289,12 @@ func resolveServerCandidates(
 // key validation, and hard-error checks all still apply); any other value
 // is used verbatim as an anonymous single-server URL via buildImplicitServer,
 // and the rest of server_list - including its own id/key validation - is
-// never consulted, matching ansible's "the flag simply wins" behavior.
+// never consulted.
+//
+// This is reached only for the flag itself and GO_GALAXY_SERVER. The
+// ANSIBLE_GALAXY_SERVER spelling is precedence rule 3 and never arrives here,
+// so nothing in this path claims to mirror what ansible does with that
+// variable - ansible consults it only when no server_list and no -s apply.
 func resolveExplicitServer(value string, ids []string, sections map[string]map[string]string) (Server, []string, error) {
 	for _, id := range ids {
 		if id != value {

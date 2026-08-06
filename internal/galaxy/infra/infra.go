@@ -108,9 +108,15 @@ func (i *Infra) DebugAnsibleConfig(cfg *config.Config) {
 		if cfg.AnsibleCacheDirUsed {
 			i.Output.Debugf("ansible.cfg %s: galaxy.cache_dir=%s", cfg.AnsibleConfigPath, cfg.CacheDir)
 		}
-		if cfg.AnsibleServerUsed {
+		if cfg.AnsibleServerUsed && !cfg.AnsibleServerEnvUsed {
 			i.Output.Debugf("ansible.cfg %s: galaxy.server=%s", cfg.AnsibleConfigPath, cfg.Server)
 		}
+	}
+	// Outside the block above on purpose: ANSIBLE_GALAXY_SERVER supplies this
+	// value whether or not an ansible.cfg was found at all, and crediting the
+	// file for it would name a source that did not provide it.
+	if cfg.AnsibleServerEnvUsed {
+		i.Output.Debugf("env ANSIBLE_GALAXY_SERVER: galaxy.server=%s", cfg.Server)
 	}
 	i.debugServerList(cfg.Servers)
 }

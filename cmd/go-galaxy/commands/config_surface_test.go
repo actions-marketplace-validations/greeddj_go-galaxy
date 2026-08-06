@@ -2,7 +2,9 @@ package commands
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -146,4 +148,90 @@ func TestCollectionCommandConfigSurface(t *testing.T) {
 	assertConfigField(t, "Workers", cfg.Workers, 3)
 	assertConfigField(t, "Offline", cfg.Offline, true)
 	assertConfigField(t, "CacheDir", cfg.CacheDir, cacheDir)
+}
+
+// ansibleCfgWithServerList writes an ansible.cfg carrying a two-entry
+// server_list plus a section for each id, points $ANSIBLE_CONFIG at it, and
+// returns nothing: what the caller needs is the environment, not the path.
+//
+// It runs neutralizeAnsibleDiscovery first and then overrides $ANSIBLE_CONFIG,
+// because that helper deliberately points the variable at a file that does not
+// exist - which is the opposite of what these rows need.
+func ansibleCfgWithServerList(t *testing.T) {
+	t.Helper()
+	neutralizeAnsibleDiscovery(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ansible.cfg")
+	body := "[galaxy]\nserver_list = hub, pub\n\n" +
+		"[galaxy_server.hub]\nurl = https://hub.example/\n\n" +
+		"[galaxy_server.pub]\nurl = https://pub.example/\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write ansible.cfg: %v", err)
+	}
+	t.Setenv("ANSIBLE_CONFIG", path)
+}
+
+// serverIDs returns the resolved server ids in order, so a row can assert the
+// whole list rather than one field of one entry.
+func serverIDs(cfg *config.Config) []string {
+	ids := make([]string, 0, len(cfg.Servers))
+	for _, s := range cfg.Servers {
+		ids = append(ids, s.ID)
+	}
+	return ids
+}
+
+// TestAnsibleGalaxyServerDoesNotCollapseServerList pins the precedence fix:
+// ANSIBLE_GALAXY_SERVER is the env spelling of the [galaxy] server key, so a
+// configured server_list still wins over it. Before the fix it was a source of
+// the --server flag, which made it precedence rule 1 - exporting it silently
+// reduced a two-server configuration to one anonymous server, and a private hub
+// simply disappeared, with no warning even under --verbose.
+//
+// The two control rows are what make the first one mean something: on the same
+// fixture, the two spellings that ARE rule 1 must still collapse the list, so
+// "the list survived" cannot be the fixture failing to collapse anything.
+//
+// KILLING MUTATION, run and reverted: restoring ANSIBLE_GALAXY_SERVER to the
+// server flag's Sources in cmd/go-galaxy/helpers/flags.go. The first row fails:
+//
+//	config_surface_test.go:209: server ids = [], want [hub pub]
+func TestAnsibleGalaxyServerDoesNotCollapseServerList(t *testing.T) {
+	t.Run("the ansible env spelling leaves server_list intact", func(t *testing.T) {
+		ansibleCfgWithServerList(t)
+		t.Setenv("ANSIBLE_GALAXY_SERVER", "https://forced.example/")
+
+		cfg, err := buildConfigFor(t, "install", helpers.CollectionFlags(), nil)
+		if err != nil {
+			t.Fatalf("BuildCollectionConfig() error = %v, want nil", err)
+		}
+		if got := serverIDs(cfg); !slices.Equal(got, []string{"hub", "pub"}) {
+			t.Fatalf("server ids = %v, want [hub pub]", got)
+		}
+	})
+
+	t.Run("the go-galaxy env spelling still collapses it", func(t *testing.T) {
+		ansibleCfgWithServerList(t)
+		t.Setenv("GO_GALAXY_SERVER", "https://forced.example/")
+
+		cfg, err := buildConfigFor(t, "install", helpers.CollectionFlags(), nil)
+		if err != nil {
+			t.Fatalf("BuildCollectionConfig() error = %v, want nil", err)
+		}
+		if got := len(cfg.Servers); got != 1 {
+			t.Fatalf("server count = %d (%v), want 1", got, serverIDs(cfg))
+		}
+	})
+
+	t.Run("the flag still collapses it", func(t *testing.T) {
+		ansibleCfgWithServerList(t)
+
+		cfg, err := buildConfigFor(t, "install", helpers.CollectionFlags(), []string{"--server=https://forced.example/"})
+		if err != nil {
+			t.Fatalf("BuildCollectionConfig() error = %v, want nil", err)
+		}
+		if got := len(cfg.Servers); got != 1 {
+			t.Fatalf("server count = %d (%v), want 1", got, serverIDs(cfg))
+		}
+	})
 }
