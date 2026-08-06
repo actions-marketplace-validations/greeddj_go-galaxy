@@ -14,6 +14,7 @@ package collections
 // run failed once, not once per collection".
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"os"
@@ -150,7 +151,7 @@ func TestExtractCollectionSymlinkedPrefixLeavesOutsideTreeIntact(t *testing.T) {
 			mustWriteFile(t, tarPath, buildMinimalTarGz(t))
 
 			runtime := infra.New(noopPrinter{}, http.DefaultClient)
-			err := extractCollection(col, tarPath, target, runtime, nil, "")
+			err := extractCollection(context.Background(), col, tarPath, target, runtime, nil, "")
 			if !errors.Is(err, helpers.ErrCollectionsPathEscape) {
 				t.Errorf("extractCollection error = %v, want errors.Is helpers.ErrCollectionsPathEscape", err)
 			}

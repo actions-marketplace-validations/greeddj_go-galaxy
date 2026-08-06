@@ -1,6 +1,7 @@
 package collections
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/archive"
@@ -23,6 +24,7 @@ import (
 // target.path through root right before unpack runs, so nothing can be
 // pre-planted inside it between the two calls.
 func extractCollection(
+	ctx context.Context,
 	col collection,
 	tarPath string,
 	target installTarget,
@@ -66,18 +68,18 @@ func extractCollection(
 		return classifyCollectionsRootError(target.root, target.rel, err)
 	}
 
-	if err := unpack(tarPath, target.path, extractStore, artifactSHA); err != nil {
+	if err := unpack(ctx, tarPath, target.path, extractStore, artifactSHA); err != nil {
 		return err
 	}
 
 	return writeExtractMarker(target, artifactSHA)
 }
 
-func unpack(tarPath, installPath string, extractStore *extracted.Store, artifactSHA string) error {
+func unpack(ctx context.Context, tarPath, installPath string, extractStore *extracted.Store, artifactSHA string) error {
 	if extractStore == nil {
-		return archive.ExtractTarGz(tarPath, installPath)
+		return archive.ExtractTarGz(ctx, tarPath, installPath)
 	}
-	src, err := extractStore.Ensure(artifactSHA, tarPath)
+	src, err := extractStore.Ensure(ctx, artifactSHA, tarPath)
 	if err != nil {
 		return err
 	}

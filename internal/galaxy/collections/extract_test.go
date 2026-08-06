@@ -7,6 +7,7 @@ package collections
 // runs only after all of that has already happened.
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"path/filepath"
@@ -43,7 +44,7 @@ func TestExtractCollectionRefusesNonCanonicalSHABeforeDestroyingTree(t *testing.
 	target := newFlatInstallTarget(t, installPath)
 
 	const traversalSHA = "../../../../../../home/ci/.ssh/authorized_keys"
-	err := extractCollection(col, tarPath, target, runtime, nil, traversalSHA)
+	err := extractCollection(context.Background(), col, tarPath, target, runtime, nil, traversalSHA)
 	if !errors.Is(err, helpers.ErrMalformedArtifactSHA256) {
 		t.Errorf("extractCollection error = %v, want errors.Is helpers.ErrMalformedArtifactSHA256", err)
 	}

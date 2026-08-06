@@ -135,7 +135,7 @@ func (s *Store) Root() string {
 // moments earlier. A local writer racing between this return and that walk is
 // the same disclosed residual the install side carries for its own extraction
 // target, not a gap this root closes.
-func (s *Store) Ensure(sha, tarPath string) (string, error) {
+func (s *Store) Ensure(ctx context.Context, sha, tarPath string) (string, error) {
 	if s == nil {
 		return "", ErrStoreNotConfigured
 	}
@@ -175,7 +175,7 @@ func (s *Store) Ensure(sha, tarPath string) (string, error) {
 	if err := verifyTarballSHA(tarPath, sha); err != nil {
 		return "", err
 	}
-	return s.extractInto(rel, tarPath)
+	return s.extractInto(ctx, rel, tarPath)
 }
 
 // Ready reports whether sha's content-addressable tree is present and
@@ -221,7 +221,7 @@ func verifyTarballSHA(tarPath, sha string) error {
 // path and a SHA to finalize, or Discard() it on error. The reader
 // is always drained to EOF so that an upstream io.Pipe writer cannot
 // deadlock when the gzip stream ends before the body does.
-func (s *Store) IngestReader(r io.Reader) (string, error) {
+func (s *Store) IngestReader(ctx context.Context, r io.Reader) (string, error) {
 	if s == nil {
 		_, _ = io.Copy(io.Discard, r)
 		return "", ErrStoreNotConfigured
@@ -238,7 +238,7 @@ func (s *Store) IngestReader(r io.Reader) (string, error) {
 		_, _ = io.Copy(io.Discard, r)
 		return "", err
 	}
-	extractErr := archive.ExtractTarGzStream(r, s.abs(tmpRel))
+	extractErr := archive.ExtractTarGzStream(ctx, r, s.abs(tmpRel))
 	_, _ = io.Copy(io.Discard, r)
 	if extractErr != nil {
 		_ = root.RemoveAll(tmpRel)
@@ -610,7 +610,7 @@ func (s *Store) readyRel(rel string) bool {
 // archive's own per-entry symlink-parent check governs what the tarball
 // itself may create - the same split extractCollection documents for the
 // collections tree.
-func (s *Store) extractInto(rel, tarPath string) (string, error) {
+func (s *Store) extractInto(ctx context.Context, rel, tarPath string) (string, error) {
 	root, err := s.openRootForWrite()
 	if err != nil {
 		return "", err
@@ -627,7 +627,7 @@ func (s *Store) extractInto(rel, tarPath string) (string, error) {
 	if err := root.MkdirAll(tmpRel, helpers.DirMod); err != nil {
 		return "", err
 	}
-	if err := archive.ExtractTarGz(tarPath, s.abs(tmpRel)); err != nil {
+	if err := archive.ExtractTarGz(ctx, tarPath, s.abs(tmpRel)); err != nil {
 		_ = root.RemoveAll(tmpRel)
 		return "", err
 	}

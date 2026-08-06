@@ -210,7 +210,7 @@ func prepareInstall(
 // prepareAndExtract can run it a second time against a freshly downloaded
 // replacement after evicting a corrupt cache hit.
 func verifyAndExtract(
-	_ context.Context,
+	ctx context.Context,
 	deps installDeps,
 	col collection,
 	payload installPayload,
@@ -221,7 +221,7 @@ func verifyAndExtract(
 		return err
 	}
 	extractStart := time.Now()
-	err := extractCollection(col, payload.artifact.Path, target, deps.runtime, deps.extractStore, payload.artifactSHA)
+	err := extractCollection(ctx, col, payload.artifact.Path, target, deps.runtime, deps.extractStore, payload.artifactSHA)
 	if err != nil {
 		return fmt.Errorf("failed to extract %s: %w", filename, err)
 	}
@@ -966,7 +966,7 @@ func streamDownloadAndExtract(
 	}
 	ingestCh := make(chan ingestOutcome, 1)
 	go func() {
-		tmp, ingestErr := deps.extractStore.IngestReader(pr)
+		tmp, ingestErr := deps.extractStore.IngestReader(ctx, pr)
 		ingestCh <- ingestOutcome{tmp: tmp, err: ingestErr}
 	}()
 

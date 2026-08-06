@@ -35,7 +35,7 @@ func TestStoreEnsureExtractsOnce(t *testing.T) {
 	store := NewStore(filepath.Join(dir, "cache"))
 	sha := mustHash(t, tarPath)
 
-	got, err := store.Ensure(sha, tarPath)
+	got, err := store.Ensure(context.Background(), sha, tarPath)
 	if err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestStoreEnsureExtractsOnce(t *testing.T) {
 	if err := os.Remove(tarPath); err != nil {
 		t.Fatalf("remove tar: %v", err)
 	}
-	got2, err := store.Ensure(sha, tarPath)
+	got2, err := store.Ensure(context.Background(), sha, tarPath)
 	if err != nil {
 		t.Fatalf("Ensure idempotent: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestStoreEnsureConcurrent(t *testing.T) {
 	errs := make(chan error, 8)
 	for range 8 {
 		wg.Go(func() {
-			_, err := store.Ensure(sha, tarPath)
+			_, err := store.Ensure(context.Background(), sha, tarPath)
 			errs <- err
 		})
 	}
@@ -103,7 +103,7 @@ func TestMaterializeUsesHardlinks(t *testing.T) {
 		"sub/bar.txt": "world",
 	})
 	store := NewStore(filepath.Join(dir, "cache"))
-	src, err := store.Ensure(mustHash(t, tarPath), tarPath)
+	src, err := store.Ensure(context.Background(), mustHash(t, tarPath), tarPath)
 	if err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestEnsureRejectsTarballNotMatchingSHA(t *testing.T) {
 	// tarPath's actual hash.
 	const wrongSHA = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 
-	if _, err := store.Ensure(wrongSHA, tarPath); !errors.Is(err, helpers.ErrSHA256Mismatch) {
+	if _, err := store.Ensure(context.Background(), wrongSHA, tarPath); !errors.Is(err, helpers.ErrSHA256Mismatch) {
 		t.Fatalf("expected errors.Is ErrSHA256Mismatch, got %v", err)
 	}
 
@@ -173,7 +173,7 @@ func TestEnsureAcceptsMatchingSHA(t *testing.T) {
 	store := NewStore(filepath.Join(dir, "cache"))
 
 	sha := mustHash(t, tarPath)
-	got, err := store.Ensure(sha, tarPath)
+	got, err := store.Ensure(context.Background(), sha, tarPath)
 	if err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
@@ -434,7 +434,7 @@ func ingestAndPromote(t *testing.T, store *Store, tarPath, sha string) string {
 		t.Fatalf("open: %v", err)
 	}
 	defer func() { _ = f.Close() }()
-	tmp, err := store.IngestReader(f)
+	tmp, err := store.IngestReader(context.Background(), f)
 	if err != nil {
 		t.Fatalf("IngestReader: %v", err)
 	}
@@ -502,7 +502,7 @@ func seedCASTree(t *testing.T) (*Store, string) {
 		"sub/bar.txt": "world",
 	})
 	store := NewStore(filepath.Join(dir, "cache"))
-	got, err := store.Ensure(mustHash(t, tarPath), tarPath)
+	got, err := store.Ensure(context.Background(), mustHash(t, tarPath), tarPath)
 	if err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
@@ -805,7 +805,7 @@ func TestLegacyReadyMarkerForcesRebuild(t *testing.T) {
 		t.Fatalf("write legacy marker: %v", err)
 	}
 
-	got, err := store.Ensure(sha, tarPath)
+	got, err := store.Ensure(context.Background(), sha, tarPath)
 	if err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
@@ -850,7 +850,7 @@ func TestStoreReady(t *testing.T) {
 		t.Error("expected Ready to report false for an empty sha")
 	}
 
-	if _, err := store.Ensure(sha, tarPath); err != nil {
+	if _, err := store.Ensure(context.Background(), sha, tarPath); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
 	if !store.Ready(sha) {
@@ -907,7 +907,7 @@ func TestEnsureAndPromoteRejectTraversalSHA(t *testing.T) {
 	store := NewStore(cacheDir)
 	const traversalSHA = "../../../../../../etc/ssh"
 
-	if _, err := store.Ensure(traversalSHA, tarPath); !errors.Is(err, ErrSHAUnsafe) {
+	if _, err := store.Ensure(context.Background(), traversalSHA, tarPath); !errors.Is(err, ErrSHAUnsafe) {
 		t.Errorf("Ensure(%q, ...) error = %v, want ErrSHAUnsafe", traversalSHA, err)
 	}
 	// The rejection happens before Ensure opens a containment root at all, so
@@ -991,7 +991,7 @@ func TestTarballShippingReadyMarkerPromotes(t *testing.T) {
 		t.Fatalf("open tarball: %v", err)
 	}
 	defer func() { _ = f.Close() }()
-	tmp, err := store.IngestReader(f)
+	tmp, err := store.IngestReader(context.Background(), f)
 	if err != nil {
 		t.Fatalf("IngestReader: %v", err)
 	}
@@ -1256,7 +1256,7 @@ func escapingStoreCases() []escapingStoreCase {
 				t.Helper()
 				tarPath := filepath.Join(t.TempDir(), "src.tar.gz")
 				writeTarball(t, tarPath, map[string]string{"foo.txt": helloFileContent})
-				_, err := s.Ensure(mustHash(t, tarPath), tarPath)
+				_, err := s.Ensure(context.Background(), mustHash(t, tarPath), tarPath)
 				return err
 			},
 		},
@@ -1272,7 +1272,7 @@ func escapingStoreCases() []escapingStoreCase {
 					t.Fatalf("open tarball: %v", err)
 				}
 				defer func() { _ = f.Close() }()
-				_, err = s.IngestReader(f)
+				_, err = s.IngestReader(context.Background(), f)
 				return err
 			},
 		},
@@ -1292,7 +1292,7 @@ func TestStoreDirUnusableNamesWhatIsWrong(t *testing.T) {
 		store, _ := escapingStoreFixture(t)
 		tarPath := filepath.Join(t.TempDir(), "src.tar.gz")
 		writeTarball(t, tarPath, map[string]string{"foo.txt": helloFileContent})
-		if _, err := store.Ensure(mustHash(t, tarPath), tarPath); !errors.Is(err, ErrStoreDirUnusable) {
+		if _, err := store.Ensure(context.Background(), mustHash(t, tarPath), tarPath); !errors.Is(err, ErrStoreDirUnusable) {
 			t.Errorf("Ensure error = %v, want ErrStoreDirUnusable", err)
 		}
 	})
@@ -1310,7 +1310,7 @@ func TestStoreDirUnusableNamesWhatIsWrong(t *testing.T) {
 		tarPath := filepath.Join(dir, "src.tar.gz")
 		writeTarball(t, tarPath, map[string]string{"foo.txt": helloFileContent})
 		store := NewStore(cacheDir)
-		if _, err := store.Ensure(mustHash(t, tarPath), tarPath); !errors.Is(err, ErrStoreDirUnusable) {
+		if _, err := store.Ensure(context.Background(), mustHash(t, tarPath), tarPath); !errors.Is(err, ErrStoreDirUnusable) {
 			t.Errorf("Ensure error = %v, want ErrStoreDirUnusable", err)
 		}
 	})

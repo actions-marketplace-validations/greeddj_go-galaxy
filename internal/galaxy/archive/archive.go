@@ -2,6 +2,7 @@ package archive
 
 import (
 	"archive/tar"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -16,7 +17,14 @@ import (
 )
 
 // ExtractTarGz extracts a tar.gz archive into dstDir with safety checks.
-func ExtractTarGz(tarGzFile, dstDir string) error {
+//
+// ctx bounds the unpack: it is checked on every read taken out of the
+// decompressor, so a canceled or expired context stops the extraction at the
+// next read rather than at the end of the archive. The error it produces
+// keeps context.Canceled reachable through errors.Is, deliberately - unlike
+// the sentinels that describe why work ended on their own, this one really
+// does mean the caller stopped it, and the run must exit as interrupted.
+func ExtractTarGz(ctx context.Context, tarGzFile, dstDir string) error {
 	info, err := os.Stat(tarGzFile)
 	if err != nil {
 		return fmt.Errorf("failed to stat file %s: %w", tarGzFile, err)
@@ -34,13 +42,13 @@ func ExtractTarGz(tarGzFile, dstDir string) error {
 		_ = file.Close()
 	}()
 
-	return ExtractTarGzStream(file, dstDir)
+	return ExtractTarGzStream(ctx, file, dstDir)
 }
 
 // ExtractTarGzStream extracts a tar.gz stream into dstDir with safety checks.
-// It does not close r.
-func ExtractTarGzStream(r io.Reader, dstDir string) error {
-	return extractTarGzStream(r, dstDir, helpers.ArchiveMaxDecompressedSize)
+// It does not close r. ctx bounds the unpack, as described on ExtractTarGz.
+func ExtractTarGzStream(ctx context.Context, r io.Reader, dstDir string) error {
+	return extractTarGzStream(ctx, r, dstDir, helpers.ArchiveMaxDecompressedSize)
 }
 
 // extractTarGzStream is ExtractTarGzStream with the decompressed-stream cap
@@ -53,7 +61,7 @@ func ExtractTarGzStream(r io.Reader, dstDir string) error {
 // is deliberately applied here rather than inside extractTarEntries: it has to
 // count what leaves the gzip reader, which includes every byte archive/tar
 // consumes without ever handing a header back (see chargeEntrySize).
-func extractTarGzStream(r io.Reader, dstDir string, maxDecompressed int64) error {
+func extractTarGzStream(ctx context.Context, r io.Reader, dstDir string, maxDecompressed int64) error {
 	uncompressedStream, err := pgzip.NewReader(r)
 	if err != nil {
 		return fmt.Errorf("failed to create gzip reader: %w", err)
@@ -62,9 +70,40 @@ func extractTarGzStream(r io.Reader, dstDir string, maxDecompressed int64) error
 		_ = uncompressedStream.Close()
 	}()
 
+	// Cancellation is enforced by a reader rather than by a check inside
+	// extractTarEntries, and that is the whole reason the entry loop's
+	// signature is untouched. A reader also gives finer granularity than a
+	// per-entry check could: archive/tar pulls every 512-byte header block and
+	// every byte of an entry body through this reader, so a single enormous
+	// entry is interruptible mid-body, which a check between entries would not
+	// be. It wraps the decompressed side, not the compressed source, because
+	// that is where the work being stopped actually happens - pgzip reads
+	// ahead on its own goroutines regardless.
 	limited := &decompressedLimitReader{r: uncompressedStream, max: maxDecompressed}
-	tarReader := tar.NewReader(limited)
+	tarReader := tar.NewReader(&contextReader{ctx: ctx, r: limited})
 	return extractTarEntries(tarReader, dstDir, helpers.ArchiveMaxEntryCount)
+}
+
+// contextReader fails a read once ctx is done, so an unpack stops at the next
+// read instead of running to the end of the archive. It reports ctx.Err()
+// unwrapped, keeping context.Canceled and context.DeadlineExceeded reachable
+// through errors.Is for cmd/go-galaxy/exitcode to classify.
+//
+// It holds the context in a field rather than taking one per call, which is
+// the only shape io.Reader allows: Read's signature is fixed, so a reader
+// that must observe cancellation has nowhere else to keep it.
+//
+//nolint:containedctx // io.Reader cannot take a context per call
+type contextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c *contextReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
 }
 
 // decompressedLimitReader counts the bytes read out of an archive's

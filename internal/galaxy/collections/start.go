@@ -243,7 +243,7 @@ func warmOne(ctx context.Context, deps installDeps, col collection) error {
 	filename := fmt.Sprintf("%s-%s-%s.tar.gz", col.Namespace, col.Name, col.Version)
 	// warm has no prefetcher, so there is never a prefetched temp to hand off.
 	payload, err := prepareWithRecovery(ctx, deps, col, nil, downloadResult{}, filename, func(payload installPayload) error {
-		return warmVerifyAndEnsure(deps, col, payload)
+		return warmVerifyAndEnsure(ctx, deps, col, payload)
 	})
 	if err != nil {
 		return err
@@ -281,14 +281,14 @@ func recordWarmed(deps installDeps, col collection, artifactSHA string) {
 // extracted store for the artifact, mirroring the install path's verify+extract
 // so a corrupt, drifted, or poisoning cached tarball drives the same bounded
 // evict-and-refetch-once through prepareWithRecovery.
-func warmVerifyAndEnsure(deps installDeps, col collection, payload installPayload) error {
+func warmVerifyAndEnsure(ctx context.Context, deps installDeps, col collection, payload installPayload) error {
 	if err := verifyPinnedSHA(col, payload.artifactSHA); err != nil {
 		return err
 	}
 	if deps.extractStore == nil {
 		return nil
 	}
-	_, err := deps.extractStore.Ensure(payload.artifactSHA, payload.artifact.Path)
+	_, err := deps.extractStore.Ensure(ctx, payload.artifactSHA, payload.artifact.Path)
 	return err
 }
 

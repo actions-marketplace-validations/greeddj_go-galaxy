@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -140,7 +141,7 @@ func TestExtractMemoizedDeepTreeExtractsCorrectly(t *testing.T) {
 	archiveBytes := buildTestArchive(t, entries)
 
 	dst := t.TempDir()
-	if err := ExtractTarGzStream(bytes.NewReader(archiveBytes), dst); err != nil {
+	if err := ExtractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), dst); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -177,7 +178,7 @@ func TestExtractSymlinkParentRejectedDespiteMemoizedAncestors(t *testing.T) {
 	archiveBytes := buildTestArchive(t, entries)
 
 	dst := t.TempDir()
-	err := ExtractTarGzStream(bytes.NewReader(archiveBytes), dst)
+	err := ExtractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), dst)
 	if err == nil {
 		t.Fatalf("expected extraction to fail")
 	}
@@ -218,7 +219,7 @@ func TestExtractSymlinkCannotReplaceMemoizedDir(t *testing.T) {
 	archiveBytes := buildTestArchive(t, entries)
 
 	dst := t.TempDir()
-	err := ExtractTarGzStream(bytes.NewReader(archiveBytes), dst)
+	err := ExtractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), dst)
 	if err == nil {
 		t.Fatalf("expected extraction to fail")
 	}
@@ -248,7 +249,7 @@ func TestExtractHardlinkWithMemoizedParentChain(t *testing.T) {
 	archiveBytes := buildTestArchive(t, entries)
 
 	dst := t.TempDir()
-	if err := ExtractTarGzStream(bytes.NewReader(archiveBytes), dst); err != nil {
+	if err := ExtractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), dst); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -455,7 +456,7 @@ func TestExtractLegitMultiFileArchiveStillExtracts(t *testing.T) {
 	archiveBytes := buildEntriesArchive(t, files, tar.TypeReg)
 
 	dst := t.TempDir()
-	if err := ExtractTarGzStream(bytes.NewReader(archiveBytes), dst); err != nil {
+	if err := ExtractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), dst); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -486,7 +487,7 @@ func TestExtractOverlongPathComponentFailsClosed(t *testing.T) {
 	archiveBytes := buildTestArchive(t, entries)
 
 	dst := t.TempDir()
-	err := ExtractTarGzStream(bytes.NewReader(archiveBytes), dst)
+	err := ExtractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), dst)
 	if err == nil {
 		t.Fatalf("expected extraction to fail")
 	}
@@ -534,7 +535,7 @@ func TestExtractStripsWriteBits(t *testing.T) {
 	archiveBytes := buildTestArchive(t, entries)
 
 	dst := t.TempDir()
-	if err := ExtractTarGzStream(bytes.NewReader(archiveBytes), dst); err != nil {
+	if err := ExtractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), dst); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -587,7 +588,7 @@ func TestExtractRejectsDuplicateEntries(t *testing.T) {
 	archiveBytes := buildTestArchive(t, entries)
 
 	dst := t.TempDir()
-	err := ExtractTarGzStream(bytes.NewReader(archiveBytes), dst)
+	err := ExtractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), dst)
 	if !errors.Is(err, helpers.ErrArchiveDuplicateEntry) {
 		t.Fatalf("expected ErrArchiveDuplicateEntry, got %v", err)
 	}
@@ -611,7 +612,7 @@ func TestExtractAcceptsDotSlashPrefixedNames(t *testing.T) {
 	archiveBytes := buildTestArchive(t, entries)
 
 	dst := t.TempDir()
-	if err := ExtractTarGzStream(bytes.NewReader(archiveBytes), dst); err != nil {
+	if err := ExtractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), dst); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -687,14 +688,14 @@ func TestExtractUnknownTypeflagEntryIsSizeCapped(t *testing.T) {
 
 	archiveBytes := buildHeaderOnlyArchive(t, '9', "bomb", helpers.ArchiveMaxEntrySize+1)
 
-	err := ExtractTarGzStream(bytes.NewReader(archiveBytes), t.TempDir())
+	err := ExtractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), t.TempDir())
 	// Killing mutation: delete the chargeEntrySize call from
 	// extractTarEntries, together with the `declared` half of that function's
 	// `var declared, entries int64` - the call is its only use, so deleting the
 	// call by itself does not compile ("declared and not used: declared").
 	// This assertion then fails with
 	//
-	//	archive_test.go:703: expected archive entry is too large, got error reading tar archive: unexpected EOF
+	//	archive_test.go:704: expected archive entry is too large, got error reading tar archive: unexpected EOF
 	//
 	// which is also what proves the charge runs BEFORE the body is read:
 	// uncharged, the entry is skipped and the first failure the extractor can
@@ -730,7 +731,7 @@ func TestExtractUnknownTypeflagUnderCapIsSkipped(t *testing.T) {
 	archiveBytes := buildTestArchive(t, entries)
 
 	dst := t.TempDir()
-	if err := ExtractTarGzStream(bytes.NewReader(archiveBytes), dst); err != nil {
+	if err := ExtractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), dst); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -756,13 +757,13 @@ func TestExtractDotNamedEntryIsSizeCapped(t *testing.T) {
 
 	archiveBytes := buildHeaderOnlyArchive(t, tar.TypeReg, ".", helpers.ArchiveMaxEntrySize+1)
 
-	err := ExtractTarGzStream(bytes.NewReader(archiveBytes), t.TempDir())
+	err := ExtractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), t.TempDir())
 	// Killing mutation: the same one the default-arm test above describes -
 	// delete the chargeEntrySize call from extractTarEntries and the `declared`
 	// half of its `var declared, entries int64`, without which the mutant does
 	// not compile. This assertion then fails with
 	//
-	//	archive_test.go:771: expected archive entry is too large, got error reading tar archive: unexpected EOF
+	//	archive_test.go:772: expected archive entry is too large, got error reading tar archive: unexpected EOF
 	//
 	// the same output the default-arm test above reports, for the same reason:
 	// the sanitize-to-empty return hands the entry back to tar.Reader.Next
@@ -789,7 +790,7 @@ func TestExtractDotEntryUnderCapIsSkipped(t *testing.T) {
 	archiveBytes := buildTestArchive(t, entries)
 
 	dst := t.TempDir()
-	if err := ExtractTarGzStream(bytes.NewReader(archiveBytes), dst); err != nil {
+	if err := ExtractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), dst); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -816,13 +817,13 @@ func TestExtractHeaderOnlyEntryWithDeclaredSizeIsCharged(t *testing.T) {
 
 	archiveBytes := buildHeaderOnlyArchive(t, tar.TypeDir, "d/", helpers.ArchiveMaxEntrySize+1)
 
-	err := ExtractTarGzStream(bytes.NewReader(archiveBytes), t.TempDir())
+	err := ExtractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), t.TempDir())
 	// Killing mutation: add `if header.Typeflag != tar.TypeReg { return nil }`
 	// at the top of chargeEntrySize - the narrowest way to put the budget back
 	// where it was, charging only the typeflag that writes bytes. This
 	// assertion then fails with
 	//
-	//	archive_test.go:832: expected archive entry is too large, got <nil>
+	//	archive_test.go:833: expected archive entry is too large, got <nil>
 	//
 	// a bare nil rather than a read failure, because a header-only entry
 	// carries no body to trip over afterwards. That is what this fixture adds
@@ -844,7 +845,7 @@ func TestExtractHeaderOnlyEntryUnderCapIsAccepted(t *testing.T) {
 	archiveBytes := buildHeaderOnlyArchive(t, tar.TypeDir, "d/", 4096)
 
 	dst := t.TempDir()
-	if err := ExtractTarGzStream(bytes.NewReader(archiveBytes), dst); err != nil {
+	if err := ExtractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), dst); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -963,14 +964,14 @@ func TestExtractSparseEntryTripsDecompressedCap(t *testing.T) {
 	const refuseCap = int64(64 << 10)
 	archiveBytes := buildOldGNUSparseArchive(t, "sparse.bin", sparseFixturePhysical, sparseFixtureLogical)
 
-	err := extractTarGzStream(bytes.NewReader(archiveBytes), t.TempDir(), refuseCap)
+	err := extractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), t.TempDir(), refuseCap)
 	// Killing mutation: unwrap the decompressor in extractTarGzStream - delete
 	// the `limited := &decompressedLimitReader{...}` line and hand
 	// uncompressedStream straight to tar.NewReader (deleting only the wrap
 	// leaves `limited` unused, which does not compile). This assertion then
 	// fails with
 	//
-	//	archive_test.go:978: expected archive decompressed stream exceeds maximum size, got <nil>
+	//	archive_test.go:979: expected archive decompressed stream exceeds maximum size, got <nil>
 	//
 	// a bare nil, not a smaller refusal: with the stream uncounted there is no
 	// rule left that this entry breaks.
@@ -994,7 +995,7 @@ func TestExtractSparseEntryUnderDecompressedCapIsAccepted(t *testing.T) {
 	archiveBytes := buildOldGNUSparseArchive(t, "sparse.bin", sparseFixturePhysical, sparseFixtureLogical)
 
 	dst := t.TempDir()
-	if err := extractTarGzStream(bytes.NewReader(archiveBytes), dst, acceptCap); err != nil {
+	if err := extractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), dst, acceptCap); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -1076,11 +1077,11 @@ func TestExtractNegativeDeclaredSizeFailsClosed(t *testing.T) {
 
 	archiveBytes := buildGNUHeaderOnlyArchive(t, tar.TypeDir, "d/", negativeDeclaredSize)
 
-	err := ExtractTarGzStream(bytes.NewReader(archiveBytes), t.TempDir())
+	err := ExtractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), t.TempDir())
 	// Killing mutation: delete chargeEntrySize's `if header.Size < 0` branch.
 	// This assertion then fails with
 	//
-	//	archive_test.go:1090: expected archive entry has negative size, got <nil>
+	//	archive_test.go:1091: expected archive entry has negative size, got <nil>
 	//
 	// a bare nil rather than one of the two size sentinels below it in that
 	// function: a negative size is under the per-entry cap and drags the
@@ -1102,7 +1103,7 @@ func TestExtractGNUFormatHeaderOnlyEntryIsAccepted(t *testing.T) {
 	archiveBytes := buildGNUHeaderOnlyArchive(t, tar.TypeDir, "d/", 4096)
 
 	dst := t.TempDir()
-	if err := ExtractTarGzStream(bytes.NewReader(archiveBytes), dst); err != nil {
+	if err := ExtractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), dst); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -1174,12 +1175,12 @@ func TestExtractCumulativeDeclaredSizeOverCapFailsClosed(t *testing.T) {
 	archiveBytes := buildDeclaredSizeDirArchive(t, atCapDirCount+1, helpers.ArchiveMaxEntrySize)
 
 	dst := t.TempDir()
-	err := ExtractTarGzStream(bytes.NewReader(archiveBytes), dst)
+	err := ExtractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), dst)
 	// Killing mutation: delete chargeEntrySize's
 	// `if *declared+header.Size > helpers.ArchiveMaxTotalSize` branch, keeping
 	// the `*declared += header.Size` below it. This assertion then fails with
 	//
-	//	archive_test.go:1188: expected archive exceeds maximum total size, got <nil>
+	//	archive_test.go:1189: expected archive exceeds maximum total size, got <nil>
 	//
 	// a bare nil: with the running total no longer consulted, every one of
 	// these entries passes the per-entry cap on its own and the archive
@@ -1216,12 +1217,12 @@ func TestExtractCumulativeDeclaredSizeAtCapIsAccepted(t *testing.T) {
 	// Killing mutation: change chargeEntrySize's per-archive comparison from
 	// `>` to `>=`. This assertion then fails with
 	//
-	//	archive_test.go:1225: unexpected error: archive exceeds maximum total size: 4294967296 bytes
+	//	archive_test.go:1226: unexpected error: archive exceeds maximum total size: 4294967296 bytes
 	//
 	// on the entry that brings the total to exactly the cap. This control pins
 	// that boundary directly: the refusal test above reports the same sentinel
 	// either way, and catches the shift only incidentally, in its placement loop.
-	if err := ExtractTarGzStream(bytes.NewReader(archiveBytes), dst); err != nil {
+	if err := ExtractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), dst); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -1316,14 +1317,14 @@ func TestExtractMetaHeaderChainTripsDecompressedCap(t *testing.T) {
 	)
 	archiveBytes := buildMetaHeaderChainArchive(t, headers)
 
-	err := extractTarGzStream(bytes.NewReader(archiveBytes), t.TempDir(), refuseCap)
+	err := extractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), t.TempDir(), refuseCap)
 	// Killing mutation: strip decompressedLimitReader.Read back to a plain
 	// pass-through - delete its sticky-error block and its clamp block, and
 	// return the crossing read's bytes alongside the refusal (`return n,
 	// fmt.Errorf(...)` instead of storing the error and returning zero). This
 	// assertion then fails with
 	//
-	//	archive_test.go:1332: expected archive decompressed stream exceeds maximum size, got <nil>
+	//	archive_test.go:1333: expected archive decompressed stream exceeds maximum size, got <nil>
 	//
 	// a bare nil: every one of those refusals is raised into an io.ReadFull
 	// that had its 512 bytes and threw the error away, and the extractor reads
@@ -1350,7 +1351,7 @@ func TestExtractMetaHeaderChainUnderDecompressedCapIsAccepted(t *testing.T) {
 	archiveBytes := buildMetaHeaderChainArchive(t, headers)
 
 	dst := t.TempDir()
-	if err := extractTarGzStream(bytes.NewReader(archiveBytes), dst, acceptCap); err != nil {
+	if err := extractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), dst, acceptCap); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -1379,13 +1380,13 @@ func TestExtractHeaderOnlyEntriesTripDecompressedCap(t *testing.T) {
 	)
 	archiveBytes := buildDeclaredSizeDirArchive(t, dirs, 0)
 
-	err := extractTarGzStream(bytes.NewReader(archiveBytes), t.TempDir(), refuseCap)
+	err := extractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), t.TempDir(), refuseCap)
 	// Killing mutation: the same one the meta-header test above describes -
 	// strip decompressedLimitReader.Read back to a plain pass-through that
 	// returns the crossing read's bytes alongside the refusal. This assertion
 	// then fails with
 	//
-	//	archive_test.go:1394: expected archive decompressed stream exceeds maximum size, got <nil>
+	//	archive_test.go:1395: expected archive decompressed stream exceeds maximum size, got <nil>
 	//
 	// for the identical reason, on a shape every other rule in the extractor
 	// does see: the entry counter counts all twenty of these headers and the
@@ -1410,7 +1411,7 @@ func TestExtractHeaderOnlyEntriesUnderDecompressedCapAreAccepted(t *testing.T) {
 	archiveBytes := buildDeclaredSizeDirArchive(t, dirs, 0)
 
 	dst := t.TempDir()
-	if err := extractTarGzStream(bytes.NewReader(archiveBytes), dst, acceptCap); err != nil {
+	if err := extractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), dst, acceptCap); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -1460,7 +1461,7 @@ func TestDecompressedLimitReaderRefusesThroughReadFull(t *testing.T) {
 	// refusal - `return n, r.err` in place of `return 0, r.err` - keeping the
 	// sticky error and the clamp. This assertion then fails with
 	//
-	//	archive_test.go:1472: expected archive decompressed stream exceeds maximum size, got <nil>
+	//	archive_test.go:1473: expected archive decompressed stream exceeds maximum size, got <nil>
 	//
 	// a bare nil: io.ReadFull got its 512 bytes, so io.ReadAtLeast nils the
 	// error out. Measured, both archive-level tests above pass under that same
@@ -1494,7 +1495,7 @@ func TestDecompressedLimitReaderRefusesThroughCopyN(t *testing.T) {
 	// `return n, r.err` in place of `return 0, r.err`. This assertion then
 	// fails with
 	//
-	//	archive_test.go:1502: expected archive decompressed stream exceeds maximum size, got <nil>
+	//	archive_test.go:1503: expected archive decompressed stream exceeds maximum size, got <nil>
 	//
 	// a bare nil: io.CopyN was handed all 11 bytes it asked for, so it reports
 	// success and drops the error.
@@ -1540,7 +1541,7 @@ func TestDecompressedLimitReaderRefusalIsSticky(t *testing.T) {
 	// Killing mutation: delete Read's `if r.err != nil` block. This assertion
 	// then fails with
 	//
-	//	archive_test.go:1549: underlying reader advanced by 5 bytes after the refusal
+	//	archive_test.go:1550: underlying reader advanced by 5 bytes after the refusal
 	//
 	// one byte per post-refusal read, which is the clamp doing its job on a
 	// cumulative count that is already over: the refusal is re-raised every
@@ -1574,7 +1575,7 @@ func TestDecompressedLimitReaderClampsOverrunToOneByte(t *testing.T) {
 	// compile ("declared and not used: remaining"). This assertion then fails
 	// with
 	//
-	//	archive_test.go:1584: read 31744 bytes past a 1024-byte ceiling, want exactly one
+	//	archive_test.go:1585: read 31744 bytes past a 1024-byte ceiling, want exactly one
 	//
 	// the whole 32 KiB request landing past a 1 KiB ceiling. The refusal above
 	// still fires - which is why it is not the assertion that catches this -
@@ -1775,5 +1776,130 @@ func TestProbeTarGz(t *testing.T) {
 
 			assertProbeOutcome(t, tt, path, ProbeTarGz(path))
 		})
+	}
+}
+
+// cancelAfterReads cancels ctx once the extraction has taken n reads out of
+// it, so a test can stop an unpack partway through deterministically instead
+// of racing a timer against it.
+type cancelAfterReads struct {
+	r      io.Reader
+	cancel context.CancelFunc
+	after  int
+	reads  int
+}
+
+// Read caps each call at a small chunk so the number of reads is a property
+// of the archive's size rather than of the caller's buffer, which is what
+// makes "cancel on read N" land in the middle of the unpack deterministically.
+func (c *cancelAfterReads) Read(p []byte) (int, error) {
+	c.reads++
+	if c.reads == c.after {
+		c.cancel()
+	}
+	if len(p) > cancelReadChunk {
+		p = p[:cancelReadChunk]
+	}
+	return c.r.Read(p)
+}
+
+// cancelReadChunk is the per-read cap cancelAfterReads applies.
+const cancelReadChunk = 512
+
+// incompressibleBytes fills n bytes from a fixed-seed xorshift, so the
+// archive below does not collapse to a few hundred compressed bytes the way a
+// repeated pattern would - the test needs the decompressor to make many reads,
+// not one. A hand-rolled generator rather than math/rand: it is three lines,
+// needs no seeding ceremony, and does not trip the "no weak randomness" lint
+// on a value that is not random for any security purpose.
+func incompressibleBytes(n int) []byte {
+	out := make([]byte, n)
+	state := uint32(0x9E3779B9)
+	for i := range out {
+		state ^= state << 13
+		state ^= state >> 17
+		state ^= state << 5
+		out[i] = byte(state & 0xff)
+	}
+	return out
+}
+
+// multiEntryArchive builds an archive with enough separate entries that an
+// extraction stopped partway leaves some of them unwritten.
+func multiEntryArchive(t *testing.T) []byte {
+	t.Helper()
+	entries := make([]testArchiveEntry, 0, 32)
+	for i := range 32 {
+		entries = append(entries, testArchiveEntry{
+			name:    fmt.Sprintf("file-%02d.txt", i),
+			content: incompressibleBytes(4096),
+		})
+	}
+	return buildTestArchive(t, entries)
+}
+
+// TestExtractTarGzStreamHonorsCancellation proves an unpack stops when the
+// caller cancels, rather than running to the end of the archive, and that the
+// error keeps context.Canceled reachable - which is what makes the run exit as
+// interrupted rather than as a failed install. The partial tree it leaves
+// behind is never mistaken for a finished one: on the install side an extract
+// marker is written only after a successful unpack, and in the extracted store
+// the temp tree is removed on this very error before anything is promoted.
+//
+// TestExtractTarGzStreamExtractsFullyWithoutCancellation is the positive
+// control on the same archive: without it, "fewer files than entries" could
+// just as well mean the fixture never extracted anything.
+//
+// Killing mutation, run: handing the tar reader the limit reader directly
+// instead of wrapping it in a contextReader fails this test with
+// `ExtractTarGzStream under a canceled context = <nil>, want errors.Is
+// context.Canceled` - the unpack runs to completion and reports success.
+func TestExtractTarGzStreamHonorsCancellation(t *testing.T) {
+	t.Parallel()
+
+	archiveBytes := multiEntryArchive(t)
+	dst := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Each read is capped at 512 bytes and the archive is tens of kilobytes,
+	// so canceling on the eighth lands well inside it rather than at either
+	// end.
+	src := &cancelAfterReads{r: bytes.NewReader(archiveBytes), cancel: cancel, after: 8}
+
+	err := ExtractTarGzStream(ctx, src, dst)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ExtractTarGzStream under a canceled context = %v, want errors.Is context.Canceled", err)
+	}
+	written, readErr := os.ReadDir(dst)
+	if readErr != nil {
+		t.Fatalf("os.ReadDir(%q): %v", dst, readErr)
+	}
+	if len(written) == 0 {
+		t.Fatalf("extraction wrote nothing, so it stopped before starting and the assertion below proves nothing")
+	}
+	if len(written) >= 32 {
+		t.Fatalf("extraction wrote %d entries despite cancellation, want fewer than the archive's 32", len(written))
+	}
+}
+
+// TestExtractTarGzStreamExtractsFullyWithoutCancellation is the positive
+// control described on TestExtractTarGzStreamHonorsCancellation: the same
+// archive, extracted under a live context, must produce every entry.
+func TestExtractTarGzStreamExtractsFullyWithoutCancellation(t *testing.T) {
+	t.Parallel()
+
+	archiveBytes := multiEntryArchive(t)
+	dst := t.TempDir()
+
+	if err := ExtractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), dst); err != nil {
+		t.Fatalf("ExtractTarGzStream = %v, want nil", err)
+	}
+	written, err := os.ReadDir(dst)
+	if err != nil {
+		t.Fatalf("os.ReadDir(%q): %v", dst, err)
+	}
+	if len(written) != 32 {
+		t.Fatalf("extraction wrote %d entries, want all 32", len(written))
 	}
 }

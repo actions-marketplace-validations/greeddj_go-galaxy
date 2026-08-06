@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -101,7 +102,7 @@ func BenchmarkExtractTarGzStream(b *testing.B) {
 				}
 				b.StartTimer()
 
-				if err := ExtractTarGzStream(bytes.NewReader(archiveBytes), dst); err != nil {
+				if err := ExtractTarGzStream(context.Background(), bytes.NewReader(archiveBytes), dst); err != nil {
 					b.Fatalf("extraction failed: %v", err)
 				}
 

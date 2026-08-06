@@ -231,7 +231,7 @@ func TestArtifactChecksumAndExtract(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	if err := archive.ExtractTarGzStream(bytes.NewReader(body), dir); err != nil {
+	if err := archive.ExtractTarGzStream(context.Background(), bytes.NewReader(body), dir); err != nil {
 		t.Fatalf("ExtractTarGzStream: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "MANIFEST.json")); err != nil {
