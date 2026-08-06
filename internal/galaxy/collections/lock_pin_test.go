@@ -257,15 +257,16 @@ func TestInstallCollectionCacheHitPinIntactBytesSucceeds(t *testing.T) {
 	}
 }
 
-// buildMinimalTarGz builds a minimal but valid gzip+tar stream containing a
-// single small regular file, suitable for archive.ExtractTarGz.
-func buildMinimalTarGz(t *testing.T) []byte {
+// buildTarGzWithEntry builds a valid gzip+tar stream holding exactly one
+// regular file, named name and carrying body. The entry name is a parameter
+// rather than fixed because the two fixtures below differ only in it: one
+// needs an archive that extracts, the other one that extracts nowhere.
+func buildTarGzWithEntry(t *testing.T, name string, body []byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
-	body := []byte("# widgets\n")
-	header := &tar.Header{Typeflag: tar.TypeReg, Name: "README.md", Size: int64(len(body)), Mode: 0o644}
+	header := &tar.Header{Typeflag: tar.TypeReg, Name: name, Size: int64(len(body)), Mode: 0o644}
 	if err := tw.WriteHeader(header); err != nil {
 		t.Fatalf("write tar header: %v", err)
 	}
@@ -281,9 +282,31 @@ func buildMinimalTarGz(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
+// buildMinimalTarGz builds a minimal but valid gzip+tar stream containing a
+// single small regular file, suitable for archive.ExtractTarGz.
+func buildMinimalTarGz(t *testing.T) []byte {
+	t.Helper()
+	return buildTarGzWithEntry(t, "README.md", []byte("# widgets\n"))
+}
+
+// buildEscapingTarGz builds a well-formed gzip+tar stream whose single entry
+// names a path outside the destination, so it passes every check made on the
+// way into the artifact cache - it really is a gzip-compressed tar - and then
+// fails during extraction with helpers.ErrArchiveEntryEscapesDestination. It
+// is what a test needs to reach the extraction arm of the corruption-recovery
+// path now that shapeless bytes are refused before they get that far.
+func buildEscapingTarGz(t *testing.T) []byte {
+	t.Helper()
+	return buildTarGzWithEntry(t, "../escape.txt", []byte("outside\n"))
+}
+
 func TestInstallCollectionFreshDownloadPinMismatch(t *testing.T) {
 	t.Parallel()
-	content := []byte("bytes served fresh over http for download-path test")
+	// A real tar.gz, not arbitrary bytes: the subject here is the lockfile pin
+	// gate, and the download arm this fixture takes (no extracted store) now
+	// probes an artifact's shape before committing it, so shapeless bytes
+	// would be refused before the pin was ever compared.
+	content := buildMinimalTarGz(t)
 	correctSHA := sha256Hex(content)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

@@ -139,9 +139,15 @@ func TestInstallCollectionCacheHitExtractFailureRefetchesOnce(t *testing.T) {
 // evicted ones (so the download-time sha check still passes, and the failure
 // keeps landing in extraction), the retry loop still gives up after a single
 // refetch instead of looping forever.
+//
+// The corrupt bytes are a well-formed archive whose entry escapes the
+// destination, not arbitrary non-gzip bytes: the failure has to land in
+// extraction for this test to cover the arm it means to, and the download arm
+// this fixture takes now refuses shapeless bytes before committing them, which
+// would move the failure earlier and quietly retarget the test.
 func TestInstallCollectionCacheHitExtractFailureRefetchOnceThenFails(t *testing.T) {
 	t.Parallel()
-	corruptBytes := []byte("still not a gzip stream after the refetch")
+	corruptBytes := buildEscapingTarGz(t)
 	corruptSHA := sha256Hex(corruptBytes)
 
 	var hits atomic.Int32

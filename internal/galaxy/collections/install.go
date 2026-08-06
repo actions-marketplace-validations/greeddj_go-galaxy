@@ -903,6 +903,20 @@ func attemptDownloadToCache(
 		cleanupIfNeeded(cleanup)
 		return downloadResult{}, err
 	}
+	// The shape probe belongs to this arm alone. The extracted-store arm above
+	// already answers the same question by construction, since its ingest runs
+	// the body through gzip+tar; a second pass there would be pure cost. Here
+	// nothing has looked at the bytes at all: verifyDownloadSHA compares
+	// against whatever sha the server declared, and declines to compare when
+	// the server declared none, so without this an error page can reach a
+	// shared cache slot and every later consumer opens it before failing. The
+	// probe runs whether or not useCache is set, so the arm has one rule
+	// rather than two; its cost is one open and a gzip header read against a
+	// full artifact download.
+	if err := archive.ProbeTarGz(tmpPath); err != nil {
+		cleanupIfNeeded(cleanup)
+		return downloadResult{}, err
+	}
 	if useCache {
 		return commitDownload(ctx, deps.artifacts, key, tmpPath, sha, cleanup)
 	}

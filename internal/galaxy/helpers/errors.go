@@ -60,6 +60,13 @@ var (
 	// regression.
 	ErrArchiveDuplicateEntry = errors.New("archive contains a duplicate entry")
 
+	// ErrArtifactNotTarGz indicates downloaded bytes do not have the outer
+	// shape of a collection artifact: they are not gzip, or nothing that looks
+	// like a tar stream begins inside the gzip. It says nothing about the
+	// archive's completeness or its contents - only that what arrived is not
+	// the kind of thing worth putting into a shared cache slot.
+	ErrArtifactNotTarGz = errors.New("downloaded artifact is not a gzip-compressed tar archive")
+
 	// ErrHardlinkTargetIsEmpty indicates a hardlink target is empty.
 	ErrHardlinkTargetIsEmpty = errors.New("hardlink target is empty")
 	// ErrFileIsEmpty indicates a file is empty.

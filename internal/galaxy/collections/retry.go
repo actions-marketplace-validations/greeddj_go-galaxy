@@ -96,12 +96,17 @@ func isEarlyTerminalDownloadError(err error) bool {
 
 // isLateTerminalDownloadError reports whether err is a terminal artifact
 // content failure discovered only after a complete read: a sha256 mismatch,
-// or an oversized body. Both are terminal by the same reasoning, and both
-// are checked explicitly - rather than relying on the default-deny
-// fallthrough - so a future reordering of the classifier cannot accidentally
-// start retrying a corrupt, tampered, hostile, or broken oversized artifact.
+// an oversized body, or bytes that are not a gzip-compressed tar at all.
+// All three are terminal by the same reasoning - re-requesting the same URL
+// turns a corrupt artifact into a correct one no more than it turns an error
+// page into an archive - and all three are checked explicitly, rather than
+// relying on the default-deny fallthrough, so a future reordering of the
+// classifier cannot accidentally start retrying a corrupt, tampered,
+// hostile, oversized, or shapeless artifact.
 func isLateTerminalDownloadError(err error) bool {
-	return errors.Is(err, helpers.ErrSHA256Mismatch) || errors.Is(err, helpers.ErrResponseTooLarge)
+	return errors.Is(err, helpers.ErrSHA256Mismatch) ||
+		errors.Is(err, helpers.ErrResponseTooLarge) ||
+		errors.Is(err, helpers.ErrArtifactNotTarGz)
 }
 
 // isRetryableAttemptError reports whether err is a *downloadAttemptError

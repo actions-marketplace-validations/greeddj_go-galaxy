@@ -1666,3 +1666,114 @@ func TestDecompressedLimitReaderClampAcceptsEmptyInputs(t *testing.T) {
 		}
 	})
 }
+
+// probeTarGzCase is one table entry for TestProbeTarGz.
+type probeTarGzCase struct {
+	// build returns the bytes to write at the probed path, or nil to skip
+	// writing the file at all (the missing-path row).
+	build   func(t *testing.T) []byte
+	wantErr error
+	name    string
+	// wantAnyErr marks a row that must fail without carrying
+	// helpers.ErrArtifactNotTarGz: an unreadable path is an environment
+	// problem, not a statement about the artifact's shape.
+	wantAnyErr bool
+}
+
+// probeTarGzCases enumerates what ProbeTarGz accepts - a real archive, and an
+// archive that is well-formed but holds no entries - alongside the two ways
+// the outer shape can be wrong (not gzip at all, and gzip wrapping something
+// that is not a tar) and the one failure that is about the file rather than
+// its content.
+func probeTarGzCases() []probeTarGzCase {
+	notAnArchive := []byte("<html>404</html>")
+	return []probeTarGzCase{
+		{
+			name: "real archive accepted",
+			build: func(t *testing.T) []byte {
+				t.Helper()
+				return buildTestArchive(t, []testArchiveEntry{{name: "README.md", content: []byte("x")}})
+			},
+		},
+		{
+			// A tar with no entries is well-formed; Next reports io.EOF on the
+			// first call and the probe must read that as "empty", not "broken".
+			name:  "empty archive accepted",
+			build: func(t *testing.T) []byte { t.Helper(); return buildTestArchive(t, nil) },
+		},
+		{
+			name:    "non-gzip bytes refused",
+			build:   func(t *testing.T) []byte { t.Helper(); return notAnArchive },
+			wantErr: helpers.ErrArtifactNotTarGz,
+		},
+		{
+			name:    "gzip wrapping something that is not a tar refused",
+			build:   func(t *testing.T) []byte { t.Helper(); return gzipBytes(t, notAnArchive) },
+			wantErr: helpers.ErrArtifactNotTarGz,
+		},
+		{
+			name:       "missing path fails without claiming a shape",
+			build:      nil,
+			wantAnyErr: true,
+		},
+	}
+}
+
+// gzipBytes compresses data with gzip and returns the compressed bytes, so a
+// test can build a stream that is valid gzip and nothing else.
+func gzipBytes(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write(data); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// assertProbeOutcome checks err against what tt expects. Split out of the
+// test body so the loop stays within the cyclomatic-complexity budget the
+// three-way outcome would otherwise push it past.
+func assertProbeOutcome(t *testing.T, tt probeTarGzCase, path string, err error) {
+	t.Helper()
+	switch {
+	case tt.wantAnyErr:
+		if err == nil {
+			t.Fatalf("ProbeTarGz(%q) = nil, want a non-nil error", path)
+		}
+		if errors.Is(err, helpers.ErrArtifactNotTarGz) {
+			t.Fatalf("ProbeTarGz(%q) = %v, want an error that does not claim the artifact's shape", path, err)
+		}
+	case tt.wantErr != nil:
+		if !errors.Is(err, tt.wantErr) {
+			t.Fatalf("ProbeTarGz(%q) = %v, want errors.Is %v", path, err, tt.wantErr)
+		}
+	default:
+		if err != nil {
+			t.Fatalf("ProbeTarGz(%q) = %v, want nil", path, err)
+		}
+	}
+}
+
+// TestProbeTarGz drives ProbeTarGz over every row in probeTarGzCases against
+// real files on disk, since the probe takes a path rather than a reader.
+func TestProbeTarGz(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range probeTarGzCases() {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "artifact.tar.gz")
+			if tt.build != nil {
+				if err := os.WriteFile(path, tt.build(t), 0o600); err != nil {
+					t.Fatalf("write fixture: %v", err)
+				}
+			}
+
+			assertProbeOutcome(t, tt, path, ProbeTarGz(path))
+		})
+	}
+}

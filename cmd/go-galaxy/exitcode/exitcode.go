@@ -288,11 +288,25 @@ func isCacheBusyError(err error) bool {
 }
 
 // isInstallError reports whether err is an install-time sentinel (unsafe
-// archive/symlink content, an empty file, or a missing artifact cache).
-// Split into three sub-checks purely to stay under the cyclomatic-complexity
-// budget; the three together still cover the exact same sentinel set.
+// archive/symlink content, bytes that are not an archive at all, an empty
+// file, or a missing artifact cache). Split into sub-checks purely to stay
+// under the cyclomatic-complexity budget; together they still cover the exact
+// same sentinel set.
 func isInstallError(err error) bool {
-	return isFileIntegrityError(err) || isArchiveError(err) || isSymlinkError(err)
+	return isFileIntegrityError(err) || isArchiveError(err) ||
+		isSymlinkError(err) || isArtifactShapeError(err)
+}
+
+// isArtifactShapeError reports whether err says the bytes that arrived are
+// not a gzip-compressed tar at all. It is its own predicate rather than a
+// member of isArchiveError because it answers a different question from a
+// different producer: every sentinel there is raised by the extractor about
+// an archive's contents, while this one is raised by the download path's
+// shape probe about whether there is an archive to speak of. It classifies
+// alongside them, and never as a transport failure - the transfer succeeded,
+// and no retry turns an error page into an archive.
+func isArtifactShapeError(err error) bool {
+	return errors.Is(err, helpers.ErrArtifactNotTarGz)
 }
 
 // isFileIntegrityError reports whether err is an empty-file/missing-cache

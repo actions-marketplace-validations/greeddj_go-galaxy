@@ -310,6 +310,16 @@ var fromErrorCases = []exitCase{
 		wantCode: ExitInstall,
 	},
 	{
+		// Raised by the download path's shape probe, not by the extractor,
+		// before the bytes are ever committed to the artifact cache. It
+		// classifies with the install-time sentinels rather than as a transport
+		// failure, since the transfer itself succeeded and no retry turns the
+		// delivered bytes into an archive.
+		name:     "artifact is not a tar.gz",
+		err:      fmt.Errorf("%w: /tmp/a: gzip: invalid header", helpers.ErrArtifactNotTarGz),
+		wantCode: ExitInstall,
+	},
+	{
 		name:     "archive duplicate entry",
 		err:      fmt.Errorf("%w: ctx", helpers.ErrArchiveDuplicateEntry),
 		wantCode: ExitInstall,
@@ -494,7 +504,7 @@ func TestIntegritySentinelsMapToExitIntegrity(t *testing.T) {
 // moving the isIntegrityError case below isLockError/isInstallError in
 // FromError, which makes isInstallError claim the headline first; verified,
 // that mutation makes this test fail with:
-// "exitcode_test.go:503: FromError(integrity join) = 5, want 7".
+// "exitcode_test.go:513: FromError(integrity join) = 5, want 7".
 func TestIntegrityOutranksInstallFailureHeadline(t *testing.T) {
 	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
 
@@ -842,7 +852,7 @@ func TestStateObjectDeadlineClassification(t *testing.T) {
 // fromErrorTail above isInstallError's case in FromError makes this test
 // fail with:
 //
-//	exitcode_test.go:850: FromError(joined) = 8, want 5
+//	exitcode_test.go:860: FromError(joined) = 8, want 5
 func TestCacheBusyFoldedBehindInstallFailureClassifiesAsInstall(t *testing.T) {
 	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
 	joined := errors.Join(headline, helpers.ErrCacheBusy)

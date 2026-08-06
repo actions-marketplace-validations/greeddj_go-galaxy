@@ -463,6 +463,49 @@ func extractHardlink(dstDir, targetPath string, header *tar.Header, verifiedDirs
 	return nil
 }
 
+// ProbeTarGz reports whether the file at path carries the outer shape of a
+// collection artifact: gzip on the outside, with a tar stream beginning
+// inside it. It reads the gzip header and only as many compressed bytes as it
+// takes to produce the first decompressed tar header - one tar.Reader.Next
+// call - then stops. Nothing is unpacked and nothing is written to disk.
+//
+// An archive with no entries is accepted: Next reporting io.EOF describes a
+// well-formed empty tar, not a malformed one, and refusing it would make this
+// probe stricter than the extractor it stands in front of.
+//
+// What it deliberately does not check: that the archive is complete (no byte
+// past the first header is ever read), what the archive contains, or that its
+// bytes match any sha256. Those questions belong to the extractor and to the
+// sha verification that already run on the paths that install an artifact.
+// This is a shape check on the way into a shared cache slot, so a later
+// consumer of that slot does not open it only to find an error page inside.
+// It uses the same decompressor the extractor does, so it accepts exactly
+// what the extractor would accept rather than a second, subtly different
+// notion of "gzip".
+func ProbeTarGz(path string) error {
+	//nolint:gosec // path is an artifact temp file this process just wrote.
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("failed to open artifact for a shape probe: %w", err)
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+
+	gz, err := pgzip.NewReader(file)
+	if err != nil {
+		return fmt.Errorf("%w: %s: %w", helpers.ErrArtifactNotTarGz, path, err)
+	}
+	defer func() {
+		_ = gz.Close()
+	}()
+
+	if _, err := tar.NewReader(gz).Next(); err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("%w: %s: %w", helpers.ErrArtifactNotTarGz, path, err)
+	}
+	return nil
+}
+
 // FileHashSHA256 calculates the SHA256 hash of a file on disk.
 func FileHashSHA256(path string) (string, error) {
 	//nolint:gosec // path is caller-provided and expected for hashing.
