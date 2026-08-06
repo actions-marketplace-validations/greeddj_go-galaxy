@@ -208,6 +208,20 @@ type lockAttempt struct {
 // a non-nil error means the step itself failed rather than merely losing the
 // race. holderCancel is carried through to whichever branch ends up starting
 // the heartbeat and is never called here.
+//
+// Both of its own error arms abandon the object their create-if-absent PUT may
+// have written, under the identical rule reclaimIfExpired applies to its swap:
+// any error returned after that PUT was issued does a best-effort,
+// token-guarded release first, so a lock object this run never went on to hold
+// is released on the way out rather than blocking every other acquirer for a
+// full TTL. The rule is the same on both paths because the hazard is: a create
+// and a swap alike can land while the response saying so is lost.
+//
+// The 412 arm deliberately abandons nothing and must not be changed to: a
+// precondition failure proves the object was already there and is somebody
+// else's, so there is nothing of ours to release - and releaseLock's own token
+// guard would decline the delete anyway, making the call a round trip that
+// changes nothing.
 func (b *Backend) tryAcquireOnce(
 	opCtx context.Context, key, token string, holderCancel context.CancelCauseFunc,
 ) (lockAttempt, error) {
@@ -217,9 +231,37 @@ func (b *Backend) tryAcquireOnce(
 		// claim itself decides whether this counts as an observation of
 		// another acquirer (a foreign token raced in ahead of us) or a
 		// successful claim; either way it is this step's whole answer.
-		return b.claim(opCtx, key, token, holderCancel)
+		attempt, err := b.claim(opCtx, key, token, holderCancel)
+		if err != nil {
+			//nolint:contextcheck // abandonLockObject builds its own fresh context instead of
+			// taking opCtx, and must: opCtx dying is one of the ways the claim above fails, so a
+			// cleanup running on opCtx would fail for the very reason it was needed.
+			b.abandonLockObject(key, token)
+		}
+		return attempt, err
 	}
 	if !errors.Is(putErr, errS3PreconditionFailed) {
+		// A create-if-absent PUT that failed without answering 412 may still
+		// have landed, the same ambiguity putObject records for every
+		// conditional write and never retries through.
+		//
+		// This arm also covers a PUT answered 404, which on a write carrying no
+		// If-Match names the bucket rather than the object: nothing was created
+		// there, so the abandon is one HEAD that finds nothing. That cost is
+		// accepted rather than special-cased, because the rule this arm follows
+		// is a predicate - an error taken after the PUT was issued - and
+		// carving out statuses would turn it into a list nobody keeps current.
+		//
+		// DOCUMENTED-UNCOVERED: no test reaches this call, for the same reason
+		// its counterpart in reclaimIfExpired is uncovered - the failure that
+		// makes it necessary is a PUT the remote applied whose response never
+		// came back, which the in-memory fake cannot model. Arming a PUT failure
+		// here only ever produces the other reading, where nothing landed.
+		// Removing the call loses exactly the unmodelable case.
+		//
+		//nolint:contextcheck // abandonLockObject builds its own fresh context instead of
+		// taking opCtx for the same reason as the arm above.
+		b.abandonLockObject(key, token)
 		return lockAttempt{}, putErr
 	}
 	return b.reclaimIfExpired(opCtx, key, token, holderCancel)
@@ -667,10 +709,10 @@ func (b *Backend) releaseLock(ctx context.Context, key, token string) error {
 	return b.client.deleteObject(ctx, key)
 }
 
-// abandonLockObject releases the lock object a reclaim's swap just wrote, as
-// the cleanup behind one rule: any error reclaimIfExpired returns after its
-// swap PUT was issued does a best-effort, token-guarded release first, so an
-// object written by a reclaim this run never went on to hold is released on the
+// abandonLockObject releases a lock object this acquisition's own write may
+// have put there, as the cleanup behind one rule: any error returned after a
+// PUT was issued does a best-effort, token-guarded release first, so an object
+// written by an acquisition this run never went on to hold is released on the
 // way out - and when that release itself fails, is left to expire with the TTL
 // exactly as it would have without this call. Without the call that expiry is
 // the only outcome: such an object sits in the bucket recording our token with
@@ -678,11 +720,12 @@ func (b *Backend) releaseLock(ctx context.Context, key, token string) error {
 // waits out a full lock TTL against a holder that does not exist - lockTTL is
 // twice lockWaitCeiling, so each of them burns its whole wait and gives up.
 //
-// The window this closes is one round trip wide, and so is the identical orphan
-// tryAcquireOnce leaves on both of its own arms - a claim error after a
-// successful fresh-create PUT, and a PUT failure that is not a 412 - which this
-// function is not applied to. Nothing about the helper is reclaim-specific:
-// what it takes is a key and the token whose object it may delete.
+// The rule is the acquisition path's as a whole rather than any one branch's,
+// and all three sites it applies to are the same shape: reclaimIfExpired's
+// claim-error and failed-swap arms, and tryAcquireOnce's own two. Nothing about
+// the helper is specific to either, since what it takes is a key and the token
+// whose object it may delete - which is also why it cannot over-reach: an
+// object carrying anybody else's token is left alone.
 //
 // A nil error is deliberately excluded even when the attempt reports observed:
 // the object then records the competing writer's token, so releaseLock's own
