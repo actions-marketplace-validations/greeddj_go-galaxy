@@ -72,13 +72,13 @@ func extractTarGzStream(r io.Reader, dstDir string, maxDecompressed int64) error
 // what it actually costs to read rather than by what its headers declare.
 //
 // helpers.NewSizeLimitedReader is deliberately not reused here, and the
-// mechanics are not identical either: one of the differences is the point
-// this reader's refusal turns on, since it returns zero bytes alongside that
-// refusal (see Read below) while sizeLimitedReader hands back the bytes it
-// read. The reason not to reuse it stands on its own regardless - it reports
+// reason is the sentinel rather than the mechanics: it reports
 // helpers.ErrResponseTooLarge, which exitcode.isTransportError classifies
 // ExitNetwork, so a decompression bomb would be reported to CI as a network
-// fault and retried forever.
+// fault and retried forever. The mechanics are the same on both - zero bytes
+// on the crossing call, a sticky error, a clamped p - and keeping them the
+// same is deliberate: two size caps in one program that disagree about what a
+// crossing read returns is a trap for whoever reads only one of them.
 type decompressedLimitReader struct {
 	r   io.Reader
 	err error
