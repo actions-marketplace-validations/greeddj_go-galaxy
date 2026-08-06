@@ -768,13 +768,47 @@ func TestHeartbeatRefreshesDeadline(t *testing.T) {
 // object out-of-band with a foreign token while a Backend holds it, and
 // confirms the heartbeat detects the takeover: release reports
 // errS3LockLost and, critically, never deletes the foreign holder's object.
+//
+// It waits on the holder context closing. The two alternatives an earlier
+// revision recorded here are both answered rather than sidestepped:
+//
+//   - the request stream is genuinely unusable, and that reasoning stands: the
+//     fake counts a request when it is SERVED, before the holder has processed
+//     the response, so waiting on its HEAD counter lets release's hbCancel
+//     abort the very HEAD that would have revealed the takeover. Polled
+//     tightly, that variant fails outright. Nothing a server observes can
+//     report what the client did with the answer.
+//   - the holder context was refused on the ground that consuming it makes
+//     this test assert through the mechanism
+//     TestLockHolderContextCanceledWhenOwnershipLost exists to pin. That
+//     conflates synchronizing with asserting. What this test asserts is
+//     unchanged and still exclusively its own: that release REPORTS the loss,
+//     and that the foreign object survives. Deleting lost.Store(true) - the
+//     flag half, which no other test covers - still fails it, and fails it on
+//     its own assertion rather than on the wait, because holderCancel keeps
+//     running and the wait keeps completing. What the wait does add is a
+//     second way to fail if holderCancel is deleted, which costs exclusive
+//     attribution and buys determinism; the fact stays covered either way,
+//     since that deletion fails the context test too.
+//
+// The wait is exact rather than probabilistic because heartbeatTick stores the
+// flag BEFORE it cancels: a closed holder context therefore proves the flag is
+// already set. That is a happens-before, not a margin - which is what the
+// three-heartbeat-interval sleep it replaces never was, and why that sleep
+// failed roughly one full package run in eighty-five under -race.
+//
+// KILLING MUTATION, run and reverted: deleting lost.Store(true) from
+// heartbeatTick, leaving the cancel in place. The wait still completes, and the
+// failure lands on this test's own assertion, which is the claim above:
+//
+//	lock_test.go:831: expected errS3LockLost, got <nil>
 func TestHeartbeatDetectsLostOwnershipAndReleaseSkipsDelete(t *testing.T) {
 	t.Parallel()
 	b := newTestBackend(t)
 	b.lock = testLockTiming(10 * time.Second)
 	ctx := context.Background()
 
-	_, release, err := b.Lock(ctx)
+	holderCtx, release, err := b.Lock(ctx)
 	if err != nil {
 		t.Fatalf("Lock: %v", err)
 	}
@@ -786,24 +820,12 @@ func TestHeartbeatDetectsLostOwnershipAndReleaseSkipsDelete(t *testing.T) {
 		t.Fatalf("seed foreign takeover: %v", err)
 	}
 
-	// Deliberately a sleep, unlike the two heartbeat tests above, and
-	// deliberately NOT the holder context this same Lock call returns. Loss
-	// detection does have an observable downstream - a takeover closes the
-	// holder context - but consuming it here would make this test assert
-	// through the very mechanism TestLockHolderContextCanceledWhenOwnershipLost
-	// exists to pin, leaving the flag-and-release half with no test of its
-	// own: the two are one fact with two independent consumers (see
-	// heartbeatTick), so removing the cancel must not be able to hide behind
-	// this test still passing. What is left as a synchronization source is
-	// the request stream, and it does not work: the fake counts a request
-	// when it is served - before the holder has processed the response - so
-	// waiting on the fake's HEAD counter lets release's hbCancel abort the
-	// very HEAD that would have revealed the takeover, leaving the flag
-	// unset; polled tightly, that variant fails outright. Three intervals of
-	// a heartbeat that needs one round trip is a scheduling margin only, and
-	// releaseLock's own token check - not this flag - is what keeps the
-	// foreign lock from being deleted.
-	time.Sleep(3 * b.lock.heartbeatInterval)
+	select {
+	case <-holderCtx.Done():
+	case <-time.After(lockEventWaitCeiling):
+		t.Fatalf("the heartbeat did not observe the takeover within %v; if holderCancel was removed, "+
+			"TestLockHolderContextCanceledWhenOwnershipLost is the test that owns that fact", lockEventWaitCeiling)
+	}
 
 	if err := release(); !errors.Is(err, errS3LockLost) {
 		t.Fatalf("expected errS3LockLost, got %v", err)
