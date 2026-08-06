@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
@@ -118,7 +119,7 @@ func TestLoadWrapsUnreadableFileAsInvalid(t *testing.T) {
 // err }` guard, so every os.ReadFile failure is wrapped) confirmed to fail
 // this test with:
 //
-//	lockfile_test.go:143: expected IsNotExist, got lockfile is invalid: open
+//	lockfile_test.go:144: expected IsNotExist, got lockfile is invalid: open
 //	/.../missing.yml: no such file or directory
 //	--- FAIL: TestLoadAbsentFileIsNotInvalid (0.00s)
 //
@@ -453,5 +454,98 @@ func invalidCollectionNameCases() []invalidCollectionNameCase {
 		{name: "path traversal", entryName: `"../../../../etc/passwd"`},
 		{name: "uppercase half", entryName: "Acme.widgets"},
 		{name: "three parts", entryName: "acme.sub.widgets"},
+	}
+}
+
+// writeSourceLockfile writes a one-entry lockfile whose single collection
+// carries source, and returns its path. The entry is otherwise valid - a
+// well-formed name and an exact version - so the source is the only thing
+// left for validate to object to.
+func writeSourceLockfile(t *testing.T, source string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "requirements.lock.yml")
+	body := fmt.Sprintf(
+		"schema_version: %d\ncollections:\n  - name: acme.widgets\n    version: 1.0.0\n    source: %q\n",
+		SchemaVersion, source,
+	)
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestLoadRejectsSourceWithUserinfo proves a lockfile entry whose source
+// embeds a credential is refused at the read boundary, and that the refusal
+// does not itself leak the credential it refuses.
+// TestLoadAcceptsSourceWithoutUserinfo is the positive control on the same
+// fixture: without it, "it refused" would be indistinguishable from a fixture
+// that is invalid for some other reason entirely.
+func TestLoadRejectsSourceWithUserinfo(t *testing.T) {
+	t.Parallel()
+	path := writeSourceLockfile(t, "https://user:hunter2@hub.example.invalid/")
+
+	_, err := Load(path)
+
+	// Killing mutation: deleting the sourceHasUserinfo call from File.validate
+	// makes Load accept the file and fails this assertion with `Load = <nil>,
+	// want errors.Is helpers.ErrGalaxyServerURLUserinfo`.
+	//
+	// The specific sentinel is asserted first, ahead of the general one,
+	// deliberately: an assertion in a Fatalf chain is only pinned by a
+	// mutation that can reach it, and deleting the check makes Load return nil,
+	// which fails whichever assertion comes first. Ordered the other way, the
+	// general sentinel would absorb that mutation and this one would never run.
+	if !errors.Is(err, helpers.ErrGalaxyServerURLUserinfo) {
+		t.Fatalf("Load = %v, want errors.Is helpers.ErrGalaxyServerURLUserinfo", err)
+	}
+	// Pinned by a different mutation from the one above: dropping
+	// ErrLockfileInvalid from the wrap leaves the assertion above satisfied and
+	// breaks Load's contract that every error it returns is either IsNotExist
+	// or ErrLockfileInvalid.
+	if !errors.Is(err, helpers.ErrLockfileInvalid) {
+		t.Fatalf("Load = %v, want errors.Is helpers.ErrLockfileInvalid", err)
+	}
+	// The password is why the source is never printed. Pinnable on its own: an
+	// error reaching here already carries both sentinels, so only the
+	// formatting decides whether the secret rides along.
+	if strings.Contains(err.Error(), "hunter2") {
+		t.Fatalf("Load error text leaks the source password: %v", err)
+	}
+}
+
+// TestLoadAcceptsSourceWithoutUserinfo is the positive control described on
+// TestLoadRejectsSourceWithUserinfo: the same fixture with the credential
+// removed must load, and must carry the source through unchanged.
+func TestLoadAcceptsSourceWithoutUserinfo(t *testing.T) {
+	t.Parallel()
+	const source = "https://hub.example.invalid/"
+	path := writeSourceLockfile(t, source)
+
+	f, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load = %v, want nil", err)
+	}
+	if got := f.Collections[0].Source; got != source {
+		t.Fatalf("Source = %q, want %q", got, source)
+	}
+}
+
+// TestLoadAcceptsBareServerListIDAsSource pins the exception both boundaries
+// share: a source naming a bare server_list id is not URL-shaped, so
+// url.Parse yields no scheme and no host and the userinfo branch is
+// unreachable for it. Without this, tightening the guard into "anything
+// url.Parse accepts" would break every lockfile written against a named
+// server rather than a URL.
+func TestLoadAcceptsBareServerListIDAsSource(t *testing.T) {
+	t.Parallel()
+	const source = "internal"
+	path := writeSourceLockfile(t, source)
+
+	f, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load = %v, want nil", err)
+	}
+	if got := f.Collections[0].Source; got != source {
+		t.Fatalf("Source = %q, want %q", got, source)
 	}
 }

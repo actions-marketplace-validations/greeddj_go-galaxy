@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -188,8 +189,43 @@ func (f *File) validate() error {
 		if !helpers.IsExactVersion(e.Version) {
 			return fmt.Errorf("%w: %s: version %q is not an exact version", helpers.ErrLockfileInvalid, e.Name, e.Version)
 		}
+		// The source itself is never printed: it is what carries the password,
+		// and this message reaches stderr and a CI log. The name is safe to
+		// print by the check above.
+		if sourceHasUserinfo(e.Source) {
+			return fmt.Errorf("%w: %s: %w", helpers.ErrLockfileInvalid, e.Name, helpers.ErrGalaxyServerURLUserinfo)
+		}
 	}
 	return nil
+}
+
+// sourceHasUserinfo reports whether an entry's source embeds URL userinfo
+// ("https://user:pass@hub/"). It is the lockfile's half of a rule
+// requirements.checkSourceUserinfo already applies to the same value arriving
+// through the other boundary it enters by, and it exists because a lockfile is
+// repository content just as requirements.yml is: an entry's source flows
+// unchanged into root-metadata request URLs, warning lines, the resolved
+// snapshot, and GALAXY.yml, and url.URL.String() renders a userinfo password
+// back out in plain text at every one of them. It also decides what
+// credential goes to that host at all - net/http sets Basic auth from a URL's
+// userinfo before any transport runs, and internal/galaxy/fetch's
+// authTransport declines to attach the operator's configured token to a
+// request that already carries an Authorization header - so a source with
+// userinfo substitutes the repository's credential for the operator's.
+//
+// A source naming a bare server_list id (e.g. "internal", never URL-shaped)
+// is left alone, the same exception its sibling documents: url.Parse succeeds
+// on such a value but yields no scheme and no host, so the userinfo branch is
+// unreachable for it.
+func sourceHasUserinfo(source string) bool {
+	if source == "" {
+		return false
+	}
+	parsed, err := url.Parse(source)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return false
+	}
+	return parsed.User != nil
 }
 
 // IsNotExist reports whether err indicates the lockfile is missing.

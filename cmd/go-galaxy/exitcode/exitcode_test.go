@@ -1022,3 +1022,26 @@ func TestFromSignal(t *testing.T) {
 		})
 	}
 }
+
+// TestLockfileUserinfoClassifiesAsLock pins which class wins when a lockfile
+// entry's source embeds URL userinfo. lockfile.File.validate wraps both
+// helpers.ErrLockfileInvalid and helpers.ErrGalaxyServerURLUserinfo into one
+// error, and the two belong to different classes on their own - the lockfile
+// class, and the Galaxy-server configuration class that lands in ExitUsage.
+// FromError's switch checks isLockError ahead of the tail that would claim
+// the second, so the run exits ExitLock, which is the right answer: the file
+// that failed to load is the lockfile, not an operator's server config.
+//
+// The negative half is the point of the test - without it, "it exits 3" would
+// not distinguish this ordering from one where the usage class had simply
+// never been reachable for this shape at all.
+func TestLockfileUserinfoClassifiesAsLock(t *testing.T) {
+	joined := fmt.Errorf("%w: acme.widgets: %w", helpers.ErrLockfileInvalid, helpers.ErrGalaxyServerURLUserinfo)
+
+	if got := FromError(joined); got != ExitLock {
+		t.Errorf("FromError(lockfile userinfo) = %d, want ExitLock (%d)", got, ExitLock)
+	}
+	if got := FromError(helpers.ErrGalaxyServerURLUserinfo); got != ExitUsage {
+		t.Errorf("FromError(bare userinfo sentinel) = %d, want ExitUsage (%d)", got, ExitUsage)
+	}
+}
