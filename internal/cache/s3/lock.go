@@ -240,6 +240,19 @@ func (b *Backend) tryAcquireOnce(
 		}
 		return attempt, err
 	}
+	if errors.Is(putErr, errS3ConditionalConflict) {
+		// A concurrent request beat this create to the object. S3 documents the
+		// write as not having been applied and safe to retry, so this is a lost
+		// race rather than a failure: report nothing and let the loop back off,
+		// which is the retry that documentation calls for. Nothing is abandoned,
+		// for the same reason the 412 arm below abandons nothing - the remote
+		// answered, and what it answered is that this call wrote nothing.
+		//
+		// Deliberately not recorded as observed: a conflict names a concurrent
+		// request, not necessarily another acquirer of this lock, and observed
+		// is what turns an eventual ceiling into a contention verdict.
+		return lockAttempt{}, nil
+	}
 	if !errors.Is(putErr, errS3PreconditionFailed) {
 		// A create-if-absent PUT that failed without answering 412 may still
 		// have landed, the same ambiguity putObject records for every
@@ -341,6 +354,12 @@ func (b *Backend) reclaimIfExpired(
 			b.abandonLockObject(key, token)
 		}
 		return attempt, err
+	}
+	if errors.Is(putErr, errS3ConditionalConflict) {
+		// A concurrent request beat this swap to the object; see
+		// tryAcquireOnce's own arm for why that is a lost race to back off
+		// from rather than a failure, and why it is not an observation.
+		return lockAttempt{}, nil
 	}
 	if errors.Is(putErr, errS3NotFound) {
 		// The object was deleted between the HEAD above and this swap, so

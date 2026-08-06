@@ -663,6 +663,16 @@ func applyContentHeaders(req *http.Request, contentType, contentEncoding string)
 // caller that could have retried immediately an unavailable-backend error
 // instead (see reclaimIfExpired, whose lock object is deleted by any holder
 // releasing it).
+//
+// A 409 answering a conditional write of either kind is the same shape of
+// mistake one step further out. S3 documents it for a concurrent request
+// racing the write - a delete completing first - and documents the write as
+// safe to retry afterwards, so it names a lost race rather than a backend that
+// cannot serve. Left in the default arm it becomes errS3PutFailed, which is
+// not retryable and therefore ends the whole acquisition; errS3ConditionalConflict
+// lets the lock's own loop, the sole retrier of conditional writes, back off
+// and try again. An unconditional PUT keeps the default arm, since nothing in
+// this client's use of one makes 409 mean that.
 func handlePutResponse(resp *http.Response, cond putCondition) error {
 	switch resp.StatusCode {
 	case http.StatusPreconditionFailed:
@@ -672,6 +682,11 @@ func handlePutResponse(resp *http.Response, cond putCondition) error {
 			return errS3NotFound
 		}
 		return errS3BucketNotFound
+	case http.StatusConflict:
+		if cond.isConditional() {
+			return errS3ConditionalConflict
+		}
+		return wrapRetryableStatus(resp.StatusCode, s3StatusError(errS3PutFailed, resp))
 	case http.StatusOK, http.StatusNoContent:
 		return nil
 	default:

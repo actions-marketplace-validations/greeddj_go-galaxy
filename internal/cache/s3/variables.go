@@ -97,6 +97,11 @@ import (
 //     by their own callers - Has, LoadStore, LoadProjectRegistry, and the
 //     lock protocol's tryAcquireOnce/reclaimIfExpired (lock.go) and
 //     probeConditionalPut (backend.go) - rather than being classified;
+//     errS3ConditionalConflict is consumed the same way by the lock protocol
+//     but carries this class anyway, since unlike those two it has a reachable
+//     path out of the package: probeConditionalPut surfaces it rather than
+//     retrying, and a conflict there is a remote condition a later run may
+//     well not hit;
 //     errS3NotFound is not always fully absorbed, though:
 //     Artifacts.Fetch surfaces it to a cache-hit arm
 //     (internal/galaxy/collections/install.go's fetchArtifact) whose object
@@ -140,6 +145,10 @@ var (
 	errS3ConditionalPutUnsupported = fmt.Errorf(
 		"%w: s3 backend does not enforce conditional PUT (If-None-Match); distributed locking cannot guarantee mutual exclusion",
 		helpers.ErrCacheBackendUnusable,
+	)
+	errS3ConditionalConflict = fmt.Errorf(
+		"%w: s3 conditional write conflicted with a concurrent request",
+		helpers.ErrCacheBackendUnavailable,
 	)
 	errS3CompareAndSwapUnsupported = fmt.Errorf(
 		"%w: s3 backend does not support compare-and-swap PUT (If-Match against an ETag); "+

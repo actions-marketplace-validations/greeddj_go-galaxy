@@ -152,3 +152,95 @@ func assertFreshCreateObject(t *testing.T, wantRelease bool, b *Backend, key str
 		t.Fatalf("lock object token after the acquisition = %q, want %q", got, ourToken)
 	}
 }
+
+// TestConditionalConflictIsRetriedNotFatal drives a 409 answering each of the
+// two conditional writes the lock protocol makes. S3 documents the status for a
+// concurrent request racing a conditional write - a delete completing first -
+// and documents the write as safe to retry afterwards, so an acquisition that
+// meets one must back off and try again rather than end.
+//
+// Both rows assert the acquisition SUCCEEDS, which alone would pass just as
+// happily against a fixture that never served a 409 at all. The PUT count is
+// what rules that out: it is asserted to have grown past the number a
+// conflict-free acquisition makes, so the row fails if the conflict was never
+// delivered or never retried. That count is also this test's positive control -
+// the same fixture is shown taking the lock, so "it retried" cannot be "it
+// failed differently".
+//
+// The two rows arm the conflict at different points because the two writes sit
+// at different points: the create-if-absent PUT is the first request an
+// acquisition makes against an empty bucket, while the swap only happens after
+// a create has been refused and a HEAD has judged the object expired, so its
+// row arms the conflict behind that HEAD.
+//
+// KILLING MUTATIONS, run and reverted. Each fails its own row, and the two
+// report the identical message, so the row name is what tells them apart.
+// Deleting tryAcquireOnce's errS3ConditionalConflict arm fails the create row:
+//
+//	lock_acquire_test.go:199: Lock: cache backend unavailable: s3 conditional write conflicted with a concurrent request
+//
+// Deleting reclaimIfExpired's own arm fails the reclaim row:
+//
+//	lock_acquire_test.go:199: Lock: cache backend unavailable: s3 conditional write conflicted with a concurrent request
+func TestConditionalConflictIsRetriedNotFatal(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		onReclaim bool
+		minPuts   int
+	}{
+		{name: "a conflict answering the create is retried", minPuts: 2},
+		{name: "a conflict answering the swap is retried", onReclaim: true, minPuts: 3},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assertConditionalConflictRetried(t, tc.onReclaim, tc.minPuts)
+		})
+	}
+}
+
+// assertConditionalConflictRetried arms a single 409 against whichever
+// conditional write the row names, then requires the acquisition to complete
+// anyway and to have issued more PUTs than an unobstructed one would.
+func assertConditionalConflictRetried(t *testing.T, onReclaim bool, minPuts int) {
+	t.Helper()
+	ctx := context.Background()
+	fake := newFakeS3()
+	key := path.Join(locksPrefix, lockObject)
+	lockPath := "/" + fake.bucket + "/" + key
+
+	var heads atomic.Int32
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fake.ServeHTTP(w, r)
+		// The swap is the first PUT after the reclaim's own HEAD, so arming the
+		// conflict behind that HEAD lands it on the swap rather than on the
+		// create-if-absent PUT that precedes both.
+		if onReclaim && r.Method == http.MethodHead && r.URL.Path == lockPath && heads.Add(1) == 1 {
+			fake.failNext(key, http.MethodPut, http.StatusConflict, 1)
+		}
+	})
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+
+	b := newLockBackendAt(t, srv.URL, srv.Client(), testLockTiming(time.Minute))
+	if err := b.Open(ctx); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if onReclaim {
+		// An expired holder, so the acquisition reaches the swap at all.
+		fake.storeLockObject(key, foreignToken, time.Now().UTC().Add(-time.Hour))
+	} else {
+		fake.failNext(key, http.MethodPut, http.StatusConflict, 1)
+	}
+
+	_, release, err := b.Lock(ctx)
+	if err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+	t.Cleanup(func() { _ = release() })
+	if got := fake.requestCount(key, http.MethodPut); got < minPuts {
+		t.Fatalf("PUT count on the lock key = %d, want at least %d: the conflict was never served or never retried", got, minPuts)
+	}
+}
