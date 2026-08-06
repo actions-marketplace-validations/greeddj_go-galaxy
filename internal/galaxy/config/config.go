@@ -107,10 +107,14 @@ func BuildCollectionConfig(c *cli.Command) (*Config, error) {
 		return nil, err
 	}
 
-	ansibleConfig, ansiblePath, err := loadAnsibleConfigFromCLI(c)
+	ansibleConfig, ansiblePath, ansibleWarnings, err := loadAnsibleConfigFromCLI(c)
 	if err != nil {
 		return nil, err
 	}
+	// Appended before applyAnsibleConfig runs, so the warning order follows
+	// the order the events happened in: what discovery declined to read comes
+	// ahead of what applying the file it did read had to say.
+	cfg.Warnings = append(cfg.Warnings, ansibleWarnings...)
 	applyAnsibleConfig(cfg, c, ansibleConfig, ansiblePath)
 
 	if err := resolveServers(cfg, c, ansibleConfig); err != nil {
@@ -197,22 +201,26 @@ func parseTimeout(raw string) (time.Duration, error) {
 // strictly: a missing file is an error. Otherwise the path is discovered
 // following ansible's own search order, where a missing candidate simply
 // falls through to the next one rather than erroring.
-func loadAnsibleConfigFromCLI(c *cli.Command) (ansibleConfig, string, error) {
+//
+// The third return value carries the warnings discovery produced. The
+// explicit-path branch returns none by construction: a path the operator
+// named passes through no heuristic and must not acquire one.
+func loadAnsibleConfigFromCLI(c *cli.Command) (ansibleConfig, string, []string, error) {
 	if c.IsSet("ansible-config") {
 		path := c.String("ansible-config")
 		cfg, loadedPath, err := loadAnsibleConfig(path)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
-				return ansibleConfig{}, "", fmt.Errorf("%w: %s", helpers.ErrAnsibleConfigNotFound, path)
+				return ansibleConfig{}, "", nil, fmt.Errorf("%w: %s", helpers.ErrAnsibleConfigNotFound, path)
 			}
-			return ansibleConfig{}, "", fmt.Errorf("failed to load ansible config: %w", err)
+			return ansibleConfig{}, "", nil, fmt.Errorf("failed to load ansible config: %w", err)
 		}
-		return cfg, loadedPath, nil
+		return cfg, loadedPath, nil, nil
 	}
 
-	path := discoverAnsibleConfigPath()
+	path, warnings := discoverAnsibleConfigPath()
 	if path == "" {
-		return ansibleConfig{}, "", nil
+		return ansibleConfig{}, "", warnings, nil
 	}
 	cfg, loadedPath, err := loadAnsibleConfig(path)
 	if err != nil {
@@ -220,27 +228,51 @@ func loadAnsibleConfigFromCLI(c *cli.Command) (ansibleConfig, string, error) {
 			// The candidate existed during discovery but vanished before we
 			// could open it (e.g. a concurrent process removed it); treat
 			// this exactly like "no config found" rather than erroring.
-			return ansibleConfig{}, "", nil
+			return ansibleConfig{}, "", warnings, nil
 		}
-		return ansibleConfig{}, "", fmt.Errorf("failed to load ansible config: %w", err)
+		return ansibleConfig{}, "", warnings, fmt.Errorf("failed to load ansible config: %w", err)
 	}
-	return cfg, loadedPath, nil
+	return cfg, loadedPath, warnings, nil
 }
 
 // maxAnsibleConfigCandidates bounds the discovery candidate list: env var,
 // cwd, home, and the system-wide path.
 const maxAnsibleConfigCandidates = 4
 
+// cwdAnsibleCfgName is the current-directory candidate, kept relative
+// exactly as ansible's own discovery keeps it: it resolves against the
+// process's working directory at open time rather than at discovery time.
+const cwdAnsibleCfgName = "ansible.cfg"
+
+// worldWritablePerm is the permission bit that makes a directory writable by
+// any principal on the machine. A directory carrying it cannot be trusted to
+// hold a configuration file this process obeys.
+const worldWritablePerm = 0o002
+
 // discoverAnsibleConfigPath returns the first existing candidate in
 // ansible's documented config-file search order: $ANSIBLE_CONFIG, then
 // ./ansible.cfg, then ~/.ansible.cfg, then /etc/ansible/ansible.cfg. It
-// returns "" if none of the candidates exist.
-func discoverAnsibleConfigPath() string {
+// returns "" if none of the candidates exist, alongside any warnings the
+// discovery itself produced.
+//
+// The order carries one exception, the same one ansible's own
+// find_ini_config_file makes: ./ansible.cfg is not a candidate at all when
+// the current directory is world-writable, because any other principal on
+// the machine can put a file there. Discovery then continues with the
+// remaining candidates rather than stopping.
+func discoverAnsibleConfigPath() (string, []string) {
+	var warnings []string
 	candidates := make([]string, 0, maxAnsibleConfigCandidates)
 	if envPath := os.Getenv("ANSIBLE_CONFIG"); envPath != "" {
 		candidates = append(candidates, envPath)
 	}
-	candidates = append(candidates, "ansible.cfg")
+	cwdPath, cwdWarning := cwdCandidate()
+	if cwdPath != "" {
+		candidates = append(candidates, cwdPath)
+	}
+	if cwdWarning != "" {
+		warnings = append(warnings, cwdWarning)
+	}
 	if home, err := os.UserHomeDir(); err == nil {
 		candidates = append(candidates, filepath.Join(home, ".ansible.cfg"))
 	}
@@ -248,10 +280,53 @@ func discoverAnsibleConfigPath() string {
 
 	for _, path := range candidates {
 		if fileExists(path) {
-			return path
+			return path, warnings
 		}
 	}
-	return ""
+	return "", warnings
+}
+
+// cwdCandidate returns the current-directory ansible.cfg candidate, or ""
+// plus a warning when the current directory is world-writable.
+//
+// What such a directory costs is concrete: a config this process obeys sets
+// collections_path (the root the install tree is written under), cache_dir
+// (the root internal/galaxy/extracted removes entries beneath), and the
+// server list a run fetches from. On a shared CI runner, letting any other
+// principal choose those by dropping a file in a scratch directory is the
+// vector ansible's own exception exists for.
+//
+// Two decisions here are deliberate. The candidate is kept when Getwd or
+// Stat fails: not being able to learn a directory's mode is a reason to
+// behave as before, not to silently drop a configuration source an ordinary
+// environment depends on. And the warning is emitted whether or not an
+// ansible.cfg is actually sitting there, since checking first would keep
+// quiet in exactly the moment before the file is planted.
+//
+// The sticky bit is deliberately not an exemption, which is also what
+// ansible does. Sticky stops another principal from replacing or removing a
+// file that already exists; it does nothing to stop one from creating
+// ansible.cfg where none exists yet, which is this vector's main shape. A
+// world-writable /tmp is therefore skipped like any other world-writable
+// directory.
+func cwdCandidate() (string, string) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return cwdAnsibleCfgName, ""
+	}
+	// #nosec G703 -- cwd is this process's own working directory; this is a
+	// read-only mode check that never opens or writes anything.
+	info, err := os.Stat(cwd)
+	if err != nil {
+		return cwdAnsibleCfgName, ""
+	}
+	if info.Mode().Perm()&worldWritablePerm == 0 {
+		return cwdAnsibleCfgName, ""
+	}
+	return "", fmt.Sprintf(
+		"the current directory %q is world-writable; ignoring ./ansible.cfg as a configuration source",
+		cwd,
+	)
 }
 
 // fileExists reports whether path can be stat'd successfully. path is
@@ -333,6 +408,10 @@ missing $ANSIBLE_CONFIG target simply falls through to the next candidate):
   ansible.cfg (in the current directory)
   ~/.ansible.cfg (in the home directory)
   /etc/ansible/ansible.cfg
+
+The cwd candidate is dropped, with a warning, when the current directory is
+world-writable - the same exception ansible makes, for the same reason - and
+discovery continues with the remaining candidates. See cwdCandidate.
 
 [galaxy]
 cache_dir // env:ANSIBLE_GALAXY_CACHE_DIR // default {{ ANSIBLE_HOME ~ "/galaxy_cache" }}

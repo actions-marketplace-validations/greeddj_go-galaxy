@@ -98,6 +98,14 @@ quoted value keeps its quotes, so `collections_path = "./c"` sets the literal
 value, so `server = https://galaxy.ansible.com # note` is a bad URL rather
 than a URL with a note.
 
+Discovery keeps one of ansible's exceptions too: `./ansible.cfg` is not
+considered at all when the current directory is world-writable, since any
+other user on the machine could put a file there, and the run says so on
+stderr rather than skipping it silently. The remaining candidates are still
+tried. A container CI job whose workspace is `0777` therefore stops picking up
+a workspace `ansible.cfg`; pass `--ansible-config` (or `$ANSIBLE_CONFIG`) to
+name it explicitly, or tighten the directory's mode.
+
 | Setting                            | Environment                                                   |
 |:-----------------------------------|:--------------------------------------------------------------|
 | `[defaults] collections_path`      | `ANSIBLE_COLLECTIONS_PATH`                                    |

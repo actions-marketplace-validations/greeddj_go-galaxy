@@ -447,7 +447,7 @@ func TestLoadAnsibleConfigFromCLIExplicit(t *testing.T) {
 		writeAnsibleCfg(t, path, "https://explicit.example")
 
 		c := newAnsibleConfigCmd(t, []string{"--ansible-config=" + path})
-		cfg, gotPath, err := loadAnsibleConfigFromCLI(c)
+		cfg, gotPath, _, err := loadAnsibleConfigFromCLI(c)
 		if err != nil {
 			t.Fatalf("loadAnsibleConfigFromCLI() error = %v, want nil", err)
 		}
@@ -463,7 +463,7 @@ func TestLoadAnsibleConfigFromCLIExplicit(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "missing.cfg")
 
 		c := newAnsibleConfigCmd(t, []string{"--ansible-config=" + path})
-		_, _, err := loadAnsibleConfigFromCLI(c)
+		_, _, _, err := loadAnsibleConfigFromCLI(c)
 		if !errors.Is(err, helpers.ErrAnsibleConfigNotFound) {
 			t.Errorf("error = %v, want helpers.ErrAnsibleConfigNotFound", err)
 		}
@@ -486,7 +486,7 @@ func TestLoadAnsibleConfigFromCLIDiscovery(t *testing.T) {
 		t.Chdir(dir)
 
 		c := newAnsibleConfigCmd(t, nil)
-		cfg, gotPath, err := loadAnsibleConfigFromCLI(c)
+		cfg, gotPath, _, err := loadAnsibleConfigFromCLI(c)
 		// discoverAnsibleConfigPath checks the literal relative candidate
 		// "ansible.cfg", not an absolute path, since it relies on the
 		// process's current directory the same way ansible's own discovery
@@ -505,7 +505,7 @@ func TestLoadAnsibleConfigFromCLIDiscovery(t *testing.T) {
 		t.Chdir(cwdDir)
 
 		c := newAnsibleConfigCmd(t, nil)
-		cfg, gotPath, err := loadAnsibleConfigFromCLI(c)
+		cfg, gotPath, _, err := loadAnsibleConfigFromCLI(c)
 		assertAnsibleConfigLoaded(t, cfg, gotPath, err, envPath, "https://env.example")
 	})
 
@@ -517,9 +517,12 @@ func TestLoadAnsibleConfigFromCLIDiscovery(t *testing.T) {
 		t.Chdir(cwdDir)
 
 		c := newAnsibleConfigCmd(t, nil)
-		cfg, gotPath, err := loadAnsibleConfigFromCLI(c)
+		cfg, gotPath, _, err := loadAnsibleConfigFromCLI(c)
 		assertAnsibleConfigLoaded(t, cfg, gotPath, err, "ansible.cfg", "https://cwd.example")
 	})
+
+	t.Run("world-writable cwd is skipped with a warning", subtestWorldWritableCwdSkipped)
+	t.Run("non-world-writable cwd is discovered", subtestNonWorldWritableCwdDiscovered)
 
 	t.Run("nothing found in cwd or ANSIBLE_CONFIG: falls through cleanly", func(t *testing.T) {
 		// ANSIBLE_CONFIG points at a missing file and the cwd has no
@@ -534,9 +537,94 @@ func TestLoadAnsibleConfigFromCLIDiscovery(t *testing.T) {
 		t.Chdir(t.TempDir())
 
 		c := newAnsibleConfigCmd(t, nil)
-		_, gotPath, err := loadAnsibleConfigFromCLI(c)
+		_, gotPath, _, err := loadAnsibleConfigFromCLI(c)
 		assertDiscoveryFallsThroughCleanly(t, gotPath, err)
 	})
+}
+
+// chmodDir sets dir's mode, failing the test if it cannot: a silently
+// unchanged mode would turn the subtests below into tests of nothing, since
+// t.TempDir is 0o700 on most systems and the mode is their whole subject.
+func chmodDir(t *testing.T, dir string, mode os.FileMode) {
+	t.Helper()
+	// #nosec G302 -- the permission is the fixture: these subtests exist to
+	// drive discovery against a world-writable working directory.
+	if err := os.Chmod(dir, mode); err != nil {
+		t.Fatalf("os.Chmod(%q, %#o) error = %v, want nil", dir, mode, err)
+	}
+}
+
+// subtestWorldWritableCwdSkipped proves ./ansible.cfg is not a discovery
+// candidate when the working directory is world-writable, and that the run
+// says so rather than falling silent.
+// subtestNonWorldWritableCwdDiscovered is its positive control.
+func subtestWorldWritableCwdSkipped(t *testing.T) {
+	// The env candidate is pointed at a missing file so it cannot win and
+	// mask what the cwd candidate did.
+	t.Setenv("ANSIBLE_CONFIG", filepath.Join(t.TempDir(), "missing.cfg"))
+
+	dir := t.TempDir()
+	writeAnsibleCfg(t, filepath.Join(dir, "ansible.cfg"), "https://cwd.example")
+	chmodDir(t, dir, 0o777)
+	t.Chdir(dir)
+
+	c := newAnsibleConfigCmd(t, nil)
+	_, gotPath, warnings, err := loadAnsibleConfigFromCLI(c)
+	if err != nil {
+		t.Fatalf("loadAnsibleConfigFromCLI() error = %v, want nil", err)
+	}
+	// Killing mutation, run: reducing cwdCandidate to an unconditional
+	// `return cwdAnsibleCfgName, ""` fails this assertion with `path =
+	// "ansible.cfg", want the cwd candidate to have been skipped`. The check
+	// cannot be deleted on its own and still compile, since the stat result
+	// would go unused - which is why the mutation is the whole body.
+	if gotPath == "ansible.cfg" {
+		t.Fatalf("path = %q, want the cwd candidate to have been skipped", gotPath)
+	}
+	if !warningMentions(warnings, "world-writable", dir) {
+		t.Fatalf("warnings = %v, want one naming %q as world-writable", warnings, dir)
+	}
+}
+
+// subtestNonWorldWritableCwdDiscovered is the positive control described on
+// subtestWorldWritableCwdSkipped: the same directory and the same file, with
+// only the mode differing, must be discovered and must warn about nothing.
+// Without it, "skipped" would be indistinguishable from a fixture discovery
+// never reaches at all.
+func subtestNonWorldWritableCwdDiscovered(t *testing.T) {
+	t.Setenv("ANSIBLE_CONFIG", filepath.Join(t.TempDir(), "missing.cfg"))
+
+	dir := t.TempDir()
+	writeAnsibleCfg(t, filepath.Join(dir, "ansible.cfg"), "https://cwd.example")
+	chmodDir(t, dir, 0o755)
+	t.Chdir(dir)
+
+	c := newAnsibleConfigCmd(t, nil)
+	cfg, gotPath, warnings, err := loadAnsibleConfigFromCLI(c)
+	assertAnsibleConfigLoaded(t, cfg, gotPath, err, "ansible.cfg", "https://cwd.example")
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", warnings)
+	}
+}
+
+// warningMentions reports whether any warning contains every one of parts.
+// Matching by fragment rather than by the whole line keeps the test from
+// pinning wording it has no reason to own, while still requiring the warning
+// to name both what is wrong and which directory it is wrong about.
+func warningMentions(warnings []string, parts ...string) bool {
+	for _, w := range warnings {
+		matched := true
+		for _, part := range parts {
+			if !strings.Contains(w, part) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
 }
 
 // assertAnsibleConfigLoaded checks that loadAnsibleConfigFromCLI succeeded
