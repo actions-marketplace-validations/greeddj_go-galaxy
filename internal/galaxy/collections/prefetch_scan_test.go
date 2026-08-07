@@ -1,13 +1,13 @@
 package collections
 
-// This file proves buildPrefetchTasks's parallel, Workers-bounded scan: that
-// it actually runs concurrently rather than sequentially (Test A), and that
-// the concurrent scan schedules the exact same set a sequential scan would,
-// including the fail-open-on-Has-error case and the already-installed skip
-// (Test B). Both stubs here only need to satisfy cacheManager.ArtifactStore's
-// Has probe - Fetch, TempFile, Commit, and Delete are never called by
-// buildPrefetchTasks, so they return a sentinel error to make an accidental
-// call fail loudly instead of silently.
+// This file proves buildPrefetchTasks's parallel, DownloadWorkers-bounded
+// scan: that it actually runs concurrently rather than sequentially (Test A),
+// and that the concurrent scan schedules the exact same set a sequential
+// scan would, including the fail-open-on-Has-error case and the
+// already-installed skip (Test B). Both stubs here only need to satisfy
+// cacheManager.ArtifactStore's Has probe - Fetch, TempFile, Commit, and
+// Delete are never called by buildPrefetchTasks, so they return a sentinel
+// error to make an accidental call fail loudly instead of silently.
 
 import (
 	"context"
@@ -97,25 +97,33 @@ func (a *concurrentProbeArtifacts) Delete(context.Context, string) error {
 	return errStubNotImplemented
 }
 
-// TestBuildPrefetchTasksProbesConcurrentlyBoundedByWorkers proves
+// TestBuildPrefetchTasksProbesConcurrentlyBoundedByDownloadWorkers proves
 // buildPrefetchTasks fans its Has probes out in parallel, bounded by
-// cfg.Workers.
+// cfg.DownloadWorkers - not cfg.Workers, which this fixture deliberately
+// sets to a different, smaller value so the two knobs cannot be confused for
+// one another.
 //
-// Discrimination: with Workers=2 and a gate that closes at 2 concurrent
-// probes, a correct parallel implementation reaches peak==2 almost instantly
-// and returns all 6 tasks well inside the 2s timeout. A sequential
-// implementation never has more than one Has call in flight, so it never
-// reaches the target of 2 and never closes the gate; each of its Has calls
-// then blocks until ctx.Done() fires, so the test would both record peak==1
-// and run out the full 2s timeout before the first call even returns.
-func TestBuildPrefetchTasksProbesConcurrentlyBoundedByWorkers(t *testing.T) {
+// Discrimination is two-layered. First, sequential vs. parallel: with
+// DownloadWorkers=4 and a gate that closes at 4 concurrent probes, a correct
+// parallel implementation reaches peak==4 almost instantly and returns all 6
+// tasks well inside the 2s timeout, while a sequential implementation never
+// has more than one Has call in flight, so it never reaches the target and
+// never closes the gate - each of its Has calls then blocks until
+// ctx.Done() fires, so the test would both record peak==1 and run out the
+// full 2s timeout before the first call even returns. Second, and the
+// reason for this test's existence over the pre-split version: Workers=1
+// alongside DownloadWorkers=4 means an implementation still (wrongly) bounded
+// by cfg.Workers reaches peak==1 and then hangs on the same ctx.Done() path a
+// sequential one would, which is exactly what makes peak==4 prove the pool
+// moved to the new knob rather than merely being renamed.
+func TestBuildPrefetchTasksProbesConcurrentlyBoundedByDownloadWorkers(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
-	const target = 2
+	const target = 4
 	art := &concurrentProbeArtifacts{gate: make(chan struct{}), target: target}
-	cfg := &config.Config{Workers: 2, DownloadPath: t.TempDir()}
+	cfg := &config.Config{Workers: 1, DownloadWorkers: target, DownloadPath: t.TempDir()}
 	root := newTestCollectionsRoot(t, cfg.DownloadPath)
 	deps := newPrefetchDeps(cfg, infra.New(noopPrinter{}, http.DefaultClient), store.New(), art, root)
 
@@ -133,7 +141,8 @@ func TestBuildPrefetchTasksProbesConcurrentlyBoundedByWorkers(t *testing.T) {
 		t.Fatalf("len(tasks) = %d, want %d", len(tasks), n)
 	}
 	if art.peak != target {
-		t.Fatalf("peak concurrent Has calls = %d, want %d (scan must be Workers-bounded parallel)", art.peak, target)
+		t.Fatalf("peak concurrent Has calls = %d, want %d (scan must be DownloadWorkers-bounded parallel, "+
+			"not cfg.Workers=%d)", art.peak, target, cfg.Workers)
 	}
 }
 

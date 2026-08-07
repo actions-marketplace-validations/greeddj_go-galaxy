@@ -105,7 +105,10 @@ func sortTasksByLevel(tasks []collection, levelIndex map[string]int) {
 
 // buildPrefetchTasks decides, for every candidate collection, whether it
 // needs a prefetch task, probing the artifact cache in parallel (bounded by
-// cfg.Workers) since Has is the dominant per-collection cost. The parallel
+// cfg.DownloadWorkers, not cfg.Workers - this scan only issues Has probes,
+// never an extraction, so it shares the download pool's network-bound sizing
+// rather than the install/warm pool's CPU-bound one) since Has is the
+// dominant per-collection cost. The parallel
 // phase only writes to disjoint keep[i]/cached[i] slice elements, so no
 // result mutex is needed; the survivor collection afterward is sequential,
 // which keeps p.register calls, the presence map write, and the returned
@@ -133,7 +136,7 @@ func buildPrefetchTasks(
 	keep := make([]bool, len(cols))
 	cached := make([]bool, len(cols))
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, max(deps.cfg.Workers, 1))
+	sem := make(chan struct{}, max(deps.cfg.DownloadWorkers, 1))
 	for i := range cols {
 		sem <- struct{}{}
 		wg.Go(func() {
@@ -207,6 +210,12 @@ func makeTaskChannel(tasks []collection) chan collection {
 	return taskCh
 }
 
+// startPrefetchWorkers spins up the background download pool that drains
+// taskCh, sized to cfg.DownloadWorkers rather than cfg.Workers: a prefetch
+// worker only downloads and hashes an artifact into a temp file - see
+// prefetchOne's own nil extractStore/root, which keeps it off the
+// extraction path entirely - so it shares the network-bound download pool's
+// sizing rather than the install/warm pool's CPU-bound one.
 func startPrefetchWorkers(
 	pfCtx context.Context,
 	deps prefetchDeps,
@@ -214,7 +223,7 @@ func startPrefetchWorkers(
 	taskCh chan collection,
 ) {
 	cfg := deps.cfg
-	for range max(cfg.Workers, 1) {
+	for range max(cfg.DownloadWorkers, 1) {
 		p.wg.Go(func() {
 			for col := range taskCh {
 				meta, result, err := prefetchOne(pfCtx, deps, col)

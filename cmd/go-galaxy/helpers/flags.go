@@ -3,6 +3,7 @@ package helpers
 import (
 	"runtime"
 
+	galaxyhelpers "github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/urfave/cli/v3"
 )
 
@@ -122,6 +123,12 @@ func collectionBehaviorFlags() []cli.Flag {
 			// that same shape reads 0 and exits 2 instead.
 			Value:   runtime.NumCPU(),
 			Sources: cli.EnvVars("GO_GALAXY_WORKERS"),
+		},
+		&cli.IntFlag{
+			Name:    "download-workers",
+			Usage:   "Number of concurrent artifact downloads and cache presence probes; these wait on the network, not the CPU",
+			Value:   galaxyhelpers.DefaultDownloadWorkers(runtime.NumCPU()),
+			Sources: cli.EnvVars("GO_GALAXY_DOWNLOAD_WORKERS"),
 		},
 		&cli.BoolFlag{
 			Name:    "no-cache",

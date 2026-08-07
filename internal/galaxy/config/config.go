@@ -42,10 +42,16 @@ type Config struct {
 	// by the same precedence this tool always used for Server, and no
 	// token - the shape every release before multi-server support existed
 	// effectively had.
-	Servers                    []Server
-	S3Cache                    S3CacheConfig
-	Timeout                    time.Duration
-	Workers                    int
+	Servers []Server
+	S3Cache S3CacheConfig
+	Timeout time.Duration
+	Workers int
+	// DownloadWorkers bounds the artifact-download and cache-presence-probe
+	// pool the prefetcher runs, separately from Workers: that pool only waits
+	// on the network, never extracts a tree, so its useful size is not the
+	// install/warm worker pool's own CPU-bound count. See
+	// helpers.DefaultDownloadWorkers for the default derivation.
+	DownloadWorkers            int
 	Refresh                    bool
 	NoCache                    bool
 	NoDeps                     bool
@@ -93,8 +99,8 @@ func (c *Config) IsOffline() bool {
 //
 // Contract: it reads the full union of flags a command may register for
 // this path - the collection flags (server, timeout, download-path,
-// requirements-file, ansible-config, workers, no-cache, refresh,
-// clear-cache, no-deps, offline, resolution, lock-file, frozen,
+// requirements-file, ansible-config, workers, download-workers, no-cache,
+// refresh, clear-cache, no-deps, offline, resolution, lock-file, frozen,
 // metrics-file), the S3 cache flags (s3-bucket and friends), and the
 // global flags (verbose, quiet, dry-run, cache-dir). A command is not
 // required to register every one of them - cleanup, for example, registers
@@ -141,6 +147,7 @@ func BuildCollectionConfig(c *cli.Command) (*Config, error) {
 func newConfigFromCLI(c *cli.Command) *Config {
 	cfg := &Config{
 		Workers:          c.Int("workers"),
+		DownloadWorkers:  c.Int("download-workers"),
 		RequirementsFile: c.String("requirements-file"),
 		LockFile:         c.String("lock-file"),
 		MetricsFile:      c.String("metrics-file"),
@@ -164,6 +171,18 @@ func newConfigFromCLI(c *cli.Command) *Config {
 	// reads the flag's own Value, one worker per CPU.
 	if cfg.Workers < 1 {
 		cfg.Workers = runtime.NumCPU()
+	}
+	// Same fallback shape as Workers above, and for the identical two
+	// reasons: a command that does not register --download-workers (cleanup)
+	// reads the zero value of an unknown flag name, and a registering command
+	// whose source supplied a non-positive value reaches it too. Unlike
+	// Workers, no companion applyWorkers-style function rejects an explicit
+	// non-positive value for this flag - it is silently replaced by the
+	// default instead, since download concurrency is a performance knob, not
+	// one whose zero value would otherwise mean "unbounded" the way a
+	// non-positive worker count could be misread.
+	if cfg.DownloadWorkers < 1 {
+		cfg.DownloadWorkers = helpers.DefaultDownloadWorkers(runtime.NumCPU())
 	}
 	cfg.Verbose = c.Bool("verbose")
 	cfg.Quiet = !cfg.Verbose && c.Bool("quiet")

@@ -369,28 +369,32 @@ func TestApplyTimeout(t *testing.T) {
 	})
 }
 
-// newWorkersCmd builds a *cli.Command for TestApplyWorkers. When
-// registerFlag is true it exposes a --workers IntFlag mirroring how
-// collectionBehaviorFlags registers it, with the same env source and the
-// same Value: runtime.NumCPU(); when false no such flag exists at all,
-// mirroring commands like cleanup that never register --workers, so
-// c.IsSet("workers") reads false and c.Int("workers") reads 0.
+// newIntFlagCmd builds a *cli.Command exposing a single IntFlag under
+// flagName (sourced from envName, with the given defaultValue) when
+// registerFlag is true, mirroring how collectionBehaviorFlags registers
+// --workers and --download-workers; when false no such flag exists at all,
+// mirroring a command like cleanup that never registers either, so
+// c.IsSet(flagName) reads false and c.Int(flagName) reads 0. Shared by
+// TestApplyWorkers and TestDownloadWorkersDefault, since both need the
+// identical minimal single-flag fixture shape against a different flag name
+// and default.
 //
-// The Value is a hand-copy, so it cannot pin the production flag's own: that
+// defaultValue is a hand-copy of whichever production flag's own Value the
+// caller is mirroring, so it cannot pin that flag's Value on its own: that
 // pin lives in TestWorkersEnvShapes (cmd/go-galaxy/commands), which drives
 // the real helpers.CollectionFlags(). It is copied anyway so the rows below
 // see the shape production has - without it, a registered-but-unset flag
 // would read 0 here and the predicate under test would look like it refuses
 // an absent value.
-func newWorkersCmd(t *testing.T, registerFlag bool, args []string) *cli.Command {
+func newIntFlagCmd(t *testing.T, flagName, envName string, defaultValue int, registerFlag bool, args []string) *cli.Command {
 	t.Helper()
 
 	var flags []cli.Flag
 	if registerFlag {
 		flags = []cli.Flag{&cli.IntFlag{
-			Name:    "workers",
-			Value:   runtime.NumCPU(),
-			Sources: cli.EnvVars("GO_GALAXY_WORKERS"),
+			Name:    flagName,
+			Value:   defaultValue,
+			Sources: cli.EnvVars(envName),
 		}}
 	}
 
@@ -428,13 +432,13 @@ func newWorkersCmd(t *testing.T, registerFlag bool, args []string) *cli.Command 
 // table, only the unregistered row fails, because an unknown flag name reads
 // 0 through the same c.Int the gate exists to keep it away from:
 //
-//	config_test.go:478: applyWorkers() error = invalid workers: --workers (or $GO_GALAXY_WORKERS) = 0, want a positive integer, want nil
+//	config_test.go:482: applyWorkers() error = invalid workers: --workers (or $GO_GALAXY_WORKERS) = 0, want a positive integer, want nil
 //
 // M3, `n < 1` relaxed to `n < 0`. Only the zero row fails and the negative
 // row survives, which is what makes the pair a pin on the boundary rather
 // than on refusal in general:
 //
-//	config_test.go:473: applyWorkers() error = <nil>, want invalid workers
+//	config_test.go:477: applyWorkers() error = <nil>, want invalid workers
 func TestApplyWorkers(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -466,7 +470,7 @@ func TestApplyWorkers(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := newWorkersCmd(t, tt.registerFlag, tt.args)
+			c := newIntFlagCmd(t, "workers", "GO_GALAXY_WORKERS", runtime.NumCPU(), tt.registerFlag, tt.args)
 			err := applyWorkers(c)
 			if tt.wantErr {
 				if !errors.Is(err, helpers.ErrInvalidWorkers) {
@@ -479,6 +483,80 @@ func TestApplyWorkers(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDownloadWorkersDefault covers helpers.DefaultDownloadWorkers's own
+// clamp (cpus * DownloadWorkersPerCPU, floored at MinDefaultDownloadWorkers
+// and capped at MaxDefaultDownloadWorkers), plus newConfigFromCLI's
+// DownloadWorkers fallback, which applies that identical default whenever no
+// source supplied a positive --download-workers value - the same shape
+// already applied to Workers, minus applyWorkers' own refusal: an explicit
+// non-positive value here is silently replaced rather than rejected, since
+// download concurrency is a performance knob rather than one whose zero
+// value could be misread as "unbounded".
+//
+// KILLING MUTATION, run for real: the MinDefaultDownloadWorkers floor
+// removed from DefaultDownloadWorkers (the inner `max(cpus*DownloadWorkersPerCPU,
+// MinDefaultDownloadWorkers)` call rewritten to a bare `cpus*DownloadWorkersPerCPU`,
+// leaving only the MaxDefaultDownloadWorkers cap). The 1-cpu row fails, because its
+// raw product (1*4=4) sits below the floor and nothing clamps it back up:
+//
+//	config_test.go:526: DefaultDownloadWorkers(1) = 4, want 8
+//
+// The 2-cpu row does NOT fail this mutation: its raw product (2*4=8) already
+// equals MinDefaultDownloadWorkers, so the floor was never the thing keeping
+// that row at 8 in the first place - only the 1-cpu row's outcome actually
+// depends on the floor existing.
+func TestDownloadWorkersDefault(t *testing.T) {
+	t.Run("derives from cpu count", func(t *testing.T) {
+		tests := []struct {
+			name string
+			cpus int
+			want int
+		}{
+			{name: "1 cpu floors to the minimum", cpus: 1, want: 8},
+			{name: "2 cpus already equal the minimum", cpus: 2, want: 8},
+			{name: "4 cpus scales linearly", cpus: 4, want: 16},
+			{name: "8 cpus reaches the maximum exactly", cpus: 8, want: 32},
+			{name: "16 cpus caps at the maximum", cpus: 16, want: 32},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				if got := helpers.DefaultDownloadWorkers(tt.cpus); got != tt.want {
+					t.Fatalf("DefaultDownloadWorkers(%d) = %d, want %d", tt.cpus, got, tt.want)
+				}
+			})
+		}
+	})
+
+	t.Run("explicit positive value survives unoverridden", func(t *testing.T) {
+		c := newIntFlagCmd(t, "download-workers", "GO_GALAXY_DOWNLOAD_WORKERS",
+			helpers.DefaultDownloadWorkers(runtime.NumCPU()), true, []string{"--download-workers=3"})
+		cfg := newConfigFromCLI(c)
+		if cfg.DownloadWorkers != 3 {
+			t.Fatalf("cfg.DownloadWorkers = %d, want 3", cfg.DownloadWorkers)
+		}
+	})
+
+	t.Run("zero falls back to the default", func(t *testing.T) {
+		c := newIntFlagCmd(t, "download-workers", "GO_GALAXY_DOWNLOAD_WORKERS",
+			helpers.DefaultDownloadWorkers(runtime.NumCPU()), true, []string{"--download-workers=0"})
+		cfg := newConfigFromCLI(c)
+		want := helpers.DefaultDownloadWorkers(runtime.NumCPU())
+		if cfg.DownloadWorkers != want {
+			t.Fatalf("cfg.DownloadWorkers = %d, want %d (the default)", cfg.DownloadWorkers, want)
+		}
+	})
+
+	t.Run("negative falls back to the default", func(t *testing.T) {
+		c := newIntFlagCmd(t, "download-workers", "GO_GALAXY_DOWNLOAD_WORKERS",
+			helpers.DefaultDownloadWorkers(runtime.NumCPU()), true, []string{"--download-workers=-1"})
+		cfg := newConfigFromCLI(c)
+		want := helpers.DefaultDownloadWorkers(runtime.NumCPU())
+		if cfg.DownloadWorkers != want {
+			t.Fatalf("cfg.DownloadWorkers = %d, want %d (the default)", cfg.DownloadWorkers, want)
+		}
+	})
 }
 
 // TestApplyAnsibleConfigServer checks the server -> Server mapping with the
@@ -792,11 +870,11 @@ func assertDiscoveryFallsThroughCleanly(t *testing.T, gotPath string, err error)
 // ini value over the env one (returning ini whenever it is non-empty). Two
 // rows fail - the first, on the precedence itself:
 //
-//	config_test.go:808: Server = "https://ini.example", want "https://env.example"
+//	config_test.go:886: Server = "https://ini.example", want "https://env.example"
 //
 // and the third, because a non-empty ini value shadows the empty-env case too:
 //
-//	config_test.go:833: Server = "https://ini.example", want the flag default "https://default.example"
+//	config_test.go:911: Server = "https://ini.example", want the flag default "https://default.example"
 func TestAnsibleGalaxyServerEnv(t *testing.T) {
 	const envServer = "https://env.example"
 

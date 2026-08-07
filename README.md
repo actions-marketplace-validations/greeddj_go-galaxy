@@ -25,10 +25,12 @@ where applicable).
 | ・go-galaxy            |           1.33 ± 0.00 s |          2.07 ± 0.10 s |         11.93 ± 0.34 s |
 
 The speedup grows with the number of collections - `go-galaxy` parallelizes
-downloads and extractions across `--workers` cores, uses hard links from a
-content-addressable cache on warm runs, and skips the network entirely under
-`--frozen --offline`. With a lockfile and warm caches, installing 100
-collections takes ~12 s instead of ~5 minutes.
+downloads and cache presence probes across `--download-workers` (network-bound,
+sized well above core count by default) and extractions across `--workers`
+cores (CPU-bound), uses hard links from a content-addressable cache on warm
+runs, and skips the network entirely under `--frozen --offline`. With a
+lockfile and warm caches, installing 100 collections takes ~12 s instead of
+~5 minutes.
 
 Reproduce locally:
 
@@ -433,6 +435,21 @@ performs a full install rather than printing help.
 - `--ansible-config` (`$GO_GALAXY_ANSIBLE_CONFIG`, `$ANSIBLE_CONFIG`)
 - `--workers` (`$GO_GALAXY_WORKERS`) - number of concurrent workers; unset means one per CPU. A
   non-positive value is a usage error and exits `2`.
+- `--download-workers` (`$GO_GALAXY_DOWNLOAD_WORKERS`) - number of concurrent artifact downloads
+  and cache presence probes, separate from `--workers`: `--workers` bounds extraction, which is
+  CPU-bound (an install or warm worker unpacks a tree in the same goroutine that downloaded it),
+  while `--download-workers` bounds downloads and cache probes, which are network-bound (a HEAD
+  probe or a streamed GET into a temp file, never an extraction). Unset, it derives from the core
+  count (4× per core) with a floor of 8 and a ceiling of 32, so a low-core CI runner still gets
+  meaningful download concurrency and a high-core one does not oversubscribe the HTTP connection
+  pool. A non-positive value falls back to that same default rather than erroring.
+  **Breaking change:** before this release, the concurrency of artifact downloads and cache
+  presence probes followed `--workers` (one per CPU by default), so a 4-core CI runner issued at
+  most 4 concurrent requests to the configured Galaxy server. It now follows `--download-workers`'s
+  own, larger default instead, so that same 4-core runner issues up to 16 concurrent requests. This
+  matters to operators of rate-limited Automation Hub instances, or any Galaxy server enforcing a
+  per-client request limit: set `--download-workers` (or `$GO_GALAXY_DOWNLOAD_WORKERS`) explicitly
+  to keep the old, CPU-derived figure, or lower, if the new default triggers throttling.
 - `--no-cache` (`$GO_GALAXY_NO_CACHE`)
 - `--refresh` (`$GO_GALAXY_REFRESH`) - re-resolve against the configured Galaxy servers instead of reusing
   cached metadata or the previous resolution. It bypasses exactly the cached answers that name a collection

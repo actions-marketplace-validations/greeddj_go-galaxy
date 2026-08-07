@@ -396,6 +396,24 @@ const (
 	// retried attempts of a Galaxy API GET or artifact download.
 	FetchRetryBackoffCap = 5 * time.Second
 
+	// DownloadWorkersPerCPU is the per-core multiplier DefaultDownloadWorkers
+	// applies before clamping. An artifact download or cache presence probe
+	// waits on the network, not the CPU - a HEAD probe or a streamed GET into
+	// a temp file, never an extraction - so a useful pool size is a multiple
+	// of the core count rather than the core count itself, unlike cfg.Workers,
+	// whose pool extracts a tree per worker and is genuinely CPU-bound.
+	DownloadWorkersPerCPU = 4
+	// MinDefaultDownloadWorkers floors DefaultDownloadWorkers' result so a
+	// single- or dual-core CI runner still gets meaningful download
+	// concurrency instead of one artifact acquisition at a time.
+	MinDefaultDownloadWorkers = 8
+	// MaxDefaultDownloadWorkers caps DefaultDownloadWorkers' result. The
+	// number is sized against FetchMaxIdleConnsPerHost (64): the default pool
+	// never exceeds half that per-host idle-connection budget, so the
+	// connection pool holds every worker's connection idle between requests
+	// with a factor of two to spare rather than churning new ones.
+	MaxDefaultDownloadWorkers = 32
+
 	// StoreSnapshotSchemaVersion is the current snapshot schema version.
 	//
 	// Bumped to 6 when the snapshot gained a warmed set (StoreBucketWarmed):
@@ -507,6 +525,29 @@ const (
 // retry loop.
 func FetchRetryPolicy() RetryPolicy {
 	return RetryPolicy{Base: FetchRetryBackoffBase, Cap: FetchRetryBackoffCap, MaxAttempts: FetchRetryMaxAttempts}
+}
+
+// DefaultDownloadWorkers derives the default size of the artifact-download
+// and cache-presence-probe worker pool from the machine's core count:
+// cpus * DownloadWorkersPerCPU, floored at MinDefaultDownloadWorkers and
+// capped at MaxDefaultDownloadWorkers.
+//
+// This is a deliberately different derivation from cfg.Workers' own worker
+// count (one per CPU), and the split stops at exactly these two pools. An
+// install or warm worker extracts a tree in the same goroutine that
+// downloaded it, so its parallelism is genuinely CPU-bound and stays sized
+// to the core count - raising it to this function's own ceiling would mean
+// up to 32 simultaneous extractions on one machine, trading speed for
+// thrashing on a small runner rather than gaining anything. A download or
+// cache-presence-probe worker, by contrast, only waits on the network - a
+// HEAD probe or a streamed GET into a temp file, never an extraction - so
+// its useful pool size tracks outstanding requests rather than CPU cores,
+// and sizing it to the core count alone would leave a low-core CI runner far
+// below what the network link can sustain. outdated is deliberately left on
+// cfg.Workers rather than gaining this knob too, so the split has exactly
+// one seam.
+func DefaultDownloadWorkers(cpus int) int {
+	return min(max(cpus*DownloadWorkersPerCPU, MinDefaultDownloadWorkers), MaxDefaultDownloadWorkers)
 }
 
 // ReadOnlyPerm strips every write bit (owner, group, other) from perm,
