@@ -28,22 +28,42 @@ func main() {
 	os.Exit(run())
 }
 
-// run configures and executes the CLI, returning the exit code.
-func run() int {
-	// Customize the version printer to show only the formatted version
-	// string (c.Root().Version, set below via helpers.Version). The raw
-	// Version global can be empty on dev builds; the formatted string never is.
-	cli.VersionPrinter = func(c *cli.Command) {
-		_, _ = fmt.Fprintln(c.Writer, c.Root().Version)
-	}
-
-	// cmdErr captures action/before/after/flag-action errors via ExitErrHandler.
-	// Flag-parse "Incorrect Usage" errors are printed by urfave itself and never
-	// reach this handler, so capturing here keeps the print to a single seam.
-	var cmdErr error
-	app := &cli.Command{
-		Name:                   "go-galaxy",
-		Usage:                  "Galaxy Collection Manager for CI",
+// newRootCommand builds the root command. onErr, when non-nil, receives what
+// urfave hands ExitErrHandler - an action, before or after failure. A nil
+// onErr captures nothing, which is what a caller inspecting only the
+// command's shape wants; run passes a real one.
+//
+// Usage and Description carry two facts a CI author cannot learn anywhere
+// else from the binary itself. The first is that a bare go-galaxy installs:
+// DefaultCommand makes it so, and nothing printed said as much, which is a
+// surprising amount of work for a command someone ran to see what it does.
+// The second is the exit-code classes. They exist to be branched on, so a
+// pipeline author is exactly who needs them, and until now they appeared only
+// in the README. Description is the one field that reaches --help with them,
+// since urfave renders a DESCRIPTION block whenever it is non-empty.
+//
+// Each phrase below is the leading phrase of the matching row in README's
+// Exit codes table rather than a fresh wording, so the two cannot come to
+// describe the same number differently. The README rows carry the full
+// qualifications; this list is the index, not a replacement.
+func newRootCommand(onErr func(error)) *cli.Command {
+	return &cli.Command{
+		Name:  "go-galaxy",
+		Usage: "Galaxy Collection Manager for CI; with no command it runs install",
+		Description: "With no command, go-galaxy runs install.\n" +
+			"\n" +
+			"Exit codes:\n" +
+			"  0    Success\n" +
+			"  1    Generic failure\n" +
+			"  2    Usage or configuration error\n" +
+			"  3    Dependency resolution failure\n" +
+			"  4    Network or Galaxy API failure\n" +
+			"  5    Install-time failure\n" +
+			"  6    Lockfile error\n" +
+			"  7    Artifact-integrity failure\n" +
+			"  8    Cache contention\n" +
+			"  9    Persisted cache state is corrupt or oversized\n" +
+			"  130  Interrupted\n",
 		HideHelpCommand:        true,
 		UseShortOptionHandling: true,
 		DefaultCommand:         "install",
@@ -59,8 +79,28 @@ func run() int {
 			commands.Explain(),
 			commands.Outdated(),
 		},
-		ExitErrHandler: func(_ context.Context, _ *cli.Command, err error) { cmdErr = err },
+		ExitErrHandler: func(_ context.Context, _ *cli.Command, err error) {
+			if onErr != nil {
+				onErr(err)
+			}
+		},
 	}
+}
+
+// run configures and executes the CLI, returning the exit code.
+func run() int {
+	// Customize the version printer to show only the formatted version
+	// string (c.Root().Version, set below via helpers.Version). The raw
+	// Version global can be empty on dev builds; the formatted string never is.
+	cli.VersionPrinter = func(c *cli.Command) {
+		_, _ = fmt.Fprintln(c.Writer, c.Root().Version)
+	}
+
+	// cmdErr captures action/before/after/flag-action errors via ExitErrHandler.
+	// Flag-parse "Incorrect Usage" errors are printed by urfave itself and never
+	// reach this handler, so capturing here keeps the print to a single seam.
+	var cmdErr error
+	app := newRootCommand(func(err error) { cmdErr = err })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

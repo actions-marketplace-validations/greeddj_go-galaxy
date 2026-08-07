@@ -2,7 +2,9 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -81,3 +83,54 @@ func TestHandleResult(t *testing.T) {
 // package-level var to satisfy the err113 linter (no inline errors.New in
 // test bodies).
 var errTestUsage = errors.New("flag parse error")
+
+// TestRootCommandDisclosesDefaultCommandAndExitCodes pins the two facts the
+// binary now tells a CI author about itself. A bare go-galaxy installs, which
+// DefaultCommand has always made true and nothing printed ever said; and the
+// exit-code classes, which exist to be branched on and until now lived only in
+// the README, out of reach of anyone reading --help.
+//
+// The rows are built from the exitcode constants rather than from literals
+// repeated here, so the pin is on the numbers themselves: renumbering a class
+// without updating the help text fails this test, which is the failure mode
+// worth catching - a help list naming a wrong number is worse than no list.
+// The phrases stay literals, since they are prose the constants do not carry.
+//
+// KILLING MUTATION, run and reverted, on newRootCommand's Description in
+// main.go - change the line for exit 8 to read "  9    Cache contention",
+// which is what a careless renumbering looks like:
+//
+//	main_test.go:133: Description is missing the line for exit 8: "  8    Cache contention"
+func TestRootCommandDisclosesDefaultCommandAndExitCodes(t *testing.T) {
+	cmd := newRootCommand(nil)
+
+	if cmd.DefaultCommand != "install" {
+		t.Fatalf("DefaultCommand = %q, want %q", cmd.DefaultCommand, "install")
+	}
+	if !strings.Contains(cmd.Usage, "install") {
+		t.Errorf("Usage = %q, want it to name the default command", cmd.Usage)
+	}
+
+	rows := []struct {
+		phrase string
+		code   int
+	}{
+		{"Success", exitcode.ExitOK},
+		{"Generic failure", exitcode.ExitError},
+		{"Usage or configuration error", exitcode.ExitUsage},
+		{"Dependency resolution failure", exitcode.ExitResolution},
+		{"Network or Galaxy API failure", exitcode.ExitNetwork},
+		{"Install-time failure", exitcode.ExitInstall},
+		{"Lockfile error", exitcode.ExitLock},
+		{"Artifact-integrity failure", exitcode.ExitIntegrity},
+		{"Cache contention", exitcode.ExitCacheBusy},
+		{"Persisted cache state is corrupt or oversized", exitcode.ExitCacheCorrupt},
+		{"Interrupted", exitcode.ExitInterrupt},
+	}
+	for _, row := range rows {
+		line := fmt.Sprintf("  %-5d%s", row.code, row.phrase)
+		if !strings.Contains(cmd.Description, line+"\n") {
+			t.Errorf("Description is missing the line for exit %d: %q", row.code, line)
+		}
+	}
+}
