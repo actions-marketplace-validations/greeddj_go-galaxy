@@ -176,6 +176,7 @@ func LockInspectFlags() []cli.Flag {
 			Name:    "requirements-file",
 			Aliases: []string{"r"},
 			Usage:   "Path to requirements.yml",
+			Value:   defaultRequirementsFilePath,
 			Sources: cli.EnvVars("GO_GALAXY_REQUIREMENTS_FILE", envRequirementsFileAnsible),
 		},
 		&cli.StringFlag{

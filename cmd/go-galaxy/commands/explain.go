@@ -37,9 +37,6 @@ func Explain() *cli.Command {
 			}
 			target := c.Args().First()
 			reqPath := c.String("requirements-file")
-			if reqPath == "" {
-				reqPath = requirementsYAML
-			}
 			lockPath := lockfile.ResolveDefaultPath(reqPath, c.String("lock-file"))
 			lf, err := lockfile.LoadRequired(lockPath)
 			if err != nil {

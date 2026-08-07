@@ -26,9 +26,6 @@ func Hash() *cli.Command {
 		Flags:   helpers.LockInspectFlags(),
 		Action: func(_ context.Context, c *cli.Command) error {
 			req := c.String("requirements-file")
-			if req == "" {
-				req = "requirements.yml"
-			}
 			lockPath := lockfile.ResolveDefaultPath(req, c.String("lock-file"))
 			key, err := computeHash(req, lockPath)
 			if err != nil {

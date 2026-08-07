@@ -30,9 +30,6 @@ func Tree() *cli.Command {
 		Flags:   helpers.LockInspectFlags(),
 		Action: func(_ context.Context, c *cli.Command) error {
 			reqPath := c.String("requirements-file")
-			if reqPath == "" {
-				reqPath = "requirements.yml"
-			}
 			lockPath := lockfile.ResolveDefaultPath(reqPath, c.String("lock-file"))
 			lf, err := lockfile.LoadRequired(lockPath)
 			if err != nil {

@@ -27,6 +27,7 @@ func envKeys(t *testing.T, chain cli.ValueSourceChain) []string {
 type wantStringFlag struct {
 	name    string
 	usage   string
+	value   string
 	aliases []string
 	envKeys []string
 }
@@ -46,6 +47,9 @@ func assertStringFlag(t *testing.T, flag cli.Flag, want wantStringFlag) {
 	}
 	if sf.Usage != want.usage {
 		t.Errorf("Usage = %q, want %q", sf.Usage, want.usage)
+	}
+	if sf.Value != want.value {
+		t.Errorf("Value = %q, want %q", sf.Value, want.value)
 	}
 	if got := envKeys(t, sf.Sources); !slices.Equal(got, want.envKeys) {
 		t.Errorf("env sources = %v, want %v", got, want.envKeys)
@@ -70,7 +74,21 @@ func TestLockInspectFlags(t *testing.T) {
 			name: "requirements-file",
 			flag: flags[0],
 			want: wantStringFlag{
-				name:    "requirements-file",
+				name: "requirements-file",
+				// The default is what makes hash, tree and explain agree with
+				// install about which file they read when nobody says. Each
+				// used to re-implement it in its own Action instead, so the
+				// three --help outputs advertised no default while install's
+				// advertised one. The lock-file row below expects an empty
+				// Value, and is the positive control that this assertion can
+				// distinguish the two rather than passing on anything.
+				//
+				// KILLING MUTATION, run and reverted - drop the Value line
+				// from LockInspectFlags's requirements-file flag, which is
+				// the state this row exists to forbid:
+				//
+				//	flags_test.go:111: Value = "", want "requirements.yml"
+				value:   "requirements.yml",
 				aliases: []string{"r"},
 				usage:   "Path to requirements.yml",
 				envKeys: []string{"GO_GALAXY_REQUIREMENTS_FILE", "ANSIBLE_GALAXY_REQUIREMENTS_FILE"},
