@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"sync/atomic"
@@ -28,10 +29,53 @@ func main() {
 	os.Exit(run())
 }
 
+// errRecorder is the writer urfave prints its own diagnostics to. It passes
+// every write through to w and records that one happened, which is the only
+// question handleResult has about a bare runErr: has the operator been told.
+//
+// The observation is exact rather than approximate, and that is a property of
+// this writer's authorship rather than of urfave's internals. urfave writes
+// here for one reason - a usage error it is reporting itself, to
+// cmd.Root().ErrWriter - and go-galaxy writes here for none at all: its own
+// terminal line goes to os.Stderr through progress.Errorf, and
+// cli.VersionPrinter writes to cmd.Writer. So a recorded write means a
+// diagnostic reached the operator, and a urfave version that reports a
+// further usage error on this writer stays covered with no change here.
+//
+// written needs no synchronization: urfave writes it inside app.Run, on the
+// parse path and before any command action starts, and run reads it only
+// after app.Run has returned.
+type errRecorder struct {
+	w       io.Writer
+	written bool
+}
+
+// Write implements io.Writer, recording any non-empty write. The length guard
+// is defensive: nothing writes zero bytes here today, so the branch is
+// deliberately left unpinned, but an io.Writer may be handed an empty slice
+// and an empty write tells an operator nothing.
+func (r *errRecorder) Write(p []byte) (int, error) {
+	if len(p) > 0 {
+		r.written = true
+	}
+	return r.w.Write(p)
+}
+
 // newRootCommand builds the root command. onErr, when non-nil, receives what
 // urfave hands ExitErrHandler - an action, before or after failure. A nil
 // onErr captures nothing, which is what a caller inspecting only the
 // command's shape wants; run passes a real one.
+//
+// errOut is where urfave prints the usage errors it reports itself. It is
+// wrapped in the returned *errRecorder rather than installed bare, and the
+// recorder is returned rather than left to be dug back out of cmd.ErrWriter,
+// so no caller can build this command without the means to ask whether urfave
+// has already reported a failure - the question handleResult answers with it.
+// The root is the right place for this and the wrong place for
+// cli.Command.OnUsageError, which is why that field is not used instead:
+// urfave resolves the writer through cmd.Root(), so one assignment covers
+// every subcommand, while it reads OnUsageError off whichever command was
+// parsing, which for a flag declared on a subcommand is never the root.
 //
 // Usage and Description carry two facts a CI author cannot learn anywhere
 // else from the binary itself. The first is that a bare go-galaxy installs:
@@ -46,8 +90,9 @@ func main() {
 // Exit codes table rather than a fresh wording, so the two cannot come to
 // describe the same number differently. The README rows carry the full
 // qualifications; this list is the index, not a replacement.
-func newRootCommand(onErr func(error)) *cli.Command {
-	return &cli.Command{
+func newRootCommand(onErr func(error), errOut io.Writer) (*cli.Command, *errRecorder) {
+	report := &errRecorder{w: errOut}
+	cmd := &cli.Command{
 		Name:  "go-galaxy",
 		Usage: "Galaxy Collection Manager for CI; with no command it runs install",
 		Description: "With no command, go-galaxy runs install.\n" +
@@ -68,6 +113,7 @@ func newRootCommand(onErr func(error)) *cli.Command {
 		UseShortOptionHandling: true,
 		DefaultCommand:         "install",
 		Version:                helpers.Version(Version, Commit, Date, BuiltBy),
+		ErrWriter:              report,
 		Flags:                  helpers.CommonFlags(),
 		Commands: []*cli.Command{
 			commands.Install(),
@@ -85,6 +131,7 @@ func newRootCommand(onErr func(error)) *cli.Command {
 			}
 		},
 	}
+	return cmd, report
 }
 
 // run configures and executes the CLI, returning the exit code.
@@ -97,10 +144,10 @@ func run() int {
 	}
 
 	// cmdErr captures action/before/after/flag-action errors via ExitErrHandler.
-	// Flag-parse "Incorrect Usage" errors are printed by urfave itself and never
-	// reach this handler, so capturing here keeps the print to a single seam.
+	// A flag failure never reaches this handler at all - urfave returns it from
+	// Run instead - so handleResult judges that shape through report.written.
 	var cmdErr error
-	app := newRootCommand(func(err error) { cmdErr = err })
+	app, report := newRootCommand(func(err error) { cmdErr = err }, os.Stderr)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -134,7 +181,12 @@ func run() int {
 		sig = *p
 	}
 
-	code, printErr := handleResult(runErr, cmdErr, sig)
+	// Not covered by a test: run reads os.Args and executes a real command, so
+	// nothing exercises this call. Passing a constant in place of
+	// report.written would either restore the silence this fixes or, for the
+	// argv shape, print a second line beside the one urfave has already
+	// written.
+	code, printErr := handleResult(runErr, cmdErr, sig, report.written)
 	if printErr != nil {
 		progress.Errorf("%s", printErr.Error())
 	}
@@ -145,10 +197,24 @@ func run() int {
 // still needs printing. A caught signal takes precedence over everything
 // else (the process is being asked to stop, not to report a business
 // error); otherwise capturedErr (from ExitErrHandler) wins since it carries
-// the actual error value, classified via exitcode.FromError. A bare runErr
-// with no capturedErr means urfave already printed a flag-parse usage error
-// itself, so only the exit code is reported.
-func handleResult(runErr, capturedErr error, sig os.Signal) (int, error) {
+// the actual error value, classified via exitcode.FromError.
+//
+// A bare runErr with no capturedErr is a flag failure urfave returned without
+// routing it through ExitErrHandler, and it arrives in two shapes the error
+// value itself does not tell apart: one urfave has already reported on the
+// root command's ErrWriter, with a help block alongside it, and one it
+// returns in silence. reported is which. It is an observation - whether
+// anything reached that writer - rather than an inference about where the
+// value came from, because what this function needs to know is whether the
+// operator has been told, not which parsing phase failed. The silent shape
+// has one producer today, a value urfave took from an environment variable
+// and parsed in a phase that reports nothing, and nothing here depends on
+// that staying the only one.
+//
+// Both shapes exit exitcode.ExitUsage, a fixed answer rather than a
+// classified one: such an error carries no go-galaxy sentinel, so
+// exitcode.FromError would fall back to exitcode.ExitError for it.
+func handleResult(runErr, capturedErr error, sig os.Signal, reported bool) (int, error) {
 	if sig != nil {
 		return exitcode.FromSignal(sig), nil
 	}
@@ -156,7 +222,10 @@ func handleResult(runErr, capturedErr error, sig os.Signal) (int, error) {
 		return exitcode.FromError(capturedErr), capturedErr
 	}
 	if runErr != nil {
-		return exitcode.ExitUsage, nil
+		if reported {
+			return exitcode.ExitUsage, nil
+		}
+		return exitcode.ExitUsage, runErr
 	}
 	return exitcode.ExitOK, nil
 }
