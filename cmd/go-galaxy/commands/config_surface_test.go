@@ -355,3 +355,53 @@ func TestFlagNameEnvAliases(t *testing.T) {
 		assertConfigField(t, "Timeout", aliasCfg(t).Timeout, 90*time.Second)
 	})
 }
+
+// TestAnsibleRequirementsFileEnvIsStillRead pins a deliberate exception rather
+// than a compatibility guarantee. ANSIBLE_GALAXY_REQUIREMENTS_FILE sits in
+// ansible's namespace without being an ansible name: ansible-core declares no
+// requirements-file setting, and ansible-galaxy takes that path only as
+// -r/--role-file. The ANSIBLE_ prefix invites an assumption of parity that
+// does not hold here, so a cleanup acting on that assumption would delete
+// this one to restore parity - and it would not fail the pipelines that set
+// it, it would silently install whatever requirements.yml the working
+// directory happens to hold. The keep is the decision; this test is what makes
+// dropping it loud.
+//
+// The second row states the order alongside it, so the exception cannot be
+// mistaken for a promotion: go-galaxy's own name still wins.
+//
+// KILLING MUTATION, run and reverted, on the requirements-file Sources chain
+// in cmd/go-galaxy/helpers - drop envRequirementsFileAnsible from it, which is
+// exactly the "restore parity" edit this test exists to stop:
+//
+//	config_surface_test.go:397: RequirementsFile = requirements.yml, want /from-ansible.yml
+//
+// The second row survives that mutation, since GO_GALAXY_REQUIREMENTS_FILE is
+// untouched by it - which is why the first row, not the pair, is the pin.
+//
+// Both paths are literals rather than t.TempDir() values, as the surface row
+// above already does for this same field: nothing between the flag and
+// cfg.RequirementsFile opens the path, so a real file buys nothing, and a
+// literal keeps the quoted failure above reproducible instead of carrying
+// digits that change on every run.
+func TestAnsibleRequirementsFileEnvIsStillRead(t *testing.T) {
+	const (
+		ansiblePath  = "/from-ansible.yml"
+		goGalaxyPath = "/from-go-galaxy.yml"
+	)
+
+	t.Run("the ansible-namespaced name is read", func(t *testing.T) {
+		neutralizeAnsibleDiscovery(t)
+		t.Setenv("ANSIBLE_GALAXY_REQUIREMENTS_FILE", ansiblePath)
+
+		assertConfigField(t, "RequirementsFile", aliasCfg(t).RequirementsFile, ansiblePath)
+	})
+
+	t.Run("go-galaxy's own name outranks it", func(t *testing.T) {
+		neutralizeAnsibleDiscovery(t)
+		t.Setenv("GO_GALAXY_REQUIREMENTS_FILE", goGalaxyPath)
+		t.Setenv("ANSIBLE_GALAXY_REQUIREMENTS_FILE", ansiblePath)
+
+		assertConfigField(t, "RequirementsFile", aliasCfg(t).RequirementsFile, goGalaxyPath)
+	})
+}

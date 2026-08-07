@@ -114,8 +114,18 @@ name it explicitly, or tighten the directory's mode.
 | `[galaxy] cache_dir`               | `ANSIBLE_GALAXY_CACHE_DIR`                                    |
 | `[galaxy_server.<id>]`             | `ANSIBLE_GALAXY_SERVER_<ID>_URL`, `_TOKEN`, `_VALIDATE_CERTS` |
 | (the config file itself)           | `ANSIBLE_CONFIG`                                              |
-| (requirements file)                | `ANSIBLE_GALAXY_REQUIREMENTS_FILE`                            |
 | (request timeout)                  | `ANSIBLE_GALAXY_SERVER_TIMEOUT`                               |
+
+One variable go-galaxy reads is deliberately absent from that table.
+`ANSIBLE_GALAXY_REQUIREMENTS_FILE` sits in ansible's namespace without being an
+ansible option: ansible-core declares no requirements-file setting, and
+`ansible-galaxy` takes that path only as `-r/--role-file`. It is read anyway,
+and it is not going away, because pipelines already set it; it is documented
+here rather than in the table so that nobody expects `ansible-galaxy` to
+honour it.
+`GO_GALAXY_TOKEN` is the other name with no ansible counterpart, for the
+separate reason described under
+[Galaxy servers and authentication](#galaxy-servers-and-authentication).
 
 Anything else in `ansible.cfg` is ignored. Within `[galaxy_server.<id>]` the
 exceptions are deliberate and loud: `username`/`password` (Basic auth) and
@@ -414,7 +424,8 @@ Clean unreachable collections:
   distributed lock is held, so an unbounded one blocks every other runner against that bucket until it
   gives up waiting for the lock - which is why its budget is tighter than the artifact ceiling above.
 - `--download-path, -p` (`$GO_GALAXY_COLLECTIONS_PATH`, `$GO_GALAXY_DOWNLOAD_PATH`, `$ANSIBLE_COLLECTIONS_PATH`)
-- `--requirements-file, -r` (`$GO_GALAXY_REQUIREMENTS_FILE`, `$ANSIBLE_GALAXY_REQUIREMENTS_FILE`)
+- `--requirements-file, -r` (`$GO_GALAXY_REQUIREMENTS_FILE`, `$ANSIBLE_GALAXY_REQUIREMENTS_FILE` -
+  a go-galaxy extension, not an ansible option)
 - `--ansible-config` (`$GO_GALAXY_ANSIBLE_CONFIG`, `$ANSIBLE_CONFIG`)
 - `--workers` (`$GO_GALAXY_WORKERS`)
 - `--no-cache` (`$GO_GALAXY_NO_CACHE`)
