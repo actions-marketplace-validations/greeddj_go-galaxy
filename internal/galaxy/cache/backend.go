@@ -15,6 +15,13 @@ type ArtifactFile struct {
 }
 
 // ArtifactStore provides access to cached collection artifacts.
+//
+// Every method is safe to call concurrently from multiple goroutines: install
+// workers, warm workers, and the prefetcher all share one ArtifactStore value
+// for the run's whole duration. That safety is scoped to distinct keys,
+// though, not to any key at all: the caller is responsible for there being at
+// most one goroutine working on any single key at a time, and a concurrent
+// Commit and Delete of the same key is undefined by this contract.
 type ArtifactStore interface {
 	Has(ctx context.Context, key string) (bool, error)
 	// Meta reports key's cached metadata without ever reading the artifact
@@ -35,6 +42,26 @@ type ArtifactStore interface {
 }
 
 // Backend defines a cache backend for state and artifacts.
+//
+// A Backend value is not safe for concurrent use: its caller serializes
+// access to it, so at most one goroutine calls any of its ten methods -
+// Artifacts included - at any moment. Both implementations depend on that
+// property rather than merely tolerating it, because each initializes its
+// own mutable state lazily and writes it without synchronization: the local
+// backend's ensureOpen writes its Bolt handle, and the S3 backend's Open
+// writes its client and its artifact store. A caller that needs to hand a
+// backend to multiple workers must add its own serialization around it; the
+// interface guarantees none.
+//
+// Splitting Backend into a role per access model is deliberately not the
+// answer here: the split a difference in access model would motivate already
+// exists - the concurrent surface is already carved out as the separate
+// ArtifactStore interface reached through Artifacts() - and Backend already
+// has two implementations and one decorator (stateDeadlineBackend, in
+// statedeadline.go), so splitting it into roles would mean either a
+// decorator per role or a composite type assembling both, enlarging exactly
+// the drift surface the state-deadline decorator's own shape works to
+// shrink.
 type Backend interface {
 	Open(ctx context.Context) error
 	Close(ctx context.Context) error
@@ -59,6 +86,12 @@ type Backend interface {
 	ClearFiles(ctx context.Context) error
 	RecordProject(ctx context.Context, requirementsFile, downloadPath string) error
 	LoadProjectRegistry(ctx context.Context) (*store.ProjectRegistry, error)
+	// Artifacts returns the backend's artifact store. Call it only after a
+	// successful Open: an implementation may build its artifact store inside
+	// Open (the S3 backend does), so a call made before Open has succeeded can
+	// return a store that is not yet usable. Unlike the Backend value itself,
+	// the returned ArtifactStore is intended for concurrent use - see its own
+	// doc comment.
 	Artifacts() ArtifactStore
 	// SweepTemp deletes temporary artifact files left by a previously killed
 	// run. It must be called only while the caller holds the backend's
