@@ -19,8 +19,14 @@ type prefetcher struct {
 	// either handed off to an install worker via Wait (ownership transfers
 	// there) or reclaimed by Close (for a key whose install level never ran).
 	prefetched map[string]downloadResult
-	mu         sync.Mutex
-	wg         sync.WaitGroup
+	// presence is the set of artifact keys the buildPrefetchTasks scan found
+	// cached and left unscheduled for prefetch - see cachedArtifacts' own doc
+	// comment for why it is populated once and never mutated afterward, and
+	// isCacheHit's for how an install worker uses membership in it to skip a
+	// redundant repeat of that same probe.
+	presence map[string]bool
+	mu       sync.Mutex
+	wg       sync.WaitGroup
 }
 
 // startPrefetcher schedules prefetch tasks for collections. levels orders the
@@ -38,7 +44,9 @@ func startPrefetcher(ctx context.Context, deps prefetchDeps, collections map[str
 	// --dry-run must never download an artifact ahead of time - that is
 	// exactly the write a dry run suppresses - so it disables the prefetcher
 	// here, the same structural way NoCache already does, rather than
-	// threading a dry-run flag into prefetchOne itself.
+	// threading a dry-run flag into prefetchOne itself. presence stays nil in
+	// this disabled shape (see cachedArtifacts), so an install worker gets no
+	// hint for any key and probes the store itself.
 	if cfg == nil || cfg.NoCache || cfg.DryRun || artifacts == nil {
 		return p
 	}
@@ -98,10 +106,19 @@ func sortTasksByLevel(tasks []collection, levelIndex map[string]int) {
 // buildPrefetchTasks decides, for every candidate collection, whether it
 // needs a prefetch task, probing the artifact cache in parallel (bounded by
 // cfg.Workers) since Has is the dominant per-collection cost. The parallel
-// phase only writes to disjoint keep[i] slice elements, so no result mutex is
-// needed; the survivor collection afterward is sequential, which keeps
-// p.register calls and the returned task order single-threaded and
-// deterministic given the input snapshot.
+// phase only writes to disjoint keep[i]/cached[i] slice elements, so no
+// result mutex is needed; the survivor collection afterward is sequential,
+// which keeps p.register calls, the presence map write, and the returned
+// task order single-threaded and deterministic given the input snapshot.
+//
+// The presence set records a key whenever cached[i] is true, with no
+// separate check against keep[i]: shouldSchedulePrefetch never returns both
+// true for the same collection, so a key this scan schedules a prefetch task
+// for can never also land in presence. That matters because the prefetcher
+// itself is about to become a concurrent writer of that exact key, so the
+// scan's own answer for it is not a hint an install worker should be handed -
+// see isCacheHit's own doc comment for what an install worker does instead
+// for a scheduled key whose prefetch failed.
 func buildPrefetchTasks(
 	ctx context.Context,
 	deps prefetchDeps,
@@ -114,32 +131,46 @@ func buildPrefetchTasks(
 	}
 
 	keep := make([]bool, len(cols))
+	cached := make([]bool, len(cols))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, max(deps.cfg.Workers, 1))
 	for i := range cols {
 		sem <- struct{}{}
 		wg.Go(func() {
 			defer func() { <-sem }()
-			keep[i] = shouldSchedulePrefetch(ctx, deps, cols[i])
+			keep[i], cached[i] = shouldSchedulePrefetch(ctx, deps, cols[i])
 		})
 	}
 	wg.Wait()
 
+	presence := make(map[string]bool, len(cols))
 	tasks := make([]collection, 0, len(cols))
 	for i, col := range cols {
+		if cached[i] {
+			presence[artifactKey(col)] = true
+		}
 		if keep[i] {
 			p.register(col.key())
 			tasks = append(tasks, col)
 		}
 	}
+	p.presence = presence
 	return tasks
 }
 
-// shouldSchedulePrefetch reports whether col needs a prefetch task: a
-// Galaxy-type source that is neither already installed nor already present in
-// the artifact cache. A Has() error is treated as "schedule it" - the same
-// fail-open behavior the original sequential scan had, where a probe error fell
-// through to scheduling rather than silently skipping the collection.
+// shouldSchedulePrefetch returns (schedule, cached): whether col needs a
+// prefetch task (schedule), and, when the artifact cache was actually probed
+// to decide, whether that probe found the artifact present (cached). schedule
+// and cached are never both true for the same collection - see
+// buildPrefetchTasks' own doc comment for how it relies on that to record
+// col's cache key in its presence set unconditionally on cached alone.
+//
+// schedule is a Galaxy-type source that is neither already installed nor
+// already present in the artifact cache. A Has() error is treated as
+// "schedule it" - the same fail-open behavior the original sequential scan
+// had, where a probe error fell through to scheduling rather than silently
+// skipping the collection - and reports cached=false: an errored probe found
+// nothing an install worker should trust as a hint.
 //
 // This deliberately calls installRecordMatches, not canSkipInstall: a wrong
 // "already installed" here only skips a background download ahead of time,
@@ -153,15 +184,18 @@ func buildPrefetchTasks(
 // mean "not installed" here: fail-open for this scan, matching the Has()
 // error handling below - a wrong "needs prefetch" only costs a redundant
 // background download, never correctness.
-func shouldSchedulePrefetch(ctx context.Context, deps prefetchDeps, col collection) bool {
+func shouldSchedulePrefetch(ctx context.Context, deps prefetchDeps, col collection) (bool, bool) {
 	if !isGalaxyType(col.Type) {
-		return false
+		return false, false
 	}
 	if target, ok := newInstallTarget(deps.root, deps.cfg, col); ok && installRecordMatches(target, col, deps.st) {
-		return false
+		return false, false
 	}
 	ok, err := deps.artifacts.Has(ctx, artifactKey(col))
-	return err != nil || !ok
+	if err != nil {
+		return true, false
+	}
+	return !ok, ok
 }
 
 func makeTaskChannel(tasks []collection) chan collection {
@@ -220,7 +254,7 @@ func prefetchOne(
 	// extractStore and root are both nil: this downloadDeps feeds only
 	// downloadCollectionToCache, which never touches the collections tree or
 	// the extracted store, so neither is needed here.
-	downloadDeps := newInstallDeps(deps.cfg, deps.runtime, deps.st, deps.artifacts, nil, nil)
+	downloadDeps := newInstallDeps(deps.cfg, deps.runtime, deps.st, deps.artifacts, nil, nil, nil)
 	result, err := downloadCollectionToCache(ctx, downloadDeps, artifactKey(col), col.Source, meta, true)
 	if err != nil {
 		return meta, downloadResult{}, err
@@ -282,6 +316,21 @@ func (p *prefetcher) Close() {
 		delete(p.prefetched, key)
 	}
 	p.mu.Unlock()
+}
+
+// cachedArtifacts returns the presence hints buildPrefetchTasks collected
+// during its scan, keyed by artifactKey. The map is built once, inside
+// startPrefetcher (via buildPrefetchTasks), before any install worker is
+// dispatched, and is never mutated afterward - the identical argument
+// tlsDispatchTransport.insecureOrigins (internal/galaxy/fetch/client.go)
+// already makes for its own construct-once, read-only-after map: concurrent
+// readers need no lock because there is never a concurrent writer. It stays
+// nil for a disabled prefetcher (cfg.NoCache, cfg.DryRun, a nil artifact
+// store), which is indistinguishable from an empty map to the one caller
+// that reads it (isCacheHit, through a plain map index that treats a nil map
+// as always-empty).
+func (p *prefetcher) cachedArtifacts() map[string]bool {
+	return p.presence
 }
 
 // register allocates a completion channel for a key.

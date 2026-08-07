@@ -191,7 +191,7 @@ func warmCollections(
 	// installDeps carries a nil root; newInstallTarget's own nil-root guard
 	// then makes any accidental collections-tree call from this path fail
 	// closed rather than by convention.
-	depsCtx := newInstallDeps(cfg, runtime, state.store, state.backend.Artifacts(), state.extractStore, nil)
+	depsCtx := newInstallDeps(cfg, runtime, state.store, state.backend.Artifacts(), state.extractStore, nil, nil)
 	var wg sync.WaitGroup
 	// max(cfg.Workers, 1): a zero Workers would make sem unbuffered, and the
 	// first send would block forever since no worker has started to drain it
@@ -1201,7 +1201,7 @@ func installLevels(
 	prefetch *prefetcher,
 	root *os.Root,
 ) (failureSummary, error) {
-	depsCtx := newInstallDeps(cfg, runtime, st, artifacts, extractStore, root)
+	depsCtx := newInstallDeps(cfg, runtime, st, artifacts, extractStore, root, prefetch.cachedArtifacts())
 	var failures failureRecorder
 	for _, level := range levels {
 		if err := runInstallLevel(ctx, depsCtx, collections, graph, level, prefetch, &failures); err != nil {

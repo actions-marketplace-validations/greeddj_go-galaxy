@@ -394,6 +394,113 @@ func TestPrefetchedArtifactReusedNotRefetched(t *testing.T) {
 	}
 }
 
+// TestCachedArtifactProbedOnceAcrossScanAndInstall pins the prefetch/install
+// handoff's elimination of the second duplicate probe: a collection whose
+// artifact is already cached, but never recorded as installed, is left
+// unscheduled by buildPrefetchTasks' own scan (its Has() found the key
+// present, so no prefetch task exists for it at all) and the install worker
+// that later handles it reuses that same scan answer through deps.presence
+// instead of calling Has() a second time.
+//
+// The artifact is pre-committed straight into the stub bucket (bypassing the
+// fake Galaxy HTTP server entirely) rather than downloaded through a real
+// prefetch, precisely so the EndpointArtifact assertion below can tell a
+// download that never happened from one this run performed itself.
+func TestCachedArtifactProbedOnceAcrossScanAndInstall(t *testing.T) {
+	t.Parallel()
+	srv := fakegalaxy.New(t)
+	srv.AddVersion("acme", "app", "1.0.0", nil)
+
+	fx := newPrefetchHandoffFixture(t, srv, 1)
+	col := collection{Namespace: "acme", Name: "app", Version: "1.0.0"}
+	collections := map[string]collection{col.key(): col}
+	graph := map[string][]string{col.key(): {}}
+	levels, err := buildInstallLevels(graph)
+	if err != nil {
+		t.Fatalf("buildInstallLevels: %v", err)
+	}
+
+	content := buildTarGzWithEntry(t, "README.md", []byte("# acme.app\n"))
+	tmpPath := filepath.Join(t.TempDir(), "precached.tar.gz")
+	if err := os.WriteFile(tmpPath, content, helpers.FileMod); err != nil {
+		t.Fatalf("write pre-cached artifact: %v", err)
+	}
+	key := artifactKey(col)
+	if _, err := fx.artifacts.Commit(context.Background(), key, tmpPath, nil); err != nil {
+		t.Fatalf("pre-commit artifact into the stub bucket: %v", err)
+	}
+
+	prefetch, summary, err := fx.runLevels(collections, graph, levels)
+	if err != nil {
+		t.Fatalf("installLevels: %v", err)
+	}
+	if summary.count != 0 {
+		t.Fatalf("failures = %d, want 0", summary.count)
+	}
+	assertFileContent(t, filepath.Join(fx.installPath(col), "README.md"), "# acme.app\n")
+
+	// Killing mutation (run for real, not merely described): deleting the
+	// "if deps.presence[artifactKey(col)] { return true }" short-circuit from
+	// isCacheHit (install.go) makes the install worker re-probe here, and
+	// this assertion fails with the real go test output:
+	//   --- FAIL: TestCachedArtifactProbedOnceAcrossScanAndInstall (0.01s)
+	//       prefetch_handoff_test.go:449: hasCount = 2, want exactly 1 (one scan probe, no install-worker re-probe)
+	if got := fx.artifacts.hasCountFor(key); got != 1 {
+		t.Fatalf("hasCount = %d, want exactly 1 (one scan probe, no install-worker re-probe)", got)
+	}
+	if got := srv.Count(fakegalaxy.EndpointArtifact); got != 0 {
+		t.Fatalf("EndpointArtifact count = %d, want 0 (the artifact was already cached, never downloaded from the origin)", got)
+	}
+
+	prefetch.Close()
+}
+
+// TestUncachedArtifactStillProbedByInstallWorkerAfterFailedPrefetch is the
+// mandatory positive control for TestCachedArtifactProbedOnceAcrossScanAndInstall
+// above: without it, that test's hasCountFor(key) == 1 assertion would be
+// indistinguishable from a change that simply stopped counting probes at
+// all, rather than one that correctly skips exactly one of them.
+//
+// Here the artifact is genuinely absent, so buildPrefetchTasks' scan
+// schedules a prefetch task for it instead of recording a presence hint (see
+// buildPrefetchTasks' own doc comment for why a scheduled key gets no hint
+// either way). The scheduled prefetch then fails - the artifact endpoint is
+// rigged to keep answering 500 - so the install worker reaches isCacheHit
+// with no hint to consult and falls through to its own artifactExists probe,
+// for a hasCountFor total of 2: one from the scan, one from the install
+// worker.
+func TestUncachedArtifactStillProbedByInstallWorkerAfterFailedPrefetch(t *testing.T) {
+	t.Parallel()
+	srv := fakegalaxy.New(t)
+	srv.AddVersion("acme", "app", "1.0.0", nil)
+	srv.Fail(fakegalaxy.EndpointArtifact, "acme", "app", fakegalaxy.Fault{Status: http.StatusInternalServerError, Count: -1})
+
+	fx := newPrefetchHandoffFixture(t, srv, 1)
+	col := collection{Namespace: "acme", Name: "app", Version: "1.0.0"}
+	collections := map[string]collection{col.key(): col}
+	graph := map[string][]string{col.key(): {}}
+	levels, err := buildInstallLevels(graph)
+	if err != nil {
+		t.Fatalf("buildInstallLevels: %v", err)
+	}
+
+	prefetch, summary, err := fx.runLevels(collections, graph, levels)
+	if err != nil {
+		t.Fatalf("installLevels: %v", err)
+	}
+	if summary.count == 0 {
+		t.Fatalf("expected failures > 0 from the persistently failing artifact download")
+	}
+
+	key := artifactKey(col)
+	if got := fx.artifacts.hasCountFor(key); got != 2 {
+		t.Fatalf("hasCount = %d, want exactly 2 (one scan probe, one install-worker probe after the failed prefetch)", got)
+	}
+
+	prefetch.Close()
+	assertPathAbsent(t, fx.installPath(col))
+}
+
 // TestUnconsumedPrefetchTempReclaimedOnLevelFailure proves the other half of
 // the ownership contract: a prefetched artifact whose install level never
 // ran - because an earlier level failed and installLevels broke before

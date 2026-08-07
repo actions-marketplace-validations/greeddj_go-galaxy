@@ -499,7 +499,7 @@ func TestPrefetchScanUsesCheapCheck(t *testing.T) {
 	testRoot := newTestCollectionsRoot(t, root)
 	deps := newPrefetchDeps(cfg, infra.New(noopPrinter{}, http.DefaultClient), st, &presenceArtifacts{}, testRoot)
 
-	if shouldSchedulePrefetch(t.Context(), deps, col) {
+	if schedule, _ := shouldSchedulePrefetch(t.Context(), deps, col); schedule {
 		t.Fatalf("expected shouldSchedulePrefetch to report already-installed via the cheap check, even with a legacy marker")
 	}
 }

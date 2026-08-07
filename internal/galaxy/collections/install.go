@@ -126,12 +126,52 @@ type artifactData struct {
 // artifact cache: forceDownload was not requested (the corruption recovery
 // path forces a fresh download rather than trusting a hit that may still be
 // the very bytes that were just evicted), caching is enabled, an artifact
-// store is configured, and that store actually reports the key present.
-// Factored out of prepareInstall to keep its own branching under the
-// cyclomatic complexity budget.
+// store is configured, and the key is known present - either from the
+// prefetch scan's own answer or from a direct probe. Factored out of
+// prepareInstall to keep its own branching under the cyclomatic complexity
+// budget.
+//
+// deps.presence is the set of artifact keys buildPrefetchTasks' scan already
+// found cached (see prefetcher.cachedArtifacts). A key in that set is served
+// as a hit without a second Has() round trip - a second signed HEAD on the S3
+// backend - for exactly the case the scan already answered. Two properties
+// make that answer safe to reuse for the rest of the run:
+//
+//   - the prefetcher writes only keys it scheduled, and the scan records a
+//     key only when it left that key unscheduled, so no prefetch worker is
+//     ever racing a write against a key this set names. A scheduled key is
+//     deliberately not recorded even though the scan probed it: the gate is
+//     the structural one (the set never names a key the prefetcher might
+//     write) rather than the behavioral one (the set names a key whose write
+//     attempt, if any, left the cache untouched), so it holds however a
+//     future prefetchOne failure path behaves. The price is one real probe
+//     here for a collection whose prefetch failed, on a path that then pays a
+//     full metadata fetch and download anyway;
+//   - an install worker commits a key only through fetchArtifact's cache-miss
+//     arm, which this function's own answer gates, and two collections in one
+//     run cannot share an artifact key, since neither a namespace nor a name
+//     may contain the "-" artifactKey joins on. The one in-run write to a
+//     named key is therefore the forced refetch after an eviction, and that
+//     path sets forceDownload, which returns above before the set is read.
+//
+// What the set cannot see is a writer outside this run. The backend's
+// exclusive lock, taken in initInstall, rules out another run of this tool
+// while this one holds it; anything else able to remove a cached artifact
+// mid-run already writes the cache this project's trust model requires an
+// operator to restrict. The exposure is wider than a per-collection probe's,
+// since the answer is now as old as the install phase, and the cost if it is
+// ever hit is bounded to one collection failing its fetch where a fresh probe
+// would have fallen back to a download.
+//
+// A nil set - a disabled prefetcher, and the nil warm and prefetch-download
+// call sites pass - names no key, so "no hint" means "probe as before" with
+// no special case.
 func isCacheHit(ctx context.Context, deps installDeps, col collection, forceDownload bool) bool {
 	if forceDownload || deps.cfg.NoCache || deps.artifacts == nil {
 		return false
+	}
+	if deps.presence[artifactKey(col)] {
+		return true
 	}
 	return artifactExists(ctx, deps.artifacts, col)
 }

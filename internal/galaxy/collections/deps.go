@@ -40,6 +40,14 @@ type installDeps struct {
 	// makes any accidental collections-tree call from that path fail closed
 	// rather than by convention.
 	root *os.Root
+	// presence carries the prefetcher's own scan-time cache-presence hints
+	// (see prefetcher.cachedArtifacts), keyed by artifactKey, so isCacheHit
+	// can skip a redundant repeat of a probe the scan already ran. It is nil
+	// for warm, which starts no prefetcher at all, and for the prefetcher's
+	// own downloadDeps, which never calls isCacheHit at all; a nil map reads
+	// as "no hint" everywhere it is indexed, so both callers need no special
+	// case.
+	presence map[string]bool
 }
 
 type prefetchDeps struct {
@@ -70,12 +78,14 @@ func newInstallDeps(
 	artifacts cacheManager.ArtifactStore,
 	extractStore *extracted.Store,
 	root *os.Root,
+	presence map[string]bool,
 ) installDeps {
 	return installDeps{
 		collectionDeps: newCollectionDeps(cfg, runtime, st),
 		artifacts:      artifacts,
 		extractStore:   extractStore,
 		root:           root,
+		presence:       presence,
 	}
 }
 

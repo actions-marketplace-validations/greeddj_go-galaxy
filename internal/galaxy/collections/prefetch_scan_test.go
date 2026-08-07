@@ -211,7 +211,10 @@ func seedAlreadyInstalled(t *testing.T, cfg *config.Config, st *store.Store, col
 // present so it is skipped, c3's Has errors so it is scheduled anyway
 // (fail-open), c4 is not a Galaxy-type source so it is skipped regardless of
 // cache state, and c5 is already installed (canSkipInstall reports true) so
-// it is skipped without ever reaching the Has probe.
+// it is skipped without ever reaching the Has probe. It also pins
+// buildPrefetchTasks' presence set: c2 is the only one of the five whose
+// probe both ran and found the artifact cached, so it is the only key
+// p.presence names.
 func TestBuildPrefetchTasksSchedulesExactlyTheRightSet(t *testing.T) {
 	t.Parallel()
 	c1 := collection{Namespace: "acme", Name: "absent", Version: "1.0.0", Type: "galaxy"}
@@ -263,5 +266,30 @@ func TestBuildPrefetchTasksSchedulesExactlyTheRightSet(t *testing.T) {
 		if _, ok := p.done[key]; !ok {
 			t.Fatalf("p.done missing registered key %s", key)
 		}
+	}
+
+	assertPresenceNamesOnlyC2(t, p, c1, c2, c3)
+}
+
+// assertPresenceNamesOnlyC2 checks buildPrefetchTasks' presence set against
+// c1 (scheduled, must be absent), c3 (probe errored, must be absent), c2
+// (probed present and left unscheduled, must be present), and finally the
+// set's total size - kept out of the calling test to stay under its
+// cyclomatic complexity budget. The four checks are ordered so each is the
+// first one a given mutation can fail: a broader check placed earlier would
+// mask a later, more specific one before it is ever reached.
+func assertPresenceNamesOnlyC2(t *testing.T, p *prefetcher, c1, c2, c3 collection) {
+	t.Helper()
+	if p.presence[artifactKey(c1)] {
+		t.Fatalf("presence must not name c1: it was scheduled for prefetch, not left unscheduled")
+	}
+	if p.presence[artifactKey(c3)] {
+		t.Fatalf("presence must not name c3: its Has probe errored, so it answers nothing to trust")
+	}
+	if !p.presence[artifactKey(c2)] {
+		t.Fatalf("presence must name c2: its probe found the artifact cached and left it unscheduled")
+	}
+	if len(p.presence) != 1 {
+		t.Fatalf("len(p.presence) = %d, want 1 (only c2)", len(p.presence))
 	}
 }
