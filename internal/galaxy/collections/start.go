@@ -34,11 +34,7 @@ type installPlan struct {
 
 // Start installs collections according to the provided configuration.
 func Start(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
-	err := runInstall(ctx, cfg, runtime)
-	if err != nil {
-		runtime.Output.Errorf("Error: %s", err.Error())
-	}
-	return err
+	return runInstall(ctx, cfg, runtime)
 }
 
 // Warm resolves dependencies and ensures every artifact is downloaded into
@@ -46,11 +42,7 @@ func Start(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error 
 // It does not write anything to the install path - useful for baking CI
 // images so subsequent installs hardlink instantly.
 func Warm(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
-	err := runWarm(ctx, cfg, runtime)
-	if err != nil {
-		runtime.Output.Errorf("Error: %s", err.Error())
-	}
-	return err
+	return runWarm(ctx, cfg, runtime)
 }
 
 // runWarm owns the backend lifecycle for the warm command: it rejects
@@ -296,11 +288,7 @@ func warmVerifyAndEnsure(ctx context.Context, deps installDeps, col collection, 
 // for the `lock` command and never installs anything; it does mutate the
 // snapshot cache so that subsequent installs benefit from the work done.
 func Lock(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
-	err := runLock(ctx, cfg, runtime)
-	if err != nil {
-		runtime.Output.Errorf("Error: %s", err.Error())
-	}
-	return err
+	return runLock(ctx, cfg, runtime)
 }
 
 // runLock owns the backend lifecycle for the lock command: it opens the

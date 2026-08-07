@@ -141,11 +141,14 @@ func TestSymlinkedAnsibleCollectionsProducesOneFailureNotOnePerCollection(t *tes
 	if !errors.Is(err, helpers.ErrCollectionsPathEscape) {
 		t.Fatalf("Start error = %v, want errors.Is helpers.ErrCollectionsPathEscape", err)
 	}
-	// Start's own Errorf wrapper ("Error: %s") is the run's single top-level
-	// failure line; a per-collection failure would additionally add one
-	// "Failed: acme.<name> error: ..." line per collection dispatched.
-	if len(printer.errs) != 1 {
-		t.Errorf("printer recorded %d Errorf lines, want exactly 1 (the top-level run failure), got %v", len(printer.errs), printer.errs)
+	// This package prints no top-level failure line of its own: the run's
+	// terminal error is printed once, by cmd/go-galaxy/main.go, after the
+	// printer is closed. So the count that matters here is zero, and any line
+	// at all would be a per-collection "Failed: acme.<name> error: ..." -
+	// which is the regression this test exists to catch, since the escape is
+	// detected once for the whole run rather than once per collection.
+	if len(printer.errs) != 0 {
+		t.Errorf("printer recorded %d Errorf lines, want none (the run failure is printed by main), got %v", len(printer.errs), printer.errs)
 	}
 	if printer.hasErrContaining("Failed: acme.") {
 		t.Errorf("expected no per-collection \"Failed: acme.*\" line, got %v", printer.errs)

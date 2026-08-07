@@ -56,11 +56,7 @@ type cleanupState struct {
 
 // Start runs the cleanup process for unused collections.
 func Start(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
-	err := runCleanup(ctx, cfg, runtime)
-	if err != nil {
-		runtime.Output.Errorf("Error: %s", err.Error())
-	}
-	return err
+	return runCleanup(ctx, cfg, runtime)
 }
 
 // runCleanup owns the backend lifecycle for the cleanup command: it opens the
