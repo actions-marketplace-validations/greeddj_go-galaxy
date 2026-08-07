@@ -817,8 +817,7 @@ func initInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) 
 	// resolveCollectionsInternal regardless of cfg.Frozen, so --refresh keeps
 	// vetoing the resolve snapshot exactly as it does unfrozen - warning
 	// "skipping --refresh" there would be an outright false statement about
-	// what lock --frozen --refresh does (see lockFrozen's own doc comment for
-	// what that combination means).
+	// what lock --frozen --refresh does.
 	if cfg.Refresh && cfg.Offline {
 		runtime.Output.Warnf("--offline: skipping --refresh; cached state is the only source of truth offline")
 	}
