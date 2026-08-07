@@ -17,7 +17,7 @@ func CommonFlags() []cli.Flag {
 		&cli.BoolFlag{
 			Name:    "quiet",
 			Aliases: []string{"q"},
-			Usage:   "Quiet mode, not working with verbose",
+			Usage:   "Suppress progress and log lines; results, warnings and errors still print. Ignored when --verbose is also set",
 			Sources: cli.EnvVars("GO_GALAXY_QUIET"),
 		},
 		&cli.BoolFlag{
@@ -225,8 +225,9 @@ func S3Flags() []cli.Flag {
 			Sources: cli.EnvVars("GO_GALAXY_S3_SESSION_TOKEN", "AWS_SESSION_TOKEN"),
 		},
 		&cli.BoolFlag{
-			Name:    "s3-path-style-disabled",
-			Usage:   "Path style addressing for S3",
+			Name: "s3-path-style-disabled",
+			Usage: "Use virtual-hosted-style S3 addressing (<bucket>.<endpoint>/<key>) " +
+				"instead of the default path style (<endpoint>/<bucket>/<key>)",
 			Sources: cli.EnvVars("GO_GALAXY_S3_PATH_STYLE_DISABLED"),
 		},
 	}

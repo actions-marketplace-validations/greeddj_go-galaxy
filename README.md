@@ -296,7 +296,8 @@ Clean unreachable collections:
 ### install options
 
 - `--verbose` - verbose output (`$GO_GALAXY_VERBOSE`)
-- `--quiet, -q` - quiet mode (`$GO_GALAXY_QUIET`)
+- `--quiet, -q` (`$GO_GALAXY_QUIET`) - suppress progress and log lines; results, warnings and
+  errors still print. Ignored when `--verbose` is also set.
 - `--dry-run` (`$GO_GALAXY_DRY_RUN`) - report what `install`, `warm`, or `lock` would do, without
   downloading any artifact, creating any install tree or extracted tree, recording any install,
   writing any warmed entry, writing any lockfile, registering the project, honoring
@@ -455,12 +456,15 @@ S3 cache options (if `--s3-bucket` is set, S3 backend is used):
 - `--s3-secret-key` (`$GO_GALAXY_S3_SECRET_KEY`, `$AWS_SECRET_ACCESS_KEY`)
 - `--s3-endpoint` (`$GO_GALAXY_S3_ENDPOINT`)
 - `--s3-session-token` (`$GO_GALAXY_S3_SESSION_TOKEN`, `$AWS_SESSION_TOKEN`)
-- `--s3-path-style-disabled` (`$GO_GALAXY_S3_PATH_STYLE_DISABLED`)
+- `--s3-path-style-disabled` (`$GO_GALAXY_S3_PATH_STYLE_DISABLED`) - switch to virtual-hosted-style
+  addressing (`<bucket>.<endpoint>/<key>`). Path style (`<endpoint>/<bucket>/<key>`) is the default,
+  which is what the flag disables.
 
 ### cleanup options
 
 - `--verbose` - verbose output (`$GO_GALAXY_VERBOSE`)
-- `--quiet, -q` - quiet mode (`$GO_GALAXY_QUIET`)
+- `--quiet, -q` (`$GO_GALAXY_QUIET`) - suppress progress and log lines; results, warnings and
+  errors still print. Ignored when `--verbose` is also set.
 - `--dry-run` (`$GO_GALAXY_DRY_RUN`) - report the collections `cleanup` would remove and the
   extracted-store entries it would sweep, without deleting anything and without saving the
   snapshot; the summary line prints a candidate count instead of a removed count.
@@ -472,7 +476,9 @@ S3 cache options (if `--s3-bucket` is set, S3 backend is used):
 - `--s3-secret-key` (`$GO_GALAXY_S3_SECRET_KEY`, `$AWS_SECRET_ACCESS_KEY`)
 - `--s3-endpoint` (`$GO_GALAXY_S3_ENDPOINT`)
 - `--s3-session-token` (`$GO_GALAXY_S3_SESSION_TOKEN`, `$AWS_SESSION_TOKEN`)
-- `--s3-path-style-disabled` (`$GO_GALAXY_S3_PATH_STYLE_DISABLED`)
+- `--s3-path-style-disabled` (`$GO_GALAXY_S3_PATH_STYLE_DISABLED`) - switch to virtual-hosted-style
+  addressing (`<bucket>.<endpoint>/<key>`). Path style (`<endpoint>/<bucket>/<key>`) is the default,
+  which is what the flag disables.
 
 `cleanup` aborts with a non-zero exit and deletes nothing if a recorded project's `requirements.yml` fails to load for any reason other than the file no longer existing at all. A recorded requirements file that no longer exists at all is treated differently: it is a tolerated stale registry entry, reported with a single warning naming the project and contributing no reachability roots this run, rather than a load failure. A project whose `ansible_collections` entry does not resolve to a real directory inside its collections path - most commonly because that entry itself is a symlink escaping that path - is skipped for scanning instead, with its own warning naming the project: nothing under it is scanned or removed, and every other project's cleanup still proceeds unless some recorded project's `requirements.yml` fails to load for any reason other than the file no longer existing at all, which aborts the whole run for every project at once. A skipped project's `requirements.yml` is still resolved against every other recorded project's installed collections, though, so its roots can keep another project's on-disk copy alive even though nothing under the skipped project itself was scanned or removed this run; `--dry-run` still never previews a removal for the skipped project's own collections, since a real run could not perform one there either. Within a project that does get scanned, an individual collection whose `MANIFEST.json` is not a regular file - a symlink, a directory, or anything else in its place - is skipped with its own warning naming the path, while the rest of that project's collections are still scanned and cleaned up normally.
 
