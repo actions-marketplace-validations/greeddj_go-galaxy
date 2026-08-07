@@ -89,6 +89,14 @@ func resolveCollectionsInternal(
 		}
 	}
 
+	// Best-effort, cfg.Workers-bounded warm of the root-metadata documents the
+	// sequential solve below is about to request one at a time - see
+	// prewarmRootMetadata's own doc comment for the full argument. Its
+	// position is load-bearing in one direction: it must stay below the
+	// snapshot-replay return above, since a run that replays the snapshot has
+	// to keep issuing zero metadata requests, and a prewarm hoisted over that
+	// return would issue one per root before the snapshot was ever consulted.
+	prewarmRootMetadata(ctx, deps, roots)
 	resolved, graph, err := solveCollections(ctx, deps, roots)
 	if err != nil {
 		return nil, nil, err

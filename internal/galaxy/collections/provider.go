@@ -48,13 +48,29 @@ type MetadataProvider struct {
 // a warm entry written by either path satisfies the other. sources maps a
 // root fqdn to its explicit install source (see sourceOf); passing nil (or
 // an empty map) means every fqdn resolves against cfg.Server.
+//
+// It builds a fresh collectionDeps (a fresh apiRootMemo and
+// unmatchedSourceMemo, scoped to this one provider) rather than reusing a
+// caller's own: a caller that needs its provider to share those memos with
+// the rest of its own pipeline - the solve phase's own provider, sharing
+// deps.apiRoots with resolveCollectionsInternal's prewarm - uses
+// newMetadataProviderWithDeps directly instead.
 func NewMetadataProvider(
 	cfg *config.Config,
 	runtime *infra.Infra,
 	st *store.Store,
 	sources map[string]string,
 ) *MetadataProvider {
-	return &MetadataProvider{deps: newCollectionDeps(cfg, runtime, st), sources: sources, bindings: make(map[string]string)}
+	return newMetadataProviderWithDeps(newCollectionDeps(cfg, runtime, st), sources)
+}
+
+// newMetadataProviderWithDeps builds a MetadataProvider over an
+// already-built collectionDeps, so its apiRootMemo and unmatchedSourceMemo -
+// not just its Store - are shared with whatever else deps is threaded
+// through, rather than each provider getting its own scoped-to-nothing-else
+// copy the way NewMetadataProvider's own newCollectionDeps call produces.
+func newMetadataProviderWithDeps(deps collectionDeps, sources map[string]string) *MetadataProvider {
+	return &MetadataProvider{deps: deps, sources: sources, bindings: make(map[string]string)}
 }
 
 // Highest returns fqdn's registry-reported highest_version, with no

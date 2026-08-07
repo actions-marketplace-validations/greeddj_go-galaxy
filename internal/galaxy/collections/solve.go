@@ -15,7 +15,14 @@ import (
 // is the production cold-resolve path.
 func solveCollections(ctx context.Context, deps collectionDeps, roots []collection) (map[string]collection, map[string][]string, error) {
 	sources := rootSourceMap(roots)
-	mp := NewMetadataProvider(deps.cfg, deps.runtime, deps.st, sources)
+	// newMetadataProviderWithDeps, not NewMetadataProvider: this provider must
+	// share deps.apiRoots (and deps.unmatchedSources) with the rest of this
+	// resolve phase, in particular with prewarmRootMetadata's own per-root
+	// providers (see its doc comment) - a root-metadata document either of
+	// them already fetched is then served to the other from deps.st with no
+	// further network request, and the winning apiRoot either of them already
+	// discovered for a server base is not re-probed by the other.
+	mp := newMetadataProviderWithDeps(deps, sources)
 	var provider solver.Provider = mp
 	if deps.cfg.NoDeps {
 		provider = NewNoDepsProvider(provider)
