@@ -199,6 +199,32 @@ func warmCollections(
 	// buildPrefetchTasks / startPrefetchWorkers).
 	sem := make(chan struct{}, max(cfg.Workers, 1))
 	for _, col := range collections {
+		// Once ctx is canceled, no further collection is handed to the worker
+		// pool: the loop stops dispatching here, on this iteration, while every
+		// worker already started keeps running to completion under the inline
+		// wg.Wait below, so no in-flight download or extract is abandoned
+		// mid-write. break rather than return: a bare return would still reach
+		// the same wg.Wait immediately below (it is not deferred here, see that
+		// call's own comment), so nothing is skipped either way, but break
+		// keeps this function's single return-through-summary() exit point
+		// instead of adding a second one. This function still returns
+		// failures.summary() on this path, exactly as it does when the map
+		// finishes normally - not an error derived from ctx.Err() - since
+		// warmWithState's own tail (the snapshot save and writeRunMetrics)
+		// needs to run for an interrupted warm exactly as it does for one that
+		// finished on its own. The process's own exit code is decided
+		// separately, by cmd/go-galaxy/main.go's handleResult reading the
+		// caught signal, so it does not depend on what this function returns.
+		//
+		// Residual: if cancellation lands exactly between two dispatches and
+		// every worker already started still finishes without error, the
+		// returned summary's count stays zero and warmWithState reports its
+		// ordinary "Warm complete" line even though the run was interrupted -
+		// the exit code still comes from the caught signal, not from that
+		// count.
+		if ctx.Err() != nil {
+			break
+		}
 		sem <- struct{}{}
 		wg.Go(func() {
 			defer func() { <-sem }()
@@ -1220,6 +1246,29 @@ func runInstallLevel(
 	defer wg.Wait()
 
 	for _, key := range level {
+		// Once ctx is canceled, no further key in this level is handed to the
+		// worker pool: the loop stops dispatching here, on this iteration,
+		// while every worker already started keeps running to completion under
+		// the deferred wg.Wait above, so no in-flight install is abandoned
+		// mid-write. break rather than return: a bare return would still run
+		// that same deferred wait, so nothing is skipped either way, but break
+		// keeps this function's single nil-returning exit point instead of
+		// adding a second one. This function still returns nil on this path,
+		// exactly as it does when a level finishes normally - not ctx.Err() -
+		// because installLevels propagates a non-nil return straight up past
+		// finalizeInstall, and an interrupted run must still reach it to save
+		// its snapshot. The process's own exit code is decided separately, by
+		// cmd/go-galaxy/main.go's handleResult reading the caught signal, so it
+		// does not depend on what this function returns.
+		//
+		// Residual: if cancellation lands exactly between two dispatches and
+		// every worker already started still finishes without error, this
+		// level's failure count stays zero and finalizeInstall reports its
+		// ordinary success line even though the run was interrupted - the exit
+		// code still comes from the caught signal, not from that count.
+		if ctx.Err() != nil {
+			break
+		}
 		col, ok := collections[key]
 		if !ok {
 			return fmt.Errorf("%w for: %s", helpers.ErrMissingCollection, key)
