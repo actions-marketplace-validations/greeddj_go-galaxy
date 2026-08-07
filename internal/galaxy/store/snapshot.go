@@ -142,18 +142,18 @@ func New() *Store {
 // The local Bolt path never needed this: loadBucket only ever populates an
 // already-initialized map key by key and never assigns a whole map field, so
 // there is no decode step there that can replace a map with nil.
-func (m *Store) UnmarshalJSON(data []byte) error {
+func (s *Store) UnmarshalJSON(data []byte) error {
 	// storeJSON strips the json.Unmarshaler method set, so the decode below
 	// cannot recurse back into this method. The conversion is on the pointer,
 	// so the RWMutex is never copied.
 	type storeJSON Store
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if err := json.Unmarshal(data, (*storeJSON)(m)); err != nil {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := json.Unmarshal(data, (*storeJSON)(s)); err != nil {
 		return err
 	}
-	m.ensureMaps()
+	s.ensureMaps()
 	return nil
 }
 
@@ -174,36 +174,36 @@ type RequirementSpec struct {
 // SetInstalled records an installed collection entry. The entry's Deps
 // slice is cloned before storing, so a later caller mutation of its
 // backing array cannot corrupt the stored snapshot state.
-func (m *Store) SetInstalled(key string, entry InstalledEntry) {
-	if m == nil {
+func (s *Store) SetInstalled(key string, entry InstalledEntry) {
+	if s == nil {
 		return
 	}
 	entry.Deps = slices.Clone(entry.Deps)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.Installed[key] = entry
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Installed[key] = entry
 }
 
 // DeleteInstalled removes an installed entry by key.
-func (m *Store) DeleteInstalled(key string) {
-	if m == nil {
+func (s *Store) DeleteInstalled(key string) {
+	if s == nil {
 		return
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.Installed, key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.Installed, key)
 }
 
 // GetInstalled returns an installed entry by key. Deps is cloned before
 // returning, so a caller mutation of the returned slice cannot corrupt the
 // stored snapshot state.
-func (m *Store) GetInstalled(key string) (InstalledEntry, bool) {
-	if m == nil {
+func (s *Store) GetInstalled(key string) (InstalledEntry, bool) {
+	if s == nil {
 		return InstalledEntry{}, false
 	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	entry, ok := m.Installed[key]
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entry, ok := s.Installed[key]
 	entry.Deps = slices.Clone(entry.Deps)
 	return entry, ok
 }
@@ -215,14 +215,14 @@ func (m *Store) GetInstalled(key string) (InstalledEntry, bool) {
 // projects whose workspace is currently absent (the normal ephemeral-CI
 // state), since their installed entries are never pruned from the snapshot
 // until their workspace is actually seen and scanned again.
-func (m *Store) InstalledArtifactSHAByKey() map[string]string {
-	if m == nil {
+func (s *Store) InstalledArtifactSHAByKey() map[string]string {
+	if s == nil {
 		return nil
 	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := make(map[string]string, len(m.Installed))
-	for key, entry := range m.Installed {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]string, len(s.Installed))
+	for key, entry := range s.Installed {
 		if entry.ArtifactSHA256 == "" {
 			continue
 		}
@@ -236,13 +236,13 @@ func (m *Store) InstalledArtifactSHAByKey() map[string]string {
 // early on a nil receiver, an empty key, or an empty sha, so it can never
 // persist an entry that protects nothing. There is nothing to clone here,
 // unlike SetInstalled: WarmedEntry holds no reference-type field.
-func (m *Store) SetWarmed(key, artifactSHA string) {
-	if m == nil || key == "" || artifactSHA == "" {
+func (s *Store) SetWarmed(key, artifactSHA string) {
+	if s == nil || key == "" || artifactSHA == "" {
 		return
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.Warmed[key] = WarmedEntry{WarmedAt: time.Now().UTC(), ArtifactSHA256: artifactSHA}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Warmed[key] = WarmedEntry{WarmedAt: time.Now().UTC(), ArtifactSHA256: artifactSHA}
 }
 
 // WarmedArtifactSHAByKey returns a fresh map from warmed collection key to
@@ -256,15 +256,15 @@ func (m *Store) SetWarmed(key, artifactSHA string) {
 // helpers.WarmedEntryMaxAge, passed to newRetentionWindow at both sites; each
 // site samples its own now, so the two windows share a width but not an
 // instant.
-func (m *Store) WarmedArtifactSHAByKey() map[string]string {
-	if m == nil {
+func (s *Store) WarmedArtifactSHAByKey() map[string]string {
+	if s == nil {
 		return nil
 	}
 	window := newRetentionWindow(time.Now().UTC(), helpers.WarmedEntryMaxAge)
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := make(map[string]string, len(m.Warmed))
-	for key, entry := range m.Warmed {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]string, len(s.Warmed))
+	for key, entry := range s.Warmed {
 		if entry.ArtifactSHA256 == "" || window.isStale(entry.WarmedAt) {
 			continue
 		}
@@ -276,13 +276,13 @@ func (m *Store) WarmedArtifactSHAByKey() map[string]string {
 // GetDepsCache returns cached dependency constraints for a key. This is a
 // pure read under RLock: it does not bump the entry's FetchedAt, so a hit
 // here never requires upgrading to the write lock.
-func (m *Store) GetDepsCache(key string) (map[string]string, bool) {
-	if m == nil {
+func (s *Store) GetDepsCache(key string) (map[string]string, bool) {
+	if s == nil {
 		return nil, false
 	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	entry, ok := m.DepsCache[key]
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entry, ok := s.DepsCache[key]
 	if !ok {
 		return nil, false
 	}
@@ -300,25 +300,25 @@ func (m *Store) GetDepsCache(key string) (map[string]string, bool) {
 // of taking the write lock to bump FetchedAt on every hit. This differs from
 // APICache, whose FetchedAt is also bumped on a successful 304 revalidation
 // via refreshAPICacheEntry, not only on an initial fetch.
-func (m *Store) SetDepsCache(key string, deps map[string]string) {
-	if m == nil {
+func (s *Store) SetDepsCache(key string, deps map[string]string) {
+	if s == nil {
 		return
 	}
 	clone := make(map[string]string, len(deps))
 	maps.Copy(clone, deps)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.DepsCache[key] = DepsCacheEntry{FetchedAt: time.Now().UTC(), Deps: clone}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.DepsCache[key] = DepsCacheEntry{FetchedAt: time.Now().UTC(), Deps: clone}
 }
 
 // DeleteDepsCache removes cached dependency data for a key.
-func (m *Store) DeleteDepsCache(key string) {
-	if m == nil {
+func (s *Store) DeleteDepsCache(key string) {
+	if s == nil {
 		return
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.DepsCache, key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.DepsCache, key)
 }
 
 // GetAPICache returns a cached API entry by key. The returned entry shares
@@ -326,51 +326,51 @@ func (m *Store) DeleteDepsCache(key string) {
 // as read-only and must not mutate it. Body is deliberately not cloned on
 // read because this is the warm-cache hot path and Body can be a large
 // response payload; the only caller unmarshals it without mutating.
-func (m *Store) GetAPICache(key string) (APICacheEntry, bool) {
-	if m == nil {
+func (s *Store) GetAPICache(key string) (APICacheEntry, bool) {
+	if s == nil {
 		return APICacheEntry{}, false
 	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	entry, ok := m.APICache[key]
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entry, ok := s.APICache[key]
 	return entry, ok
 }
 
 // SetAPICache stores a cached API entry. The entry's Body is cloned before
 // storing, so a later caller mutation (or reuse) of its backing buffer
 // cannot corrupt the stored snapshot state.
-func (m *Store) SetAPICache(key string, entry APICacheEntry) {
-	if m == nil {
+func (s *Store) SetAPICache(key string, entry APICacheEntry) {
+	if s == nil {
 		return
 	}
 	entry.Body = slices.Clone(entry.Body)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.APICache[key] = entry
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.APICache[key] = entry
 }
 
 // ClearCaches clears API, dependency, and versions caches.
-func (m *Store) ClearCaches() {
-	if m == nil {
+func (s *Store) ClearCaches() {
+	if s == nil {
 		return
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.APICache = make(map[string]APICacheEntry)
-	m.DepsCache = make(map[string]DepsCacheEntry)
-	m.Versions = make(map[string]VersionsEntry)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.APICache = make(map[string]APICacheEntry)
+	s.DepsCache = make(map[string]DepsCacheEntry)
+	s.Versions = make(map[string]VersionsEntry)
 }
 
 // GetVersionsCache returns cached versions for a key. This is a pure read
 // under RLock: it does not bump the entry's FetchedAt, so a hit here never
 // requires upgrading to the write lock.
-func (m *Store) GetVersionsCache(key string) ([]string, bool) {
-	if m == nil {
+func (s *Store) GetVersionsCache(key string) ([]string, bool) {
+	if s == nil {
 		return nil, false
 	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	entry, ok := m.Versions[key]
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entry, ok := s.Versions[key]
 	if !ok {
 		return nil, false
 	}
@@ -388,67 +388,67 @@ func (m *Store) GetVersionsCache(key string) ([]string, bool) {
 // instead of taking the write lock to bump FetchedAt on every hit. This
 // differs from APICache, whose FetchedAt is also bumped on a successful 304
 // revalidation via refreshAPICacheEntry, not only on an initial fetch.
-func (m *Store) SetVersionsCache(key string, versions []string) {
-	if m == nil {
+func (s *Store) SetVersionsCache(key string, versions []string) {
+	if s == nil {
 		return
 	}
 	clone := make([]string, len(versions))
 	copy(clone, versions)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.Versions[key] = VersionsEntry{FetchedAt: time.Now().UTC(), List: clone}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Versions[key] = VersionsEntry{FetchedAt: time.Now().UTC(), List: clone}
 }
 
 // SetResolvedAll replaces the resolved entries map.
-func (m *Store) SetResolvedAll(resolved map[string]ResolvedEntry) {
-	if m == nil {
+func (s *Store) SetResolvedAll(resolved map[string]ResolvedEntry) {
+	if s == nil {
 		return
 	}
 	clone := make(map[string]ResolvedEntry, len(resolved))
 	maps.Copy(clone, resolved)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.Resolved = clone
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Resolved = clone
 }
 
 // ResolvedSnapshot returns a copy of resolved entries.
-func (m *Store) ResolvedSnapshot() map[string]ResolvedEntry {
-	if m == nil {
+func (s *Store) ResolvedSnapshot() map[string]ResolvedEntry {
+	if s == nil {
 		return nil
 	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	clone := make(map[string]ResolvedEntry, len(m.Resolved))
-	maps.Copy(clone, m.Resolved)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	clone := make(map[string]ResolvedEntry, len(s.Resolved))
+	maps.Copy(clone, s.Resolved)
 	return clone
 }
 
 // SetGraph records dependencies for a collection key. deps is cloned before
 // storing, so a later caller mutation of its backing array cannot corrupt
 // the stored snapshot state.
-func (m *Store) SetGraph(key string, deps []string) {
-	if m == nil {
+func (s *Store) SetGraph(key string, deps []string) {
+	if s == nil {
 		return
 	}
 	clone := slices.Clone(deps)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.Graph[key] = clone
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Graph[key] = clone
 }
 
 // DeleteGraph removes dependency data for a key.
-func (m *Store) DeleteGraph(key string) {
-	if m == nil {
+func (s *Store) DeleteGraph(key string) {
+	if s == nil {
 		return
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.Graph, key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.Graph, key)
 }
 
 // SetGraphSnapshot replaces the dependency graph.
-func (m *Store) SetGraphSnapshot(graph map[string][]string) {
-	if m == nil {
+func (s *Store) SetGraphSnapshot(graph map[string][]string) {
+	if s == nil {
 		return
 	}
 	clone := make(map[string][]string, len(graph))
@@ -457,20 +457,20 @@ func (m *Store) SetGraphSnapshot(graph map[string][]string) {
 		copy(out, deps)
 		clone[key] = out
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.Graph = clone
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Graph = clone
 }
 
 // GraphSnapshot returns a copy of the dependency graph.
-func (m *Store) GraphSnapshot() map[string][]string {
-	if m == nil {
+func (s *Store) GraphSnapshot() map[string][]string {
+	if s == nil {
 		return nil
 	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	clone := make(map[string][]string, len(m.Graph))
-	for key, deps := range m.Graph {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	clone := make(map[string][]string, len(s.Graph))
+	for key, deps := range s.Graph {
 		out := make([]string, len(deps))
 		copy(out, deps)
 		clone[key] = out
@@ -482,8 +482,8 @@ func (m *Store) GraphSnapshot() map[string][]string {
 // would only shallow-copy each RequirementSpec, leaving its Signatures
 // slice aliasing the caller's backing array, so each entry's Signatures is
 // cloned individually before storing.
-func (m *Store) SetRequirements(spec map[string]RequirementSpec) {
-	if m == nil {
+func (s *Store) SetRequirements(spec map[string]RequirementSpec) {
+	if s == nil {
 		return
 	}
 	clone := make(map[string]RequirementSpec, len(spec))
@@ -491,23 +491,23 @@ func (m *Store) SetRequirements(spec map[string]RequirementSpec) {
 		value.Signatures = slices.Clone(value.Signatures)
 		clone[key] = value
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.Requirements = clone
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Requirements = clone
 }
 
 // RequirementsSnapshot returns a fully independent deep copy of requirement
 // specs: each entry's Signatures slice is cloned too, so mutating the
 // returned map or any of its Signatures slices cannot corrupt the stored
 // snapshot state.
-func (m *Store) RequirementsSnapshot() map[string]RequirementSpec {
-	if m == nil {
+func (s *Store) RequirementsSnapshot() map[string]RequirementSpec {
+	if s == nil {
 		return nil
 	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	clone := make(map[string]RequirementSpec, len(m.Requirements))
-	for key, value := range m.Requirements {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	clone := make(map[string]RequirementSpec, len(s.Requirements))
+	for key, value := range s.Requirements {
 		value.Signatures = slices.Clone(value.Signatures)
 		clone[key] = value
 	}
@@ -515,18 +515,18 @@ func (m *Store) RequirementsSnapshot() map[string]RequirementSpec {
 }
 
 // MetaSnapshot returns the current snapshot metadata.
-func (m *Store) MetaSnapshot() SnapshotMeta {
-	if m == nil {
+func (s *Store) MetaSnapshot() SnapshotMeta {
+	if s == nil {
 		return SnapshotMeta{}
 	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.Meta
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.Meta
 }
 
 // WasPersisted reports whether this store was ever actually loaded from a
 // persisted snapshot, as opposed to being a fresh, never-saved store. It is
-// equivalent to !m.Meta.LastSnapshot.IsZero(): LastSnapshot is zero exactly
+// equivalent to !s.Meta.LastSnapshot.IsZero(): LastSnapshot is zero exactly
 // when no persisted snapshot was loaded - New() leaves it zero, Load returns
 // New() outright for ErrOutdatedSchemaVersion (a dropped, pre-migration
 // snapshot), the S3 backend's LoadStore returns store.New() for both
@@ -536,7 +536,7 @@ func (m *Store) MetaSnapshot() SnapshotMeta {
 // load as usual; that combination only a hand-edited database can produce,
 // and skipping is the conservative answer there anyway - while Save and
 // MarshalSnapshot both stamp it unconditionally on every persisted write.
-// It reads m.Meta.LastSnapshot directly under the read lock rather than
+// It reads s.Meta.LastSnapshot directly under the read lock rather than
 // through MetaSnapshot, which would copy the whole SnapshotMeta struct just
 // to check one field.
 //
@@ -545,13 +545,13 @@ func (m *Store) MetaSnapshot() SnapshotMeta {
 // content or narrows state on the strength of such a store is acting on
 // ignorance, not on evidence, and must not treat an empty in-memory map as
 // proof that nothing is installed or warmed.
-func (m *Store) WasPersisted() bool {
-	if m == nil {
+func (s *Store) WasPersisted() bool {
+	if s == nil {
 		return false
 	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return !m.Meta.LastSnapshot.IsZero()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return !s.Meta.LastSnapshot.IsZero()
 }
 
 // HasRecordedContent reports whether any run has ever written records of
@@ -577,24 +577,24 @@ func (m *Store) WasPersisted() bool {
 // nothing is installed there, which is evidence, not ignorance - while
 // leaving it false for a cache no content-recording command has ever
 // written.
-func (m *Store) HasRecordedContent() bool {
-	if m == nil {
+func (s *Store) HasRecordedContent() bool {
+	if s == nil {
 		return false
 	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return !m.Meta.ContentRecorded.IsZero()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return !s.Meta.ContentRecorded.IsZero()
 }
 
 // SetMetaRequirements stores the requirements hash and server.
-func (m *Store) SetMetaRequirements(hash, server string) {
-	if m == nil {
+func (s *Store) SetMetaRequirements(hash, server string) {
+	if s == nil {
 		return
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.Meta.RequirementsHash = hash
-	m.Meta.Server = server
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Meta.RequirementsHash = hash
+	s.Meta.Server = server
 }
 
 // stampSaveMeta applies the metadata every persisted write stamps, and is the
@@ -643,9 +643,9 @@ type snapshotData struct {
 // live store directly, so a concurrent writer goroutine cannot trip the
 // race detector or produce a torn payload. The schema version and
 // last-snapshot timestamp are stamped exactly as Save does.
-func (m *Store) MarshalSnapshot() ([]byte, error) {
-	data := m.snapshotData()
-	stampSaveMeta(&data, m.hasContentEntries())
+func (s *Store) MarshalSnapshot() ([]byte, error) {
+	data := s.snapshotData()
+	stampSaveMeta(&data, s.hasContentEntries())
 
 	// snapshotData has no json tags of its own; assign its fields onto a
 	// throwaway Store so the encoding reuses Store's existing json tags and
@@ -668,27 +668,27 @@ func (m *Store) MarshalSnapshot() ([]byte, error) {
 // of on-disk content. It is what a save consults to decide whether to stamp
 // Meta.ContentRecorded; see stampSaveMeta for why it is read here, from the
 // store itself, rather than from the payload that save is about to write.
-func (m *Store) hasContentEntries() bool {
-	if m == nil {
+func (s *Store) hasContentEntries() bool {
+	if s == nil {
 		return false
 	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return len(m.Installed) > 0 || len(m.Warmed) > 0
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.Installed) > 0 || len(s.Warmed) > 0
 }
 
 // ensureMaps re-allocates every map a decode may have nilled. The caller must
 // hold the write lock. Every map New() initializes is listed here; a new map
 // on Store must be added to both.
-func (m *Store) ensureMaps() {
-	m.APICache = ensureMap(m.APICache)
-	m.DepsCache = ensureMap(m.DepsCache)
-	m.Installed = ensureMap(m.Installed)
-	m.Graph = ensureMap(m.Graph)
-	m.Requirements = ensureMap(m.Requirements)
-	m.Resolved = ensureMap(m.Resolved)
-	m.Versions = ensureMap(m.Versions)
-	m.Warmed = ensureMap(m.Warmed)
+func (s *Store) ensureMaps() {
+	s.APICache = ensureMap(s.APICache)
+	s.DepsCache = ensureMap(s.DepsCache)
+	s.Installed = ensureMap(s.Installed)
+	s.Graph = ensureMap(s.Graph)
+	s.Requirements = ensureMap(s.Requirements)
+	s.Resolved = ensureMap(s.Resolved)
+	s.Versions = ensureMap(s.Versions)
+	s.Warmed = ensureMap(s.Warmed)
 }
 
 // ensureMap returns m when it is non-nil and a fresh empty map otherwise.
@@ -751,33 +751,33 @@ func (w retentionWindow) isStale(stampedAt time.Time) bool {
 // are never pruned, only this RLock-protected copy - a still-warm entry
 // stays available for reads until it is naturally overwritten or the store
 // process restarts and reloads the (now-pruned) persisted snapshot.
-func (m *Store) snapshotData() snapshotData {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+func (s *Store) snapshotData() snapshotData {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	now := time.Now().UTC()
 	window := newRetentionWindow(now, helpers.CacheEntryMaxAge)
 	warmedWindow := newRetentionWindow(now, helpers.WarmedEntryMaxAge)
 
 	data := snapshotData{
-		Meta:         m.Meta,
-		APICache:     make(map[string]APICacheEntry, len(m.APICache)),
-		DepsCache:    make(map[string]DepsCacheEntry, len(m.DepsCache)),
-		Installed:    make(map[string]InstalledEntry, len(m.Installed)),
-		Graph:        make(map[string][]string, len(m.Graph)),
-		Requirements: make(map[string]RequirementSpec, len(m.Requirements)),
-		Resolved:     make(map[string]ResolvedEntry, len(m.Resolved)),
-		Versions:     make(map[string]VersionsEntry, len(m.Versions)),
-		Warmed:       make(map[string]WarmedEntry, len(m.Warmed)),
+		Meta:         s.Meta,
+		APICache:     make(map[string]APICacheEntry, len(s.APICache)),
+		DepsCache:    make(map[string]DepsCacheEntry, len(s.DepsCache)),
+		Installed:    make(map[string]InstalledEntry, len(s.Installed)),
+		Graph:        make(map[string][]string, len(s.Graph)),
+		Requirements: make(map[string]RequirementSpec, len(s.Requirements)),
+		Resolved:     make(map[string]ResolvedEntry, len(s.Resolved)),
+		Versions:     make(map[string]VersionsEntry, len(s.Versions)),
+		Warmed:       make(map[string]WarmedEntry, len(s.Warmed)),
 	}
 
-	for key, entry := range m.APICache {
+	for key, entry := range s.APICache {
 		if window.isStale(entry.FetchedAt) {
 			continue
 		}
 		data.APICache[key] = entry
 	}
-	for key, entry := range m.DepsCache {
+	for key, entry := range s.DepsCache {
 		if window.isStale(entry.FetchedAt) {
 			continue
 		}
@@ -812,15 +812,15 @@ func (m *Store) snapshotData() snapshotData {
 	// installed entries could be dropped on that basis without a window and
 	// without touching a live project. That is a cleanup-pass design, not a
 	// snapshot-schema one, and it is what a revival of this should build.
-	maps.Copy(data.Installed, m.Installed)
-	for key, deps := range m.Graph {
+	maps.Copy(data.Installed, s.Installed)
+	for key, deps := range s.Graph {
 		clone := make([]string, len(deps))
 		copy(clone, deps)
 		data.Graph[key] = clone
 	}
-	maps.Copy(data.Requirements, m.Requirements)
-	maps.Copy(data.Resolved, m.Resolved)
-	for key, entry := range m.Versions {
+	maps.Copy(data.Requirements, s.Requirements)
+	maps.Copy(data.Resolved, s.Resolved)
+	for key, entry := range s.Versions {
 		if window.isStale(entry.FetchedAt) {
 			continue
 		}
@@ -828,7 +828,7 @@ func (m *Store) snapshotData() snapshotData {
 		copy(clone, entry.List)
 		data.Versions[key] = VersionsEntry{FetchedAt: entry.FetchedAt, List: clone}
 	}
-	copyFreshWarmed(data.Warmed, m.Warmed, warmedWindow)
+	copyFreshWarmed(data.Warmed, s.Warmed, warmedWindow)
 
 	return data
 }
