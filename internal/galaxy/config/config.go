@@ -111,6 +111,9 @@ func BuildCollectionConfig(c *cli.Command) (*Config, error) {
 	if err := applyTimeout(cfg, c); err != nil {
 		return nil, err
 	}
+	if err := applyWorkers(c); err != nil {
+		return nil, err
+	}
 
 	ansibleConfig, ansiblePath, ansibleWarnings, err := loadAnsibleConfigFromCLI(c)
 	if err != nil {
@@ -151,6 +154,14 @@ func newConfigFromCLI(c *cli.Command) *Config {
 		DownloadPath:     c.String("download-path"),
 	}
 
+	// Two shapes reach this, and only one of them survives. A command that
+	// does not register --workers (cleanup) reads the zero value of an
+	// unknown flag name and genuinely needs the fallback. A registering
+	// command whose source supplied a non-positive value reaches it too,
+	// since this runs before applyWorkers - but that config is discarded, so
+	// the fallback never reaches a caller for such a value. A registering
+	// command with no source filling the flag does not reach this at all: it
+	// reads the flag's own Value, one worker per CPU.
 	if cfg.Workers < 1 {
 		cfg.Workers = runtime.NumCPU()
 	}
@@ -169,6 +180,34 @@ func applyTimeout(cfg *Config, c *cli.Command) error {
 		return err
 	}
 	cfg.Timeout = timeout
+	return nil
+}
+
+// applyWorkers refuses a --workers value some source actually supplied and
+// that is not a positive integer. It writes nothing: the value newConfigFromCLI
+// already read is either accepted as-is or the whole config load fails, so this
+// takes no *Config at all.
+//
+// The predicate is "present and non-positive", which two facts make correct.
+// A command that does not register --workers (cleanup) reads IsSet == false
+// and is skipped entirely, keeping the NumCPU fallback newConfigFromCLI
+// applies to its zero value. A command that does register the flag, with no
+// source filling it, reads runtime.NumCPU() from the flag's own Value rather
+// than 0 (see collectionBehaviorFlags in cmd/go-galaxy/helpers/flags.go), so
+// n < 1 here is reachable only for a value some source genuinely supplied.
+//
+// The message names both the flag and the environment variable because
+// c.IsSet cannot tell argv from env: an operator whose CI block exports
+// GO_GALAXY_WORKERS=0 would otherwise be pointed at a flag they never typed,
+// and urfave prints nothing of its own for an env-sourced value.
+func applyWorkers(c *cli.Command) error {
+	if !c.IsSet("workers") {
+		return nil
+	}
+	if n := c.Int("workers"); n < 1 {
+		return fmt.Errorf("%w: --workers (or $GO_GALAXY_WORKERS) = %d, want a positive integer",
+			helpers.ErrInvalidWorkers, n)
+	}
 	return nil
 }
 

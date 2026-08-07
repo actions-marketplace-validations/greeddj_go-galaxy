@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -368,6 +369,118 @@ func TestApplyTimeout(t *testing.T) {
 	})
 }
 
+// newWorkersCmd builds a *cli.Command for TestApplyWorkers. When
+// registerFlag is true it exposes a --workers IntFlag mirroring how
+// collectionBehaviorFlags registers it, with the same env source and the
+// same Value: runtime.NumCPU(); when false no such flag exists at all,
+// mirroring commands like cleanup that never register --workers, so
+// c.IsSet("workers") reads false and c.Int("workers") reads 0.
+//
+// The Value is a hand-copy, so it cannot pin the production flag's own: that
+// pin lives in TestWorkersEnvShapes (cmd/go-galaxy/commands), which drives
+// the real helpers.CollectionFlags(). It is copied anyway so the rows below
+// see the shape production has - without it, a registered-but-unset flag
+// would read 0 here and the predicate under test would look like it refuses
+// an absent value.
+func newWorkersCmd(t *testing.T, registerFlag bool, args []string) *cli.Command {
+	t.Helper()
+
+	var flags []cli.Flag
+	if registerFlag {
+		flags = []cli.Flag{&cli.IntFlag{
+			Name:    "workers",
+			Value:   runtime.NumCPU(),
+			Sources: cli.EnvVars("GO_GALAXY_WORKERS"),
+		}}
+	}
+
+	var captured *cli.Command
+	cmd := &cli.Command{
+		Name:  "go-galaxy",
+		Flags: flags,
+		Action: func(_ context.Context, c *cli.Command) error {
+			captured = c
+			return nil
+		},
+	}
+
+	fullArgs := append([]string{"go-galaxy"}, args...)
+	if err := cmd.Run(context.Background(), fullArgs); err != nil {
+		t.Fatalf("cmd.Run() error = %v, want nil", err)
+	}
+	return captured
+}
+
+// TestApplyWorkers covers applyWorkers' predicate and nothing else: a
+// --workers value some source supplied and that is not positive is refused,
+// anything else is accepted. The first row is the positive control - without
+// it, the two refusals below would be indistinguishable from a fixture that
+// never reaches the check at all - and the last is the cleanup shape, a
+// command that registers no --workers flag and must keep its fallback rather
+// than being refused for a value nobody set.
+//
+// This test says nothing about which value an accepted flag resolves to; that
+// is TestWorkersEnvShapes' subject, on the real production flag.
+//
+// KILLING MUTATIONS, both run and reverted, both on applyWorkers in config.go.
+//
+// M1, the `if !c.IsSet("workers") { return nil }` gate deleted. Of this
+// table, only the unregistered row fails, because an unknown flag name reads
+// 0 through the same c.Int the gate exists to keep it away from:
+//
+//	config_test.go:478: applyWorkers() error = invalid workers: --workers (or $GO_GALAXY_WORKERS) = 0, want a positive integer, want nil
+//
+// M3, `n < 1` relaxed to `n < 0`. Only the zero row fails and the negative
+// row survives, which is what makes the pair a pin on the boundary rather
+// than on refusal in general:
+//
+//	config_test.go:473: applyWorkers() error = <nil>, want invalid workers
+func TestApplyWorkers(t *testing.T) {
+	tests := []struct {
+		name         string
+		args         []string
+		registerFlag bool
+		wantErr      bool
+	}{
+		{
+			name:         "positive value is accepted",
+			registerFlag: true,
+			args:         []string{"--workers=3"},
+		},
+		{
+			name:         "zero is refused",
+			registerFlag: true,
+			args:         []string{"--workers=0"},
+			wantErr:      true,
+		},
+		{
+			name:         "negative value is refused",
+			registerFlag: true,
+			args:         []string{"--workers=-1"},
+			wantErr:      true,
+		},
+		{
+			name: "unregistered flag is accepted",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newWorkersCmd(t, tt.registerFlag, tt.args)
+			err := applyWorkers(c)
+			if tt.wantErr {
+				if !errors.Is(err, helpers.ErrInvalidWorkers) {
+					t.Fatalf("applyWorkers() error = %v, want %v", err, helpers.ErrInvalidWorkers)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("applyWorkers() error = %v, want nil", err)
+			}
+		})
+	}
+}
+
 // TestApplyAnsibleConfigServer checks the server -> Server mapping with the
 // same three precedence scenarios as TestApplyAnsibleConfigDownloadPath.
 func TestApplyAnsibleConfigServer(t *testing.T) {
@@ -679,11 +792,11 @@ func assertDiscoveryFallsThroughCleanly(t *testing.T, gotPath string, err error)
 // ini value over the env one (returning ini whenever it is non-empty). Two
 // rows fail - the first, on the precedence itself:
 //
-//	config_test.go:695: Server = "https://ini.example", want "https://env.example"
+//	config_test.go:808: Server = "https://ini.example", want "https://env.example"
 //
 // and the third, because a non-empty ini value shadows the empty-env case too:
 //
-//	config_test.go:720: Server = "https://ini.example", want the flag default "https://default.example"
+//	config_test.go:833: Server = "https://ini.example", want the flag default "https://default.example"
 func TestAnsibleGalaxyServerEnv(t *testing.T) {
 	const envServer = "https://env.example"
 

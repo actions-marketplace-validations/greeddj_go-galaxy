@@ -431,7 +431,8 @@ performs a full install rather than printing help.
 - `--requirements-file, -r` (`$GO_GALAXY_REQUIREMENTS_FILE`, `$ANSIBLE_GALAXY_REQUIREMENTS_FILE` -
   a go-galaxy extension, not an ansible option)
 - `--ansible-config` (`$GO_GALAXY_ANSIBLE_CONFIG`, `$ANSIBLE_CONFIG`)
-- `--workers` (`$GO_GALAXY_WORKERS`)
+- `--workers` (`$GO_GALAXY_WORKERS`) - number of concurrent workers; unset means one per CPU. A
+  non-positive value is a usage error and exits `2`.
 - `--no-cache` (`$GO_GALAXY_NO_CACHE`)
 - `--refresh` (`$GO_GALAXY_REFRESH`) - re-resolve against the configured Galaxy servers instead of reusing
   cached metadata or the previous resolution. It bypasses exactly the cached answers that name a collection

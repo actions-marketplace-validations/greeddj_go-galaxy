@@ -2,14 +2,17 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/greeddj/go-galaxy/cmd/go-galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
+	galaxyhelpers "github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/urfave/cli/v3"
 )
 
@@ -195,7 +198,7 @@ func serverIDs(cfg *config.Config) []string {
 // KILLING MUTATION, run and reverted: restoring ANSIBLE_GALAXY_SERVER to the
 // server flag's Sources in cmd/go-galaxy/helpers/flags.go. The first row fails:
 //
-//	config_surface_test.go:209: server ids = [], want [hub pub]
+//	config_surface_test.go:212: server ids = [], want [hub pub]
 func TestAnsibleGalaxyServerDoesNotCollapseServerList(t *testing.T) {
 	t.Run("the ansible env spelling leaves server_list intact", func(t *testing.T) {
 		ansibleCfgWithServerList(t)
@@ -285,24 +288,24 @@ func aliasCfg(t *testing.T) *config.Config {
 // row pitting it against the ANSIBLE_ spelling loses to that spelling once
 // it is no longer a source at all:
 //
-//	config_surface_test.go:316: DownloadPath = .collections, want /tmp/TestFlagNameEnvAliases2512145342/001/b
-//	config_surface_test.go:332: DownloadPath = /tmp/TestFlagNameEnvAliases2512145342/001/c, want /tmp/TestFlagNameEnvAliases2512145342/001/b
-//	config_surface_test.go:339: Timeout = 30s, want 1m30s
-//	config_surface_test.go:355: Timeout = 1m0s, want 1m30s
+//	config_surface_test.go:319: DownloadPath = .collections, want /tmp/TestFlagNameEnvAliases82068219/001/b
+//	config_surface_test.go:335: DownloadPath = /tmp/TestFlagNameEnvAliases82068219/001/c, want /tmp/TestFlagNameEnvAliases82068219/001/b
+//	config_surface_test.go:342: Timeout = 30s, want 1m30s
+//	config_surface_test.go:358: Timeout = 1m0s, want 1m30s
 //
 // M2, positions 1 and 2 swapped in both chains. Only the two rows pitting
 // the new name against the name that shipped first fail, which is what makes
 // them a pin on ordering rather than on membership:
 //
-//	config_surface_test.go:324: DownloadPath = /tmp/TestFlagNameEnvAliases2232971022/001/b, want /tmp/TestFlagNameEnvAliases2232971022/001/a
-//	config_surface_test.go:347: Timeout = 1m30s, want 45s
+//	config_surface_test.go:327: DownloadPath = /tmp/TestFlagNameEnvAliases3589060566/001/b, want /tmp/TestFlagNameEnvAliases3589060566/001/a
+//	config_surface_test.go:350: Timeout = 1m30s, want 45s
 //
 // M3, the new name demoted to last in both chains. Only the two rows pitting
 // it against the ANSIBLE_ spelling fail, so second position is pinned from
 // both sides and not merely membership in the chain:
 //
-//	config_surface_test.go:332: DownloadPath = /tmp/TestFlagNameEnvAliases1459717069/001/c, want /tmp/TestFlagNameEnvAliases1459717069/001/b
-//	config_surface_test.go:355: Timeout = 1m0s, want 1m30s
+//	config_surface_test.go:335: DownloadPath = /tmp/TestFlagNameEnvAliases4102758397/001/c, want /tmp/TestFlagNameEnvAliases4102758397/001/b
+//	config_surface_test.go:358: Timeout = 1m0s, want 1m30s
 func TestFlagNameEnvAliases(t *testing.T) {
 	base := t.TempDir()
 	pathA := filepath.Join(base, "a")
@@ -374,7 +377,7 @@ func TestFlagNameEnvAliases(t *testing.T) {
 // in cmd/go-galaxy/helpers - drop envRequirementsFileAnsible from it, which is
 // exactly the "restore parity" edit this test exists to stop:
 //
-//	config_surface_test.go:397: RequirementsFile = requirements.yml, want /from-ansible.yml
+//	config_surface_test.go:400: RequirementsFile = requirements.yml, want /from-ansible.yml
 //
 // The second row survives that mutation, since GO_GALAXY_REQUIREMENTS_FILE is
 // untouched by it - which is why the first row, not the pair, is the pin.
@@ -404,4 +407,86 @@ func TestAnsibleRequirementsFileEnvIsStillRead(t *testing.T) {
 
 		assertConfigField(t, "RequirementsFile", aliasCfg(t).RequirementsFile, goGalaxyPath)
 	})
+}
+
+// workersEnvRow is one shape GO_GALAXY_WORKERS can arrive in from an ambient
+// CI environment block: the exported value, and either the worker count the
+// run must resolve to or the refusal it must produce instead.
+type workersEnvRow struct {
+	name    string
+	value   string
+	want    int
+	wantErr bool
+}
+
+// TestWorkersEnvShapes pins how each GO_GALAXY_WORKERS shape resolves, driven
+// through the real helpers.CollectionFlags() rather than a hand-copied flag -
+// which is the whole reason this test exists alongside TestApplyWorkers
+// (internal/galaxy/config), whose fixture builds its own --workers flag and so
+// can only pin the predicate, never the production flag's fields.
+//
+// The "3" row is the positive control for the empty-value row specifically:
+// without it, "the declared-but-empty variable was accepted" would be
+// indistinguishable from "this harness never reads the environment at all",
+// since a harness ignoring the environment entirely would accept that row too
+// and resolve to the very same NumCPU default.
+//
+// The two checks below say "config error" rather than naming
+// BuildCollectionConfig the way the rest of this file does, and that has to
+// survive a tidy-up: the refusal message they render is 79 columns on its own,
+// so the conventional wording pushes the quoted mutation output past lll's
+// 140-column budget and the quote would have to lose its line citation.
+//
+// KILLING MUTATIONS, all run and reverted.
+//
+// M2, `Value: runtime.NumCPU()` deleted from the workers IntFlag in
+// cmd/go-galaxy/helpers. Only the empty-value row fails - the other three
+// survive, and that selectivity is the point: the field is what turns a
+// declared-but-empty variable into the default rather than into a zero this
+// tool now refuses:
+//
+//	config_surface_test.go:487: config error = invalid workers: --workers (or $GO_GALAXY_WORKERS) = 0, want a positive integer, want nil
+//
+// M3, `n < 1` relaxed to `n < 0` in applyWorkers (internal/galaxy/config).
+// Only the zero row fails; the negative row survives, pinning the boundary
+// rather than refusal in general:
+//
+//	config_surface_test.go:482: config error = <nil>, want invalid workers
+//
+// M1, the `if !c.IsSet("workers")` gate deleted from applyWorkers, leaves
+// every row here passing - none of them is the unset shape - and instead
+// fails both TestCleanupConfigSurface subtests above, which register no
+// --workers flag at all, each through its own BuildCollectionConfig check:
+//
+//	BuildCollectionConfig() error = invalid workers: --workers (or $GO_GALAXY_WORKERS) = 0, want a positive integer, want nil
+//
+// That last quote drops the `config_surface_test.go:NNN:` prefix go test
+// prints ahead of it, for the same column budget the note above describes;
+// the two subtests reporting it are named in prose instead.
+func TestWorkersEnvShapes(t *testing.T) {
+	rows := []workersEnvRow{
+		{name: "a positive value is read", value: "3", want: 3},
+		{name: "a declared but empty value reads the flag default", value: "", want: runtime.NumCPU()},
+		{name: "zero is refused", value: "0", wantErr: true},
+		{name: "a negative value is refused", value: "-1", wantErr: true},
+	}
+
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			neutralizeAnsibleDiscovery(t)
+			t.Setenv("GO_GALAXY_WORKERS", row.value)
+
+			cfg, err := buildConfigFor(t, "install", helpers.CollectionFlags(), nil)
+			if row.wantErr {
+				if !errors.Is(err, galaxyhelpers.ErrInvalidWorkers) {
+					t.Fatalf("config error = %v, want %v", err, galaxyhelpers.ErrInvalidWorkers)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("config error = %v, want nil", err)
+			}
+			assertConfigField(t, "Workers", cfg.Workers, row.want)
+		})
+	}
 }

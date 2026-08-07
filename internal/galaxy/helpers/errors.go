@@ -395,6 +395,11 @@ var (
 	// ErrInvalidTimeout indicates the --timeout value is neither a positive
 	// integer number of seconds nor a valid positive Go duration string.
 	ErrInvalidTimeout = errors.New("invalid timeout")
+	// ErrInvalidWorkers indicates the --workers value some source supplied is
+	// not a positive integer. A worker count of zero or below names no
+	// runnable configuration, so it is refused where it enters rather than
+	// silently rewritten to a default the operator did not ask for.
+	ErrInvalidWorkers = errors.New("invalid workers")
 
 	// ErrAnsibleConfigNotFound indicates an explicitly requested ansible.cfg
 	// path does not exist.

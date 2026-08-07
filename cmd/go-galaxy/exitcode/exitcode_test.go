@@ -166,6 +166,14 @@ var fromErrorCases = []exitCase{
 		wantCode: ExitUsage,
 	},
 	{
+		// A non-positive --workers value classifies exactly like its sibling
+		// --timeout above: the same operator mistake, with the same remedy -
+		// edit the flag or the environment block - and never a retry.
+		name:     "invalid workers",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrInvalidWorkers),
+		wantCode: ExitUsage,
+	},
+	{
 		name:     "ansible config not found",
 		err:      fmt.Errorf("%w: ctx", helpers.ErrAnsibleConfigNotFound),
 		wantCode: ExitUsage,
@@ -504,7 +512,7 @@ func TestIntegritySentinelsMapToExitIntegrity(t *testing.T) {
 // moving the isIntegrityError case below isLockError/isInstallError in
 // FromError, which makes isInstallError claim the headline first; verified,
 // that mutation makes this test fail with:
-// "exitcode_test.go:513: FromError(integrity join) = 5, want 7".
+// "exitcode_test.go:521: FromError(integrity join) = 5, want 7".
 func TestIntegrityOutranksInstallFailureHeadline(t *testing.T) {
 	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
 
@@ -852,7 +860,7 @@ func TestStateObjectDeadlineClassification(t *testing.T) {
 // fromErrorTail above isInstallError's case in FromError makes this test
 // fail with:
 //
-//	exitcode_test.go:860: FromError(joined) = 8, want 5
+//	exitcode_test.go:868: FromError(joined) = 8, want 5
 func TestCacheBusyFoldedBehindInstallFailureClassifiesAsInstall(t *testing.T) {
 	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
 	joined := errors.Join(headline, helpers.ErrCacheBusy)

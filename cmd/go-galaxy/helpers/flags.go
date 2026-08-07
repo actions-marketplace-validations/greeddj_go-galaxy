@@ -111,8 +111,15 @@ func collectionPathFlags() []cli.Flag {
 func collectionBehaviorFlags() []cli.Flag {
 	return []cli.Flag{
 		&cli.IntFlag{
-			Name:    "workers",
-			Usage:   "Number of concurrent workers",
+			Name:  "workers",
+			Usage: "Number of concurrent workers",
+			// Value is load-bearing for a refusal, not just a default.
+			// applyWorkers (internal/galaxy/config/config.go) rejects a
+			// non-positive workers value that any source supplied, and urfave
+			// marks a declared-but-empty env var as set while skipping the
+			// parse for it - so a CI block exporting GO_GALAXY_WORKERS= reads
+			// this Value, one worker per CPU, and is accepted. Remove it and
+			// that same shape reads 0 and exits 2 instead.
 			Value:   runtime.NumCPU(),
 			Sources: cli.EnvVars("GO_GALAXY_WORKERS"),
 		},
