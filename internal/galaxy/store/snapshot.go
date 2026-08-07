@@ -100,6 +100,10 @@ type Store struct {
 	Warmed       map[string]WarmedEntry     `json:"warmed"`
 	Meta         SnapshotMeta               `json:"meta"`
 	mu           sync.RWMutex               `json:"-"`
+	// dirty records whether this process has written something into the
+	// store since it was loaded (or since New built a fresh one); see Dirty
+	// for the full contract.
+	dirty bool `json:"-"`
 }
 
 // New creates an initialized Store with empty maps. UnmarshalJSON is the
@@ -182,6 +186,7 @@ func (s *Store) SetInstalled(key string, entry InstalledEntry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Installed[key] = entry
+	s.dirty = true
 }
 
 // DeleteInstalled removes an installed entry by key.
@@ -192,6 +197,7 @@ func (s *Store) DeleteInstalled(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.Installed, key)
+	s.dirty = true
 }
 
 // GetInstalled returns an installed entry by key. Deps is cloned before
@@ -243,6 +249,7 @@ func (s *Store) SetWarmed(key, artifactSHA string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Warmed[key] = WarmedEntry{WarmedAt: time.Now().UTC(), ArtifactSHA256: artifactSHA}
+	s.dirty = true
 }
 
 // WarmedArtifactSHAByKey returns a fresh map from warmed collection key to
@@ -309,6 +316,7 @@ func (s *Store) SetDepsCache(key string, deps map[string]string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.DepsCache[key] = DepsCacheEntry{FetchedAt: time.Now().UTC(), Deps: clone}
+	s.dirty = true
 }
 
 // DeleteDepsCache removes cached dependency data for a key.
@@ -319,6 +327,7 @@ func (s *Store) DeleteDepsCache(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.DepsCache, key)
+	s.dirty = true
 }
 
 // GetAPICache returns a cached API entry by key. The returned entry shares
@@ -347,6 +356,7 @@ func (s *Store) SetAPICache(key string, entry APICacheEntry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.APICache[key] = entry
+	s.dirty = true
 }
 
 // ClearCaches clears API, dependency, and versions caches.
@@ -359,6 +369,7 @@ func (s *Store) ClearCaches() {
 	s.APICache = make(map[string]APICacheEntry)
 	s.DepsCache = make(map[string]DepsCacheEntry)
 	s.Versions = make(map[string]VersionsEntry)
+	s.dirty = true
 }
 
 // GetVersionsCache returns cached versions for a key. This is a pure read
@@ -397,6 +408,7 @@ func (s *Store) SetVersionsCache(key string, versions []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Versions[key] = VersionsEntry{FetchedAt: time.Now().UTC(), List: clone}
+	s.dirty = true
 }
 
 // SetResolvedAll replaces the resolved entries map.
@@ -409,6 +421,7 @@ func (s *Store) SetResolvedAll(resolved map[string]ResolvedEntry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Resolved = clone
+	s.dirty = true
 }
 
 // ResolvedSnapshot returns a copy of resolved entries.
@@ -434,6 +447,7 @@ func (s *Store) SetGraph(key string, deps []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Graph[key] = clone
+	s.dirty = true
 }
 
 // DeleteGraph removes dependency data for a key.
@@ -444,6 +458,7 @@ func (s *Store) DeleteGraph(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.Graph, key)
+	s.dirty = true
 }
 
 // SetGraphSnapshot replaces the dependency graph.
@@ -460,6 +475,7 @@ func (s *Store) SetGraphSnapshot(graph map[string][]string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Graph = clone
+	s.dirty = true
 }
 
 // GraphSnapshot returns a copy of the dependency graph.
@@ -494,6 +510,7 @@ func (s *Store) SetRequirements(spec map[string]RequirementSpec) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Requirements = clone
+	s.dirty = true
 }
 
 // RequirementsSnapshot returns a fully independent deep copy of requirement
@@ -595,6 +612,40 @@ func (s *Store) SetMetaRequirements(hash, server string) {
 	defer s.mu.Unlock()
 	s.Meta.RequirementsHash = hash
 	s.Meta.Server = server
+	s.dirty = true
+}
+
+// Dirty reports whether this process has written something into the store
+// since it was loaded (or since New built a fresh one). It is what lets a
+// caller decide whether a save has anything to persist at all.
+//
+// The predicate is "this process wrote something into the store since it was
+// loaded", never "the store differs from what the backend holds": nothing
+// here compares against what was last persisted, and nothing here consults
+// the backend to find out - it is a pure read of a flag this process set
+// itself.
+//
+// The flag is set unconditionally by any mutator call, never conditioned on
+// whether the value actually changed and never cleared, because a false
+// positive costs one redundant save - exactly today's behavior - while a
+// false negative silently drops persisted state. The two are not symmetric,
+// so the design errs toward saving.
+//
+// A load never sets it, for the identical reason in both cases: store.Load's
+// loadBucket callbacks populate Store's map fields directly, key by key,
+// rather than through a setter, and UnmarshalJSON decodes straight onto the
+// struct the same way - so setting the flag from either path would make
+// every run against a backend that already holds a snapshot dirty on
+// arrival, which defeats the point of this flag entirely. Every read method
+// takes only the read lock and never reaches a mutator, so none of them set
+// it either.
+func (s *Store) Dirty() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.dirty
 }
 
 // stampSaveMeta applies the metadata every persisted write stamps, and is the

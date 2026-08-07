@@ -57,11 +57,11 @@ type ArtifactStore interface {
 // answer here: the split a difference in access model would motivate already
 // exists - the concurrent surface is already carved out as the separate
 // ArtifactStore interface reached through Artifacts() - and Backend already
-// has two implementations and one decorator (stateDeadlineBackend, in
-// statedeadline.go), so splitting it into roles would mean either a
-// decorator per role or a composite type assembling both, enlarging exactly
-// the drift surface the state-deadline decorator's own shape works to
-// shrink.
+// has two implementations and two decorators (stateDeadlineBackend, in
+// statedeadline.go, and cleanSaveSkipBackend, in dirtyskip.go), so splitting
+// it into roles would mean either a decorator per role or a composite type
+// assembling both, enlarging exactly the drift surface each decorator's own
+// hand-written-methods shape works to shrink.
 type Backend interface {
 	Open(ctx context.Context) error
 	Close(ctx context.Context) error

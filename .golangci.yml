@@ -21,10 +21,12 @@ linters:
           allow:
             - $gostd
             # Standard library, but outside depguard's own $gostd expansion,
-            # which does not cover the go/ tree. Used only by the two
+            # which does not cover the go/ tree. Used only by the three
             # source-auditing test packages: internal/proseaudit (comments
-            # against the code they cite) and internal/lockaudit (the holder
-            # context's threading through each command's lifecycle).
+            # against the code they cite), internal/lockaudit (the holder
+            # context's threading through each command's lifecycle), and
+            # internal/galaxy/store's own dirty-flag audit (every write-locked
+            # *Store method setting the dirty flag).
             - go/ast
             - go/parser
             - go/token

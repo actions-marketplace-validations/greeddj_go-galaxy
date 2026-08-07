@@ -848,7 +848,12 @@ func initInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) 
 	// this backend - for as long as the caller's own context allows. See
 	// cacheManager.WithStateDeadline's own doc comment for why this wraps the
 	// backend once here rather than at each of its several call sites.
-	backend = cacheManager.WithStateDeadline(backend, runtime.StateDeadline())
+	//
+	// WithCleanSaveSkip wraps outermost, so a save this run never needed
+	// skips before WithStateDeadline would even construct a timer for it: see
+	// its own doc comment (internal/galaxy/cache/dirtyskip.go) for what it
+	// decides and what it deliberately leaves alone.
+	backend = cacheManager.WithCleanSaveSkip(cacheManager.WithStateDeadline(backend, runtime.StateDeadline()))
 	if err := backend.Open(ctx); err != nil {
 		return nil, nil, err
 	}

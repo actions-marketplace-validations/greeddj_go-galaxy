@@ -15,7 +15,7 @@ package cache_test
 //
 //   - TestWithStateDeadlineBoundsEveryStateOperation, dropping SaveStore's
 //     own context.WithTimeout wrapping in statedeadline.go (calling
-//     b.Backend.SaveStore(ctx, st) directly, so it inherits the caller's
+//     b.inner.SaveStore(ctx, st) directly, so it inherits the caller's
 //     unbounded context instead), makes the SaveStore subtest hang until the
 //     harness kills it - run with a bounded -timeout so it fails instead of
 //     blocking the suite forever, observed as:
