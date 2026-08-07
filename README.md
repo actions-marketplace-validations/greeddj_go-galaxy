@@ -376,7 +376,7 @@ Clean unreachable collections:
   an error if a multi-entry `server_list` is configured, and setting it to the
   empty string clears a previously configured token (see
   [Galaxy servers and authentication](#galaxy-servers-and-authentication))
-- `--timeout` (`$GO_GALAXY_SERVER_TIMEOUT`, `$ANSIBLE_GALAXY_SERVER_TIMEOUT`)
+- `--timeout` (`$GO_GALAXY_SERVER_TIMEOUT`, `$GO_GALAXY_TIMEOUT`, `$ANSIBLE_GALAXY_SERVER_TIMEOUT`)
   `--timeout` is a no-progress budget - it bounds the response-header wait and the gap between two
   body reads. It bounds neither total transfer time nor a byte-drip: a server that keeps dribbling a
   few bytes into every idle window counts as making progress on every single read, so it never trips
@@ -413,7 +413,7 @@ Clean unreachable collections:
   S3-backed cache, not just the one that is stalling: these operations run while the backend's
   distributed lock is held, so an unbounded one blocks every other runner against that bucket until it
   gives up waiting for the lock - which is why its budget is tighter than the artifact ceiling above.
-- `--download-path, -p` (`$GO_GALAXY_COLLECTIONS_PATH`, `$ANSIBLE_COLLECTIONS_PATH`)
+- `--download-path, -p` (`$GO_GALAXY_COLLECTIONS_PATH`, `$GO_GALAXY_DOWNLOAD_PATH`, `$ANSIBLE_COLLECTIONS_PATH`)
 - `--requirements-file, -r` (`$GO_GALAXY_REQUIREMENTS_FILE`, `$ANSIBLE_GALAXY_REQUIREMENTS_FILE`)
 - `--ansible-config` (`$GO_GALAXY_ANSIBLE_CONFIG`, `$ANSIBLE_CONFIG`)
 - `--workers` (`$GO_GALAXY_WORKERS`)

@@ -235,3 +235,123 @@ func TestAnsibleGalaxyServerDoesNotCollapseServerList(t *testing.T) {
 		}
 	})
 }
+
+// aliasCfg builds the install config with no CLI arguments at all, so a value
+// a row below asserts on can only have arrived through an env source.
+func aliasCfg(t *testing.T) *config.Config {
+	t.Helper()
+	cfg, err := buildConfigFor(t, "install", helpers.CollectionFlags(), nil)
+	if err != nil {
+		t.Fatalf("BuildCollectionConfig() error = %v, want nil", err)
+	}
+	return cfg
+}
+
+// TestFlagNameEnvAliases pins the GO_GALAXY_<FLAG_NAME> env spelling on the
+// only two flags that lacked one: --timeout and --download-path, whose env
+// names were taken from ansible's own variables rather than derived from the
+// flag name. Each now accepts the flag-name-shaped spelling in second
+// position, so the convention every other flag in cmd/go-galaxy/helpers
+// follows has no exception, while the name that shipped first keeps the
+// precedence it already had.
+//
+// Three pairs of rows, each pair one path row and one timeout row. The
+// pairs assert, in order, that the new name is read at all, that it does
+// not outrank the name that shipped first, and that it does outrank the
+// ANSIBLE_ spelling behind it. Both ordering directions are load-bearing:
+// a chain carrying the new name first still passes the third pair, and one
+// carrying it last still passes the second, so neither pins it alone.
+//
+// Two value choices are load-bearing and must survive a later tidy-up. The
+// timeout values must not be 30s, since that is helpers.FetchDefaultTimeout
+// and a row asserting it would pass with no env source read at all; the path
+// values must not be ".collections", the --download-path default, for the
+// identical reason, and must contain no ":", since firstCollectionsPath
+// POSIX-splits the resolved value and would keep only what precedes the
+// first one. t.TempDir() satisfies both.
+//
+// No row's asserted value depends on the /etc/ansible/ansible.cfg that
+// neutralizeAnsibleDiscovery cannot control: each path row sets its flag
+// through an env source, so pickConfigValue never reaches its ansible arm,
+// and no ansible.cfg key feeds --timeout - applyTimeout reads it directly.
+//
+// KILLING MUTATIONS, all run and reverted, all on the Sources chains of the
+// timeout and download-path flags in cmd/go-galaxy/helpers. Quoted under
+// TMPDIR=/tmp, which keeps the longest line here at 139 columns against
+// lll's 140; the digits t.TempDir() appends differ on every run.
+//
+// M1, both chains cut back to their pre-change two-name form. It fails four
+// rows rather than only the two that set the new spelling alone, because a
+// row pitting it against the ANSIBLE_ spelling loses to that spelling once
+// it is no longer a source at all:
+//
+//	config_surface_test.go:316: DownloadPath = .collections, want /tmp/TestFlagNameEnvAliases2512145342/001/b
+//	config_surface_test.go:332: DownloadPath = /tmp/TestFlagNameEnvAliases2512145342/001/c, want /tmp/TestFlagNameEnvAliases2512145342/001/b
+//	config_surface_test.go:339: Timeout = 30s, want 1m30s
+//	config_surface_test.go:355: Timeout = 1m0s, want 1m30s
+//
+// M2, positions 1 and 2 swapped in both chains. Only the two rows pitting
+// the new name against the name that shipped first fail, which is what makes
+// them a pin on ordering rather than on membership:
+//
+//	config_surface_test.go:324: DownloadPath = /tmp/TestFlagNameEnvAliases2232971022/001/b, want /tmp/TestFlagNameEnvAliases2232971022/001/a
+//	config_surface_test.go:347: Timeout = 1m30s, want 45s
+//
+// M3, the new name demoted to last in both chains. Only the two rows pitting
+// it against the ANSIBLE_ spelling fail, so second position is pinned from
+// both sides and not merely membership in the chain:
+//
+//	config_surface_test.go:332: DownloadPath = /tmp/TestFlagNameEnvAliases1459717069/001/c, want /tmp/TestFlagNameEnvAliases1459717069/001/b
+//	config_surface_test.go:355: Timeout = 1m0s, want 1m30s
+func TestFlagNameEnvAliases(t *testing.T) {
+	base := t.TempDir()
+	pathA := filepath.Join(base, "a")
+	pathB := filepath.Join(base, "b")
+	pathC := filepath.Join(base, "c")
+
+	t.Run("the flag-name spelling alone sets the path", func(t *testing.T) {
+		neutralizeAnsibleDiscovery(t)
+		t.Setenv("GO_GALAXY_DOWNLOAD_PATH", pathB)
+
+		assertConfigField(t, "DownloadPath", aliasCfg(t).DownloadPath, pathB)
+	})
+
+	t.Run("the name that shipped first outranks it for the path", func(t *testing.T) {
+		neutralizeAnsibleDiscovery(t)
+		t.Setenv("GO_GALAXY_COLLECTIONS_PATH", pathA)
+		t.Setenv("GO_GALAXY_DOWNLOAD_PATH", pathB)
+
+		assertConfigField(t, "DownloadPath", aliasCfg(t).DownloadPath, pathA)
+	})
+
+	t.Run("it outranks the ansible spelling for the path", func(t *testing.T) {
+		neutralizeAnsibleDiscovery(t)
+		t.Setenv("GO_GALAXY_DOWNLOAD_PATH", pathB)
+		t.Setenv("ANSIBLE_COLLECTIONS_PATH", pathC)
+
+		assertConfigField(t, "DownloadPath", aliasCfg(t).DownloadPath, pathB)
+	})
+
+	t.Run("the flag-name spelling alone sets the timeout", func(t *testing.T) {
+		neutralizeAnsibleDiscovery(t)
+		t.Setenv("GO_GALAXY_TIMEOUT", "90s")
+
+		assertConfigField(t, "Timeout", aliasCfg(t).Timeout, 90*time.Second)
+	})
+
+	t.Run("the name that shipped first outranks it for the timeout", func(t *testing.T) {
+		neutralizeAnsibleDiscovery(t)
+		t.Setenv("GO_GALAXY_SERVER_TIMEOUT", "45s")
+		t.Setenv("GO_GALAXY_TIMEOUT", "90s")
+
+		assertConfigField(t, "Timeout", aliasCfg(t).Timeout, 45*time.Second)
+	})
+
+	t.Run("it outranks the ansible spelling for the timeout", func(t *testing.T) {
+		neutralizeAnsibleDiscovery(t)
+		t.Setenv("GO_GALAXY_TIMEOUT", "90s")
+		t.Setenv("ANSIBLE_GALAXY_SERVER_TIMEOUT", "60")
+
+		assertConfigField(t, "Timeout", aliasCfg(t).Timeout, 90*time.Second)
+	})
+}

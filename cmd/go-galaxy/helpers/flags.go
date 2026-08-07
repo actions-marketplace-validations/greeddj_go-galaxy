@@ -72,15 +72,25 @@ func collectionPathFlags() []cli.Flag {
 			// transfer sets it far too low for a large collection.
 			Usage: "No-progress budget: wait for response headers, and gap between body reads. " +
 				"Not a total-transfer cap. Seconds (e.g. 60) or Go duration (e.g. 90s, 1m30s)",
-			Value:   defaultTimeout.String(),
-			Sources: cli.EnvVars("GO_GALAXY_SERVER_TIMEOUT", "ANSIBLE_GALAXY_SERVER_TIMEOUT"),
+			Value: defaultTimeout.String(),
+			// Source order is precedence: urfave/cli takes the first name in
+			// the chain that is set, so a name that was already effective
+			// keeps it and reordering these is a behavior change rather than
+			// a tidy-up. The flag-name-shaped spelling is listed second so
+			// that the GO_GALAXY_<FLAG_NAME> form every flag in this file
+			// accepts has no exception: behind the name that shipped first,
+			// which keeps the precedence it had, and ahead of the ANSIBLE_
+			// spelling, which is where every other GO_GALAXY_ name here sits.
+			Sources: cli.EnvVars("GO_GALAXY_SERVER_TIMEOUT", "GO_GALAXY_TIMEOUT", "ANSIBLE_GALAXY_SERVER_TIMEOUT"),
 		},
 		&cli.StringFlag{
 			Name:    "download-path",
 			Aliases: []string{"p"},
 			Usage:   "Path to download collections to",
 			Value:   defaultCollectionsPath,
-			Sources: cli.EnvVars("GO_GALAXY_COLLECTIONS_PATH", "ANSIBLE_COLLECTIONS_PATH"),
+			// Source order is precedence, for the reason given on the timeout
+			// flag above.
+			Sources: cli.EnvVars("GO_GALAXY_COLLECTIONS_PATH", "GO_GALAXY_DOWNLOAD_PATH", "ANSIBLE_COLLECTIONS_PATH"),
 		},
 		&cli.StringFlag{
 			Name:    "requirements-file",

@@ -283,7 +283,7 @@ func newTimeoutCmd(t *testing.T, registerFlag bool, args []string) *cli.Command 
 		flags = []cli.Flag{&cli.StringFlag{
 			Name:    "timeout",
 			Value:   helpers.FetchDefaultTimeout.String(),
-			Sources: cli.EnvVars("GO_GALAXY_SERVER_TIMEOUT", "ANSIBLE_GALAXY_SERVER_TIMEOUT"),
+			Sources: cli.EnvVars("GO_GALAXY_SERVER_TIMEOUT", "GO_GALAXY_TIMEOUT", "ANSIBLE_GALAXY_SERVER_TIMEOUT"),
 		}}
 	}
 
