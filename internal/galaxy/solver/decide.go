@@ -1,6 +1,7 @@
 package solver
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -220,7 +221,7 @@ type decisionOutcome struct {
 // fast paths avoid ever fetching a universe when they can), and either
 // decide it or report an empty-candidate/unknown-package incompatibility so
 // the next propagation round can act on it.
-func (s *solveState) makeDecision() (string, bool, error) {
+func (s *solveState) makeDecision(ctx context.Context) (string, bool, error) {
 	pkg, ok := s.pickPackage()
 	if !ok {
 		pkg, ok = s.pickRequiredDependencyTarget()
@@ -228,26 +229,26 @@ func (s *solveState) makeDecision() (string, bool, error) {
 			return "", true, nil
 		}
 	}
-	if out := s.tryFastDecide(pkg); out != nil {
+	if out := s.tryFastDecide(ctx, pkg); out != nil {
 		return out.pkg, out.done, out.err
 	}
-	return s.decideFromAllowed(pkg)
+	return s.decideFromAllowed(ctx, pkg)
 }
 
 // tryFastDecide attempts pkg's decision fast paths in priority order (exact
 // pin, then the provider.Highest probe), materializing pkg along the way
 // when a fast path cannot be confirmed cheaply. Returns nil when no fast
 // path applied and the caller should fall through to decideFromAllowed.
-func (s *solveState) tryFastDecide(pkg string) *decisionOutcome {
+func (s *solveState) tryFastDecide(ctx context.Context, pkg string) *decisionOutcome {
 	p := s.ps.pkgState(pkg)
 	if vp, isPin := s.packageIsExactPin(pkg); isPin {
-		return s.tryDecidePin(pkg, p, vp)
+		return s.tryDecidePin(ctx, pkg, p, vp)
 	}
 	if !p.materialized && allPositiveSymbolic(pkg, s.ps) {
-		return s.tryDecideByProbe(pkg)
+		return s.tryDecideByProbe(ctx, pkg)
 	}
 	if !p.materialized {
-		if err := s.materializePkg(pkg); err != nil {
+		if err := s.materializePkg(ctx, pkg); err != nil {
 			return &decisionOutcome{err: err}
 		}
 	}
@@ -260,12 +261,12 @@ func (s *solveState) tryFastDecide(pkg string) *decisionOutcome {
 // record), materializing pkg otherwise so decideFromAllowed can re-verify
 // the pin for real. Returns nil when the caller should fall through to
 // decideFromAllowed itself.
-func (s *solveState) tryDecidePin(pkg string, p *packageAssignments, vp Version) *decisionOutcome {
+func (s *solveState) tryDecidePin(ctx context.Context, pkg string, p *packageAssignments, vp Version) *decisionOutcome {
 	if p.materialized || versionPassesAssignments(pkg, vp, s.ps) {
-		pkg, done, err := s.decideVersion(pkg, vp)
+		pkg, done, err := s.decideVersion(ctx, pkg, vp)
 		return &decisionOutcome{pkg: pkg, done: done, err: err}
 	}
-	if err := s.materializePkg(pkg); err != nil {
+	if err := s.materializePkg(ctx, pkg); err != nil {
 		return &decisionOutcome{err: err}
 	}
 	return nil
@@ -276,16 +277,16 @@ func (s *solveState) tryDecidePin(pkg string, p *packageAssignments, vp Version)
 // the probe is unavailable or its candidate does not satisfy the
 // accumulated assignments. Returns nil when the caller should fall through
 // to decideFromAllowed itself.
-func (s *solveState) tryDecideByProbe(pkg string) *decisionOutcome {
-	v, ok, err := s.provider.Highest(pkg)
+func (s *solveState) tryDecideByProbe(ctx context.Context, pkg string) *decisionOutcome {
+	v, ok, err := s.provider.Highest(ctx, pkg)
 	if err != nil {
 		return &decisionOutcome{err: fmt.Errorf("probing highest version of %s: %w", pkg, err)}
 	}
 	if ok && versionPassesAssignments(pkg, v, s.ps) {
-		decidedPkg, done, decErr := s.decideVersion(pkg, v)
+		decidedPkg, done, decErr := s.decideVersion(ctx, pkg, v)
 		return &decisionOutcome{pkg: decidedPkg, done: done, err: decErr}
 	}
-	if err := s.materializePkg(pkg); err != nil {
+	if err := s.materializePkg(ctx, pkg); err != nil {
 		return &decisionOutcome{err: err}
 	}
 	return nil
@@ -301,7 +302,7 @@ func (s *solveState) tryDecideByProbe(pkg string) *decisionOutcome {
 // projection), so it carries the same boundary-cell information conflict
 // resolution's satisfier search needs - collapsing it to published-only
 // would silently discard exactly that information.
-func (s *solveState) decideFromAllowed(pkg string) (string, bool, error) {
+func (s *solveState) decideFromAllowed(ctx context.Context, pkg string) (string, bool, error) {
 	p := s.ps.pkgState(pkg)
 	u := s.uniFor(pkg)
 	allowed := pointCellsOf(p.running, u)
@@ -321,7 +322,7 @@ func (s *solveState) decideFromAllowed(pkg string) (string, bool, error) {
 	}
 
 	idx, _ := lowestSetBit(allowed)
-	return s.decideVersion(pkg, u.versions[idx])
+	return s.decideVersion(ctx, pkg, u.versions[idx])
 }
 
 // describeAllowed renders a human-readable label for pkg's current
@@ -348,8 +349,8 @@ func (s *solveState) describeAllowed(pkg string) string {
 // incompatibilities, then - unless doing so would immediately relate one of
 // them as satisfied against the tentative decision (the conservative
 // decision-time conflict check) - record v as pkg's decision.
-func (s *solveState) decideVersion(pkg string, v Version) (string, bool, error) {
-	newIdx, err := s.dependencyIncompatibilities(pkg, v)
+func (s *solveState) decideVersion(ctx context.Context, pkg string, v Version) (string, bool, error) {
+	newIdx, err := s.dependencyIncompatibilities(ctx, pkg, v)
 	if err != nil {
 		return "", false, err
 	}
@@ -403,13 +404,13 @@ func relateTentative(inc *incompatibility, ps *partialSolution, uniFor func(stri
 // the same pair - e.g. after a deferred decision-time conflict - never
 // re-fetches or re-adds them) and returns the indices of whatever it added
 // (empty if this (pkg, v) pair was already processed).
-func (s *solveState) dependencyIncompatibilities(pkg string, v Version) ([]int, error) {
+func (s *solveState) dependencyIncompatibilities(ctx context.Context, pkg string, v Version) ([]int, error) {
 	key := pkg + "\x00" + v.Original()
 	if s.depsAdded[key] {
 		return nil, nil
 	}
 
-	deps, err := s.dependenciesOf(pkg, v)
+	deps, err := s.dependenciesOf(ctx, pkg, v)
 	if err != nil {
 		return nil, err
 	}
@@ -443,11 +444,11 @@ func (s *solveState) dependencyIncompatibilities(pkg string, v Version) ([]int, 
 // "dependencies" are the solve's root requirements, injected here rather
 // than through any provider call; every other package goes through the
 // provider.
-func (s *solveState) dependenciesOf(pkg string, v Version) (map[string]Constraint, error) {
+func (s *solveState) dependenciesOf(ctx context.Context, pkg string, v Version) (map[string]Constraint, error) {
 	if pkg == rootPkg {
 		return s.rootDeps, nil
 	}
-	deps, err := s.provider.Dependencies(pkg, v)
+	deps, err := s.provider.Dependencies(ctx, pkg, v)
 	if err != nil {
 		return nil, fmt.Errorf("fetching dependencies of %s@%s: %w", pkg, v.Original(), err)
 	}

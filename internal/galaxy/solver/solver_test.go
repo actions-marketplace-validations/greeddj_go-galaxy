@@ -1,6 +1,7 @@
 package solver
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -26,7 +27,7 @@ func TestFuelGuard(t *testing.T) {
 		withDeps("c", "1.0.0", map[string]string{"d": "^1.0.0"})
 	reqs := []Requirement{{Package: "a", Constraint: "^1.0.0"}}
 
-	_, err := Solve(reqs, p)
+	_, err := Solve(t.Context(), reqs, p)
 	if err == nil {
 		t.Fatalf("Solve succeeded despite a fuel limit of 3; want the iteration-limit error")
 	}
@@ -78,7 +79,7 @@ func TestConservativeRelationFence(t *testing.T) {
 		withVersions("foo", "1.0.0", "2.0.0").
 		withDeps("mid1", "1.0.0", map[string]string{"foo": "^1.0.0"}).
 		withDeps("mid2", "1.0.0", map[string]string{"foo": "^2.0.0"})
-	_, err := Solve([]Requirement{
+	_, err := Solve(t.Context(), []Requirement{
 		{Package: "mid1", Constraint: "^1.0.0"},
 		{Package: "mid2", Constraint: "^1.0.0"},
 	}, p2)
@@ -111,7 +112,7 @@ func TestExtractResultGuardFiresOnIncompleteResolution(t *testing.T) {
 		withDeps("acme.foo", "2.0.0", map[string]string{"acme.bar": ">=5.0.0"}).
 		withDeps("acme.foo", "1.0.0", map[string]string{"acme.bar": "*"})
 
-	res, err := Solve([]Requirement{{Package: "acme.foo", Constraint: ">=1.0.0"}}, p)
+	res, err := Solve(t.Context(), []Requirement{{Package: "acme.foo", Constraint: ">=1.0.0"}}, p)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -184,7 +185,7 @@ func TestConditionalityDropFamily(t *testing.T) {
 				withVersions("acme.bar", tc.barVersions...).
 				withDeps("acme.foo", "2.0.0", map[string]string{"acme.bar": tc.constraintHi}).
 				withDeps("acme.foo", testVersion100, map[string]string{"acme.bar": tc.constraintLo})
-			res, err := Solve(root, p)
+			res, err := Solve(t.Context(), root, p)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -209,11 +210,81 @@ func TestTransitiveUnsatisfiableBacktrack(t *testing.T) {
 		withDeps("acme.foo", "2.0.0", map[string]string{"acme.mid": "1.x"}).
 		withDeps("acme.foo", survivor, map[string]string{"acme.leaf": "<2.0.0"}).
 		withDeps("acme.mid", "1.5.0", map[string]string{"acme.leaf": "^0.0.3"})
-	res, err := Solve([]Requirement{{Package: "acme.foo", Constraint: "*"}}, p)
+	res, err := Solve(t.Context(), []Requirement{{Package: "acme.foo", Constraint: "*"}}, p)
 	if err != nil {
 		t.Fatalf("unexpected error (was a false ConflictError before stage 1): %v", err)
 	}
 	if res.Versions["acme.foo"] != survivor || res.Versions["acme.leaf"] != survivor {
 		t.Fatalf("Versions = %v, want foo=1.2.0 leaf=1.2.0", res.Versions)
 	}
+}
+
+// TestSolveStopsOnCanceledContext asserts Solve checks ctx for cancellation
+// ahead of the first unitPropagation call in its main loop, refusing to make
+// even one provider call once ctx is already canceled - and, as the
+// mandatory positive control on the identical fixture, that a live context
+// still resolves normally, so "canceled produced nothing" cannot be mistaken
+// for "the fixture was never solvable".
+func TestSolveStopsOnCanceledContext(t *testing.T) {
+	t.Parallel()
+	p := newFakeProvider().withVersions("acme.foo", "1.0.0", "2.0.0")
+	reqs := []Requirement{{Package: "acme.foo", Constraint: ">=1.0.0"}}
+
+	t.Run("canceled", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		res, err := Solve(ctx, reqs, p)
+
+		// Killing mutation: deleting the `if err := ctx.Err(); err != nil {
+		// return nil, err }` block from Solve's main loop (solver.go) and
+		// running `go test ./internal/galaxy/solver/ -run
+		// TestSolveStopsOnCanceledContext -race -v -count=1` makes this exact
+		// assertion fail with:
+		// "solver_test.go:247: Solve returned a non-nil result on an
+		// already-canceled context: map[acme.foo:2.0.0]"
+		if res != nil {
+			t.Fatalf("Solve returned a non-nil result on an already-canceled context: %v", res.Versions)
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Solve error = %v, want errors.Is(err, context.Canceled)", err)
+		}
+		if errors.Is(err, errSolverBug) {
+			t.Fatalf("Solve error = %v, wraps errSolverBug; caller cancellation must never look like an internal-invariant defect", err)
+		}
+		if got := p.totalHighestCalls(); got != 0 {
+			t.Fatalf("totalHighestCalls() = %d, want 0 (Solve must never reach the provider on an already-canceled context)", got)
+		}
+		// Documentary, not pinned: the two counters below cannot be this
+		// chain's first failing line. Highest answers 2.0.0 for this fixture,
+		// so tryDecideByProbe decides acme.foo and materializePkg is never
+		// reached - Universe is unreachable on every path here - and
+		// Dependencies is reached only from decideVersion inside that same
+		// probe branch, i.e. always after the Highest call the assertion above
+		// already counts. They are kept as a shape assertion that Solve
+		// reached no provider at all, not as checks a mutation of the ctx
+		// guard can kill.
+		if got := p.totalUniverseCalls(); got != 0 {
+			t.Fatalf("totalUniverseCalls() = %d, want 0", got)
+		}
+		if got := p.totalDepsCalls(); got != 0 {
+			t.Fatalf("totalDepsCalls() = %d, want 0", got)
+		}
+	})
+
+	// "live" is the mandatory positive control: the identical requirement set,
+	// solved against a live context and a fresh provider instance, must
+	// actually resolve - proving the "canceled" subtest's zero-calls outcome
+	// comes from the cancellation check, not from a fixture that could never
+	// be solved at all.
+	t.Run("live", func(t *testing.T) {
+		t.Parallel()
+		res, err := Solve(t.Context(), reqs, newFakeProvider().withVersions("acme.foo", "1.0.0", "2.0.0"))
+		if err != nil {
+			t.Fatalf("Solve: unexpected error: %v", err)
+		}
+		if res.Versions["acme.foo"] != "2.0.0" {
+			t.Fatalf("Versions[acme.foo] = %q, want 2.0.0", res.Versions["acme.foo"])
+		}
+	})
 }

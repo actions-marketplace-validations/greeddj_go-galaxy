@@ -17,7 +17,7 @@ func newTestState(p Provider) *solveState {
 // this hard-codes it rather than threading an always-identical parameter.
 func materializeForTest(t *testing.T, s *solveState) {
 	t.Helper()
-	if err := s.materializePkg("foo"); err != nil {
+	if err := s.materializePkg(t.Context(), "foo"); err != nil {
 		t.Fatalf("materializePkg(foo): %v", err)
 	}
 }
@@ -158,7 +158,7 @@ func TestUnitPropagationNewestToOldest(t *testing.T) {
 	}}
 	newIdx, _ := s.store.add(newInc)
 
-	if err := s.unitPropagation(rootPkg); err != nil {
+	if err := s.unitPropagation(t.Context(), rootPkg); err != nil {
 		t.Fatalf("unitPropagation: %v", err)
 	}
 

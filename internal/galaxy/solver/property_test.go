@@ -143,7 +143,7 @@ func TestPropertyResolutionSatisfiesConstraints(t *testing.T) {
 	for _, n := range []int{5, 6, 7, 8} {
 		for seed := range int64(propertySeedCount) {
 			g := generateGraph(seed, n, 3)
-			res, err := Solve(g.roots, g.provider())
+			res, err := Solve(t.Context(), g.roots, g.provider())
 			if err != nil {
 				var ce *ConflictError
 				if !errors.As(err, &ce) {

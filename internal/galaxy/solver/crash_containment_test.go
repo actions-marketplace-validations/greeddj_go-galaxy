@@ -40,7 +40,7 @@ func TestVacuouslySatisfiedConflictIsCleanFailure(t *testing.T) {
 		withDeps("gen.p3", "1.0.0-rc.1", map[string]string{"gen.p4": "<2.0.0"}).
 		withDeps("gen.p3", "1.2.0", map[string]string{"gen.p4": "1.x"}).
 		withDeps("gen.p3", "1.5.0", map[string]string{"gen.p4": "!=1.5.0"})
-	_, err := Solve([]Requirement{{Package: "gen.p0", Constraint: ">=0.2.0"}}, p)
+	_, err := Solve(t.Context(), []Requirement{{Package: "gen.p0", Constraint: ">=0.2.0"}}, p)
 	mustNotInvariantError(t, err)
 }
 
@@ -49,6 +49,6 @@ func TestVacuouslySatisfiedConflictIsCleanFailure(t *testing.T) {
 // *ConflictError, never an internal-invariant error.
 func TestNonConvergingConflictIsCleanFailure(t *testing.T) {
 	g := fuzzDecodeGraph([]byte("A'2'00"))
-	_, err := Solve(g.roots, g.provider())
+	_, err := Solve(t.Context(), g.roots, g.provider())
 	mustNotInvariantError(t, err)
 }

@@ -6,6 +6,8 @@
 package solver
 
 import (
+	"context"
+
 	"github.com/Masterminds/semver/v3"
 )
 
@@ -100,14 +102,19 @@ func (v Version) sv() *semver.Version {
 // Provider is the seam between the solver core and package metadata. All
 // three methods must be safe for concurrent use if the caller drives
 // multiple solves concurrently, though a single Solve call drives the
-// provider from one goroutine only.
+// provider from one goroutine only. An implementation must carry the supplied
+// ctx into every I/O it performs rather than substituting one of its own, and
+// must surface a cancellation observed there as an error whose tree still
+// satisfies errors.Is(err, ctx.Err()). A call answered entirely from an
+// in-memory cache performs no I/O and is under no obligation to check ctx
+// itself: Solve's own per-iteration check is what bounds that case.
 type Provider interface {
 	// Highest returns the registry-reported highest version of pkg, with NO
 	// constraint checking performed by the provider - the core checks
 	// membership itself. ok reports whether the package is known and a
 	// highest version is available; when ok is false (or err is non-nil),
 	// the core falls back to Universe.
-	Highest(pkg string) (Version, bool, error)
+	Highest(ctx context.Context, pkg string) (Version, bool, error)
 
 	// Universe returns every published version of pkg, deduplicated by
 	// original string. The core re-sorts the result into its own total
@@ -115,12 +122,12 @@ type Provider interface {
 	// contract states an order only as a defense-in-depth convention, not a
 	// correctness requirement. An unknown package returns an empty slice
 	// and a nil error.
-	Universe(pkg string) ([]Version, error)
+	Universe(ctx context.Context, pkg string) ([]Version, error)
 
 	// Dependencies returns the validated dependency map of pkg@v: dependency
 	// fqdn mapped to its canonical Constraint. Key and constraint validation
 	// happens inside Dependencies itself; a malformed dependency key or
 	// constraint is a provider contract violation and must be surfaced as an
 	// error from this method, never guessed at by the core.
-	Dependencies(pkg string, v Version) (map[string]Constraint, error)
+	Dependencies(ctx context.Context, pkg string, v Version) (map[string]Constraint, error)
 }

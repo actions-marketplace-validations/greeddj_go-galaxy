@@ -20,7 +20,7 @@ func TestMakeDecisionProbeSatisfiesZeroUniverseCalls(t *testing.T) {
 	s.ps.decide(rootPkg, rootVersion)
 	s.ps.derive(term{Package: testPkgFoo, Set: mustSet(t, "^1.0.0"), Positive: true}, mustDummyCause(t, s))
 
-	pkg, done, err := s.makeDecision()
+	pkg, done, err := s.makeDecision(t.Context())
 	if err != nil {
 		t.Fatalf("makeDecision: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestMakeDecisionProbeUnavailableFallsBackToMaterialize(t *testing.T) {
 	s.ps.decide(rootPkg, rootVersion)
 	s.ps.derive(term{Package: testPkgFoo, Set: mustSet(t, "^1.0.0"), Positive: true}, mustDummyCause(t, s))
 
-	pkg, done, err := s.makeDecision()
+	pkg, done, err := s.makeDecision(t.Context())
 	if err != nil {
 		t.Fatalf("makeDecision: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestMakeDecisionProbeFailsFallsBackToMaterialize(t *testing.T) {
 	s.ps.derive(term{Package: testPkgFoo, Set: mustSet(t, "^1.0.0"), Positive: true}, mustDummyCause(t, s))
 	s.ps.derive(term{Package: testPkgFoo, Set: mustSet(t, "<2.0.0"), Positive: true}, mustDummyCause(t, s))
 
-	pkg, done, err := s.makeDecision()
+	pkg, done, err := s.makeDecision(t.Context())
 	if err != nil {
 		t.Fatalf("makeDecision: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestMakeDecisionEmptyCandidateProducesCauseNoVersions(t *testing.T) {
 	s.ps.derive(term{Package: testPkgFoo, Set: mustSet(t, "^1.0.0"), Positive: true}, mustDummyCause(t, s))
 	s.ps.derive(term{Package: testPkgFoo, Set: mustSet(t, "^2.0.0"), Positive: true}, mustDummyCause(t, s))
 
-	pkg, done, err := s.makeDecision()
+	pkg, done, err := s.makeDecision(t.Context())
 	if err != nil {
 		t.Fatalf("makeDecision: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestMakeDecisionUnknownPackageProducesCauseUnknownPackage(t *testing.T) {
 	s.ps.decide(rootPkg, rootVersion)
 	s.ps.derive(term{Package: "ghost", Set: mustSet(t, "^1.0.0"), Positive: true}, mustDummyCause(t, s))
 
-	pkg, done, err := s.makeDecision()
+	pkg, done, err := s.makeDecision(t.Context())
 	if err != nil {
 		t.Fatalf("makeDecision: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestMakeDecisionConservativeCheckDefersConflict(t *testing.T) {
 	s.ps.decide("bar", mustV(t, testVersion100)) // already decided, incompatible with foo's own dependency
 	s.ps.derive(term{Package: testPkgFoo, Set: mustSet(t, "^1.0.0"), Positive: true}, mustDummyCause(t, s))
 
-	pkg, done, err := s.makeDecision()
+	pkg, done, err := s.makeDecision(t.Context())
 	if err != nil {
 		t.Fatalf("makeDecision: %v", err)
 	}

@@ -47,9 +47,9 @@ type countingProvider struct {
 	universeCalls atomic.Int64
 }
 
-func (c *countingProvider) Universe(pkg string) ([]solver.Version, error) {
+func (c *countingProvider) Universe(ctx context.Context, pkg string) ([]solver.Version, error) {
 	c.universeCalls.Add(1)
-	return c.Provider.Universe(pkg)
+	return c.Provider.Universe(ctx, pkg)
 }
 
 // TestProviderLazinessAvoidsVersionsList drives a full Solve against a
@@ -65,7 +65,7 @@ func TestProviderLazinessAvoidsVersionsList(t *testing.T) {
 	p := &countingProvider{Provider: newTestMetadataProvider(t, srv)}
 	reqs := []solver.Requirement{{Package: "acme.widgets", Constraint: "^1.0.0"}}
 
-	result, err := solver.Solve(reqs, p)
+	result, err := solver.Solve(t.Context(), reqs, p)
 	if err != nil {
 		t.Fatalf("Solve: unexpected error: %v", err)
 	}
@@ -93,8 +93,8 @@ func TestProviderDependenciesWarmPinIsZeroNetwork(t *testing.T) {
 	cacheKey := helpers.ScopedDepsCacheKey(normalizeServerBase(srv.URL()), "acme.widgets@1.0.0")
 	st.SetDepsCache(cacheKey, map[string]string{"acme.other": "^2.0.0"})
 
-	p := NewMetadataProvider(context.Background(), testConfig(srv), testRuntime(srv), st, nil)
-	deps, err := p.Dependencies("acme.widgets", mustSolverVersion(t))
+	p := NewMetadataProvider(testConfig(srv), testRuntime(srv), st, nil)
+	deps, err := p.Dependencies(t.Context(), "acme.widgets", mustSolverVersion(t))
 	if err != nil {
 		t.Fatalf("Dependencies: unexpected error: %v", err)
 	}
@@ -114,12 +114,12 @@ func TestProviderOfflineMissReturnsErrOfflineMode(t *testing.T) {
 	t.Parallel()
 	cfg := &config.Config{Server: "http://offline.example.invalid", Offline: true}
 	runtime := infra.New(noopPrinter{}, fetch.NewOffline(0))
-	p := NewMetadataProvider(context.Background(), cfg, runtime, store.New(), nil)
+	p := NewMetadataProvider(cfg, runtime, store.New(), nil)
 
-	if _, err := p.Universe("acme.widgets"); !errors.Is(err, helpers.ErrOfflineMode) {
+	if _, err := p.Universe(t.Context(), "acme.widgets"); !errors.Is(err, helpers.ErrOfflineMode) {
 		t.Fatalf("Universe error = %v, want errors.Is(err, ErrOfflineMode)", err)
 	}
-	if _, err := p.Dependencies("acme.widgets", mustSolverVersion(t)); !errors.Is(err, helpers.ErrOfflineMode) {
+	if _, err := p.Dependencies(t.Context(), "acme.widgets", mustSolverVersion(t)); !errors.Is(err, helpers.ErrOfflineMode) {
 		t.Fatalf("Dependencies error = %v, want errors.Is(err, ErrOfflineMode)", err)
 	}
 }
@@ -135,13 +135,13 @@ func TestProviderMalformedDependencyKeyAborts(t *testing.T) {
 	srv.AddVersion("acme", "widgets", testVersion100, map[string]string{"not-a-fqdn": "^1.0.0"})
 
 	p := newTestMetadataProvider(t, srv)
-	_, err := p.Dependencies("acme.widgets", mustSolverVersion(t))
+	_, err := p.Dependencies(t.Context(), "acme.widgets", mustSolverVersion(t))
 	if !errors.Is(err, helpers.ErrInvalidDependencyKey) {
 		t.Fatalf("Dependencies error = %v, want errors.Is(err, ErrInvalidDependencyKey)", err)
 	}
 
 	reqs := []solver.Requirement{{Package: "acme.widgets", Constraint: "^1.0.0"}}
-	_, solveErr := solver.Solve(reqs, p)
+	_, solveErr := solver.Solve(t.Context(), reqs, p)
 	if !errors.Is(solveErr, helpers.ErrInvalidDependencyKey) {
 		t.Fatalf("Solve error = %v, want errors.Is(err, ErrInvalidDependencyKey)", solveErr)
 	}
@@ -211,17 +211,17 @@ func TestProviderUnknownPackageIsNotAnError(t *testing.T) {
 	srv := fakegalaxy.New(t)
 	p := newTestMetadataProvider(t, srv)
 
-	v, ok, err := p.Highest("acme.ghost")
+	v, ok, err := p.Highest(t.Context(), "acme.ghost")
 	if err != nil || ok {
 		t.Fatalf("Highest = (%v, %v, %v), want (_, false, nil)", v, ok, err)
 	}
-	versions, err := p.Universe("acme.ghost")
+	versions, err := p.Universe(t.Context(), "acme.ghost")
 	if err != nil || versions != nil {
 		t.Fatalf("Universe = (%v, %v), want (nil, nil)", versions, err)
 	}
 
 	reqs := []solver.Requirement{{Package: "acme.ghost", Constraint: "^1.0.0"}}
-	_, solveErr := solver.Solve(reqs, p)
+	_, solveErr := solver.Solve(t.Context(), reqs, p)
 	var conflictErr *solver.ConflictError
 	if !errors.As(solveErr, &conflictErr) {
 		t.Fatalf("Solve error is not a *solver.ConflictError: %v", solveErr)
@@ -249,7 +249,7 @@ func TestNoDepsProviderReturnsEmptyDependencies(t *testing.T) {
 	inner := &countingProvider{Provider: newTestMetadataProvider(t, srv)}
 	wrapped := NewNoDepsProvider(inner)
 
-	deps, err := wrapped.Dependencies("acme.widgets", mustSolverVersion(t))
+	deps, err := wrapped.Dependencies(t.Context(), "acme.widgets", mustSolverVersion(t))
 	if err != nil {
 		t.Fatalf("Dependencies: unexpected error: %v", err)
 	}
@@ -258,7 +258,7 @@ func TestNoDepsProviderReturnsEmptyDependencies(t *testing.T) {
 	}
 
 	reqs := []solver.Requirement{{Package: "acme.widgets", Constraint: "^1.0.0"}}
-	result, err := solver.Solve(reqs, wrapped)
+	result, err := solver.Solve(t.Context(), reqs, wrapped)
 	if err != nil {
 		t.Fatalf("Solve: unexpected error: %v", err)
 	}
@@ -282,14 +282,14 @@ func TestProviderHighestEmptyFallsBackToUniverse(t *testing.T) {
 
 	cfg := &config.Config{Server: srv.URL}
 	runtime := infra.New(noopPrinter{}, srv.Client())
-	p := NewMetadataProvider(context.Background(), cfg, runtime, store.New(), nil)
+	p := NewMetadataProvider(cfg, runtime, store.New(), nil)
 
-	_, ok, err := p.Highest("acme.widgets")
+	_, ok, err := p.Highest(t.Context(), "acme.widgets")
 	if err != nil || ok {
 		t.Fatalf("Highest = (_, %v, %v), want (_, false, nil)", ok, err)
 	}
 
-	versions, err := p.Universe("acme.widgets")
+	versions, err := p.Universe(t.Context(), "acme.widgets")
 	if err != nil {
 		t.Fatalf("Universe: unexpected error: %v", err)
 	}
@@ -374,7 +374,7 @@ func TestIsUnknownPackageErrorClassification(t *testing.T) {
 // newTestMetadataProvider builds a MetadataProvider pointed at srv.
 func newTestMetadataProvider(t *testing.T, srv *fakegalaxy.Server) *MetadataProvider {
 	t.Helper()
-	return NewMetadataProvider(context.Background(), testConfig(srv), testRuntime(srv), store.New(), nil)
+	return NewMetadataProvider(testConfig(srv), testRuntime(srv), store.New(), nil)
 }
 
 func testConfig(srv *fakegalaxy.Server) *config.Config {

@@ -23,12 +23,6 @@ import (
 // against the live registry the same way the existing resolve.go pipeline
 // does - same candidate URLs, same cache buckets, same offline behavior.
 type MetadataProvider struct {
-	// ctx is the sole seam through which cancellation reaches the HTTP/cache
-	// layer beneath solver.Provider's methods, which take no ctx of their
-	// own; a single Solve call drives every method from one goroutine only.
-	//
-	//nolint:containedctx // required: solver.Provider has no ctx parameter of its own to thread through instead.
-	ctx  context.Context
 	deps collectionDeps
 	// sources maps a root fqdn to its explicit install source (see
 	// sourceOf): a root without one, and every transitive dependency, is
@@ -39,11 +33,12 @@ type MetadataProvider struct {
 	// bindings maps every fqdn this provider has successfully fetched root
 	// metadata for to the server base that answered it (see recordBinding).
 	// It is a plain map with no mutex, deliberately: a single Solve call
-	// drives every MetadataProvider method from one goroutine only (see the
-	// ctx field's own doc comment), unlike the install and prefetch worker
-	// pools, which is why apiRootMemo (shared across those pools) needs one
-	// and this does not. solveCollections reads it once Solve returns, to
-	// stamp the same winning server onto each resolved collection's Source.
+	// drives every MetadataProvider method from one goroutine only, so an
+	// unsynchronized map is sufficient here, unlike apiRootMemo (shared
+	// across the install and prefetch worker pools, which is why that one
+	// needs a mutex and this one does not). solveCollections reads it once
+	// Solve returns, to stamp the same winning server onto each resolved
+	// collection's Source.
 	bindings map[string]string
 }
 
@@ -54,13 +49,12 @@ type MetadataProvider struct {
 // root fqdn to its explicit install source (see sourceOf); passing nil (or
 // an empty map) means every fqdn resolves against cfg.Server.
 func NewMetadataProvider(
-	ctx context.Context,
 	cfg *config.Config,
 	runtime *infra.Infra,
 	st *store.Store,
 	sources map[string]string,
 ) *MetadataProvider {
-	return &MetadataProvider{ctx: ctx, deps: newCollectionDeps(cfg, runtime, st), sources: sources, bindings: make(map[string]string)}
+	return &MetadataProvider{deps: newCollectionDeps(cfg, runtime, st), sources: sources, bindings: make(map[string]string)}
 }
 
 // Highest returns fqdn's registry-reported highest_version, with no
@@ -68,13 +62,13 @@ func NewMetadataProvider(
 // unknown package (translated from a 404/exhausted-candidates root-metadata
 // fetch) or a package whose root metadata carries no highest_version
 // reports ok=false, sending the core to Universe instead.
-func (p *MetadataProvider) Highest(fqdn string) (solver.Version, bool, error) {
+func (p *MetadataProvider) Highest(ctx context.Context, fqdn string) (solver.Version, bool, error) {
 	ns, name, err := splitFQDN(fqdn)
 	if err != nil {
 		return solver.Version{}, false, err
 	}
 	policy := cachePolicyForConstraint(p.deps.cfg, false)
-	rootMeta, _, known, err := p.resolveRoot(fqdn, ns, name, policy)
+	rootMeta, _, known, err := p.resolveRoot(ctx, fqdn, ns, name, policy)
 	if err != nil {
 		return solver.Version{}, false, err
 	}
@@ -95,20 +89,20 @@ func (p *MetadataProvider) Highest(fqdn string) (solver.Version, bool, error) {
 // convention, never load-bearing for correctness, but computed here anyway
 // since the core would otherwise re-sort with the exact same comparator. An
 // unknown package returns (nil, nil), matching solver.Provider's contract.
-func (p *MetadataProvider) Universe(fqdn string) ([]solver.Version, error) {
+func (p *MetadataProvider) Universe(ctx context.Context, fqdn string) ([]solver.Version, error) {
 	ns, name, err := splitFQDN(fqdn)
 	if err != nil {
 		return nil, err
 	}
 	policy := cachePolicyForConstraint(p.deps.cfg, false)
-	_, versionsURL, known, err := p.resolveRoot(fqdn, ns, name, policy)
+	_, versionsURL, known, err := p.resolveRoot(ctx, fqdn, ns, name, policy)
 	if err != nil {
 		return nil, err
 	}
 	if !known {
 		return nil, nil
 	}
-	raw, err := loadVersionsListCached(p.ctx, p.deps, versionsURL, policy)
+	raw, err := loadVersionsListCached(ctx, p.deps, versionsURL, policy)
 	if err != nil {
 		return nil, err
 	}
@@ -124,7 +118,7 @@ func (p *MetadataProvider) Universe(fqdn string) ([]solver.Version, error) {
 // it. A malformed dependency key aborts with helpers.ErrInvalidDependencyKey;
 // an unparseable constraint aborts wrapped, both as a provider contract
 // violation the core never tries to guess around.
-func (p *MetadataProvider) Dependencies(fqdn string, v solver.Version) (map[string]solver.Constraint, error) {
+func (p *MetadataProvider) Dependencies(ctx context.Context, fqdn string, v solver.Version) (map[string]solver.Constraint, error) {
 	ns, name, err := splitFQDN(fqdn)
 	if err != nil {
 		return nil, err
@@ -132,7 +126,7 @@ func (p *MetadataProvider) Dependencies(fqdn string, v solver.Version) (map[stri
 	policy := cachePolicyForConstraint(p.deps.cfg, true)
 	col := collection{Namespace: ns, Name: name, Source: p.sourceOf(fqdn)}
 
-	base, err := p.boundBaseFor(col, fqdn, policy)
+	base, err := p.boundBaseFor(ctx, col, fqdn, policy)
 	if err != nil {
 		return nil, err
 	}
@@ -142,12 +136,12 @@ func (p *MetadataProvider) Dependencies(fqdn string, v solver.Version) (map[stri
 		return canonicalizeDependencies(fqdn, raw)
 	}
 
-	root, err := resolveRootMetadata(p.ctx, p.deps, col, policy, fqdn)
+	root, err := resolveRootMetadata(ctx, p.deps, col, policy, fqdn)
 	if err != nil {
 		return nil, err
 	}
 	p.recordBinding(fqdn, root.base)
-	info, err := fetchVersionMetadataCached(p.ctx, p.deps, root.base, root.versionsURL, v.Original(), policy)
+	info, err := fetchVersionMetadataCached(ctx, p.deps, root.base, root.versionsURL, v.Original(), policy)
 	if err != nil {
 		return nil, err
 	}
@@ -178,14 +172,14 @@ func (p *MetadataProvider) Dependencies(fqdn string, v solver.Version) (map[stri
 // requirements pinning an exact version trigger routinely - it resolves root
 // metadata now to settle which server actually serves it, recording the
 // binding via recordBinding so every later call for fqdn reuses it.
-func (p *MetadataProvider) boundBaseFor(col collection, fqdn string, policy cacheManager.Policy) (string, error) {
+func (p *MetadataProvider) boundBaseFor(ctx context.Context, col collection, fqdn string, policy cacheManager.Policy) (string, error) {
 	if candidates := serverCandidates(p.deps, col); len(candidates) == 1 {
 		return candidates[0].base, nil
 	}
 	if base, ok := p.bindings[fqdn]; ok {
 		return base, nil
 	}
-	root, err := resolveRootMetadata(p.ctx, p.deps, col, policy, fqdn)
+	root, err := resolveRootMetadata(ctx, p.deps, col, policy, fqdn)
 	if err != nil {
 		return "", err
 	}
@@ -229,11 +223,12 @@ func (p *MetadataProvider) recordBinding(fqdn, base string) {
 // classified auth/availability abort) propagates unchanged. A successful
 // fetch is recorded via recordBinding before it is ever inspected further.
 func (p *MetadataProvider) resolveRoot(
+	ctx context.Context,
 	fqdn, ns, name string,
 	policy cacheManager.Policy,
 ) (*types.GalaxyCollection, string, bool, error) {
 	col := collection{Namespace: ns, Name: name, Source: p.sourceOf(fqdn)}
-	root, err := resolveRootMetadata(p.ctx, p.deps, col, policy, fqdn)
+	root, err := resolveRootMetadata(ctx, p.deps, col, policy, fqdn)
 	if err != nil {
 		if isUnknownPackageError(err) {
 			return nil, "", false, nil
@@ -375,6 +370,6 @@ func NewNoDepsProvider(p solver.Provider) solver.Provider {
 
 // Dependencies always reports no dependencies, without ever calling the
 // wrapped provider.
-func (noDepsProvider) Dependencies(string, solver.Version) (map[string]solver.Constraint, error) {
+func (noDepsProvider) Dependencies(context.Context, string, solver.Version) (map[string]solver.Constraint, error) {
 	return map[string]solver.Constraint{}, nil
 }

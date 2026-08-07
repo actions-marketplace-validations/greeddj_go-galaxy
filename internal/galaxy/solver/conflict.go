@@ -1,6 +1,9 @@
 package solver
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 // resolveConflict resolves the conflict represented by the incompatibility
 // stored at startIdx, backtracking the partial solution and returning
@@ -22,7 +25,7 @@ import "fmt"
 // Case C without any projection step); only decision making, which can only
 // ever choose a published version, ever needs to collapse an extended
 // running intersection down to published-only cells (pointCellsOf).
-func (s *solveState) resolveConflict(startIdx int) (int, *incompatibility, error) {
+func (s *solveState) resolveConflict(ctx context.Context, startIdx int) (int, *incompatibility, error) {
 	inc := s.store.all[startIdx]
 	curIdx := startIdx
 
@@ -41,7 +44,7 @@ func (s *solveState) resolveConflict(startIdx int) (int, *incompatibility, error
 	// large input - mirroring the main solve loop's own fuel guard.
 	for guard := range 10_000 {
 		_ = guard
-		if err := s.materializeTerms(inc.Terms); err != nil {
+		if err := s.materializeTerms(ctx, inc.Terms); err != nil {
 			return 0, nil, err
 		}
 		if inc.isTerminal() {
@@ -83,7 +86,7 @@ func (s *solveState) resolveConflict(startIdx int) (int, *incompatibility, error
 			return s.backjump(inc, curIdx, incChanged, prevLevel)
 		}
 
-		next, err := s.mergeWithSatisfierCause(inc, satisfier, term)
+		next, err := s.mergeWithSatisfierCause(ctx, inc, satisfier, term)
 		if err != nil {
 			return 0, nil, err
 		}
@@ -152,9 +155,11 @@ func (s *solveState) backjump(inc *incompatibility, curIdx int, incChanged bool,
 // (excluding the satisfier's package), adding a partial-satisfier correction
 // term when the satisfier's assignment does not, on its own, satisfy inc's
 // term for that package (satisfierTerm).
-func (s *solveState) mergeWithSatisfierCause(inc *incompatibility, satisfier *assignment, satisfierTerm term) (*incompatibility, error) {
+func (s *solveState) mergeWithSatisfierCause(
+	ctx context.Context, inc *incompatibility, satisfier *assignment, satisfierTerm term,
+) (*incompatibility, error) {
 	cause := s.store.all[satisfier.CauseIndex]
-	if err := s.materializeTerms(cause.Terms); err != nil {
+	if err := s.materializeTerms(ctx, cause.Terms); err != nil {
 		return nil, err
 	}
 
@@ -172,9 +177,9 @@ func (s *solveState) mergeWithSatisfierCause(inc *incompatibility, satisfier *as
 
 // materializeTerms materializes every package named in terms that is not
 // already materialized.
-func (s *solveState) materializeTerms(terms []term) error {
+func (s *solveState) materializeTerms(ctx context.Context, terms []term) error {
 	for _, t := range terms {
-		if err := s.materializePkg(t.Package); err != nil {
+		if err := s.materializePkg(ctx, t.Package); err != nil {
 			return err
 		}
 	}

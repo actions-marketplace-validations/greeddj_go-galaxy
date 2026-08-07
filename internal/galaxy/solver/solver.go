@@ -1,6 +1,7 @@
 package solver
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -41,7 +42,20 @@ type solveState struct {
 // (plus their dependency graph) on success, or a *ConflictError when no
 // selection exists. Any other error is a provider failure passed through
 // wrapped, never modeled as an incompatibility.
-func Solve(reqs []Requirement, p Provider) (*Result, error) {
+//
+// Solve checks ctx once per main-loop iteration, ahead of every provider call
+// that iteration would otherwise make, and when that check finds ctx canceled
+// it returns ctx.Err() bare - never wrapped in errSolverBug, so a caller's own
+// cancellation is never reported as an internal defect. Once per iteration is
+// the whole of what this loop guarantees, and it is deliberately not a claim
+// of promptness: a single iteration can issue many provider calls, since
+// conflict resolution materializes every package it touches, so a cancellation
+// arriving mid-iteration is observed by the provider first - which is what
+// Provider's own contract requires of a call that performs I/O - and comes
+// back as that provider's error wrapped by materializePkg, dependenciesOf, or
+// tryDecideByProbe, keeping errors.Is(err, context.Canceled) true but not
+// bare.
+func Solve(ctx context.Context, reqs []Requirement, p Provider) (*Result, error) {
 	s := newSolveState(p, reqs)
 
 	rootInc := &incompatibility{
@@ -55,10 +69,13 @@ func Solve(reqs []Requirement, p Provider) (*Result, error) {
 		if fuel > fuelLimit {
 			return nil, fmt.Errorf("iteration limit exceeded: %w", errSolverBug)
 		}
-		if err := s.unitPropagation(next); err != nil {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		pkg, done, err := s.makeDecision()
+		if err := s.unitPropagation(ctx, next); err != nil {
+			return nil, err
+		}
+		pkg, done, err := s.makeDecision(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -117,13 +134,13 @@ func (s *solveState) uniFor(pkg string) *packageUniverse {
 // universe, so a later re-materialization here is a cheap local replay, not
 // a second provider call; ps.materializePackage is already a no-op if it is
 // still up to date.
-func (s *solveState) materializePkg(pkg string) error {
+func (s *solveState) materializePkg(ctx context.Context, pkg string) error {
 	if pkg == rootPkg {
 		return nil
 	}
 	u := s.uniFor(pkg)
 	if !u.materialized {
-		versions, err := s.provider.Universe(pkg)
+		versions, err := s.provider.Universe(ctx, pkg)
 		if err != nil {
 			return fmt.Errorf("fetching version universe for %s: %w", pkg, err)
 		}

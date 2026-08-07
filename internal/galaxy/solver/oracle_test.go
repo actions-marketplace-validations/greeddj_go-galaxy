@@ -124,7 +124,7 @@ func TestOracleMembership(t *testing.T) {
 		for seed := range int64(oracleSeedCount) {
 			g := generateGraph(seed, n, 3)
 			valid := g.bruteForceResolutions()
-			res, err := Solve(g.roots, g.provider())
+			res, err := Solve(t.Context(), g.roots, g.provider())
 			if err != nil {
 				var ce *ConflictError
 				if !errors.As(err, &ce) {
@@ -190,7 +190,7 @@ func TestOracleAllowsMultipleValidMembers(t *testing.T) {
 		!containsResolution(valid, Resolution{"app": "1.0.0", "lib": "1.2.0"}) {
 		t.Fatalf("want both lib:1.0.0 and lib:1.2.0 valid, got %v", valid)
 	}
-	res, err := Solve(g.roots, g.provider())
+	res, err := Solve(t.Context(), g.roots, g.provider())
 	if err != nil {
 		t.Fatalf("solve: %v", err)
 	}

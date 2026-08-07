@@ -15,7 +15,7 @@ import (
 // is the production cold-resolve path.
 func solveCollections(ctx context.Context, deps collectionDeps, roots []collection) (map[string]collection, map[string][]string, error) {
 	sources := rootSourceMap(roots)
-	mp := NewMetadataProvider(ctx, deps.cfg, deps.runtime, deps.st, sources)
+	mp := NewMetadataProvider(deps.cfg, deps.runtime, deps.st, sources)
 	var provider solver.Provider = mp
 	if deps.cfg.NoDeps {
 		provider = NewNoDepsProvider(provider)
@@ -26,7 +26,7 @@ func solveCollections(ctx context.Context, deps collectionDeps, roots []collecti
 		return nil, nil, err
 	}
 
-	result, err := solver.Solve(reqs, provider)
+	result, err := solver.Solve(ctx, reqs, provider)
 	if err != nil {
 		return nil, nil, err
 	}

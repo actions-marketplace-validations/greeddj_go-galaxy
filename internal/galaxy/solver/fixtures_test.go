@@ -26,7 +26,7 @@ func TestFixtureNoConflicts(t *testing.T) {
 	p := noConflictsProvider()
 	reqs := []Requirement{{Package: "foo", Constraint: "^1.0.0"}}
 
-	result, err := Solve(reqs, p)
+	result, err := Solve(t.Context(), reqs, p)
 	if err != nil {
 		t.Fatalf("Solve: unexpected error: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestFixtureAvoidingConflict(t *testing.T) {
 		{Package: "foo", Constraint: "^1.0.0"},
 	}
 
-	result, err := Solve(reqs, p)
+	result, err := Solve(t.Context(), reqs, p)
 	if err != nil {
 		t.Fatalf("Solve: unexpected error: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestFixturePerformingConflictResolution(t *testing.T) {
 	p := conflictResolutionProvider()
 	reqs := []Requirement{{Package: "foo", Constraint: ">=1.0.0"}}
 
-	result, err := Solve(reqs, p)
+	result, err := Solve(t.Context(), reqs, p)
 	if err != nil {
 		t.Fatalf("Solve: unexpected error: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestFixturePartialSatisfier(t *testing.T) {
 		{Package: "target", Constraint: "^2.0.0"},
 	}
 
-	result, err := Solve(reqs, p)
+	result, err := Solve(t.Context(), reqs, p)
 	if err != nil {
 		t.Fatalf("Solve: unexpected error: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestFixtureLinearErrorReporting(t *testing.T) {
 		{Package: "baz", Constraint: "^1.0.0"},
 	}
 
-	_, err := Solve(reqs, p)
+	_, err := Solve(t.Context(), reqs, p)
 	if err == nil {
 		t.Fatalf("Solve: expected a conflict, got a resolution")
 	}
@@ -198,7 +198,7 @@ func TestFixtureBranchingErrorReporting(t *testing.T) {
 	p := branchingErrorProvider()
 	reqs := []Requirement{{Package: "foo", Constraint: "^1.0.0"}}
 
-	_, err := Solve(reqs, p)
+	_, err := Solve(t.Context(), reqs, p)
 	if err == nil {
 		t.Fatalf("Solve: expected a conflict, got a resolution")
 	}
@@ -263,7 +263,7 @@ func TestFixtureUnknownPackage(t *testing.T) {
 	p := newFakeProvider() // "ghost" has no registered versions
 	reqs := []Requirement{{Package: "ghost", Constraint: "^1.0.0"}}
 
-	_, err := Solve(reqs, p)
+	_, err := Solve(t.Context(), reqs, p)
 	if err == nil {
 		t.Fatalf("Solve: expected a conflict for an unknown package, got a resolution")
 	}
@@ -298,7 +298,7 @@ func unknownPackageTransitiveProvider() *fakeProvider {
 func TestFixtureUnknownPackageTransitive(t *testing.T) {
 	t.Parallel()
 	p := unknownPackageTransitiveProvider()
-	_, err := Solve([]Requirement{{Package: "foo", Constraint: "^1.0.0"}}, p)
+	_, err := Solve(t.Context(), []Requirement{{Package: "foo", Constraint: "^1.0.0"}}, p)
 	var conflictErr *ConflictError
 	if !errors.As(err, &conflictErr) {
 		t.Fatalf("Solve error is not a *ConflictError: %v (%T)", err, err)
@@ -324,7 +324,7 @@ func TestHintPrereleaseOnly(t *testing.T) {
 	p := newFakeProvider().withVersions("foo", "1.0.0-rc1", "1.0.0-rc2")
 	reqs := []Requirement{{Package: "foo", Constraint: ">=1.0.0"}}
 
-	_, err := Solve(reqs, p)
+	_, err := Solve(t.Context(), reqs, p)
 	var conflictErr *ConflictError
 	if !errors.As(err, &conflictErr) {
 		t.Fatalf("Solve error is not a *ConflictError: %v", err)
@@ -349,7 +349,7 @@ func TestHintPrereleasesExcluded(t *testing.T) {
 	p := newFakeProvider().withVersions("foo", testVersion100, "2.0.0-rc1")
 	reqs := []Requirement{{Package: "foo", Constraint: ">=1.5.0"}}
 
-	_, err := Solve(reqs, p)
+	_, err := Solve(t.Context(), reqs, p)
 	var conflictErr *ConflictError
 	if !errors.As(err, &conflictErr) {
 		t.Fatalf("Solve error is not a *ConflictError: %v", err)
@@ -452,7 +452,7 @@ func runDeterminismCase(t *testing.T, tc determinismCase) {
 
 	for i := range 100 {
 		p := tc.build()
-		result, err := Solve(tc.reqs, p)
+		result, err := Solve(t.Context(), tc.reqs, p)
 		if tc.wantErr {
 			var conflictErr *ConflictError
 			if !errors.As(err, &conflictErr) {

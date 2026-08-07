@@ -1,6 +1,7 @@
 package solver
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"strconv"
@@ -113,7 +114,7 @@ func BenchmarkSolve(b *testing.B) {
 			reqs, p := buildScaledGraph(int64(n), n)
 			b.ResetTimer()
 			for range b.N {
-				res, err := Solve(reqs, p)
+				res, err := Solve(context.Background(), reqs, p)
 				if err != nil {
 					b.Fatalf("Solve: %v", err)
 				}
@@ -181,7 +182,7 @@ func BenchmarkSolveGalaxyShape(b *testing.B) {
 	reqs, p := buildGalaxyShapeGraph()
 	b.ResetTimer()
 	for range b.N {
-		res, err := Solve(reqs, p)
+		res, err := Solve(context.Background(), reqs, p)
 		if err != nil {
 			b.Fatalf("Solve: %v", err)
 		}
@@ -228,7 +229,7 @@ func BenchmarkSolveDeepBacktrack(b *testing.B) {
 	reqs, p := buildDeepBacktrackGraph(deepBacktrackChainLength)
 	b.ResetTimer()
 	for range b.N {
-		res, _ := Solve(reqs, p)
+		res, _ := Solve(context.Background(), reqs, p)
 		sink = res
 	}
 }

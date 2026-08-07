@@ -63,8 +63,8 @@ func TestPlainInstallResolvesThroughSolverVersionSelection(t *testing.T) {
 	assertManifestInstalled(t, f.downloadPath, "lib")
 	installedLibVersion := readManifestVersion(t, f.downloadPath, "lib")
 
-	provider := collections.NewMetadataProvider(context.Background(), f.cfg, f.runtime, store.New(), nil)
-	result, err := solver.Solve([]solver.Requirement{{Package: "acme.app", Constraint: "*"}}, provider)
+	provider := collections.NewMetadataProvider(f.cfg, f.runtime, store.New(), nil)
+	result, err := solver.Solve(context.Background(), []solver.Requirement{{Package: "acme.app", Constraint: "*"}}, provider)
 	if err != nil {
 		t.Fatalf("solver.Solve: %v", err)
 	}

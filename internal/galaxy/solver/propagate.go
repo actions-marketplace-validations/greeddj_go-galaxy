@@ -1,6 +1,7 @@
 package solver
 
 import (
+	"context"
 	"slices"
 )
 
@@ -138,11 +139,11 @@ func relate(inc *incompatibility, ps *partialSolution, uniFor func(string) *pack
 // changed's pop order is deterministic (ascending package name), and each
 // package's incompatibilities are scanned newest to oldest, since conflict
 // resolution tends to produce more general incompatibilities later on.
-func (s *solveState) unitPropagation(pkg string) error {
+func (s *solveState) unitPropagation(ctx context.Context, pkg string) error {
 	changed := map[string]bool{pkg: true}
 	for len(changed) > 0 {
 		p := popSmallest(changed)
-		if _, err := s.propagatePackage(p, changed); err != nil {
+		if _, err := s.propagatePackage(ctx, p, changed); err != nil {
 			return err
 		}
 	}
@@ -155,13 +156,13 @@ func (s *solveState) unitPropagation(pkg string) error {
 // package, and reports conflicted = true so the caller re-enters the outer
 // while loop instead of continuing this scan (the partial solution just
 // backtracked, so the remaining incompatibilities in this scan are stale).
-func (s *solveState) propagatePackage(p string, changed map[string]bool) (bool, error) {
+func (s *solveState) propagatePackage(ctx context.Context, p string, changed map[string]bool) (bool, error) {
 	for _, idx := range s.store.byPackageNewestFirst(p) {
 		inc := s.store.all[idx]
 		rel, unsat := relate(inc, s.ps, s.uniFor)
 		switch rel {
 		case incSatisfied:
-			if err := s.resolveAndDerive(idx, changed); err != nil {
+			if err := s.resolveAndDerive(ctx, idx, changed); err != nil {
 				return false, err
 			}
 			return true, nil
@@ -226,10 +227,10 @@ func (s *solveState) deriveOnce(term term, causeIdx int, changed map[string]bool
 // (derive the negation) or CONTRADICTED (nothing to derive - the backtrack
 // alone resolved it). Only INCONCLUSIVE, or exceeding the iteration cap,
 // signals a genuine defect.
-func (s *solveState) resolveAndDerive(idx int, changed map[string]bool) error {
+func (s *solveState) resolveAndDerive(ctx context.Context, idx int, changed map[string]bool) error {
 	for guard := range 10_000 {
 		_ = guard
-		rootIdx, rootCause, err := s.resolveConflict(idx)
+		rootIdx, rootCause, err := s.resolveConflict(ctx, idx)
 		if err != nil {
 			return err
 		}

@@ -162,7 +162,7 @@ func TestMetadataProviderSourceOf(t *testing.T) {
 	t.Parallel()
 	cfg := &config.Config{Server: "https://default.example"}
 	sources := map[string]string{"acme.a": "https://explicit.example"}
-	p := NewMetadataProvider(context.Background(), cfg, infra.New(noopPrinter{}, nil), store.New(), sources)
+	p := NewMetadataProvider(cfg, infra.New(noopPrinter{}, nil), store.New(), sources)
 
 	if got := p.sourceOf("acme.a"); got != "https://explicit.example" {
 		t.Fatalf("sourceOf(acme.a) = %q, want the explicit source", got)

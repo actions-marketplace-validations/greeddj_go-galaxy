@@ -94,7 +94,7 @@ func FuzzSolve(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		g := fuzzDecodeGraph(data)
-		res, err := Solve(g.roots, g.provider())
+		res, err := Solve(t.Context(), g.roots, g.provider())
 		if err != nil {
 			if errors.Is(err, errSolverBug) {
 				t.Fatalf("internal-bug error on a fuzzed input: %v (roots=%v)", err, g.roots)

@@ -83,7 +83,7 @@ func TestResolveConflictBackjumpsWhenSatisfierIsDecision(t *testing.T) {
 	inc := &incompatibility{Terms: []term{{Package: "foo", Set: mustSet(t, "^1.0.0"), Positive: true}}}
 	idx, _ := s.store.add(inc)
 
-	rootIdx, rootCause, err := s.resolveConflict(idx)
+	rootIdx, rootCause, err := s.resolveConflict(t.Context(), idx)
 	if err != nil {
 		t.Fatalf("resolveConflict: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestResolveConflictMergeLearnsNewIncompatibility(t *testing.T) {
 	// "Performing Conflict Resolution" fixture's own shape, which is known to
 	// exercise exactly one merge step before backjumping to level 0.
 	p := conflictResolutionProvider()
-	result, err := Solve([]Requirement{{Package: "foo", Constraint: ">=1.0.0"}}, p)
+	result, err := Solve(t.Context(), []Requirement{{Package: "foo", Constraint: ">=1.0.0"}}, p)
 	if err != nil {
 		t.Fatalf("Solve: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestResolveConflictSkipsStoreAddWhenUnchanged(t *testing.T) {
 	idx, _ := s.store.add(inc)
 	before := len(s.store.all)
 
-	_, rootCause, err := s.resolveConflict(idx)
+	_, rootCause, err := s.resolveConflict(t.Context(), idx)
 	if err != nil {
 		t.Fatalf("resolveConflict: %v", err)
 	}

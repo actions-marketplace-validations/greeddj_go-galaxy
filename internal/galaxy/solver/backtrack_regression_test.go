@@ -20,7 +20,7 @@ func TestFullConstraintInvisibilityBacktrack(t *testing.T) {
 		withDeps("gen.p0", "1.5.0", map[string]string{"gen.p1": "*"}).
 		withDeps("gen.p0", "1.2.0", map[string]string{"gen.p2": "*"}).
 		withDeps("gen.p1", "1.5.0", map[string]string{"gen.p2": "^0.0.3"})
-	res, err := Solve([]Requirement{{Package: "gen.p0", Constraint: "*"}}, p)
+	res, err := Solve(t.Context(), []Requirement{{Package: "gen.p0", Constraint: "*"}}, p)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestResultExcludesBacktrackedOverInstall(t *testing.T) {
 		withDeps("gen.p0", "2.0.0", map[string]string{"gen.p1": ">=0.2.0", "gen.p3": "<2.0.0"}).
 		withDeps("gen.p1", "0.2.5", map[string]string{"gen.p3": "<2.0.0"}).
 		withDeps("gen.p2", "1.2.0", map[string]string{"gen.p3": "!=1.5.0"})
-	res, err := Solve([]Requirement{{Package: "gen.p0", Constraint: ">=0.2.0"}}, p)
+	res, err := Solve(t.Context(), []Requirement{{Package: "gen.p0", Constraint: ">=0.2.0"}}, p)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

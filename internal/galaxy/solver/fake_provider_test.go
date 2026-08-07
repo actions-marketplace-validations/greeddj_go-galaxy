@@ -1,6 +1,7 @@
 package solver
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"math/rand"
@@ -40,7 +41,7 @@ func newFakeProvider() *fakeProvider {
 	}
 }
 
-func (f *fakeProvider) Highest(pkg string) (Version, bool, error) {
+func (f *fakeProvider) Highest(_ context.Context, pkg string) (Version, bool, error) {
 	f.mu.Lock()
 	f.highestCalls[pkg]++
 	f.mu.Unlock()
@@ -75,7 +76,7 @@ func (f *fakeProvider) Highest(pkg string) (Version, bool, error) {
 	return ordered[0], true, nil
 }
 
-func (f *fakeProvider) Universe(pkg string) ([]Version, error) {
+func (f *fakeProvider) Universe(_ context.Context, pkg string) ([]Version, error) {
 	f.mu.Lock()
 	f.universeCalls[pkg]++
 	f.mu.Unlock()
@@ -94,7 +95,7 @@ func (f *fakeProvider) Universe(pkg string) ([]Version, error) {
 	return out, nil
 }
 
-func (f *fakeProvider) Dependencies(pkg string, v Version) (map[string]Constraint, error) {
+func (f *fakeProvider) Dependencies(_ context.Context, pkg string, v Version) (map[string]Constraint, error) {
 	key := pkg + "@" + v.Original()
 	f.mu.Lock()
 	f.depsCalls[key]++
@@ -143,6 +144,28 @@ func (f *fakeProvider) totalUniverseCalls() int {
 	defer f.mu.Unlock()
 	total := 0
 	for _, n := range f.universeCalls {
+		total += n
+	}
+	return total
+}
+
+// totalHighestCalls sums every package's Highest call count.
+func (f *fakeProvider) totalHighestCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	total := 0
+	for _, n := range f.highestCalls {
+		total += n
+	}
+	return total
+}
+
+// totalDepsCalls sums every "pkg@version" key's Dependencies call count.
+func (f *fakeProvider) totalDepsCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	total := 0
+	for _, n := range f.depsCalls {
 		total += n
 	}
 	return total
