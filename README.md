@@ -586,6 +586,13 @@ configured token; setting it to the empty string clears the token entirely,
 letting a pipeline force an anonymous run by exporting `GO_GALAXY_TOKEN=`
 without editing any config.
 
+Prefer the environment variable over the flag. A token passed as `--token`
+lands in this process's argv, where any local process can read it - on Linux
+through `/proc/<pid>/cmdline`, and in a `ps` listing on most systems - for as
+long as the run lasts. `GO_GALAXY_TOKEN` carries the same value without that
+exposure. go-galaxy does not detect which route you used and will not warn:
+this is guidance about how you invoke the tool, not a check it performs.
+
 ### Precedence
 
 Highest wins:
@@ -660,6 +667,16 @@ investigate, not a configuration mistake.
 When `--s3-bucket` (or `GO_GALAXY_S3_BUCKET`) is set, go-galaxy uses S3 as the cache backend.
 Artifacts and cache metadata are stored in S3; collections are still installed locally.
 
+Pass the two credential values through the environment rather than the command line.
+`--s3-secret-key` and `--s3-session-token` land in this process's argv, where any local
+process can read them for as long as the run lasts; `GO_GALAXY_S3_SECRET_KEY` /
+`AWS_SECRET_ACCESS_KEY` and `GO_GALAXY_S3_SESSION_TOKEN` / `AWS_SESSION_TOKEN` carry the
+same values without that exposure. This is guidance about how you invoke the tool, not a
+check it performs - go-galaxy does not detect which route you used and will not warn.
+`--s3-access-key` is deliberately not in this list: an AWS access key id travels in
+cleartext inside every signed request's `Authorization` header by construction, so hiding
+it from argv would prevent no disclosure.
+
 **The endpoint must support conditional writes - both of them.** The distributed lock that
 keeps concurrent runs off each other's cache is built on `If-None-Match: *` to take the
 lock and `If-Match` against an object's ETag to take over one whose holder died, so an
@@ -691,6 +708,14 @@ to itself. See "Exit codes" below for the exact messages to grep for.
 
 ## Security / Trust model
 
+- Every secret this tool accepts has an environment route, and that is the route to
+  use. `--token`, `--s3-secret-key` and `--s3-session-token` all put their value in
+  this process's argv, readable by any local process for the life of the run;
+  `GO_GALAXY_TOKEN`, `GO_GALAXY_S3_SECRET_KEY` / `AWS_SECRET_ACCESS_KEY` and
+  `GO_GALAXY_S3_SESSION_TOKEN` / `AWS_SESSION_TOKEN` do not. go-galaxy cannot tell the
+  two routes apart and issues no warning: a value's source is not observable once
+  urfave has resolved it, so a warning would have to fire on every run, including the
+  environment-driven majority it exists to encourage.
 - The shared S3 snapshot object and the project registry object are a trust boundary:
   go-galaxy serves cached Galaxy metadata (including a collection's download URL and
   sha256) from them without re-validating against the origin on every use, so anyone
