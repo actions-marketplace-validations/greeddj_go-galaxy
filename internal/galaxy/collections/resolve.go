@@ -179,7 +179,7 @@ func recordResolution(
 }
 
 func buildGraphFromDeps(resolved map[string]collection, depsByParent map[string]map[string]string) (map[string][]string, error) {
-	graph := make(map[string][]string)
+	graph := make(map[string][]string, len(depsByParent))
 	for parentFQDN, deps := range depsByParent {
 		parentCol, ok := resolved[parentFQDN]
 		if !ok {
@@ -1128,8 +1128,8 @@ func buildInstallLevels(graph map[string][]string) ([][]string, error) {
 }
 
 func buildDependencyIndex(graph map[string][]string) (map[string]int, map[string][]string) {
-	indegree := make(map[string]int)
-	reverse := make(map[string][]string)
+	indegree := make(map[string]int, len(graph))
+	reverse := make(map[string][]string, len(graph))
 	for node, deps := range graph {
 		if _, ok := indegree[node]; !ok {
 			indegree[node] = 0
@@ -1145,34 +1145,48 @@ func buildDependencyIndex(graph map[string][]string) (map[string]int, map[string
 	return indegree, reverse
 }
 
+// topologicalLevels groups indegree's nodes into install levels: the first
+// level is every node already at indegree 0, and each following level is
+// whatever nodes reverse[node] reduces to indegree 0 once every node in the
+// level before it is applied. remaining tracks how many nodes have not yet
+// been placed in a level; if it is still positive once no node reaches
+// indegree 0, those unplaced nodes form a cycle.
+//
+// Each level is sorted by key before it is appended, which makes
+// runInstallLevel's dispatch order match the prefetch queue order
+// sortTasksByLevel builds from the same (level, key) pair. That match is a
+// latency optimization only, exactly as sortTasksByLevel's own doc comment
+// states of its side: a worker still blocks on prefetch.Wait(key) for its own
+// artifact regardless of fetch order.
+//
+// The loop reaches every reverse[node] edge exactly once - one decrement per
+// edge, no rescanning of nodes already placed in an earlier level.
 func topologicalLevels(indegree map[string]int, reverse map[string][]string) ([][]string, error) {
-	levels := make([][]string, 0)
-	for len(indegree) > 0 {
-		level := nextLevel(indegree)
-		if len(level) == 0 {
-			return nil, helpers.ErrDependencyGraphHasACycle
-		}
-		levels = append(levels, level)
-		applyLevel(indegree, reverse, level)
-	}
-	return levels, nil
-}
-
-func nextLevel(indegree map[string]int) []string {
-	level := make([]string, 0)
+	current := make([]string, 0, len(indegree))
 	for node, deg := range indegree {
 		if deg == 0 {
-			level = append(level, node)
+			current = append(current, node)
 		}
 	}
-	return level
-}
-
-func applyLevel(indegree map[string]int, reverse map[string][]string, level []string) {
-	for _, node := range level {
-		delete(indegree, node)
-		for _, child := range reverse[node] {
-			indegree[child]--
+	levels := make([][]string, 0, len(indegree))
+	remaining := len(indegree)
+	for len(current) > 0 {
+		sort.Strings(current)
+		levels = append(levels, current)
+		remaining -= len(current)
+		next := make([]string, 0, len(current))
+		for _, node := range current {
+			for _, child := range reverse[node] {
+				indegree[child]--
+				if indegree[child] == 0 {
+					next = append(next, child)
+				}
+			}
 		}
+		current = next
 	}
+	if remaining > 0 {
+		return nil, helpers.ErrDependencyGraphHasACycle
+	}
+	return levels, nil
 }

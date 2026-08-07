@@ -43,6 +43,78 @@ func TestBuildInstallLevelsCycle(t *testing.T) {
 	}
 }
 
+// unsortedLevelGraph is a single-level, six-node graph (no node depends on
+// any other) whose keys are deliberately unlike any plausible insertion or
+// map-iteration order, so TestInstallLevelsAreSortedWithinLevel below cannot
+// pass by accidentally already being sorted.
+func unsortedLevelGraph() map[string][]string {
+	return map[string][]string{
+		"z.z@1.0.0": nil,
+		"a.a@1.0.0": nil,
+		"m.m@1.0.0": nil,
+		"b.b@1.0.0": nil,
+		"y.y@1.0.0": nil,
+		"c.c@1.0.0": nil,
+	}
+}
+
+// TestInstallLevelsAreSortedWithinLevel proves buildInstallLevels sorts each
+// level by key rather than leaving it in Go's randomized map-iteration order.
+// That sort is what lets runInstallLevel's dispatch order match the prefetch
+// queue order sortTasksByLevel builds from the same (level, key) pair (see
+// topologicalLevels' own doc comment). The call runs 20 times because map
+// iteration order is randomized per run: a single iteration passing against
+// an unsorted implementation would not reliably catch a regression.
+//
+// KILLING MUTATION, run for real: deleting the "sort.Strings(current)" line
+// from topologicalLevels fails this test on the very first iteration. Real
+// output: "iteration 0: levels[0] = [m.m@1.0.0 b.b@1.0.0 y.y@1.0.0 c.c@1.0.0
+// z.z@1.0.0 a.a@1.0.0], want [a.a@1.0.0 b.b@1.0.0 c.c@1.0.0 m.m@1.0.0
+// y.y@1.0.0 z.z@1.0.0]".
+func TestInstallLevelsAreSortedWithinLevel(t *testing.T) {
+	t.Parallel()
+	graph := unsortedLevelGraph()
+	want := []string{"a.a@1.0.0", "b.b@1.0.0", "c.c@1.0.0", "m.m@1.0.0", "y.y@1.0.0", "z.z@1.0.0"}
+
+	const iterations = 20
+	for i := range iterations {
+		levels, err := buildInstallLevels(graph)
+		if err != nil {
+			t.Fatalf("iteration %d: buildInstallLevels error: %v", i, err)
+		}
+		if len(levels) != 1 {
+			t.Fatalf("iteration %d: expected 1 level, got %d", i, len(levels))
+		}
+		got := levels[0]
+		if len(got) != len(want) {
+			t.Fatalf("iteration %d: levels[0] = %v, want %v", i, got, want)
+		}
+		for j := range want {
+			if got[j] != want[j] {
+				t.Fatalf("iteration %d: levels[0] = %v, want %v", i, got, want)
+			}
+		}
+	}
+}
+
+// TestInstallLevelsMembershipUnchangedBySort is the positive control for
+// TestInstallLevelsAreSortedWithinLevel above: the same fixture graph still
+// produces exactly one level whose key set is unchanged, which is what
+// proves the sort assertion above catches ORDER rather than the leveling
+// being broken outright.
+func TestInstallLevelsMembershipUnchangedBySort(t *testing.T) {
+	t.Parallel()
+	graph := unsortedLevelGraph()
+	levels, err := buildInstallLevels(graph)
+	if err != nil {
+		t.Fatalf("buildInstallLevels error: %v", err)
+	}
+	if len(levels) != 1 {
+		t.Fatalf("expected 1 level, got %d", len(levels))
+	}
+	assertLevel(t, levels[0], []string{"z.z@1.0.0", "a.a@1.0.0", "m.m@1.0.0", "b.b@1.0.0", "y.y@1.0.0", "c.c@1.0.0"})
+}
+
 // TestParseDependenciesMalformedKey covers the shapes a Galaxy server can put
 // in a dependency map that this program must not carry any further. The
 // forged-line row is the reason the check is on the alphabet and not just on
