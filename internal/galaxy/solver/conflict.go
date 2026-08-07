@@ -146,7 +146,9 @@ func (s *solveState) backjump(inc *incompatibility, curIdx int, incChanged bool,
 		idx, _ := s.store.add(inc)
 		curIdx = idx
 	}
-	s.ps.backtrackTo(prevLevel)
+	if err := s.ps.backtrackTo(prevLevel); err != nil {
+		return 0, nil, err
+	}
 	return curIdx, inc, nil
 }
 

@@ -136,12 +136,34 @@ func countOutgoing(inc *incompatibility, outgoing map[*incompatibility]int, visi
 // graph. lineOf holds the line number assigned to a node that has one (a
 // node referenced by two or more parents always earns one; the partial-
 // satisfier merge case can also force one early to allow a back-reference).
+//
+// The bug field holds the first invariant-violation error renderNode
+// recorded: a non-derived incompatibility reached where the walk requires
+// one already established as derived. Recording one does not abort the
+// walk, and that is safe because the node that records it is a leaf - a
+// non-causeConflict cause has no cc.Left/cc.Right for renderNode to recurse
+// into, and renderNode returns before marking that node rendered, so a
+// later ensureRendered on it re-enters renderNode, costs O(1), and recurses
+// nowhere. outcome is the field's only reader, and it runs once the walk
+// has finished.
 type reportBuilder struct {
 	lineOf   map[*incompatibility]int
 	rendered map[*incompatibility]bool
 	outgoing map[*incompatibility]int
+	bug      error
 	lines    []string
 	nextLine int
+}
+
+// newReportBuilder returns a reportBuilder whose three lookup maps are
+// initialized. They are the only fields a walk writes that a zero value
+// leaves unusable, so this is the whole of what construction has to do.
+func newReportBuilder() *reportBuilder {
+	return &reportBuilder{
+		lineOf:   make(map[*incompatibility]int),
+		rendered: make(map[*incompatibility]bool),
+		outgoing: make(map[*incompatibility]int),
+	}
 }
 
 // hasLine reports whether inc has already been assigned a line number.
@@ -178,6 +200,14 @@ func (b *reportBuilder) forceLineNumber(inc *incompatibility) int {
 	return b.nextLine
 }
 
+// recordBug records err as b's first invariant-violation error (first-wins:
+// a bug already recorded is never overwritten).
+func (b *reportBuilder) recordBug(err error) {
+	if b.bug == nil {
+		b.bug = err
+	}
+}
+
 // renderNode renders inc's own explanatory line (recursing into its causes
 // as the numbered algorithm requires), appends it to b.lines, and assigns it
 // a line number if it is referenced by two or more parents. final marks the
@@ -187,10 +217,17 @@ func (b *reportBuilder) forceLineNumber(inc *incompatibility) int {
 func (b *reportBuilder) renderNode(s *solveState, inc *incompatibility, final bool) {
 	cc, ok := inc.Cause.(causeConflict)
 	if !ok {
-		// renderNode is only ever called (by buildConflictError or
-		// ensureRendered) on a derived incompatibility, so a non-causeConflict
-		// cause here is a solver invariant violation, not reachable input.
-		panic("solver: renderNode called on a non-derived incompatibility; this is a bug")
+		// A non-causeConflict cause here means the walk reached this function
+		// on a node nothing established as derived. buildConflictError gates
+		// its own call on isDerivedInc; ensureRendered gates only on the
+		// rendered cache, so what keeps this branch unreachable is its call
+		// sites - the ext1/ext2 dispatch below, splitOneDerived and pickSimple
+		// each hand it a node already classified as derived. The return is
+		// required, not stylistic: on this branch cc is the zero causeConflict,
+		// so the very next statement's isDerivedInc(cc.Left) would dereference
+		// a nil *incompatibility.
+		b.recordBug(fmt.Errorf("renderNode called on a non-derived incompatibility (cause %T): %w", inc.Cause, errSolverBug))
+		return
 	}
 	ext1, ext2 := !isDerivedInc(cc.Left), !isDerivedInc(cc.Right)
 
@@ -301,15 +338,13 @@ func finalizeLine(line, desc string) string {
 }
 
 // buildConflictError renders the full proof for inc (the terminal
-// incompatibility resolveConflict produced) and constructs the ConflictError
-// returned to the caller. It runs while every package materialized during
-// the solve is still live, since the hint conditions inspect universes.
-func (s *solveState) buildConflictError(inc *incompatibility) *ConflictError {
-	b := &reportBuilder{
-		lineOf:   make(map[*incompatibility]int),
-		rendered: make(map[*incompatibility]bool),
-		outgoing: make(map[*incompatibility]int),
-	}
+// incompatibility resolveConflict produced) and returns either the
+// ConflictError built from it or the invariant-violation error the render
+// walk recorded, via outcome. It runs while every package materialized
+// during the solve is still live, since the hint conditions inspect
+// universes.
+func (s *solveState) buildConflictError(inc *incompatibility) error {
+	b := newReportBuilder()
 	countOutgoing(inc, b.outgoing, make(map[*incompatibility]bool))
 
 	if isDerivedInc(inc) {
@@ -318,6 +353,21 @@ func (s *solveState) buildConflictError(inc *incompatibility) *ConflictError {
 		b.lines = append(b.lines, finalizeLine(s.describe(inc), s.describe(inc)))
 	}
 
+	return b.outcome(s, inc)
+}
+
+// outcome returns the recorded bug in preference to the built proof,
+// discarding the partially built lines: renderNode may have recorded an
+// invariant-violation error partway through the walk, in which case the
+// lines collected up to that point describe an incomplete, unusable proof.
+// Otherwise it returns the ConflictError assembled from b.lines and inc's
+// hints and attributions. Both arms return a non-nil value, so no typed-nil
+// interface is ever constructible from this method. Named outcome, not
+// result, to stay clear of the exported Result type.
+func (b *reportBuilder) outcome(s *solveState, inc *incompatibility) error {
+	if b.bug != nil {
+		return b.bug
+	}
 	return &ConflictError{
 		proofLines:   b.lines,
 		hints:        s.collectHints(inc),

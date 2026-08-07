@@ -102,7 +102,9 @@ func newSymbolicSet(raw string) (versionSet, error) {
 // singletonSet returns the symbolic versionSet denoting exactly {v}. It
 // reuses Masterminds' own exact-match operator ("=") to build the set, so
 // membership on it goes through the same sole authority (Check) as every
-// other set - never a hand-rolled equality comparison.
+// other set - never a hand-rolled equality comparison. errSolverBug's own
+// doc comment (solver.go) is the home of the panic-vs-error rule this
+// function's own panic falls under.
 func singletonSet(v Version) versionSet {
 	key := "=" + v.Original()
 	c, err := semver.NewConstraint(key)

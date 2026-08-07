@@ -21,7 +21,16 @@ var fuelLimit = 1_000_000
 // an assumption the reference algorithm guarantees but this implementation
 // failed to uphold - never a caller error, an unsatisfiable input (that is a
 // *ConflictError), or a provider failure (that is passed through wrapped on
-// its own). None of these are part of Solve's documented exit-code taxonomy.
+// its own). The rule that decides which assertion becomes which: an
+// invariant this package's own algorithm is responsible for upholding is
+// raised as an error wrapping this sentinel, so the failure travels back
+// through the caller's own error handling instead of terminating the
+// process. An assertion whose subject is something other than that
+// bookkeeping stays a panic - a value fixed at compile time and evaluated
+// during package initialization, before any run exists to fail, or the
+// vendored semver package's own consistency between what it accepts as a
+// version and what it accepts as the exact constraint on that same version.
+// None of these are part of Solve's documented exit-code taxonomy.
 var errSolverBug = errors.New("solver: internal invariant violated")
 
 // solveState is one Solve call's mutable state: the incompatibility store,

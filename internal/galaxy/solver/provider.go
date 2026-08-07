@@ -29,6 +29,8 @@ var rootVersion = mustNewVersion(rootVersionString)
 
 // mustNewVersion parses raw as a Version or panics. It exists only for the
 // constant root version string above, which is guaranteed to parse.
+// errSolverBug's own doc comment (solver.go) is the home of the
+// panic-vs-error rule this function's own panic falls under.
 func mustNewVersion(raw string) Version {
 	v, err := NewVersion(raw)
 	if err != nil {

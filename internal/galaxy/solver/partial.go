@@ -1,5 +1,7 @@
 package solver
 
+import "fmt"
+
 // assignment is one entry in the partial solution's ordered list: either a
 // decision (a concrete chosen version, CauseIndex == -1) or a derivation (a
 // term forced by an incompatibility, CauseIndex pointing at that
@@ -18,12 +20,15 @@ func (a *assignment) isDecision() bool {
 
 // decisionVersionOf extracts the concrete version a decision's term denotes.
 // Every decision's term is built by singletonSet, which carries the version
-// alongside its constraint representation for exactly this purpose.
-func decisionVersionOf(t term) Version {
+// alongside its constraint representation for exactly this purpose. It
+// returns an error wrapping errSolverBug when t is not a singleton, as an
+// invariant assertion about how a decision term is built rather than a check
+// against reachable input.
+func decisionVersionOf(t term) (Version, error) {
 	if !t.Set.isSingleton {
-		panic("solver: decision term does not carry a singleton version")
+		return Version{}, fmt.Errorf("decision term for %q does not carry a singleton version: %w", t.Package, errSolverBug)
 	}
-	return t.Set.singleton
+	return t.Set.singleton, nil
 }
 
 // packageAssignments is one package's bookkeeping inside a partialSolution:
@@ -165,19 +170,15 @@ func (ps *partialSolution) materializePackage(pkg string) {
 	p.materialized = true
 }
 
-// backtrackTo truncates the assignment list to drop every assignment whose
-// decision level exceeds level, then rebuilds every package's bookkeeping
-// (including materialized running intersections) by replaying the survivors
-// front to back. At Galaxy scale this full rebuild is microseconds, so no
-// per-level snapshot machinery is kept around for it.
-func (ps *partialSolution) backtrackTo(level int) {
-	cut := len(ps.assignments)
-	for cut > 0 && ps.assignments[cut-1].DecisionLevel > level {
-		cut--
-	}
-	ps.assignments = ps.assignments[:cut]
-	ps.decisions = level
-
+// rebuildPackageAssignments replays ps.assignments front to back, building
+// each named package's index list and, for a decision-shaped assignment
+// (CauseIndex == -1), its decisionVersion. It is backtrackTo's rebuild step,
+// and it owns the partially built map for that map's whole lifetime: the
+// first decisionVersionOf failure returns a nil map alongside the error, so a
+// map built from only a prefix of the assignments can never reach a caller.
+// ps.packages sizes the result - backtracking only ever drops assignments, so
+// the packages the survivors name are a subset of the ones tracked there.
+func (ps *partialSolution) rebuildPackageAssignments() (map[string]*packageAssignments, error) {
 	rebuilt := make(map[string]*packageAssignments, len(ps.packages))
 	for i := range ps.assignments {
 		a := &ps.assignments[i]
@@ -189,8 +190,36 @@ func (ps *partialSolution) backtrackTo(level int) {
 		p.indices = append(p.indices, int32(i))
 		if a.CauseIndex == -1 {
 			p.decisionIdx = int32(i)
-			p.decisionVersion = decisionVersionOf(a.term)
+			v, err := decisionVersionOf(a.term)
+			if err != nil {
+				return nil, err
+			}
+			p.decisionVersion = v
 		}
+	}
+	return rebuilt, nil
+}
+
+// backtrackTo truncates the assignment list to drop every assignment whose
+// decision level exceeds level, then rebuilds every package's bookkeeping
+// (including materialized running intersections) by replaying the survivors
+// front to back. At Galaxy scale this full rebuild is microseconds, so no
+// per-level snapshot machinery is kept around for it. It returns the first
+// error decisionVersionOf reports; the truncation above has already happened
+// by then, while ps.packages is left untouched, so a map rebuilt from only a
+// prefix of the survivors never replaces the live one. A caller that gets an
+// error must abandon this partial solution rather than continue against it.
+func (ps *partialSolution) backtrackTo(level int) error {
+	cut := len(ps.assignments)
+	for cut > 0 && ps.assignments[cut-1].DecisionLevel > level {
+		cut--
+	}
+	ps.assignments = ps.assignments[:cut]
+	ps.decisions = level
+
+	rebuilt, err := ps.rebuildPackageAssignments()
+	if err != nil {
+		return err
 	}
 
 	// A package that was materialized before the backtrack, and still has at
@@ -230,4 +259,5 @@ func (ps *partialSolution) backtrackTo(level int) {
 		}
 	}
 	ps.packages = rebuilt
+	return nil
 }
