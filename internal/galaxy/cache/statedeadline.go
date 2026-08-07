@@ -15,8 +15,7 @@ import (
 // for why a decorator, rather than nine separate context.WithTimeout call
 // sites, is the right shape for this.
 type stateDeadlineBackend struct {
-	Backend
-
+	inner  Backend
 	budget time.Duration
 }
 
@@ -60,14 +59,21 @@ type stateDeadlineBackend struct {
 // ArtifactDownloadDeadline is inert for local.Artifacts.Fetch, which also
 // ignores the context deadline a caller layers on top of it.
 //
-// The drift hazard this shape introduces: stateDeadlineBackend embeds
-// Backend rather than implementing every method by hand, so a method added
-// to the Backend interface later passes through this decorator unbounded by
-// default, with no compile error to flag it. Any future Backend method that
-// touches a persisted state object must be given its own explicit bounded
-// override here, the same way LoadStore/SaveStore/LoadProjectRegistry/
-// RecordProject already are; it does not become bounded on its own just by
-// virtue of being added to the interface.
+// Every Backend method is implemented here by hand, over the named inner
+// field rather than an embedded interface, so a method added to the Backend
+// interface later cannot pass through this decorator unnoticed: the build
+// stops on this function's own return statement until that method is
+// written. Adding a Ping(ctx context.Context) error to Backend, for
+// instance, fails with "cannot use &stateDeadlineBackend{…} (value of type
+// *stateDeadlineBackend) as Backend value in return statement:
+// *stateDeadlineBackend does not implement Backend (missing method Ping)".
+// Whoever adds that method therefore has to decide here whether it touches a
+// persisted state object and needs its own bounded override, the way
+// LoadStore, SaveStore, LoadProjectRegistry and RecordProject each have one,
+// or is left unbounded on purpose, the way Open, Close, Lock, ClearFiles,
+// SweepTemp and Artifacts each are for the reason given on their own doc
+// comments. Nothing becomes bounded just by virtue of being added to the
+// interface.
 func WithStateDeadline(b Backend, budget time.Duration) Backend {
 	if b == nil {
 		return nil
@@ -75,14 +81,14 @@ func WithStateDeadline(b Backend, budget time.Duration) Backend {
 	if budget <= 0 {
 		budget = helpers.StateObjectDeadline
 	}
-	return &stateDeadlineBackend{Backend: b, budget: budget}
+	return &stateDeadlineBackend{inner: b, budget: budget}
 }
 
 // LoadStore bounds b.LoadStore with this decorator's budget.
 func (b *stateDeadlineBackend) LoadStore(ctx context.Context) (*store.Store, error) {
 	dlCtx, cancel := context.WithTimeout(ctx, b.budget)
 	defer cancel()
-	st, err := b.Backend.LoadStore(dlCtx)
+	st, err := b.inner.LoadStore(dlCtx)
 	return st, deadlineError(ctx, dlCtx, b.budget, helpers.ErrStateObjectDeadline, err)
 }
 
@@ -94,7 +100,7 @@ func (b *stateDeadlineBackend) LoadStore(ctx context.Context) (*store.Store, err
 func (b *stateDeadlineBackend) SaveStore(ctx context.Context, st *store.Store) error {
 	dlCtx, cancel := context.WithTimeout(ctx, b.budget)
 	defer cancel()
-	err := b.Backend.SaveStore(dlCtx, st)
+	err := b.inner.SaveStore(dlCtx, st)
 	return deadlineError(ctx, dlCtx, b.budget, helpers.ErrStateObjectDeadline, err)
 }
 
@@ -103,7 +109,7 @@ func (b *stateDeadlineBackend) SaveStore(ctx context.Context, st *store.Store) e
 func (b *stateDeadlineBackend) LoadProjectRegistry(ctx context.Context) (*store.ProjectRegistry, error) {
 	dlCtx, cancel := context.WithTimeout(ctx, b.budget)
 	defer cancel()
-	registry, err := b.Backend.LoadProjectRegistry(dlCtx)
+	registry, err := b.inner.LoadProjectRegistry(dlCtx)
 	return registry, deadlineError(ctx, dlCtx, b.budget, helpers.ErrStateObjectDeadline, err)
 }
 
@@ -111,7 +117,7 @@ func (b *stateDeadlineBackend) LoadProjectRegistry(ctx context.Context) (*store.
 func (b *stateDeadlineBackend) RecordProject(ctx context.Context, requirementsFile, downloadPath string) error {
 	dlCtx, cancel := context.WithTimeout(ctx, b.budget)
 	defer cancel()
-	err := b.Backend.RecordProject(dlCtx, requirementsFile, downloadPath)
+	err := b.inner.RecordProject(dlCtx, requirementsFile, downloadPath)
 	return deadlineError(ctx, dlCtx, b.budget, helpers.ErrStateObjectDeadline, err)
 }
 
@@ -123,13 +129,13 @@ func (b *stateDeadlineBackend) RecordProject(ctx context.Context, requirementsFi
 // this codebase call Open explicitly before any state operation, so that lazy
 // path is a no-op by the time it would matter.
 func (b *stateDeadlineBackend) Open(ctx context.Context) error {
-	return b.Backend.Open(ctx)
+	return b.inner.Open(ctx)
 }
 
 // Close passes through unmodified: it releases in-process resources and
 // issues no network call in either backend.
 func (b *stateDeadlineBackend) Close(ctx context.Context) error {
-	return b.Backend.Close(ctx)
+	return b.inner.Close(ctx)
 }
 
 // Lock passes through unmodified: the distributed lock protocol carries its
@@ -142,7 +148,7 @@ func (b *stateDeadlineBackend) Close(ctx context.Context) error {
 // every run that holds the lock for longer than the budget - and it is the
 // underlying backend, not this decorator, that knows when ownership was lost.
 func (b *stateDeadlineBackend) Lock(ctx context.Context) (context.Context, func() error, error) {
-	return b.Backend.Lock(ctx)
+	return b.inner.Lock(ctx)
 }
 
 // ClearFiles passes through unmodified: --clear-cache's bulk delete is
@@ -153,14 +159,14 @@ func (b *stateDeadlineBackend) Lock(ctx context.Context) (context.Context, func(
 // drip runs, reachable only when the operator explicitly asked for this
 // destructive bulk operation.
 func (b *stateDeadlineBackend) ClearFiles(ctx context.Context) error {
-	return b.Backend.ClearFiles(ctx)
+	return b.inner.ClearFiles(ctx)
 }
 
 // SweepTemp passes through unmodified: it is local-only work (the S3
 // backend's implementation is a no-op), with no state-object read or write
 // for a budget to bound.
 func (b *stateDeadlineBackend) SweepTemp(ctx context.Context) error {
-	return b.Backend.SweepTemp(ctx)
+	return b.inner.SweepTemp(ctx)
 }
 
 // Artifacts passes through unmodified, returning the underlying store
@@ -168,5 +174,5 @@ func (b *stateDeadlineBackend) SweepTemp(ctx context.Context) error {
 // (helpers.ArtifactDownloadDeadline) in internal/galaxy/collections, not this
 // one.
 func (b *stateDeadlineBackend) Artifacts() ArtifactStore {
-	return b.Backend.Artifacts()
+	return b.inner.Artifacts()
 }
