@@ -38,10 +38,29 @@ Reproduce locally:
 brew install hyperfine
 python3 -m venv .venv && .venv/bin/pip install ansible-core
 go build -o ./dist/go-galaxy ./cmd/go-galaxy
-testing/bench.sh                          # all sizes, all scenarios
-SIZES=10 testing/bench.sh                 # one file
-SCENARIOS="warm" RUNS=5 testing/bench.sh  # one scenario, more runs
+docker compose -f testing/docker-compose.yaml up -d minio-svc  # for the s3-* scenarios
+testing/bench.sh                   # all sizes, all scenarios
+SIZES=10 testing/bench.sh          # one file
+SCENARIOS="warm" testing/bench.sh  # one scenario
+RUNS=10 testing/bench.sh           # more measured runs than the default 5
 ```
+
+The defaults are `RUNS=5`, `WARMUP=1`, `SIZES="1 10 100"` and
+`SCENARIOS="cold warm frozen s3-cold s3-warm s3-frozen"` - so a bare
+`testing/bench.sh` benchmarks the S3 cache backend as well as the local one,
+which is what the `minio-svc` line above is for. The S3 scenarios are skipped
+with a warning, rather than failing the run, when `$S3_ENDPOINT` (default
+`http://127.0.0.1:9000`) does not answer, so the local scenarios still run on a
+machine with no container runtime. Every cache the script wipes lives under
+`$TMPDIR`, never in `$HOME` and never inside the repository, so benchmarking
+does not touch the caches you actually use.
+
+Each size writes three kinds of file under `dist/bench/`:
+`<scenario>-<N>.md` is hyperfine's own table, `resources-<N>.md` adds a
+`Peak RSS (MiB)` and a `Bytes downloaded` column measured in a separate
+single-run pass (RSS from `/usr/bin/time`, bytes from `go-galaxy`'s own
+`--metrics-file`, so the byte column reads `n/a` for `ansible-galaxy`, which
+has no metrics report), and `summary.md` concatenates every table produced.
 
 <details>
 <summary>Methodology</summary>
@@ -52,9 +71,11 @@ SCENARIOS="warm" RUNS=5 testing/bench.sh  # one scenario, more runs
   `requirements-100.yml` has transitive constraint conflicts that `ansible-
   galaxy` resolves leniently and `go-galaxy` rejects strictly - that's a
   separate comparison).
-- **Cold cache:** `~/.ansible/galaxy_cache`, `~/.cache/go-galaxy` and the
-  install dir wiped before each run. `ANSIBLE_COLLECTIONS_PATH=$TARGET` so
-  `ansible-galaxy` doesn't see anything pre-installed in `~/.ansible/collections`.
+- **Cold cache:** both tools' cache directories and the install dir wiped
+  before each run. The script points each tool at a cache of its own under
+  `$TMPDIR` rather than at its default in `$HOME`, and sets
+  `ANSIBLE_COLLECTIONS_PATH=$TARGET` so `ansible-galaxy` doesn't see anything
+  pre-installed in `~/.ansible/collections`.
 - **Warm cache:** caches primed once, only the install dir wiped between runs.
 - **Frozen + offline:** `go-galaxy lock` once, then `go-galaxy install --frozen
   --offline` - zero network calls.
