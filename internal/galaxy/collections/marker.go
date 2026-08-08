@@ -357,8 +357,8 @@ func checkExtractMarker(target installTarget, sha string) extractMarkerOutcome {
 // edited file's exact byte length. Closing that hole needs a full re-hash (or
 // an equally expensive per-file sha comparison against FILES.json) - a cost
 // this cheap tally exists specifically to avoid paying on every warm install.
-// TestExtractMarkerMissesEqualSizeEdit pins this limit so it is never
-// mistaken for a stronger guarantee than it actually is.
+// TestExtractMarkerMutationCases's "misses an equal-size edit" case pins this
+// limit so it is never mistaken for a stronger guarantee than it actually is.
 //
 // On any negative outcome that reaches a real marker path - missing or
 // unreadable, unparseable (including the legacy "ok" sentinel this format

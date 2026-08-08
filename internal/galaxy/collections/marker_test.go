@@ -111,86 +111,113 @@ func TestExtractMarkerRoundTrip(t *testing.T) {
 	}
 }
 
-// TestExtractMarkerDetectsDeletedFile proves a file removed from the install
-// tree after extraction is caught: the entry count drops, the tally no
-// longer matches, and the rejection is reported at Warnf (a live integrity
-// signal) with the marker removed so no second walk is needed on the next
-// check.
-func TestExtractMarkerDetectsDeletedFile(t *testing.T) {
-	t.Parallel()
-	target, _ := buildFixedMarkerTree(t)
-	const sha = "2222222222222222222222222222222222222222222222222222222222222222"
-	seedValidExtractMarker(t, target, sha)
+// extractMarkerMutationCase is one row of TestExtractMarkerMutationCases: a
+// single mutation applied to a freshly seeded install tree, the verdict
+// verifyExtractMarker must return for it, and an optional extra check for a
+// row that asserts more than that verdict alone.
+type extractMarkerMutationCase struct {
+	mutate     func(t *testing.T, target installTarget)
+	extraCheck func(t *testing.T, target installTarget, sha string, printer *capturingPrinter)
+	name       string
+	wantVerify bool
+}
 
-	if err := os.Remove(filepath.Join(target.path, "dirA", "file1.txt")); err != nil {
-		t.Fatalf("remove file: %v", err)
-	}
-
-	printer := &capturingPrinter{}
-	if verifyExtractMarker(printer, target, sha) {
-		t.Fatalf("expected verifyExtractMarker to reject a tree missing a file")
-	}
-	assertPathAbsent(t, filepath.Join(target.path, helpers.ExtractMarkerPrefix+sha))
-	if len(printer.warns) == 0 {
-		t.Fatalf("expected a Warnf line for a current-format tally mismatch, got none")
+// extractMarkerMutationCases enumerates one row per post-extraction mutation
+// the tally is meant to catch, plus the one it deliberately does not. Every
+// row uses validMarkerSHA: each gets its own tree from buildFixedMarkerTree,
+// so the sha only has to pass helpers.IsSHA256Hex, never tell one row's
+// marker apart from another's.
+func extractMarkerMutationCases() []extractMarkerMutationCase {
+	return []extractMarkerMutationCase{
+		{
+			// Proves a file removed from the install tree after extraction is
+			// caught: the entry count drops, the tally no longer matches, and
+			// the rejection is reported at Warnf (a live integrity signal)
+			// with the marker removed so no second walk is needed on the next
+			// check.
+			name: "deletes a file",
+			mutate: func(t *testing.T, target installTarget) {
+				t.Helper()
+				if err := os.Remove(filepath.Join(target.path, "dirA", "file1.txt")); err != nil {
+					t.Fatalf("remove file: %v", err)
+				}
+			},
+			extraCheck: func(t *testing.T, target installTarget, sha string, printer *capturingPrinter) {
+				t.Helper()
+				assertPathAbsent(t, filepath.Join(target.path, helpers.ExtractMarkerPrefix+sha))
+				if len(printer.warns) == 0 {
+					t.Fatalf("expected a Warnf line for a current-format tally mismatch, got none")
+				}
+			},
+			wantVerify: false,
+		},
+		{
+			// Proves a file added under the install tree after extraction -
+			// e.g. a stray write into the shared cache - is caught the same
+			// way a deletion is.
+			name: "adds a file",
+			mutate: func(t *testing.T, target installTarget) {
+				t.Helper()
+				mustWriteFile(t, filepath.Join(target.path, "dirA", "extra.txt"), []byte("new"))
+			},
+			wantVerify: false,
+		},
+		{
+			// The direct answer to "an in-place edit is detected": rewriting a
+			// file with different-length content changes its lstat size, which
+			// changes the tally's byte sum, which fails the comparison.
+			name: "resizes a file",
+			mutate: func(t *testing.T, target installTarget) {
+				t.Helper()
+				mustWriteFile(t, filepath.Join(target.path, "dirA", "file1.txt"), []byte("this content is longer than the original"))
+			},
+			wantVerify: false,
+		},
+		{
+			// Pins the documented limit of the tally check: an in-place edit
+			// that preserves the edited file's exact byte length is invisible
+			// to it, since the tally only tracks counts and a byte sum, never
+			// content. This is an accepted tradeoff (see verifyExtractMarker's
+			// doc comment) - a full re-hash would close it, but at the cost
+			// this unit exists specifically to avoid paying on every warm
+			// install - and this row exists so nobody later assumes
+			// verifyExtractMarker is a stronger guarantee than it actually is.
+			name: "misses an equal-size edit",
+			mutate: func(t *testing.T, target installTarget) {
+				t.Helper()
+				// "hello" -> "HELLO": identical length (5 bytes), different content.
+				mustWriteFile(t, filepath.Join(target.path, "dirA", "file1.txt"), []byte("HELLO"))
+			},
+			wantVerify: true,
+		},
 	}
 }
 
-// TestExtractMarkerDetectsAddedFile proves a file added under the install
-// tree after extraction - e.g. a stray write into the shared cache - is
-// caught the same way a deletion is.
-func TestExtractMarkerDetectsAddedFile(t *testing.T) {
+// TestExtractMarkerMutationCases drives each post-extraction mutation against
+// its own freshly seeded tree and asserts the verdict verifyExtractMarker
+// reaches for it. A row's extraCheck is where anything beyond that verdict
+// goes: only the deletion row has one, pinning a rejection's two observable
+// effects - the marker removed, a Warnf line emitted - once rather than on
+// every rejecting row.
+func TestExtractMarkerMutationCases(t *testing.T) {
 	t.Parallel()
-	target, _ := buildFixedMarkerTree(t)
-	const sha = "3333333333333333333333333333333333333333333333333333333333333333"
-	seedValidExtractMarker(t, target, sha)
 
-	mustWriteFile(t, filepath.Join(target.path, "dirA", "extra.txt"), []byte("new"))
+	for _, tc := range extractMarkerMutationCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			target, _ := buildFixedMarkerTree(t)
+			seedValidExtractMarker(t, target, validMarkerSHA)
 
-	printer := &capturingPrinter{}
-	if verifyExtractMarker(printer, target, sha) {
-		t.Fatalf("expected verifyExtractMarker to reject a tree with an added file")
-	}
-}
+			tc.mutate(t, target)
 
-// TestExtractMarkerDetectsSizeChange is the direct answer to "an in-place
-// edit is detected": rewriting a file with different-length content changes
-// its lstat size, which changes the tally's byte sum, which fails the
-// comparison.
-func TestExtractMarkerDetectsSizeChange(t *testing.T) {
-	t.Parallel()
-	target, _ := buildFixedMarkerTree(t)
-	const sha = "4444444444444444444444444444444444444444444444444444444444444444"
-	seedValidExtractMarker(t, target, sha)
-
-	mustWriteFile(t, filepath.Join(target.path, "dirA", "file1.txt"), []byte("this content is longer than the original"))
-
-	printer := &capturingPrinter{}
-	if verifyExtractMarker(printer, target, sha) {
-		t.Fatalf("expected verifyExtractMarker to reject a tree with a resized file")
-	}
-}
-
-// TestExtractMarkerMissesEqualSizeEdit pins the documented limit of the
-// tally check: an in-place edit that preserves the edited file's exact byte
-// length is invisible to it, since the tally only tracks counts and a byte
-// sum, never content. This is an accepted tradeoff (see verifyExtractMarker's
-// doc comment) - a full re-hash would close it, but at the cost this unit
-// exists specifically to avoid paying on every warm install - and this test
-// exists so nobody later assumes verifyExtractMarker is a stronger guarantee
-// than it actually is.
-func TestExtractMarkerMissesEqualSizeEdit(t *testing.T) {
-	t.Parallel()
-	target, _ := buildFixedMarkerTree(t)
-	const sha = "5555555555555555555555555555555555555555555555555555555555555555"
-	seedValidExtractMarker(t, target, sha)
-
-	// "hello" -> "HELLO": identical length (5 bytes), different content.
-	mustWriteFile(t, filepath.Join(target.path, "dirA", "file1.txt"), []byte("HELLO"))
-
-	printer := &capturingPrinter{}
-	if !verifyExtractMarker(printer, target, sha) {
-		t.Fatalf("expected verifyExtractMarker to MISS a same-length in-place edit (documented limit, not a bug)")
+			printer := &capturingPrinter{}
+			if got := verifyExtractMarker(printer, target, validMarkerSHA); got != tc.wantVerify {
+				t.Fatalf("verifyExtractMarker = %v, want %v", got, tc.wantVerify)
+			}
+			if tc.extraCheck != nil {
+				tc.extraCheck(t, target, validMarkerSHA, printer)
+			}
+		})
 	}
 }
 
