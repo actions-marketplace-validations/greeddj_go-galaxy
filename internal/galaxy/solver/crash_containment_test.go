@@ -22,6 +22,7 @@ func mustNotInvariantError(t *testing.T, err error) {
 // dead end where a learned clause reduces to a single always-satisfiable term:
 // it must fail as a clean *ConflictError, never an internal-invariant error.
 func TestVacuouslySatisfiedConflictIsCleanFailure(t *testing.T) {
+	t.Parallel()
 	p := newFakeProvider().
 		withVersions("gen.p0", "0.2.0").
 		withVersions("gen.p1", "0.0.3", "0.2.0", "0.2.5", "1.0.0", "1.0.0-rc.1", "1.2.0", "1.5.0").
@@ -48,6 +49,7 @@ func TestVacuouslySatisfiedConflictIsCleanFailure(t *testing.T) {
 // end where resolution would not converge: it must fail as a clean
 // *ConflictError, never an internal-invariant error.
 func TestNonConvergingConflictIsCleanFailure(t *testing.T) {
+	t.Parallel()
 	g := fuzzDecodeGraph([]byte("A'2'00"))
 	_, err := Solve(t.Context(), g.roots, g.provider())
 	mustNotInvariantError(t, err)

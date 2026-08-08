@@ -29,6 +29,7 @@ func inconc184Provider() *fakeProvider {
 }
 
 func TestInconc184NoSpuriousInternalError(t *testing.T) {
+	t.Parallel()
 	_, err := Solve(t.Context(), []Requirement{{Package: "gen.p0", Constraint: "1.2.x"}}, inconc184Provider())
 	if errors.Is(err, errSolverBug) {
 		t.Fatalf("conflict resolution returned a spurious internal error on a graph that must resolve or report a clean ConflictError: %v", err)
