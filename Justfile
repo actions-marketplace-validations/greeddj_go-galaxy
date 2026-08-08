@@ -12,6 +12,12 @@ LDFLAGS := "-s -w" \
   + " -X main.Commit=" + COMMIT \
   + " -X main.Date=" + DATE \
   + " -X main.BuiltBy=just"
+# The single spelling of the golangci-lint version this repository is
+# linted with. .github/workflows/ci.yml carries the same literal, and
+# internal/ciaudit gates the two against each other. Bumping the linter is
+# editing both spellings in one commit and fixing whatever the new release
+# reports.
+GOLANGCI_LINT_VERSION := "v2.11.4"
 
 deps:
 	@echo "===== Check deps for {{PROJECT}} ====="
@@ -20,6 +26,13 @@ deps:
 
 lint:
 	@echo "===== Lint {{PROJECT}} ====="
+	@have=$(golangci-lint version --short 2>/dev/null || echo none); \
+		want=$(echo "{{GOLANGCI_LINT_VERSION}}" | sed 's/^v//'); \
+		if [ "$have" != "$want" ]; then \
+			echo "golangci-lint $want is required, found $have" >&2; \
+			echo "install it from https://golangci-lint.run/docs/welcome/install/" >&2; \
+			exit 1; \
+		fi
 	golangci-lint run ./... --timeout=5m
 
 test:
