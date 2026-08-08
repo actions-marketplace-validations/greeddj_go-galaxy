@@ -172,10 +172,10 @@ func (s *spinner) run(stop chan struct{}, delay time.Duration) {
 // setSuffix replaces the text drawn to the right of the frame glyph.
 //
 // The safeout.Text parameter is a structural check rather than a proof. A
-// string-typed value cannot be passed without an explicit conversion, so
-// anything reaching here from outside this file has to have been cleaned or
-// deliberately cast; an untyped string constant written at this call site
-// would still be assignable, which is the gap the type does not close.
+// value of any other type cannot be passed without an explicit conversion,
+// so any suffix that arrived here at run time has been cleaned or
+// deliberately cast; an untyped string constant, wherever it is written, is
+// still assignable - see safeout.Text's own doc comment for that gap.
 func (s *spinner) setSuffix(text safeout.Text) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -18,10 +18,29 @@ import (
 )
 
 // Text is a string that has passed through Clean. Its purpose is
-// structural, not informational: a function requiring Text as a parameter
-// cannot compile against a plain string, so sanitize-then-decorate is
-// enforced by the type checker rather than left to be remembered at every
+// structural, not informational: it puts sanitize-then-decorate into a
+// function's signature rather than leaving it to be remembered at every
 // call site.
+//
+// What it closes is the whole of the untrusted surface, and the reason is
+// not a property of today's code but of what a constant is. A value of any
+// other type is unassignable to Text - a string, a constant declared with
+// an explicit string type, another defined string type, a type parameter
+// constrained to ~string - so each has to pass an explicit conversion,
+// either Clean or a Text(...) cast a reviewer can see. Untrusted input - a
+// Galaxy server's error text, a manifest, a filesystem path, output a
+// caller formatted elsewhere - arrives at run time, so it is never a
+// constant, so it is always a typed value, so it is always refused.
+//
+// What it does not close is the complement of that argument: an untyped
+// string constant, which is assignable to a defined string type. That is a
+// bare literal, a named constant declared anywhere, or any constant
+// expression over them, in this package or another - each compiles where
+// Text is required with its control characters intact. The gap is
+// therefore a question about what an author of this repository writes,
+// which source review answers, rather than about untrusted input reaching
+// a terminal, which is what this type is for. It is a structural check,
+// not a proof.
 type Text string
 
 // Clean replaces with U+FFFD the control characters a terminal or log

@@ -193,7 +193,7 @@ func (p *Progress) Printf(format string, args ...any) {
 		// sanitized along with the message rather than prepended after it:
 		// Clean maps rune by rune, so cleaning the joined string yields the
 		// same value as joining the cleaned one, and doing it this way keeps
-		// a plain string from ever being cast to safeout.Text here.
+		// a plain string from ever reaching safeout.Text uncleaned here.
 		p.s.setSuffix(safeout.Clean(" " + fmt.Sprintf(format, args...)))
 		return
 	}
@@ -314,10 +314,11 @@ func (p *Progress) emit(dst stream, prefix string, msg safeout.Text) {
 // format/args, or Write's payload) - so a prefix this file declares (a
 // colored marker, a debug tag, a timing string) is never itself subject to
 // Clean, and an already-sanitized payload is never re-sanitized. The
-// safeout.Text parameter type makes this a compile-time property: writeLine
-// cannot be called with a plain string where Text is required, so
-// sanitize-then-decorate is type-checked rather than a convention callers
-// must remember.
+// safeout.Text parameter puts that rule into the signature: a value of any
+// other type cannot reach msg without an explicit conversion, so a payload
+// arriving here from anywhere else has been cleaned or deliberately cast. It
+// is a structural check rather than a proof - safeout.Text's own doc comment
+// (internal/safeout/safeout.go) holds what the type does not close.
 func writeLine(w io.Writer, prefix string, msg safeout.Text) {
 	_, _ = fmt.Fprintf(w, "%s%s\n", prefix, msg)
 }
