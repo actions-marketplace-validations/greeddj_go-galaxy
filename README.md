@@ -1036,9 +1036,12 @@ spinner's frames while leaving the status markers colored.
 ## Exit codes
 
 `go-galaxy` exits with a class-specific code instead of a flat `1`, so CI
-pipelines can branch on failure type without parsing log output. The same
-numbers and their one-phrase meanings are printed by `go-galaxy --help`; the
-qualifications below are the part only this table carries:
+pipelines can branch on failure type without parsing log output. The failure
+classes and their one-phrase meanings are printed by `go-galaxy --help` as an
+index; the three signal codes and every qualification below are the part only
+this table carries. A caught signal follows the shell convention of
+`128 + signal number`, so the tool's own classes and its signal codes can never
+collide:
 
 | Code | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 |-----:|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------                                                                                                                         |
@@ -1052,7 +1055,9 @@ qualifications below are the part only this table carries:
 |    7 | Artifact-integrity failure (content does not authenticate against its naming sha256, or the digest is malformed)                                                                                                                                                                                                                                                                                                                                                  |
 |    8 | Cache contention (the cache lock is held elsewhere, the S3 lock's wait ceiling elapsed after this run observed another holder, or a lock this run did hold was taken away by another holder mid-run)                                                                                                                                                                                                                                                              |
 |    9 | Persisted cache state is corrupt or oversized and must be discarded (a project registry that fails to decode, a state object that exceeds its size ceiling, or - local backend only - a Bolt snapshot file that fails one of its own corruption checks)                                                                                                                                                                                                           |
+|  129 | Interrupted (a caught SIGHUP)                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 |  130 | Interrupted (a caught SIGINT, or the caller's own context canceled)                                                                                                                                                                                                                                                                                                                                                                                               |
+|  143 | Interrupted (a caught SIGTERM)                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 Exit `6`'s "missing" half is uniform across every command that requires a
 lockfile: `install --frozen`, `warm --frozen`, `lock --frozen`, `tree`,
@@ -1082,8 +1087,14 @@ touching the cache.
 
 A stalled or byte-dripped transfer is never reported as an interrupt, even
 though the underlying mechanism that unblocks it is a context cancellation:
-the tool distinguishes its own no-progress cancellation from a genuine SIGINT
-or caller cancellation, and only the latter exits `130`. The same holds for
+the tool distinguishes its own no-progress cancellation from a genuine caught
+signal or caller cancellation, and only the latter exits `130` (SIGINT or a
+canceled caller context), `143` (SIGTERM) or `129` (SIGHUP). SIGTERM is the one
+worth planning for: a canceled GitLab job, an evicted Kubernetes pod and a
+canceled GitHub Actions job all send it rather than SIGINT, so `143` is the
+code a cancellation usually shows up as. SIGQUIT is deliberately left
+unhandled, which keeps Go's default goroutine dump available for diagnosing a
+hung run. The same holds for
 the metadata and cache-state ceilings above: grep the run's output for
 `galaxy metadata fetch deadline exceeded` or `cache state object deadline
 exceeded` to tell one of these deadlines apart from a genuine interrupt or
