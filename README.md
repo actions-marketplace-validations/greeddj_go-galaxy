@@ -397,8 +397,8 @@ two-flag set of their own, listed under
   warned about on stderr and then treated the same as no lockfile at all - every collection
   reports as added - because a real `lock` run never reads that file, it only overwrites it, so
   the preview cannot fail on it either.
-  **Breaking change:** before this release, `--dry-run` (and `$GO_GALAXY_DRY_RUN`) had no effect
-  on `install` or `warm` - only `cleanup` implemented it - so `install --dry-run` performed a
+  **Breaking change (after v1.0.2):** through v1.0.2, `--dry-run` (and `$GO_GALAXY_DRY_RUN`) had
+  no effect on `install` or `warm` - only `cleanup` implemented it - so `install --dry-run` performed a
   full, real install and `warm --dry-run` performed a full, real warm; `lock --dry-run` refused to
   run at all, exiting with the usage code (`2`). `install` and `warm` now install and warm
   nothing, and preview instead; `lock` now previews instead of refusing. A CI job that carried an
@@ -485,8 +485,8 @@ two-flag set of their own, listed under
   count (4× per core) with a floor of 8 and a ceiling of 32, so a low-core CI runner still gets
   meaningful download concurrency and a high-core one does not oversubscribe the HTTP connection
   pool. A non-positive value falls back to that same default rather than erroring.
-  **Breaking change:** before this release, the concurrency of artifact downloads and cache
-  presence probes followed `--workers` (one per CPU by default), so a 4-core CI runner issued at
+  **Breaking change (after v1.0.2):** through v1.0.2, the concurrency of artifact downloads and
+  cache presence probes followed `--workers` (one per CPU by default), so a 4-core CI runner issued at
   most 4 concurrent requests to the configured Galaxy server. It now follows `--download-workers`'s
   own, larger default instead, so that same 4-core runner issues up to 16 concurrent requests. This
   matters to operators of rate-limited Automation Hub instances, or any Galaxy server enforcing a
@@ -547,7 +547,7 @@ S3 cache options (if `--s3-bucket` is set, S3 backend is used):
 
 `cleanup`'s extracted-cache sweep keeps a collection warmed within the last 30 days even if no project currently installs it, so a `warm`-only machine does not lose the extracted trees it exists to produce; a warmed entry that goes stale (no warm run for 30 days) is swept like any other unreferenced entry.
 
-**Upgrade note:** this release bumps the cache snapshot schema, so the first `install`, `lock`, or `warm` run after upgrading rebuilds its metadata caches cold. If you run `cleanup` before that first run, it finds no persisted snapshot - the old one was dropped by the schema bump - so it skips the extracted-cache sweep entirely and leaves the snapshot untouched; the metadata caches still rebuild cold on the first `install`, `lock`, or `warm`.
+**Upgrade note (after v1.0.2):** the cache snapshot schema was bumped after v1.0.2 - to schema version 6, which added the warmed-set bucket - so upgrading from v1.0.2 or earlier makes the first `install`, `lock`, or `warm` run rebuild its metadata caches cold. If you run `cleanup` before that first run, it finds no persisted snapshot - the old one was dropped by the schema bump - so it skips the extracted-cache sweep entirely and leaves the snapshot untouched; the metadata caches still rebuild cold on the first `install`, `lock`, or `warm`.
 
 ### hash / tree / explain options
 
