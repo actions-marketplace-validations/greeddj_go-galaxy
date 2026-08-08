@@ -3,7 +3,7 @@ package collections
 // This file proves cfg.Workers == 0 cannot deadlock either per-collection
 // dispatch loop that bounds its worker pool with a buffered-channel
 // semaphore sized from cfg.Workers: warmCollections and runInstallLevel. Both
-// guard with max(_, 1) (see start.go); without that guard, a zero Workers
+// guard with max(_, 1) (see warm_command.go and install_command.go); without that guard, a zero Workers
 // makes the semaphore channel unbuffered, and the loop's first send blocks
 // forever because no worker has started yet to drain it - nothing reachable
 // from the CLI can set Workers to 0 (newConfigFromCLI clamps it to NumCPU),

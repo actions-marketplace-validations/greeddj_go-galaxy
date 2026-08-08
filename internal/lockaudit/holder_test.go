@@ -28,9 +28,9 @@ type holderCase struct {
 // gate cannot close from the inside.
 func holderCases() []holderCase {
 	return []holderCase{
-		{file: "internal/galaxy/collections/start.go", fn: "runInstall", work: "installWithState"},
-		{file: "internal/galaxy/collections/start.go", fn: "runWarm", work: "warmWithState"},
-		{file: "internal/galaxy/collections/start.go", fn: "runLock", work: "lockWithState"},
+		{file: "internal/galaxy/collections/install_command.go", fn: "runInstall", work: "installWithState"},
+		{file: "internal/galaxy/collections/warm_command.go", fn: "runWarm", work: "warmWithState"},
+		{file: "internal/galaxy/collections/lock_command.go", fn: "runLock", work: "lockWithState"},
 		{file: "internal/galaxy/cleanup/cleanup.go", fn: "runCleanup", work: "cleanupWithState"},
 	}
 }

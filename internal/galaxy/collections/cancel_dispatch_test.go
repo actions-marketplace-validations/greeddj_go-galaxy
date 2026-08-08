@@ -92,7 +92,7 @@ func TestRunInstallLevelStopsDispatchingAfterCancel(t *testing.T) {
 		waitRunInstallLevel(t, done)
 
 		// Killing mutation: removing the "if ctx.Err() != nil { break }" check
-		// (start.go, top of runInstallLevel's dispatch loop) makes `go test
+		// (install_command.go, top of runInstallLevel's dispatch loop) makes `go test
 		// -run TestRunInstallLevelStopsDispatchingAfterCancel/canceled -v`
 		// fail with the real observed output:
 		//   failures.count() = 3, want 0: a canceled run must dispatch no collection
@@ -197,7 +197,7 @@ func TestWarmCollectionsStopsDispatchingAfterCancel(t *testing.T) {
 		summary := waitWarmCollections(t, done)
 
 		// Killing mutation: removing the "if ctx.Err() != nil { break }" check
-		// (start.go, top of warmCollections's dispatch loop) makes `go test
+		// (warm_command.go, top of warmCollections's dispatch loop) makes `go test
 		// -run TestWarmCollectionsStopsDispatchingAfterCancel/canceled -v`
 		// fail with the real observed output:
 		//   summary.count = 3, want 0: a canceled run must dispatch no collection

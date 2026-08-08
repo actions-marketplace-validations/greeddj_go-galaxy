@@ -20,7 +20,7 @@ package collections
 // install and warm.
 //
 // And it covers lock's --frozen drift gate (TestLockFrozen*, see lockFrozen's
-// own doc comment in start.go): lock --frozen still resolves fresh -
+// own doc comment in lock_command.go): lock --frozen still resolves fresh -
 // lockWithState always does - but refuses to overwrite the lockfile when
 // that fresh resolve disagrees with the one already on disk, reporting the
 // disagreement through the same reportLockfileDiff the dry-run preview uses
