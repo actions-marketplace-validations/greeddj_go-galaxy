@@ -590,6 +590,141 @@ var (
 	// with this sentinel; see prepareWithRecovery's doc comment for that one.
 	ErrMalformedArtifactSHA256 = errors.New("artifact sha256 is not a 64-character lowercase hex digest")
 
+	// ErrSignatureVerificationFailed is one collection's aggregate signature
+	// verdict: the signatures actually checked did not satisfy the policy in
+	// force - fewer valid ones than the required count, at least one outright
+	// failure under an "all" policy, or none valid under a "+N" policy. It
+	// names the verdict for a collection, never one signature's own outcome, so
+	// a collection carrying a bad signature alongside enough good ones does not
+	// reach it.
+	//
+	// It is deliberately NOT ErrSHA256Mismatch and must never be folded into
+	// it: a digest answers whether these are the bytes that were named, a
+	// signature answers who published them. Bytes that hash exactly as expected
+	// and carry no acceptable signature are intact and unattributed, which is a
+	// different question with a different remedy - most often this run's own
+	// keyring or signature policy rather than the artifact or its server.
+	ErrSignatureVerificationFailed = errors.New("collection signature verification failed")
+	// ErrSignatureSourceUnavailable indicates a signature this run was told to
+	// check could not be obtained at all: a network failure fetching it, an
+	// offline-mode refusal, a file:// source that could not be read, or version
+	// metadata that would have carried a server's own signatures being
+	// unreachable.
+	//
+	// It is deliberately NOT ErrSignatureVerificationFailed: nothing was
+	// verified and nothing failed verification, so the two must stay
+	// distinguishable - that one says a publisher could not be authenticated,
+	// this one says the material to try was never in hand.
+	ErrSignatureSourceUnavailable = errors.New("collection signature source unavailable")
+	// ErrSignatureFetchDeadline indicates one collection's signature fetching
+	// exceeded SignatureFetchDeadline: the whole-phase ceiling that catches a
+	// byte-drip response, which the read-inactivity watchdog cannot enforce
+	// since such a response makes genuine progress inside every idle window.
+	//
+	// A producer must NOT wrap its cause with %w - the rule ErrReadStalled's
+	// own doc comment states and every deadline sentinel here follows: a
+	// sentinel raised to describe why work ended must never leave a context
+	// sentinel reachable through errors.Is, because exitcode.FromError checks
+	// context.Canceled ahead of every other class and would report a hostile or
+	// degraded signature host as a caught Ctrl-C. Render the cause with %v
+	// instead, so it stays diagnosable without being matchable.
+	//
+	// It is never retried: the budget is spent, so every remaining attempt
+	// would fail instantly against the same dead context.
+	//
+	// It is deliberately NOT ErrSignatureSourceUnavailable, even though a spent
+	// budget also leaves the material out of hand: this names a link or a host
+	// too slow to finish inside the ceiling, not one that refused or vanished,
+	// and only one of the two is worth reporting as an endpoint that answered.
+	ErrSignatureFetchDeadline = errors.New("collection signature fetch deadline exceeded")
+	// ErrUnsupportedSignatureSource indicates a signature source names a scheme
+	// outside file, http and https, or names no scheme at all. Like
+	// ErrUnsupportedDownloadURLScheme, the value is judged against an
+	// allow-list rather than a blocklist: a blocklist would have to name every
+	// scheme worth refusing and would admit whatever it forgot.
+	//
+	// It is deliberately NOT ErrSignatureSourceUnavailable: no fetch was
+	// attempted and none failed - the value never named something this tool
+	// fetches - so the remedy is editing the source, never retrying it.
+	ErrUnsupportedSignatureSource = errors.New("signature source scheme is not file, http, or https")
+	// ErrKeyringUnreadable indicates the configured keyring could not be read
+	// as one: it is absent, it cannot be opened, or its bytes do not parse as
+	// the OpenPGP key material this tool reads.
+	//
+	// It is deliberately NOT a verification verdict: nothing was checked
+	// against this keyring, so a run that hits it never learns whether an
+	// artifact would have verified. ErrKeyringIsKeybox is the one unreadable
+	// shape kept out of it, because that shape has a specific remedy to name.
+	ErrKeyringUnreadable = errors.New("keyring could not be read")
+	// ErrKeyringIsKeybox indicates the configured keyring is a GnuPG keybox -
+	// the .kbx container a default GnuPG installation writes - which this tool
+	// cannot read: it verifies in pure Go against OpenPGP key material and
+	// keeps no gpg process to delegate a container format to. The message
+	// carries the export command rather than leaving an operator to find it,
+	// since being told only that the file is unreadable is a dead end for the
+	// file GnuPG itself produced by default.
+	//
+	// It is deliberately NOT folded into ErrKeyringUnreadable: that one says
+	// the bytes are not key material this tool understands, this one says they
+	// are key material in a container it does not open, and only the second has
+	// a one-command remedy to state.
+	ErrKeyringIsKeybox = errors.New(
+		"keyring is a GnuPG keybox (.kbx), which this tool cannot read; export an armored keyring instead: " +
+			"gpg --no-default-keyring --keyring <kbx> --export --armor > keyring.asc")
+	// ErrKeyringRequired indicates a requirements file declares signatures: for
+	// a collection while no keyring is configured, so nothing exists to verify
+	// those signatures against. This is a hard error rather than a
+	// warn-and-continue, which is parity with ansible-galaxy: a requirements
+	// file that asks for verification is refused rather than silently installed
+	// unverified.
+	//
+	// It is deliberately NOT ErrKeyringUnreadable: no keyring was named at all,
+	// so the remedy is to configure one (or to drop the signatures: block),
+	// never to repair a file this run tried to read.
+	ErrKeyringRequired = errors.New("requirements declare signatures but no keyring is configured")
+	// ErrInvalidSignatureCount indicates the required-valid-signature-count
+	// value is not a form this tool accepts: it names neither "all" nor a
+	// positive count, in either the bare or the "+N" spelling.
+	//
+	// It is deliberately NOT ErrSignatureVerificationFailed: the policy itself
+	// could not be read, so no count was ever compared against anything, and
+	// the remedy is editing the value rather than looking at an artifact.
+	ErrInvalidSignatureCount = errors.New("invalid required valid signature count")
+	// ErrUnknownSignatureStatusCode indicates an ignore-signature-status-code
+	// value naming a status code outside the set this tool recognizes in a
+	// verification result.
+	//
+	// It is refused rather than ignored, which is the whole point of the
+	// sentinel: a status code nothing recognizes would ignore nothing, so a
+	// typo in the value would read as "this failure is being tolerated" while
+	// the run kept failing on exactly that failure.
+	ErrUnknownSignatureStatusCode = errors.New("unknown signature status code")
+	// ErrManifestNotFound indicates a collection artifact names no
+	// MANIFEST.json within ManifestScanMaxBytes of the start of its tar stream.
+	// The bound is what makes this a verdict rather than an abandoned search: a
+	// real collection carries its manifest at the front of the archive, so an
+	// archive that has not named one by then is refused instead of read to its
+	// end.
+	//
+	// It is deliberately NOT ErrCorruptManifest: that one names a manifest that
+	// exists and does not parse, which cleanup tolerates as neither a
+	// reachability root nor a deletion candidate, while this names an artifact
+	// with no manifest to parse at all.
+	ErrManifestNotFound = errors.New("collection artifact contains no MANIFEST.json")
+	// ErrManifestChainMismatch indicates the chain from MANIFEST.json down to
+	// an artifact's files broke: FILES.json did not match the digest
+	// MANIFEST.json names for it, a listed file did not match the digest
+	// FILES.json names for it, or the archive carried a file FILES.json does
+	// not list at all.
+	//
+	// This one IS an integrity failure in the same sense as ErrSHA256Mismatch,
+	// and classifies with it rather than with the signature sentinels above:
+	// what failed is bytes against a digest. A signature is made over
+	// MANIFEST.json alone, so it is worth exactly what that chain is worth - a
+	// broken chain means the signed digests no longer describe the content, and
+	// no keyring or policy change repairs that.
+	ErrManifestChainMismatch = errors.New("collection manifest chain does not match")
+
 	// ErrLatestVersionLookupFailed is the headline for an `outdated` run in
 	// which at least one lockfile entry's latest-version lookup failed. Named
 	// for the lookup rather than for the command so it does not read as a

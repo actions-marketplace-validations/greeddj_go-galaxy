@@ -1135,8 +1135,8 @@ spinner's frames while leaving the status markers colored.
 `go-galaxy` exits with a class-specific code instead of a flat `1`, so CI
 pipelines can branch on failure type without parsing log output. The failure
 classes and their one-phrase meanings are printed by `go-galaxy --help` as an
-index; the three signal codes and every qualification below are the part only
-this table carries. A caught signal follows the shell convention of
+index, `130` among them; the other two signal codes and every qualification
+below are the part only this table carries. A caught signal follows the shell convention of
 `128 + signal number`, so the tool's own classes and its signal codes can never
 collide:
 
@@ -1152,6 +1152,7 @@ collide:
 |    7 | Artifact-integrity failure (content does not authenticate against its naming sha256, or the digest is malformed)                                                                                                                                                                                                                                                                                                                                                  |
 |    8 | Cache contention (the cache lock is held elsewhere, the S3 lock's wait ceiling elapsed after this run observed another holder, or a lock this run did hold was taken away by another holder mid-run)                                                                                                                                                                                                                                                              |
 |    9 | Persisted cache state is corrupt or oversized and must be discarded (a project registry that fails to decode, a state object that exceeds its size ceiling, or - local backend only - a Bolt snapshot file that fails one of its own corruption checks)                                                                                                                                                                                                           |
+|   10 | Signature verification failure (a collection's signatures did not satisfy the policy in force - fewer valid than required, or a failure under an `all` policy). The artifact's own bytes are a separate question and stay exit `7`                                                                                                                                                                                                                                |
 |  129 | Interrupted (a caught SIGHUP)                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 |  130 | Interrupted (a caught SIGINT, or the caller's own context canceled)                                                                                                                                                                                                                                                                                                                                                                                               |
 |  143 | Interrupted (a caught SIGTERM)                                                                                                                                                                                                                                                                                                                                                                                                                                    |
@@ -1239,6 +1240,22 @@ safely interpret (`unsupported snapshot schema version`) exits `2` instead,
 since the snapshot itself is not damaged, only unreadable by this particular
 binary, and discarding it would destroy a shared cache other, newer runners
 still depend on.
+
+Exit `10` means a collection's signatures did not satisfy the policy in force,
+not that its content is wrong: an artifact can hash exactly as its digest says
+and still exit `10`, because nothing this run was configured to trust vouched
+for it. That is what makes it a class of its own rather than part of exit `7` -
+the remedy is usually this run's own keyring or its required-signature-count
+policy, not the artifact or the server that served it. Every other
+signature-related failure classifies by what actually failed rather than by the
+phase it was found in: a keyring that cannot be read, a keyring in a container
+format this tool cannot open, `signatures:` declared with no keyring
+configured, and an unaccepted required-count or ignored-status-code value all
+exit `2`; a signature source that could not be fetched, or a signature phase
+that overran its deadline, exits `4`; an artifact carrying no `MANIFEST.json`
+exits `5` with the other artifact-shape failures; and a manifest chain that
+does not match its own digests exits `7`, since what failed there is bytes
+against a digest.
 
 ## Metrics
 

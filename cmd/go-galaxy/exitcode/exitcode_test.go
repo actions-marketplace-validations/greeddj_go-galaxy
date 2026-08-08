@@ -1093,6 +1093,7 @@ func TestLockfileUserinfoClassifiesAsLock(t *testing.T) {
 var wantExitClassOrder = []int{
 	ExitInterrupt,
 	ExitIntegrity,
+	ExitSignature,
 	ExitLock,
 	ExitInstall,
 	ExitNetwork,
@@ -1113,8 +1114,8 @@ var wantExitClassOrder = []int{
 // KILLING MUTATION, run and reverted: swapping the isCacheBusyError and
 // isCacheCorruptError entries of exitClasses makes this test fail with:
 //
-//	exitcode_test.go:1125: exitClasses[5].code = 9, want 8
-//	exitcode_test.go:1125: exitClasses[6].code = 8, want 9
+//	exitcode_test.go:1126: exitClasses[6].code = 9, want 8
+//	exitcode_test.go:1126: exitClasses[7].code = 8, want 9
 func TestExitClassOrderIsPinned(t *testing.T) {
 	t.Parallel()
 	if len(exitClasses) != len(wantExitClassOrder) {
@@ -1157,11 +1158,19 @@ var adjacentExitPrecedenceCases = []exitPrecedenceCase{
 		wantLower:  ExitIntegrity,
 	},
 	{
-		name:       "integrity over lock",
+		name:       "integrity over signature",
 		higher:     helpers.ErrSHA256Mismatch,
-		lower:      helpers.ErrLockfileDrift,
+		lower:      helpers.ErrSignatureVerificationFailed,
 		wantJoined: ExitIntegrity,
 		wantHigher: ExitIntegrity,
+		wantLower:  ExitSignature,
+	},
+	{
+		name:       "signature over lock",
+		higher:     helpers.ErrSignatureVerificationFailed,
+		lower:      helpers.ErrLockfileDrift,
+		wantJoined: ExitSignature,
+		wantHigher: ExitSignature,
 		wantLower:  ExitLock,
 	},
 	{
@@ -1226,7 +1235,7 @@ var adjacentExitPrecedenceCases = []exitPrecedenceCase{
 // isCacheCorruptError entries of exitClasses makes the "cache busy over cache
 // corrupt" row fail with:
 //
-//	exitcode_test.go:1237: FromError(joined) = 9, want 8
+//	exitcode_test.go:1246: FromError(joined) = 9, want 8
 func TestAdjacentExitClassPrecedence(t *testing.T) {
 	t.Parallel()
 	for _, tt := range adjacentExitPrecedenceCases {
@@ -1241,6 +1250,194 @@ func TestAdjacentExitClassPrecedence(t *testing.T) {
 			}
 			if got := FromError(tt.lower); got != tt.wantLower {
 				t.Errorf("FromError(lower alone) = %d, want %d", got, tt.wantLower)
+			}
+		})
+	}
+}
+
+// aggregatedBehindInstallFailure builds the shape a per-collection failure
+// actually reaches FromError in: the cause joined behind the
+// helpers.ErrInstallationFailed headline finalizeInstall and warmWithState
+// render for a run that recorded at least one failed collection.
+func aggregatedBehindInstallFailure(cause error) error {
+	return errors.Join(fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed), cause)
+}
+
+// signatureExitCases is TestSignatureExitClassification's table: every
+// signature-family sentinel in both shapes it can reach FromError in - bare,
+// and joined behind the installation-failure headline a per-collection worker
+// aggregates it behind - plus the two shapes that bound the new class from
+// above.
+//
+// Read as a specification, the table says one thing: only
+// helpers.ErrSignatureVerificationFailed is the signature class. Every other
+// sentinel here classifies by what actually failed - a wire failure, a
+// configuration value this run cannot use, an artifact's shape, or bytes
+// against a digest - rather than by having been raised while checking a
+// signature. The bare/aggregated pair is what makes that visible per sentinel:
+// for all but the verdict itself and the manifest-chain mismatch, the
+// aggregated shape classifies ExitInstall like every other per-collection
+// cause, and those two exceptions are exactly the classes that sit above
+// isInstallError in exitClasses.
+//
+//nolint:gochecknoglobals // a fixed table consumed by one test, not mutable shared state
+var signatureExitCases = []exitCase{
+	{
+		name:     "signature verification failed, bare",
+		err:      fmt.Errorf("%w: acme.app@1.0.0", helpers.ErrSignatureVerificationFailed),
+		wantCode: ExitSignature,
+	},
+	{
+		// The row the isSignatureError entry's position exists for: a
+		// per-collection verdict arrives joined behind the installation
+		// headline, so a class placed below isInstallError would never be
+		// reached for the only shape that actually occurs.
+		name:     "signature verification failed, aggregated",
+		err:      aggregatedBehindInstallFailure(helpers.ErrSignatureVerificationFailed),
+		wantCode: ExitSignature,
+	},
+	{
+		name:     "signature source unavailable, bare",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrSignatureSourceUnavailable),
+		wantCode: ExitNetwork,
+	},
+	{
+		name:     "signature source unavailable, aggregated",
+		err:      aggregatedBehindInstallFailure(helpers.ErrSignatureSourceUnavailable),
+		wantCode: ExitInstall,
+	},
+	{
+		name:     "signature fetch deadline, bare",
+		err:      helpers.ErrSignatureFetchDeadline,
+		wantCode: ExitNetwork,
+	},
+	{
+		name:     "signature fetch deadline, aggregated",
+		err:      aggregatedBehindInstallFailure(helpers.ErrSignatureFetchDeadline),
+		wantCode: ExitInstall,
+	},
+	{
+		name:     "unsupported signature source, bare",
+		err:      fmt.Errorf("%w: %q", helpers.ErrUnsupportedSignatureSource, "ftp://keys/sig.asc"),
+		wantCode: ExitUsage,
+	},
+	{
+		name:     "unsupported signature source, aggregated",
+		err:      aggregatedBehindInstallFailure(helpers.ErrUnsupportedSignatureSource),
+		wantCode: ExitInstall,
+	},
+	{
+		name:     "keyring unreadable, bare",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrKeyringUnreadable),
+		wantCode: ExitUsage,
+	},
+	{
+		name:     "keyring unreadable, aggregated",
+		err:      aggregatedBehindInstallFailure(helpers.ErrKeyringUnreadable),
+		wantCode: ExitInstall,
+	},
+	{
+		name:     "keyring is a keybox, bare",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrKeyringIsKeybox),
+		wantCode: ExitUsage,
+	},
+	{
+		name:     "keyring is a keybox, aggregated",
+		err:      aggregatedBehindInstallFailure(helpers.ErrKeyringIsKeybox),
+		wantCode: ExitInstall,
+	},
+	{
+		name:     "keyring required, bare",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrKeyringRequired),
+		wantCode: ExitUsage,
+	},
+	{
+		name:     "keyring required, aggregated",
+		err:      aggregatedBehindInstallFailure(helpers.ErrKeyringRequired),
+		wantCode: ExitInstall,
+	},
+	{
+		name:     "invalid signature count, bare",
+		err:      fmt.Errorf("%w: %q", helpers.ErrInvalidSignatureCount, "some"),
+		wantCode: ExitUsage,
+	},
+	{
+		name:     "invalid signature count, aggregated",
+		err:      aggregatedBehindInstallFailure(helpers.ErrInvalidSignatureCount),
+		wantCode: ExitInstall,
+	},
+	{
+		name:     "unknown signature status code, bare",
+		err:      fmt.Errorf("%w: %q", helpers.ErrUnknownSignatureStatusCode, "NOT_A_CODE"),
+		wantCode: ExitUsage,
+	},
+	{
+		name:     "unknown signature status code, aggregated",
+		err:      aggregatedBehindInstallFailure(helpers.ErrUnknownSignatureStatusCode),
+		wantCode: ExitInstall,
+	},
+	{
+		name:     "manifest not found, bare",
+		err:      fmt.Errorf("%w: ctx", helpers.ErrManifestNotFound),
+		wantCode: ExitInstall,
+	},
+	{
+		// The one pair that does not discriminate, and it is written down
+		// rather than left to be rediscovered: both shapes reach ExitInstall
+		// through isInstallError, the bare one via isArtifactShapeError and the
+		// aggregated one via the headline isFileIntegrityError matches. The row
+		// documents the aggregated shape rather than pinning a precedence.
+		name:     "manifest not found, aggregated",
+		err:      aggregatedBehindInstallFailure(helpers.ErrManifestNotFound),
+		wantCode: ExitInstall,
+	},
+	{
+		name:     "manifest chain mismatch, bare",
+		err:      fmt.Errorf("%w: FILES.json", helpers.ErrManifestChainMismatch),
+		wantCode: ExitIntegrity,
+	},
+	{
+		// Aggregation does not move it either, and here that IS the claim: the
+		// isIntegrityError entry sits above isInstallError, so a chain mismatch
+		// found inside a per-collection worker still reports as an integrity
+		// failure rather than as a generic install failure.
+		name:     "manifest chain mismatch, aggregated",
+		err:      aggregatedBehindInstallFailure(helpers.ErrManifestChainMismatch),
+		wantCode: ExitIntegrity,
+	},
+	{
+		// Both classes in one tree: integrity wins, because "these are not the
+		// bytes that were named" outranks "nobody vouched for them".
+		name:     "integrity cause alongside a signature verdict",
+		err:      errors.Join(helpers.ErrSHA256Mismatch, helpers.ErrSignatureVerificationFailed),
+		wantCode: ExitIntegrity,
+	},
+	{
+		// The top of exitClasses is unchanged by the new entry: a genuine
+		// caller cancellation racing a signature verdict is still an interrupt.
+		name:     "cancellation alongside a signature verdict",
+		err:      errors.Join(context.Canceled, helpers.ErrSignatureVerificationFailed),
+		wantCode: ExitInterrupt,
+	},
+}
+
+// TestSignatureExitClassification walks signatureExitCases. The failure
+// message names the row instead of rendering the error, because an aggregated
+// row's errors.Join renders across several lines and the citation below has to
+// name a single one.
+//
+// KILLING MUTATION, run and reverted: moving the isSignatureError entry of
+// exitClasses below its isInstallError entry. Exactly one row fails - the
+// aggregated verdict, which is the whole reason that entry sits where it does:
+//
+//	exitcode_test.go:1440: FromError(signature verification failed, aggregated) = 5, want 10
+func TestSignatureExitClassification(t *testing.T) {
+	t.Parallel()
+	for _, tt := range signatureExitCases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := FromError(tt.err); got != tt.wantCode {
+				t.Errorf("FromError(%s) = %d, want %d", tt.name, got, tt.wantCode)
 			}
 		})
 	}

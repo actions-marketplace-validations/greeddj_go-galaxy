@@ -115,6 +115,7 @@ func newRootCommand(onErr func(error), errOut io.Writer) (*cli.Command, *errReco
 			"  7    Artifact-integrity failure\n" +
 			"  8    Cache contention\n" +
 			"  9    Persisted cache state is corrupt or oversized\n" +
+			"  10   Signature verification failure\n" +
 			"  130  Interrupted\n",
 		HideHelpCommand:        true,
 		UseShortOptionHandling: true,

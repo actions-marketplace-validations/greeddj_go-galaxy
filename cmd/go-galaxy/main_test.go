@@ -159,7 +159,7 @@ var errTestUsage = errors.New("flag parse error")
 // main.go - change the line for exit 8 to read "  9    Cache contention",
 // which is what a careless renumbering looks like:
 //
-//	main_test.go:192: Description is missing the line for exit 8: "  8    Cache contention"
+//	main_test.go:193: Description is missing the line for exit 8: "  8    Cache contention"
 func TestRootCommandDisclosesDefaultCommandAndExitCodes(t *testing.T) {
 	cmd, _ := newRootCommand(nil, io.Discard)
 
@@ -184,6 +184,7 @@ func TestRootCommandDisclosesDefaultCommandAndExitCodes(t *testing.T) {
 		{"Artifact-integrity failure", exitcode.ExitIntegrity},
 		{"Cache contention", exitcode.ExitCacheBusy},
 		{"Persisted cache state is corrupt or oversized", exitcode.ExitCacheCorrupt},
+		{"Signature verification failure", exitcode.ExitSignature},
 		{"Interrupted", exitcode.ExitInterrupt},
 	}
 	for _, row := range rows {
@@ -213,7 +214,7 @@ func TestRootCommandDisclosesDefaultCommandAndExitCodes(t *testing.T) {
 // recorder never sees it. The argv subtest fails, and the line it was meant to
 // capture leaks to the test run's own stderr:
 //
-//	main_test.go:228: rec.written = false, want true; errOut = ""
+//	main_test.go:229: rec.written = false, want true; errOut = ""
 func TestRootCommandRecordsUrfaveUsageReports(t *testing.T) {
 	t.Run("argv value urfave reports itself", func(t *testing.T) {
 		var errOut bytes.Buffer

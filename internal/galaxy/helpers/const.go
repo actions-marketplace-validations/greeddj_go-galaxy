@@ -333,6 +333,107 @@ const (
 	// flag, an environment variable, or an ansible.cfg key.
 	MetadataFetchDeadline = 2 * time.Minute
 
+	// SignatureFetchDeadline bounds one collection's signature phase end to
+	// end: every signature source gathered for that collection - a server's own
+	// signatures carried in version metadata and each configured source alike -
+	// together with each size-limited body read and every retry attempt and
+	// backoff sleep between them, as one shared budget rather than one spent
+	// per source.
+	//
+	// It exists for the same reason MetadataFetchDeadline and
+	// ArtifactDownloadDeadline do: the read-inactivity watchdog bounds the gap
+	// between two consecutive reads, not total transfer time, so a byte-drip
+	// that keeps making genuine progress never leaves its idle window, and
+	// SignatureMaxSize bounds memory rather than time. What is specific to this
+	// surface is the multiplication - up to MaxSignaturesPerCollection blobs
+	// may be gathered for one collection, so a per-source budget would multiply
+	// by that count instead of bounding the phase, which is why the budget is
+	// the phase's and not a request's.
+	//
+	// Throughput is not what sizes this one, and that is the difference from
+	// its three siblings: each of them covers a single transfer, while this
+	// covers up to MaxSignaturesPerCollection independent requests. The bytes
+	// are the easy term - 64 blobs of SignatureMaxSize (1 MiB) is 64 MiB worst
+	// case, needing 64 MiB / 60 s = 1,118,481 B/s (1.07 MiB/s, about
+	// 8.9 Mbit/s), a slower link than StateObjectDeadline (4.27 MiB/s) or
+	// ArtifactDownloadDeadline (4.55 MiB/s) already demands, and a realistic
+	// collection carries one or two blobs of a few KiB, needing 136 B/s. The
+	// binding term is per-source latency instead: one source that black-holes
+	// costs FetchDialContextTimeout x FetchRetryMaxAttempts plus backoff, and
+	// one that accepts a connection and never answers costs the operator's own
+	// --timeout (ResponseHeaderTimeout) x the same attempts - which at a raised
+	// --timeout exceeds this whole budget on a single source.
+	//
+	// That is a constraint on the producer, not an argument for a larger value:
+	// a phase budget alone lets the first source in a list starve every source
+	// after it, and list order belongs to whoever supplied the list - which,
+	// for a server's own signatures, is a documented trust boundary of this
+	// project. Whatever gathers these sources must therefore bound each one
+	// (its own sub-budget, or a single attempt once the source count is
+	// non-trivial) rather than relying on this ceiling to do it, or the
+	// collection that would have verified never gets its turn.
+	//
+	// It is not configurable, for the same reason the three deadlines above are
+	// not: a knob for a safety ceiling is a knob an operator raises in direct
+	// response to a truncation, which is exactly how the attack this ceiling
+	// defends against succeeds. Should a test need to shrink it, that knob
+	// belongs on Infra beside the other deadlines' own test-only fields and
+	// nowhere else; it must never be wired to a CLI flag, an environment
+	// variable, or an ansible.cfg key.
+	SignatureFetchDeadline = 1 * time.Minute
+
+	// SignatureMaxSize caps the raw bytes read for a single signature blob
+	// before it is rejected. A detached OpenPGP signature is a few hundred
+	// bytes to a few KiB, armored or not, so 1 MiB leaves three orders of
+	// magnitude of headroom while still bounding what one hostile or broken
+	// source can buffer into memory - the role MetadataMaxSize plays for a
+	// metadata document.
+	//
+	// It bounds one blob, never the set: MaxSignaturesPerCollection blobs of
+	// this size is 64 MiB for a single collection, and installs run
+	// cfg.Workers collections at once, so a verifier that holds every blob of
+	// a collection at once multiplies both. Verify and release one at a time.
+	SignatureMaxSize = int64(1 << 20) // 1 MiB
+
+	// MaxSignaturesPerCollection caps how many signature blobs may be gathered
+	// and checked for one collection, counting a server's own and every
+	// configured source together.
+	//
+	// The cap exists because the list is not this program's own. A persisted
+	// snapshot is a documented trust boundary here - a principal who can write
+	// the cache influences what a run installs - and a server-supplied
+	// signature list arrives across it, so without a ceiling that boundary
+	// hands the verifier an unbounded number of blobs to fetch and verify: a
+	// denial of service costing the writer one edit and the run an unbounded
+	// number of round trips and public-key operations. The value sits far above
+	// any real collection, which carries one or two.
+	MaxSignaturesPerCollection = 64
+
+	// ManifestFileName is the archive-relative name of a collection's manifest,
+	// the one document a collection signature is made over.
+	ManifestFileName = "MANIFEST.json"
+	// FilesManifestFileName is the archive-relative name of the per-file digest
+	// list MANIFEST.json points at. It is the second link of the chain a
+	// signature covers: the signature authenticates MANIFEST.json, which names
+	// this file's digest, which names every other file's.
+	FilesManifestFileName = "FILES.json"
+	// ManifestScanMaxBytes caps how far into an artifact's decompressed tar
+	// stream a scan for ManifestFileName may read before giving up with
+	// ErrManifestNotFound. A real collection carries its manifest at the front
+	// of the archive, so this bounds the work a hostile archive can extract
+	// from a scan that will find nothing. It is deliberately far below
+	// ArchiveMaxDecompressedSize, which bounds a full extraction rather than a
+	// look at an archive's head.
+	//
+	// It counts bytes taken OUT of the decompressor, the same side
+	// ArchiveMaxDecompressedSize is enforced on and for the same reason: a
+	// limit placed on the compressed body instead is not a limit at all, since
+	// 64 MiB of gzip input can yield orders of magnitude more tar stream. A
+	// scan bounded here is transitively bounded in entries too - a tar header
+	// is 512 bytes, so 64 MiB admits at most 131,072 of them - which is why no
+	// separate entry-count ceiling is needed for the scan.
+	ManifestScanMaxBytes = int64(64 << 20) // 64 MiB
+
 	// S3ListMaxSize caps the raw bytes read for a single ListObjectsV2 XML
 	// page response. A page is bounded by max-keys (1000 by default, which
 	// renders to roughly 1 MB of XML), and pagination reads a large bucket

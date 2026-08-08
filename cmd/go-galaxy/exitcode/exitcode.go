@@ -102,6 +102,27 @@ const (
 	// isRecordedStateUsageError below for the two classifiers this split
 	// lives in.
 	ExitCacheCorrupt = 9
+	// ExitSignature indicates a collection's signatures did not satisfy the
+	// policy in force: the artifact's bytes may authenticate perfectly against
+	// the digest that named them, and this run still could not attribute them
+	// to a publisher it was configured to accept.
+	//
+	// It is deliberately not ExitIntegrity, because the two authenticate
+	// different actors: exit 7 says these are not the bytes that were named,
+	// exit 10 says nobody this run trusts vouched for them. The remedies part
+	// company with the actors - an integrity failure is a stop-and-alert about
+	// the artifact or the server that served it, while a signature failure is
+	// most often about this run's own keyring or its required-count policy,
+	// which is a different CI branch and usually a different team. Folding both
+	// into 7 would make that branch impossible to write.
+	//
+	// helpers.ErrManifestChainMismatch is the deliberate exception and
+	// classifies ExitIntegrity rather than here, even though the chain it names
+	// is exactly what a collection signature covers: what fails there is a file
+	// against the digest MANIFEST.json or FILES.json names for it, which is
+	// bytes against a digest - exit 7's own predicate - and no keyring or
+	// policy change repairs it.
+	ExitSignature = 10
 	// ExitInterrupt indicates the run was canceled, either by a caught
 	// signal falling back to this default or by context cancellation.
 	ExitInterrupt = 130
@@ -135,6 +156,21 @@ var exitClasses = []exitClass{
 	// it unreachable - isInstallError would already have claimed the error.
 	// Cancellation still outranks it.
 	{match: isIntegrityError, code: ExitIntegrity},
+	// isSignatureError sits below isIntegrityError and above isInstallError,
+	// and both bounds are load-bearing. Below isIntegrityError: an error tree
+	// carrying both a digest failure and a signature verdict classifies
+	// ExitIntegrity, because "these are not the bytes that were named" is the
+	// more fundamental fact - who published an artifact is a question that only
+	// arises once the artifact is the one it claims to be. Above isInstallError:
+	// a verdict raised inside a per-collection worker reaches FromError joined
+	// behind helpers.ErrInstallationFailed like every other per-collection
+	// cause, so any position below that entry would make this class unreachable
+	// for the shape aggregation produces - the identical trap isIntegrityError's
+	// own entry above describes for itself. Its position relative to the
+	// isLockError entry it now precedes carries no argument of its own: that
+	// follows from the two bounds, and a tree carrying both a signature verdict
+	// and a lockfile verdict resolves here.
+	{match: isSignatureError, code: ExitSignature},
 	{match: isLockError, code: ExitLock},
 	{match: isInstallError, code: ExitInstall},
 	{match: isNetworkError, code: ExitNetwork},
@@ -175,9 +211,9 @@ var exitClasses = []exitClass{
 // otherwise exitClasses is walked top to bottom and the first class whose
 // predicate matches wins, with an error no class recognizes falling back to
 // ExitError. The priority order is that table's own order - cancellation,
-// integrity, lock, install, network, cache contention, cache corruption,
-// resolution, then usage/config - and the reason a class sits where it sits
-// is stated on its entry there.
+// integrity, signature, lock, install, network, cache contention, cache
+// corruption, resolution, then usage/config - and the reason a class sits
+// where it sits is stated on its entry there.
 func FromError(err error) int {
 	if err == nil {
 		return ExitOK
@@ -247,9 +283,32 @@ func isCacheCorruptError(err error) bool {
 // isIntegrityError reports whether err is an artifact-digest authentication
 // failure: content that did not hash to the digest that named it, or a value
 // that was supposed to be such a digest and was not.
+//
+// helpers.ErrManifestChainMismatch is a member on that predicate rather than
+// by association with the check it belongs to. It names content that did not
+// match a digest naming it - FILES.json against MANIFEST.json's pointer, or a
+// listed file against FILES.json's - which is this class's own question,
+// whatever a signature check wrapped around it concluded; isSignatureError's
+// one member asks who vouched for the bytes instead.
 func isIntegrityError(err error) bool {
 	return errors.Is(err, helpers.ErrSHA256Mismatch) ||
-		errors.Is(err, helpers.ErrMalformedArtifactSHA256)
+		errors.Is(err, helpers.ErrMalformedArtifactSHA256) ||
+		errors.Is(err, helpers.ErrManifestChainMismatch)
+}
+
+// isSignatureError reports whether err carries one collection's signature
+// verdict: the signatures in hand did not satisfy the policy in force. It
+// matches helpers.ErrSignatureVerificationFailed and nothing else, and that is
+// the whole class rather than a sample of it - every other signature-related
+// sentinel classifies elsewhere, on its own predicate rather than by
+// association. A source that could not be fetched, or a fetch budget that
+// expired, is a wire failure (isSignatureTransportError); a keyring or a
+// policy value this tool refuses is a configuration failure
+// (isSignatureConfigError); an artifact naming no manifest is an
+// artifact-shape failure (isArtifactShapeError); and a broken manifest chain
+// is bytes against a digest (isIntegrityError).
+func isSignatureError(err error) bool {
+	return errors.Is(err, helpers.ErrSignatureVerificationFailed)
 }
 
 // isLockError reports whether err is a lockfile-related sentinel:
@@ -292,16 +351,20 @@ func isInstallError(err error) bool {
 		isSymlinkError(err) || isArtifactShapeError(err)
 }
 
-// isArtifactShapeError reports whether err says the bytes that arrived are
-// not a gzip-compressed tar at all. It is its own predicate rather than a
-// member of isArchiveError because it answers a different question from a
-// different producer: every sentinel there is raised by the extractor about
-// an archive's contents, while this one is raised by the download path's
-// shape probe about whether there is an archive to speak of. It classifies
-// alongside them, and never as a transport failure - the transfer succeeded,
-// and no retry turns an error page into an archive.
+// isArtifactShapeError reports whether err says what arrived does not have the
+// outer shape of a collection artifact: it is not a gzip-compressed tar at all
+// (helpers.ErrArtifactNotTarGz, from the download path's shape probe), or it is
+// one that names no MANIFEST.json within its scan bound
+// (helpers.ErrManifestNotFound). It is its own predicate rather than a member
+// of isArchiveError because it answers a different question: every sentinel
+// there is raised by the extractor about an archive's contents, while these
+// two are raised outside it about whether there is a collection artifact to
+// speak of. They classify alongside them, and never as a transport failure -
+// the transfer succeeded, and no retry turns an error page into an archive or
+// puts a manifest into one that has none.
 func isArtifactShapeError(err error) bool {
-	return errors.Is(err, helpers.ErrArtifactNotTarGz)
+	return errors.Is(err, helpers.ErrArtifactNotTarGz) ||
+		errors.Is(err, helpers.ErrManifestNotFound)
 }
 
 // isFileIntegrityError reports whether err is an empty-file/missing-cache
@@ -413,10 +476,31 @@ func isSymlinkError(err error) bool {
 // runs have none. It never classifies as ExitInterrupt, for the identical
 // %v-not-%w reason.
 //
-// Split into two sub-checks purely to stay under the cyclomatic-complexity
-// budget; the two together still cover the exact same sentinel set.
+// Split into three sub-checks purely to stay under the cyclomatic-complexity
+// budget; the three together still cover the exact same sentinel set.
 func isNetworkError(err error) bool {
-	return isTransportError(err) || isMetadataFetchError(err)
+	return isTransportError(err) || isMetadataFetchError(err) || isSignatureTransportError(err)
+}
+
+// isSignatureTransportError reports whether err says a signature could not be
+// obtained over the wire: the source was unreachable, unreadable, or refused
+// by offline mode (helpers.ErrSignatureSourceUnavailable), or the collection's
+// whole signature phase overran helpers.SignatureFetchDeadline. Both classify
+// exactly like their siblings in isTransportError - ExitNetwork unaggregated,
+// ExitInstall once joined behind helpers.ErrInstallationFailed by a
+// per-collection worker - and neither ever classifies ExitInterrupt: the
+// deadline sentinel's own doc comment binds its producer to render the context
+// cause with %v rather than wrap it with %w, so no context sentinel stays
+// reachable through errors.Is.
+//
+// It is a sibling of isTransportError rather than two more lines inside it
+// purely to stay under the cyclomatic-complexity budget, the same reason
+// isNetworkError was split in the first place. Neither of these two is a
+// signature VERDICT: nothing was verified, so isSignatureError deliberately
+// does not match them and this class is where they belong.
+func isSignatureTransportError(err error) bool {
+	return errors.Is(err, helpers.ErrSignatureSourceUnavailable) ||
+		errors.Is(err, helpers.ErrSignatureFetchDeadline)
 }
 
 // isTransportError reports whether err is a request-level network sentinel:
@@ -512,13 +596,37 @@ func isResolutionError(err error) bool {
 
 // isUsageError reports whether err is a configuration or CLI-input sentinel
 // (invalid flags, malformed requirements, or a missing path). Split into
-// four sub-checks purely to stay under the cyclomatic-complexity budget;
-// the four together still cover the exact same sentinel set.
+// five sub-checks purely to stay under the cyclomatic-complexity budget;
+// the five together still cover the exact same sentinel set.
 func isUsageError(err error) bool {
 	return isConfigUsageError(err) ||
 		isGalaxyServerConfigError(err) ||
 		isCollectionNameUsageError(err) ||
-		isCollectionListUsageError(err)
+		isCollectionListUsageError(err) ||
+		isSignatureConfigError(err)
+}
+
+// isSignatureConfigError reports whether err says this run's signature
+// configuration cannot be used as given: a source naming a scheme this tool
+// does not fetch, a keyring it cannot read or whose container format it does
+// not open, a requirements file declaring signatures with no keyring
+// configured, or a required-count or ignored-status-code value it does not
+// accept. The predicate every member shares is the one every other usage
+// sentinel shares: an operator has to change something - a flag, an
+// environment value, ansible.cfg, or the requirements file - and no retry
+// repairs it.
+//
+// None of them is a signature verdict, which is what keeps them out of
+// isSignatureError and its exit class: a run that hits one of these never
+// checked a signature at all, so reporting it as a verification failure would
+// tell a pipeline the artifact was rejected when the configuration was.
+func isSignatureConfigError(err error) bool {
+	return errors.Is(err, helpers.ErrUnsupportedSignatureSource) ||
+		errors.Is(err, helpers.ErrKeyringUnreadable) ||
+		errors.Is(err, helpers.ErrKeyringIsKeybox) ||
+		errors.Is(err, helpers.ErrKeyringRequired) ||
+		errors.Is(err, helpers.ErrInvalidSignatureCount) ||
+		errors.Is(err, helpers.ErrUnknownSignatureStatusCode)
 }
 
 // isConfigUsageError reports whether err is a config/environment-level usage
