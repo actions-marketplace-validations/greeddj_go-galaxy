@@ -3,11 +3,12 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"net/url"
 	"os"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
@@ -638,10 +639,5 @@ func tlsWarnings(servers []Server) []string {
 // deterministically instead of depending on Go's randomized map iteration.
 // kv may be nil (an id with no ini section at all).
 func sortedKeys(kv map[string]string) []string {
-	keys := make([]string, 0, len(kv))
-	for k := range kv {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
+	return slices.Sorted(maps.Keys(kv))
 }

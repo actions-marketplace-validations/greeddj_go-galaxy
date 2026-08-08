@@ -339,6 +339,57 @@ func TestBuildServerHardErrorKeys(t *testing.T) {
 	}
 }
 
+// TestBuildServerNamesTheFirstHardErrorKeyInSortedOrder pins the ordering
+// buildServer feeds checkHardErrorKeys. checkHardErrorKeys returns on the
+// first hard-error key it meets, so with two of them in one section the key
+// the operator is told about is decided entirely by that order: sorted, it
+// is auth_url; collected straight off the map, it is whichever key Go's
+// randomized iteration yielded first.
+//
+// Killing mutation: replacing sortedKeys' slices.Sorted(maps.Keys(kv)) with
+// slices.Collect(maps.Keys(kv)) fails the sorted-order subtest under
+// go test -race -count=1 with
+//
+//	error = unsupported galaxy_server key: configure a Galaxy API token instead: server "prod" key "password",
+//	want it to name the first hard-error key in sorted order ("auth_url")
+//
+// while the positive-control subtest keeps passing, which is what makes the
+// first subtest's assertion a claim about ordering rather than the vacuous
+// "password is never named".
+func TestBuildServerNamesTheFirstHardErrorKeyInSortedOrder(t *testing.T) {
+	t.Parallel()
+
+	t.Run("sorted order decides which of two hard-error keys is named", func(t *testing.T) {
+		t.Parallel()
+		kv := map[string]string{"url": "https://x", "password": "p", "auth_url": "https://a"}
+		// Go randomizes map iteration order per range, so an unsorted
+		// collection picks between the two hard-error keys afresh on every
+		// call; repeating the call makes that a certain failure rather than
+		// a coin flip.
+		for range 64 {
+			_, _, err := buildServer("prod", kv)
+			if !errors.Is(err, helpers.ErrUnsupportedGalaxyServerKey) {
+				t.Fatalf("error = %v, want helpers.ErrUnsupportedGalaxyServerKey", err)
+			}
+			if !strings.Contains(err.Error(), "auth_url") {
+				t.Fatalf("error = %v, want it to name the first hard-error key in sorted order (%q)", err, "auth_url")
+			}
+		}
+	})
+
+	t.Run("positive control: the sole hard-error key is named", func(t *testing.T) {
+		t.Parallel()
+		kv := map[string]string{"url": "https://x", "password": "p"}
+		_, _, err := buildServer("prod", kv)
+		if !errors.Is(err, helpers.ErrUnsupportedGalaxyServerKey) {
+			t.Fatalf("error = %v, want helpers.ErrUnsupportedGalaxyServerKey", err)
+		}
+		if !strings.Contains(err.Error(), "password") {
+			t.Fatalf("error = %v, want it to name %q", err, "password")
+		}
+	})
+}
+
 // TestBuildServerAPIVersion checks that api_version = "v3" is accepted as a
 // no-op and any other value is a hard error.
 func TestBuildServerAPIVersion(t *testing.T) {
