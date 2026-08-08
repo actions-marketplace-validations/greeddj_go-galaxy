@@ -60,8 +60,8 @@ func doGetWithAuth(t *testing.T, client *http.Client, url, auth string) *http.Re
 
 // getJSON performs a GET against url and decodes the JSON response body
 // into target (skipped when target is nil or the status is not 200),
-// returning the response's status code. The body is always drained and
-// closed before returning.
+// returning the response's status code. The body is always closed before
+// returning, and read only as far as the decode above needs.
 func getJSON(t *testing.T, client *http.Client, url string, target any) int {
 	t.Helper()
 	resp := doGet(t, client, url)
@@ -573,43 +573,66 @@ func TestFailWildcardAndNamespaceMatching(t *testing.T) {
 	})
 }
 
-// TestRootMetadataUnregistered404 asserts root metadata 404s for a
-// namespace/name that was never registered, even while a different
-// collection is.
-func TestRootMetadataUnregistered404(t *testing.T) {
-	t.Parallel()
-	s := New(t)
-	s.AddVersion("ns", "name", "1.0.0", nil)
+// unregistered404Case is one table entry for TestUnregistered404Cases.
+type unregistered404Case struct {
+	// setup registers whatever this case needs on a freshly built server
+	// before the request is issued. A nil setup leaves the server with
+	// nothing registered at all, which is a scenario of its own rather
+	// than a shorthand for the other rows' registration.
+	setup func(s *Server)
+	name  string
+	path  string
+}
 
-	status := getJSON(t, s.Client(), s.URL()+"/api/v3/collections/ns/unknown", nil)
-	if status != http.StatusNotFound {
-		t.Errorf("status = %d, want %d", status, http.StatusNotFound)
+// unregistered404Cases enumerates the routes that must answer 404 for an
+// identifier the fake never registered, one row per route. The two rows that
+// register an unrelated collection first prove the route looks its identifier
+// up rather than serving whatever the server happens to hold; the versions-list
+// row queries a server with nothing registered at all, so it covers the route
+// against an empty server instead.
+func unregistered404Cases() []unregistered404Case {
+	return []unregistered404Case{
+		{
+			// Root metadata 404s for a namespace/name that was never
+			// registered, even while a different collection is.
+			name:  "root metadata",
+			path:  "/api/v3/collections/ns/unknown",
+			setup: func(s *Server) { s.AddVersion("ns", "name", "1.0.0", nil) },
+		},
+		{
+			// The versions-list route 404s for a namespace/name that was
+			// never registered.
+			name: "versions list",
+			path: "/api/v3/collections/ns/unknown/versions",
+		},
+		{
+			// The download route 404s for a filename that was never
+			// registered, even while a different artifact is.
+			name:  "artifact",
+			path:  "/download/does-not-exist.tar.gz",
+			setup: func(s *Server) { s.AddVersion("ns", "name", "1.0.0", nil) },
+		},
 	}
 }
 
-// TestVersionsListUnregistered404 asserts the versions-list route 404s for
-// a namespace/name that was never registered.
-func TestVersionsListUnregistered404(t *testing.T) {
+// TestUnregistered404Cases asserts every route answers 404 for an identifier
+// the fake never registered, rather than serving a zero-valued body or the one
+// collection it does hold. Each row builds its own server, so no row's
+// registration - or deliberate lack of one - can reach another's.
+func TestUnregistered404Cases(t *testing.T) {
 	t.Parallel()
-	s := New(t)
-
-	status := getJSON(t, s.Client(), s.URL()+"/api/v3/collections/ns/unknown/versions", nil)
-	if status != http.StatusNotFound {
-		t.Errorf("status = %d, want %d", status, http.StatusNotFound)
-	}
-}
-
-// TestArtifactUnknownFilename404 asserts the download route 404s for a
-// filename that was never registered, even while a different artifact is.
-func TestArtifactUnknownFilename404(t *testing.T) {
-	t.Parallel()
-	s := New(t)
-	s.AddVersion("ns", "name", "1.0.0", nil)
-
-	resp := doGet(t, s.Client(), s.URL()+"/download/does-not-exist.tar.gz")
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	for _, tc := range unregistered404Cases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := New(t)
+			if tc.setup != nil {
+				tc.setup(s)
+			}
+			status := getJSON(t, s.Client(), s.URL()+tc.path, nil)
+			if status != http.StatusNotFound {
+				t.Errorf("status = %d, want %d", status, http.StatusNotFound)
+			}
+		})
 	}
 }
 
