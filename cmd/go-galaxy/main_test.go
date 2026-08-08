@@ -34,25 +34,27 @@ import (
 // exitcode.ExitUsage, nil from the silent arm, which is the behavior this
 // test exists to forbid. Only "usage error nothing reported" fails:
 //
-//	main_test.go:67: printErr = <nil>, want errors.Is match with flag parse error
+//	main_test.go:69: printErr = <nil>, want errors.Is match with flag parse error
 //
 // KILLING MUTATION, run and reverted, in handleResult (main.go) - invert the
 // arm's condition to "if !reported". Both rows fail, with opposite messages,
 // which is what shows the control and the pin are reading the same bit from
 // opposite sides:
 //
-//	main_test.go:62: printErr = flag parse error, want nil
-//	main_test.go:67: printErr = <nil>, want errors.Is match with flag parse error
+//	main_test.go:64: printErr = flag parse error, want nil
+//	main_test.go:69: printErr = <nil>, want errors.Is match with flag parse error
 //
 // KILLING MUTATION, run and reverted, in handleResult (main.go) - hoist the
 // reported check above the capturedErr branch. Only "captured error outranks
 // a usage report" fails:
 //
-//	main_test.go:58: code = 2, want 5
-//	main_test.go:67: printErr = <nil>, want errors.Is match with installation failed
+//	main_test.go:60: code = 2, want 5
+//	main_test.go:69: printErr = <nil>, want errors.Is match with installation failed
 func TestHandleResult(t *testing.T) {
+	t.Parallel()
 	for _, tt := range handleResultCases() {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			code, printErr := handleResult(tt.runErr, tt.capturedErr, tt.sig, tt.reported)
 			if code != tt.wantCode {
 				t.Errorf("code = %d, want %d", code, tt.wantCode)
@@ -157,7 +159,7 @@ var errTestUsage = errors.New("flag parse error")
 // main.go - change the line for exit 8 to read "  9    Cache contention",
 // which is what a careless renumbering looks like:
 //
-//	main_test.go:190: Description is missing the line for exit 8: "  8    Cache contention"
+//	main_test.go:192: Description is missing the line for exit 8: "  8    Cache contention"
 func TestRootCommandDisclosesDefaultCommandAndExitCodes(t *testing.T) {
 	cmd, _ := newRootCommand(nil, io.Discard)
 
@@ -211,7 +213,7 @@ func TestRootCommandDisclosesDefaultCommandAndExitCodes(t *testing.T) {
 // recorder never sees it. The argv subtest fails, and the line it was meant to
 // capture leaks to the test run's own stderr:
 //
-//	main_test.go:226: rec.written = false, want true; errOut = ""
+//	main_test.go:228: rec.written = false, want true; errOut = ""
 func TestRootCommandRecordsUrfaveUsageReports(t *testing.T) {
 	t.Run("argv value urfave reports itself", func(t *testing.T) {
 		var errOut bytes.Buffer

@@ -24,6 +24,7 @@ const (
 // path passed in (not a hardcoded "requirements.yml"), and that the tree body
 // reflects the dependency structure.
 func TestPrintTree(t *testing.T) {
+	t.Parallel()
 	lf := &lockfile.File{
 		SchemaVersion: lockfile.SchemaVersion,
 		Collections: []lockfile.Entry{
@@ -62,6 +63,7 @@ func TestPrintTree(t *testing.T) {
 // TestPrintTreeMissingDependency checks that a dependency absent from the
 // lockfile is flagged inline instead of being silently skipped.
 func TestPrintTreeMissingDependency(t *testing.T) {
+	t.Parallel()
 	lf := &lockfile.File{
 		SchemaVersion: lockfile.SchemaVersion,
 		Collections: []lockfile.Entry{
@@ -89,6 +91,7 @@ func TestPrintTreeMissingDependency(t *testing.T) {
 // it proves the writer sanitized the hostile text rather than discarding
 // the whole line or the whole tree.
 func TestPrintTreeSanitizesLockfileText(t *testing.T) {
+	t.Parallel()
 	lf := &lockfile.File{
 		SchemaVersion: lockfile.SchemaVersion,
 		Collections: []lockfile.Entry{

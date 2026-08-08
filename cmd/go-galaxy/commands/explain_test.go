@@ -12,6 +12,7 @@ import (
 // neither a root requirement nor depended on by anything else must print the
 // hyphen-minus message and must not contain an em dash (U+2014).
 func TestPrintExplainOrphan(t *testing.T) {
+	t.Parallel()
 	lf := &lockfile.File{
 		SchemaVersion: lockfile.SchemaVersion,
 		Collections: []lockfile.Entry{
@@ -42,6 +43,7 @@ func TestPrintExplainOrphan(t *testing.T) {
 // requirement with its own dependency prints both the "required by" (root)
 // line and the "depends on" line.
 func TestPrintExplainRequiredByAndDepends(t *testing.T) {
+	t.Parallel()
 	lf := &lockfile.File{
 		SchemaVersion: lockfile.SchemaVersion,
 		Collections: []lockfile.Entry{
@@ -73,6 +75,7 @@ func TestPrintExplainRequiredByAndDepends(t *testing.T) {
 // TestPrintExplainNotFound checks that a target absent from the lockfile
 // returns errExplainNotFound rather than printing anything misleading.
 func TestPrintExplainNotFound(t *testing.T) {
+	t.Parallel()
 	lf := &lockfile.File{SchemaVersion: lockfile.SchemaVersion}
 	var buf strings.Builder
 	err := printExplain(&buf, lf, "ns.missing", map[string]bool{})
@@ -93,6 +96,7 @@ func TestPrintExplainNotFound(t *testing.T) {
 // are still present - is the positive control: it proves the writer
 // sanitized the hostile text rather than discarding the whole report.
 func TestPrintExplainSanitizesLockfileText(t *testing.T) {
+	t.Parallel()
 	lf := &lockfile.File{
 		SchemaVersion: lockfile.SchemaVersion,
 		Collections: []lockfile.Entry{

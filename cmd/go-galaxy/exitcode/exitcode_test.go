@@ -422,8 +422,10 @@ var fromErrorCases = []exitCase{
 // TestFromError walks fromErrorCases, checking one representative error per
 // exit class.
 func TestFromError(t *testing.T) {
+	t.Parallel()
 	for _, tt := range fromErrorCases {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			if got := FromError(tt.err); got != tt.wantCode {
 				t.Errorf("FromError(%v) = %d, want %d", tt.err, got, tt.wantCode)
 			}
@@ -462,8 +464,10 @@ var galaxyServerConfigSentinels = []struct {
 // tell "your ansible.cfg is wrong, editing it is the only fix" apart from
 // a transient failure worth retrying.
 func TestGalaxyServerConfigErrorsMapToUsage(t *testing.T) {
+	t.Parallel()
 	for _, tt := range galaxyServerConfigSentinels {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			wrapped := fmt.Errorf("%w: ctx", tt.err)
 			if got := FromError(wrapped); got != ExitUsage {
 				t.Errorf("FromError(%v) = %d, want %d", wrapped, got, ExitUsage)
@@ -491,8 +495,10 @@ var integritySentinels = []struct {
 // sentinel to ExitIntegrity, wrapped so the check goes through errors.Is
 // rather than requiring exact identity.
 func TestIntegritySentinelsMapToExitIntegrity(t *testing.T) {
+	t.Parallel()
 	for _, tt := range integritySentinels {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			wrapped := fmt.Errorf("%w: ctx", tt.err)
 			if got := FromError(wrapped); got != ExitIntegrity {
 				t.Errorf("FromError(%v) = %d, want %d", wrapped, got, ExitIntegrity)
@@ -512,8 +518,9 @@ func TestIntegritySentinelsMapToExitIntegrity(t *testing.T) {
 // moving the isIntegrityError case below isLockError/isInstallError in
 // FromError, which makes isInstallError claim the headline first; verified,
 // that mutation makes this test fail with:
-// "exitcode_test.go:521: FromError(integrity join) = 5, want 7".
+// "exitcode_test.go:528: FromError(integrity join) = 5, want 7".
 func TestIntegrityOutranksInstallFailureHeadline(t *testing.T) {
+	t.Parallel()
 	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
 
 	integrity := errors.Join(headline, fmt.Errorf("%w: acme.app@1.0.0", helpers.ErrSHA256Mismatch))
@@ -531,6 +538,7 @@ func TestIntegrityOutranksInstallFailureHeadline(t *testing.T) {
 // joined tree also contains a network-class sentinel: the integrity cause
 // still wins.
 func TestIntegrityOutranksNetworkCause(t *testing.T) {
+	t.Parallel()
 	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
 	joined := errors.Join(headline, helpers.ErrDownloadFailed, helpers.ErrSHA256Mismatch)
 	if got := FromError(joined); got != ExitIntegrity {
@@ -543,6 +551,7 @@ func TestIntegrityOutranksNetworkCause(t *testing.T) {
 // sentinel sits - both orderings of the same three causes, and a nested join
 // of them, all classify identically.
 func TestIntegrityPrecedenceIndependentOfCauseOrder(t *testing.T) {
+	t.Parallel()
 	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
 
 	forward := errors.Join(headline, helpers.ErrDownloadFailed, helpers.ErrSHA256Mismatch)
@@ -567,6 +576,7 @@ func TestIntegrityPrecedenceIndependentOfCauseOrder(t *testing.T) {
 // integrity cause, matching the real shape a frozen install with a corrupted
 // pin and a failing snapshot save would produce.
 func TestSaveFailureDoesNotMaskIntegrity(t *testing.T) {
+	t.Parallel()
 	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
 	joinedInstall := errors.Join(headline, helpers.ErrSHA256Mismatch)
 
@@ -584,6 +594,7 @@ func TestSaveFailureDoesNotMaskIntegrity(t *testing.T) {
 // save failure's own network-class sentinel, is what the operator must act
 // on.
 func TestLockDriftOutranksSaveFailure(t *testing.T) {
+	t.Parallel()
 	drift := fmt.Errorf("%w: requirements.lock.yml: run `go-galaxy lock` to update it", helpers.ErrLockfileDrift)
 
 	err := fmt.Errorf("%w; snapshot save failed: %w", drift, helpers.ErrStateObjectDeadline)
@@ -596,6 +607,7 @@ func TestLockDriftOutranksSaveFailure(t *testing.T) {
 // ExitIntegrity, matching FromError's documented priority order: cancellation
 // first, integrity second.
 func TestCanceledOutranksIntegrity(t *testing.T) {
+	t.Parallel()
 	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
 	integrity := errors.Join(headline, helpers.ErrSHA256Mismatch)
 
@@ -610,6 +622,7 @@ func TestCanceledOutranksIntegrity(t *testing.T) {
 // set, classifies as ExitResolution - both bare and wrapped, matching
 // through errors.Is via ConflictError's own Is method.
 func TestSolverConflictMapsToResolution(t *testing.T) {
+	t.Parallel()
 	err := error(&solver.ConflictError{})
 	if got := FromError(err); got != ExitResolution {
 		t.Fatalf("FromError(*solver.ConflictError) = %d, want ExitResolution (%d)", got, ExitResolution)
@@ -631,6 +644,7 @@ func TestSolverConflictMapsToResolution(t *testing.T) {
 // first, ahead of every other class) misclassify a hostile or slow server as
 // a caught Ctrl-C.
 func TestArtifactDownloadDeadlineClassification(t *testing.T) {
+	t.Parallel()
 	bare := helpers.ErrArtifactDownloadDeadline
 	if got := FromError(bare); got != ExitNetwork {
 		t.Errorf("FromError(bare sentinel) = %d, want ExitNetwork (%d)", got, ExitNetwork)
@@ -670,6 +684,7 @@ func TestArtifactDownloadDeadlineClassification(t *testing.T) {
 // already carries. They are kept anyway because they name the security
 // property this test exists to cover.
 func TestReadStalledClassification(t *testing.T) {
+	t.Parallel()
 	bare := helpers.ErrReadStalled
 	if got := FromError(bare); got != ExitNetwork {
 		t.Errorf("FromError(bare sentinel) = %d, want ExitNetwork (%d)", got, ExitNetwork)
@@ -706,6 +721,7 @@ func TestReadStalledClassification(t *testing.T) {
 // context.Canceled/context.DeadlineExceeded that is unreachable through
 // errors.Is.
 func TestMixedDeadlineAndStallShapeIsNotInterrupt(t *testing.T) {
+	t.Parallel()
 	headline := fmt.Errorf("%w for 2 collections", helpers.ErrInstallationFailed)
 	//nolint:errorlint // pinning the real, deliberately non-wrapping shape; see ErrArtifactDownloadDeadline's doc comment.
 	deadlineCause := fmt.Errorf("%w after 3s: %v", helpers.ErrArtifactDownloadDeadline, context.DeadlineExceeded)
@@ -729,6 +745,7 @@ func TestMixedDeadlineAndStallShapeIsNotInterrupt(t *testing.T) {
 // ExitInterrupt. Any stall case placed above the cancellation case in
 // FromError's switch would make this test fail.
 func TestFromErrorInterruptSurvivesStallSentinel(t *testing.T) {
+	t.Parallel()
 	//nolint:errorlint // pinning the real, deliberately non-wrapping shape watchdogBody.Read builds.
 	stallCause := fmt.Errorf("%w: no data for %s: %v", helpers.ErrReadStalled, 30*time.Second, context.Canceled)
 
@@ -759,6 +776,7 @@ func TestFromErrorInterruptSurvivesStallSentinel(t *testing.T) {
 // classify as ExitInterrupt, proving the %v row's assertion actually
 // discriminates rather than passing vacuously.
 func TestMetadataFetchDeadlineClassification(t *testing.T) {
+	t.Parallel()
 	bare := helpers.ErrMetadataFetchDeadline
 	if got := FromError(bare); got != ExitNetwork {
 		t.Errorf("FromError(bare sentinel) = %d, want ExitNetwork (%d)", got, ExitNetwork)
@@ -807,6 +825,7 @@ func TestMetadataFetchDeadlineClassification(t *testing.T) {
 // falls through to isNetworkError instead, since nothing left in
 // isInstallError still matches the headline.
 func TestStateObjectDeadlineClassification(t *testing.T) {
+	t.Parallel()
 	bare := helpers.ErrStateObjectDeadline
 	if got := FromError(bare); got != ExitNetwork {
 		t.Errorf("FromError(bare sentinel) = %d, want ExitNetwork (%d)", got, ExitNetwork)
@@ -860,8 +879,9 @@ func TestStateObjectDeadlineClassification(t *testing.T) {
 // fromErrorTail above isInstallError's case in FromError makes this test
 // fail with:
 //
-//	exitcode_test.go:868: FromError(joined) = 8, want 5
+//	exitcode_test.go:888: FromError(joined) = 8, want 5
 func TestCacheBusyFoldedBehindInstallFailureClassifiesAsInstall(t *testing.T) {
+	t.Parallel()
 	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
 	joined := errors.Join(headline, helpers.ErrCacheBusy)
 	if got := FromError(joined); got != ExitInstall {
@@ -875,6 +895,7 @@ func TestCacheBusyFoldedBehindInstallFailureClassifiesAsInstall(t *testing.T) {
 // helpers.ErrInstallationFailed headline to route it through FromError's
 // earlier cases instead - classifies as ExitNetwork, not ExitCacheBusy.
 func TestNetworkOutranksCacheBusyWithoutAnInstallHeadline(t *testing.T) {
+	t.Parallel()
 	joined := errors.Join(helpers.ErrCacheBusy, helpers.ErrCacheBackendUnavailable)
 	if got := FromError(joined); got != ExitNetwork {
 		t.Errorf("FromError(joined) = %d, want %d", got, ExitNetwork)
@@ -886,6 +907,7 @@ func TestNetworkOutranksCacheBusyWithoutAnInstallHeadline(t *testing.T) {
 // fs.ErrNotExist (isUsageError's own broad fs.ErrNotExist arm) still
 // classifies as ExitCacheBusy, not ExitUsage.
 func TestCacheBusyOutranksUsage(t *testing.T) {
+	t.Parallel()
 	err := fmt.Errorf("%w: %w", helpers.ErrCacheBusy, fs.ErrNotExist)
 	if got := FromError(err); got != ExitCacheBusy {
 		t.Errorf("FromError(err) = %d, want %d", got, ExitCacheBusy)
@@ -897,6 +919,7 @@ func TestCacheBusyOutranksUsage(t *testing.T) {
 // since the cancellation case is checked before fromErrorTail is ever
 // reached.
 func TestCanceledOutranksCacheBusy(t *testing.T) {
+	t.Parallel()
 	joined := errors.Join(context.Canceled, helpers.ErrCacheBusy)
 	if got := FromError(joined); got != ExitInterrupt {
 		t.Errorf("FromError(joined) = %d, want %d", got, ExitInterrupt)
@@ -909,6 +932,7 @@ func TestCanceledOutranksCacheBusy(t *testing.T) {
 // (isUsageError's own broad fs.ErrNotExist arm) still classifies as
 // ExitCacheCorrupt, not ExitUsage.
 func TestCacheCorruptOutranksUsage(t *testing.T) {
+	t.Parallel()
 	err := fmt.Errorf("%w: %w", helpers.ErrCorruptProjectRegistry, fs.ErrNotExist)
 	if got := FromError(err); got != ExitCacheCorrupt {
 		t.Errorf("FromError(err) = %d, want %d", got, ExitCacheCorrupt)
@@ -920,6 +944,7 @@ func TestCacheCorruptOutranksUsage(t *testing.T) {
 // helpers.ErrCorruptProjectRegistry, since the cancellation case is checked
 // before fromErrorTail is ever reached.
 func TestCanceledOutranksCacheCorrupt(t *testing.T) {
+	t.Parallel()
 	joined := errors.Join(context.Canceled, helpers.ErrCorruptProjectRegistry)
 	if got := FromError(joined); got != ExitInterrupt {
 		t.Errorf("FromError(joined) = %d, want %d", got, ExitInterrupt)
@@ -988,8 +1013,10 @@ var genericSentinels = []struct {
 // sentinel to ExitError, wrapped so the check goes through errors.Is rather
 // than requiring exact identity.
 func TestGenericSentinelsMapToExitError(t *testing.T) {
+	t.Parallel()
 	for _, tt := range genericSentinels {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			wrapped := fmt.Errorf("%w: ctx", tt.err)
 			if got := FromError(wrapped); got != ExitError {
 				t.Errorf("FromError(%v) = %d, want %d", wrapped, got, ExitError)
@@ -1010,6 +1037,7 @@ func (fakeSignal) Signal()        {}
 // input even though main.go no longer subscribes to it) and the
 // non-syscall.Signal fallback.
 func TestFromSignal(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		sig      os.Signal
 		name     string
@@ -1024,6 +1052,7 @@ func TestFromSignal(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			if got := FromSignal(tt.sig); got != tt.wantCode {
 				t.Errorf("FromSignal(%v) = %d, want %d", tt.sig, got, tt.wantCode)
 			}
@@ -1044,6 +1073,7 @@ func TestFromSignal(t *testing.T) {
 // not distinguish this ordering from one where the usage class had simply
 // never been reachable for this shape at all.
 func TestLockfileUserinfoClassifiesAsLock(t *testing.T) {
+	t.Parallel()
 	joined := fmt.Errorf("%w: acme.widgets: %w", helpers.ErrLockfileInvalid, helpers.ErrGalaxyServerURLUserinfo)
 
 	if got := FromError(joined); got != ExitLock {

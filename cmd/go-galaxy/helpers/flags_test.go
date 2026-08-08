@@ -60,6 +60,7 @@ func assertStringFlag(t *testing.T, flag cli.Flag, want wantStringFlag) {
 // (used by hash, tree, explain) exposes exactly the requirements-file and
 // lock-file flags with the expected names, alias, usage, and env sources.
 func TestLockInspectFlags(t *testing.T) {
+	t.Parallel()
 	flags := LockInspectFlags()
 	if len(flags) != 2 {
 		t.Fatalf("LockInspectFlags() returned %d flags, want 2", len(flags))
@@ -87,7 +88,7 @@ func TestLockInspectFlags(t *testing.T) {
 				// from LockInspectFlags's requirements-file flag, which is
 				// the state this row exists to forbid:
 				//
-				//	flags_test.go:111: Value = "", want "requirements.yml"
+				//	flags_test.go:113: Value = "", want "requirements.yml"
 				value:   "requirements.yml",
 				aliases: []string{"r"},
 				usage:   "Path to requirements.yml",
@@ -108,6 +109,7 @@ func TestLockInspectFlags(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			assertStringFlag(t, tt.flag, tt.want)
 		})
 	}
@@ -117,6 +119,7 @@ func TestLockInspectFlags(t *testing.T) {
 // GO_GALAXY_DRY_RUN, since it is a global flag also consumed by cleanup
 // (which has no --dry-run-specific wiring of its own).
 func TestDryRunEnv(t *testing.T) {
+	// Not parallel: t.Setenv panics in a test that has called t.Parallel.
 	t.Setenv("GO_GALAXY_DRY_RUN", "true")
 
 	var gotDryRun bool

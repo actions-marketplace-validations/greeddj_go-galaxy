@@ -10,6 +10,7 @@ import (
 // explicit, already-resolved (ldflags-style) inputs, so the expected output
 // is deterministic regardless of the environment's build info.
 func TestFormatVersion(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		version string
 		commit  string
@@ -54,6 +55,7 @@ func TestFormatVersion(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := formatVersion(tt.version, tt.commit, tt.date, tt.builtBy)
 			if got != tt.want {
 				t.Errorf("formatVersion(%q, %q, %q, %q) = %q, want %q",
@@ -67,6 +69,7 @@ func TestFormatVersion(t *testing.T) {
 // inputs (the real-world Justfile case), which must pass through unchanged
 // and produce a deterministic string.
 func TestVersion(t *testing.T) {
+	t.Parallel()
 	got := Version("v1.2.3", "abc123", "2026-07-22T00:00:00Z", "goreleaser")
 	want := "v1.2.3 (commit abc123, built by goreleaser @ 2026-07-22T00:00:00Z) // " + runtime.Version()
 	if got != want {
@@ -81,6 +84,7 @@ func TestVersion(t *testing.T) {
 // the result is never empty, it still reports the Go runtime version, and -
 // crucially - it never reintroduces the deleted GitHub network fetch.
 func TestVersionDevBuildFallback(t *testing.T) {
+	t.Parallel()
 	got := Version("", "", "", "")
 	if got == "" {
 		t.Fatal("Version(\"\", \"\", \"\", \"\") = \"\", want non-empty")

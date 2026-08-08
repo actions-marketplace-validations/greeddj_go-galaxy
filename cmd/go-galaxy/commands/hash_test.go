@@ -160,6 +160,7 @@ func checkAnyError(t *testing.T, got string, err error) {
 // surface the error rather than silently falling back), and neither file
 // present (must error).
 func TestComputeHash(t *testing.T) {
+	t.Parallel()
 	tests := []hashTestCase{
 		{name: "valid lockfile present", setup: setupValidLockfile, check: checkValidLockfile},
 		{name: "lockfile absent, requirements present falls back", setup: setupLockfileAbsent, check: checkLockfileAbsentFallback},
@@ -174,6 +175,7 @@ func TestComputeHash(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			dir := t.TempDir()
 			reqPath, lockPath := tt.setup(t, dir)
 			got, err := computeHash(reqPath, lockPath)
