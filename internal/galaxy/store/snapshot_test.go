@@ -19,6 +19,10 @@ import (
 // resolved bucket is unexpectedly absent while corrupting a test fixture.
 var errTestResolvedBucketMissing = errors.New("resolved bucket missing")
 
+// errTestAPICacheBucketMissing is a static test-only error used when the
+// api_cache bucket is unexpectedly absent while corrupting a test fixture.
+var errTestAPICacheBucketMissing = errors.New("api_cache bucket missing")
+
 // testDepsConstraint is the shared dependency constraint value seeded across
 // several deps-cache test fixtures.
 const testDepsConstraint = ">=1.0.0"
@@ -389,7 +393,7 @@ func TestWasPersistedFalseAfterOutdatedSchemaLoad(t *testing.T) {
 	}
 }
 
-// TestLoadRejectsCorruptResolvedEntry proves loadResolved reports an error
+// TestLoadRejectsCorruptResolvedEntry proves Load reports an error
 // instead of silently coercing a genuinely corrupt resolved value into a
 // garbage version string. Every current-schema value is written as valid
 // JSON by saveResolved, so an unmarshal failure here can only mean the
@@ -420,6 +424,72 @@ func TestLoadRejectsCorruptResolvedEntry(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "a.b") {
 		t.Fatalf("expected error to mention the corrupt key, got %v", err)
+	}
+}
+
+// TestLoadNamesBucketAndKeyOfCorruptEntry proves the error Load reports for a
+// corrupt entry names both the bucket the value came from and the key it was
+// stored under. The bucket is api_cache rather than resolved, so the two tests
+// together cover a wrapper shared across buckets instead of one loader whose
+// message happens to be special-cased to a single bucket.
+func TestLoadNamesBucketAndKeyOfCorruptEntry(t *testing.T) {
+	t.Parallel()
+	dbs := openTestDBs(t)
+	st := New()
+	// FetchedAt is sampled fresh rather than left zero: SetAPICache does not
+	// stamp it, and snapshotData prunes api_cache against CacheEntryMaxAge, so
+	// a zero stamp drops the entry at save time and the corruption below would
+	// have no stored value to land on.
+	st.SetAPICache("a.b", APICacheEntry{
+		URL:       "https://example.com/api",
+		FetchedAt: time.Now().UTC(),
+		Body:      []byte(`{"ok":true}`),
+	})
+	mustSave(t, dbs, st)
+
+	// Positive control on this same fixture, before it is corrupted: the entry
+	// has to be shown loading cleanly, otherwise the refusal below cannot be
+	// told apart from a fixture whose value never reaches the decode at all.
+	if _, ok := mustLoad(t, dbs).GetAPICache("a.b"); !ok {
+		t.Fatal("expected the intact fixture to load its api_cache entry")
+	}
+
+	err := dbs.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte(helpers.StoreBucketAPICache))
+		if bucket == nil {
+			return errTestAPICacheBucketMissing
+		}
+		return bucket.Put([]byte("a.b"), []byte("{not-json"))
+	})
+	if err != nil {
+		t.Fatalf("failed to corrupt api_cache entry: %v", err)
+	}
+
+	_, err = Load(dbs)
+	// This guard is documentary rather than pinned: it exists so the two
+	// assertions below can call err.Error() at all. Neither dropping the
+	// bucket nor dropping the key from loadJSONBucket's format string reaches
+	// it, since both still return an error - the runs quoted below stop lower.
+	if err == nil {
+		t.Fatal("expected Load to reject a corrupt api_cache entry")
+	}
+	// Replacing loadJSONBucket's wrapped return with a bare `return err` stops
+	// here, and fails TestLoadRejectsCorruptResolvedEntry as well:
+	// expected error to name the bucket, got invalid character 'n' looking for beginning of object key string
+	//
+	// Dropping the bucket from that format string ("invalid entry %q: %w")
+	// stops here too, while TestLoadRejectsCorruptResolvedEntry keeps passing,
+	// since its own assertion is on the key alone:
+	// expected error to name the bucket, got invalid entry "a.b": invalid character 'n' looking for beginning of object key string
+	if !strings.Contains(err.Error(), helpers.StoreBucketAPICache) {
+		t.Fatalf("expected error to name the bucket, got %v", err)
+	}
+	// Dropping the key from that format string ("invalid %s entry: %w") leaves
+	// both assertions above satisfied and stops here, and it fails
+	// TestLoadRejectsCorruptResolvedEntry, whose sole assertion is the key:
+	// expected error to name the corrupt key, got invalid api_cache entry: invalid character 'n' looking for beginning of object key string
+	if !strings.Contains(err.Error(), "a.b") {
+		t.Fatalf("expected error to name the corrupt key, got %v", err)
 	}
 }
 

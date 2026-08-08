@@ -143,7 +143,7 @@ func New() *Store {
 // ninth map added to Store later cannot reopen this hole just by a call site
 // forgetting to guard it.
 //
-// The local Bolt path never needed this: loadBucket only ever populates an
+// The local Bolt path never needed this: loadJSONBucket only ever populates an
 // already-initialized map key by key and never assigns a whole map field, so
 // there is no decode step there that can replace a map with nil.
 func (s *Store) UnmarshalJSON(data []byte) error {
@@ -632,7 +632,7 @@ func (s *Store) SetMetaRequirements(hash, server string) {
 // so the design errs toward saving.
 //
 // A load never sets it, for the identical reason in both cases: store.Load's
-// loadBucket callbacks populate Store's map fields directly, key by key,
+// loadJSONBucket populates Store's map fields directly, key by key,
 // rather than through a setter, and UnmarshalJSON decodes straight onto the
 // struct the same way - so setting the flag from either path would make
 // every run against a backend that already holds a snapshot dirty on
@@ -973,14 +973,14 @@ func ValidateSchema(version int) error {
 // runLoadSteps reads the eight data buckets in the given transaction.
 func runLoadSteps(tx *bolt.Tx, store *Store) error {
 	steps := []func() error{
-		func() error { return loadAPICache(tx, store) },
-		func() error { return loadInstalled(tx, store) },
-		func() error { return loadDepsCache(tx, store) },
-		func() error { return loadGraph(tx, store) },
-		func() error { return loadRequirements(tx, store) },
-		func() error { return loadResolved(tx, store) },
-		func() error { return loadVersions(tx, store) },
-		func() error { return loadWarmed(tx, store) },
+		func() error { return loadJSONBucket(tx, helpers.StoreBucketAPICache, store.APICache) },
+		func() error { return loadJSONBucket(tx, helpers.StoreBucketInstalled, store.Installed) },
+		func() error { return loadJSONBucket(tx, helpers.StoreBucketDepsCache, store.DepsCache) },
+		func() error { return loadJSONBucket(tx, helpers.StoreBucketGraph, store.Graph) },
+		func() error { return loadJSONBucket(tx, helpers.StoreBucketRequirements, store.Requirements) },
+		func() error { return loadJSONBucket(tx, helpers.StoreBucketResolved, store.Resolved) },
+		func() error { return loadJSONBucket(tx, helpers.StoreBucketVersions, store.Versions) },
+		func() error { return loadJSONBucket(tx, helpers.StoreBucketWarmed, store.Warmed) },
 	}
 	for _, step := range steps {
 		if err := step(); err != nil {
@@ -1059,98 +1059,6 @@ func loadMeta(tx *bolt.Tx, store *Store) error {
 		store.Meta.Server = string(v)
 	}
 	return nil
-}
-
-func loadAPICache(tx *bolt.Tx, store *Store) error {
-	return loadBucket(tx, helpers.StoreBucketAPICache, func(k, v []byte) error {
-		var entry APICacheEntry
-		if err := json.Unmarshal(v, &entry); err != nil {
-			return err
-		}
-		store.APICache[string(k)] = entry
-		return nil
-	})
-}
-
-func loadInstalled(tx *bolt.Tx, store *Store) error {
-	return loadBucket(tx, helpers.StoreBucketInstalled, func(k, v []byte) error {
-		var entry InstalledEntry
-		if err := json.Unmarshal(v, &entry); err != nil {
-			return err
-		}
-		store.Installed[string(k)] = entry
-		return nil
-	})
-}
-
-func loadDepsCache(tx *bolt.Tx, store *Store) error {
-	return loadBucket(tx, helpers.StoreBucketDepsCache, func(k, v []byte) error {
-		var entry DepsCacheEntry
-		if err := json.Unmarshal(v, &entry); err != nil {
-			return err
-		}
-		store.DepsCache[string(k)] = entry
-		return nil
-	})
-}
-
-func loadGraph(tx *bolt.Tx, store *Store) error {
-	return loadBucket(tx, helpers.StoreBucketGraph, func(k, v []byte) error {
-		var deps []string
-		if err := json.Unmarshal(v, &deps); err != nil {
-			return err
-		}
-		store.Graph[string(k)] = deps
-		return nil
-	})
-}
-
-func loadRequirements(tx *bolt.Tx, store *Store) error {
-	return loadBucket(tx, helpers.StoreBucketRequirements, func(k, v []byte) error {
-		var spec RequirementSpec
-		if err := json.Unmarshal(v, &spec); err != nil {
-			return err
-		}
-		store.Requirements[string(k)] = spec
-		return nil
-	})
-}
-
-// loadResolved decodes the resolved bucket. Every current-schema value is
-// written by saveResolved as a JSON-encoded ResolvedEntry, so an unmarshal
-// failure means the value is genuinely corrupt: it is reported as an error
-// rather than silently coerced into a garbage version string.
-func loadResolved(tx *bolt.Tx, store *Store) error {
-	return loadBucket(tx, helpers.StoreBucketResolved, func(k, v []byte) error {
-		var entry ResolvedEntry
-		if err := json.Unmarshal(v, &entry); err != nil {
-			return fmt.Errorf("invalid resolved entry %q: %w", string(k), err)
-		}
-		store.Resolved[string(k)] = entry
-		return nil
-	})
-}
-
-func loadVersions(tx *bolt.Tx, store *Store) error {
-	return loadBucket(tx, helpers.StoreBucketVersions, func(k, v []byte) error {
-		var entry VersionsEntry
-		if err := json.Unmarshal(v, &entry); err != nil {
-			return err
-		}
-		store.Versions[string(k)] = entry
-		return nil
-	})
-}
-
-func loadWarmed(tx *bolt.Tx, store *Store) error {
-	return loadBucket(tx, helpers.StoreBucketWarmed, func(k, v []byte) error {
-		var entry WarmedEntry
-		if err := json.Unmarshal(v, &entry); err != nil {
-			return err
-		}
-		store.Warmed[string(k)] = entry
-		return nil
-	})
 }
 
 func saveMeta(tx *bolt.Tx, meta SnapshotMeta) error {
@@ -1252,6 +1160,37 @@ func loadBucket(tx *bolt.Tx, name string, fn func(k, v []byte) error) error {
 		return nil
 	}
 	return bucket.ForEach(fn)
+}
+
+// loadJSONBucket decodes every value in the named bucket as a JSON-encoded T
+// and stores it in dst under that entry's bucket key. A bucket that does not
+// exist is not an error; loadBucket above owns that contract.
+//
+// A value that does not decode is reported as an error rather than stored as a
+// zero T: every current-schema value is written as valid JSON by saveBucket, so
+// a decode failure means the stored bytes are genuinely corrupt, and coercing
+// them into a zero entry would hand a caller a garbage record it cannot tell
+// from a real one.
+//
+// The error names both the bucket and the key because a caller of Load
+// otherwise gets a bare encoding/json message identifying neither, leaving an
+// operator with a corrupt cache and nothing to look at. The key renders through
+// %q because it is a byte string read back from persisted cache state, so an
+// unprintable or empty key still renders unambiguously.
+//
+// The destination is the map rather than the *Store, so a decoded entry is
+// written into it directly and this function has no receiver through which to
+// reach a mutator - which is what leaves Store.Dirty false after a load (see
+// Store.Dirty, and TestDirtyIsFalseAfterEveryLoadPath for the pin).
+func loadJSONBucket[T any](tx *bolt.Tx, name string, dst map[string]T) error {
+	return loadBucket(tx, name, func(k, v []byte) error {
+		var entry T
+		if err := json.Unmarshal(v, &entry); err != nil {
+			return fmt.Errorf("invalid %s entry %q: %w", name, string(k), err)
+		}
+		dst[string(k)] = entry
+		return nil
+	})
 }
 
 // saveBucket writes data to a bucket using the encode callback, within the
