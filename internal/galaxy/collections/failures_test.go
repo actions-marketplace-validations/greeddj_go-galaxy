@@ -3,7 +3,7 @@ package collections
 // This file pins failureRecorder/failureSummary/summaryError's contract in
 // isolation, one layer below the end-to-end propagation covered in
 // failure_propagation_test.go. Each test below was verified against
-// the specific killing mutation named in its own doc comment, with the real
+// the specific killing mutation named in its own comment, with the real
 // observed failure output quoted:
 //
 //   - TestFailureRecorderIsConcurrencySafe: dropping the mutex in record
@@ -21,10 +21,10 @@ package collections
 //     position each frame carried is left out deliberately: it named a line
 //     of the mutated tree, which no longer exists for anyone to check the
 //     number against, whereas the function name stays checkable)
-//   - TestSummaryErrorRendersHeadlineOnly: changing wrap to
+//   - TestSummaryHeadlineCases's "install" row: changing wrap to
 //     `return errors.Join(headline, s.cause)` unconditionally (skipping the
-//     one-line *summaryError wrapper) makes the test fail with:
-//     "installError().Error() = \"installation failed for 3 collections\\ncause 0\\ncause 1\\ncause 2\",
+//     one-line *summaryError wrapper) makes that row fail with:
+//     "Error() = \"installation failed for 3 collections\\ncause 0\\ncause 1\\ncause 2\",
 //     want \"installation failed for 3 collections\""
 //   - TestFailureRecorderSummaryIsEmptyWhenNothingRecorded: pre-sizing causes
 //     with `make([]error, 0, 1)` in a zero-value recorder is not itself
@@ -134,94 +134,88 @@ func TestFailureRecorderIsConcurrencySafe(t *testing.T) {
 	}
 }
 
-// TestSummaryErrorRendersHeadlineOnly asserts installError's message stays
-// exactly the one-line headline - "installation failed for 3 collections",
-// with no cause text appended - while errors.Is still reaches
-// helpers.ErrInstallationFailed and every recorded cause through Unwrap. The
-// killing mutation is building wrap's non-nil-cause branch as
-// errors.Join(headline, s.cause) directly instead of through *summaryError:
-// see this file's header comment for the real observed message that
-// mutation produces.
-func TestSummaryErrorRendersHeadlineOnly(t *testing.T) {
-	t.Parallel()
-	var r failureRecorder
-	causes := []error{errTestCause0, errTestCause1, errTestCause2}
-	for _, c := range causes {
-		r.record(c)
-	}
+// summaryHeadlineCase is one table entry for TestSummaryHeadlineCases: the
+// causes a failureRecorder observes, the failureSummary method under test,
+// and the exact message and sentinel that method must produce.
+type summaryHeadlineCase struct {
+	name         string
+	build        func(s failureSummary) error
+	wantMsg      string
+	wantSentinel error
+	causes       []error
+}
 
-	summary := r.summary()
-	err := summary.installError()
-
-	const want = "installation failed for 3 collections"
-	if got := err.Error(); got != want {
-		t.Fatalf("installError().Error() = %q, want %q", got, want)
-	}
-	if !errors.Is(err, helpers.ErrInstallationFailed) {
-		t.Fatalf("expected errors.Is helpers.ErrInstallationFailed, got %v", err)
-	}
-	for i, c := range causes {
-		if !errors.Is(err, c) {
-			t.Fatalf("expected errors.Is causes[%d] = %v, got %v", i, c, err)
-		}
+// summaryHeadlineCases enumerates one row per failureSummary headline method,
+// each recording its own causes so a row's count is visible in the message it
+// demands.
+func summaryHeadlineCases() []summaryHeadlineCase {
+	return []summaryHeadlineCase{
+		{
+			// Asserts installError's message stays exactly the one-line
+			// headline - "installation failed for 3 collections", with no
+			// cause text appended - while errors.Is still reaches
+			// helpers.ErrInstallationFailed and every recorded cause through
+			// Unwrap. The killing mutation is building wrap's non-nil-cause
+			// branch as errors.Join(headline, s.cause) directly instead of
+			// through *summaryError: see this file's header comment for the
+			// real observed message that mutation produces.
+			name:         "install",
+			build:        func(s failureSummary) error { return s.installError() },
+			wantMsg:      "installation failed for 3 collections",
+			wantSentinel: helpers.ErrInstallationFailed,
+			causes:       []error{errTestCause0, errTestCause1, errTestCause2},
+		},
+		{
+			// Pins warmError's distinct headline wording, byte for byte,
+			// alongside the same one-line-message / full-cause-tree contract
+			// the "install" row above pins for installError.
+			name:         "warm",
+			build:        func(s failureSummary) error { return s.warmError() },
+			wantMsg:      "installation failed: warm failed for 2 collections",
+			wantSentinel: helpers.ErrInstallationFailed,
+			causes:       []error{errTestWarmCause0, errTestWarmCause1},
+		},
+		{
+			// Pins outdatedError's distinct headline wording, byte for byte,
+			// alongside the same one-line-message / full-cause-tree contract
+			// the "install" and "warm" rows above pin for installError and
+			// warmError.
+			name:         "outdated",
+			build:        func(s failureSummary) error { return s.outdatedError() },
+			wantMsg:      "latest version lookup failed for 2 collections",
+			wantSentinel: helpers.ErrLatestVersionLookupFailed,
+			causes:       []error{errTestOutdatedCause0, errTestOutdatedCause1},
+		},
 	}
 }
 
-// TestWarmErrorKeepsItsOwnHeadline pins warmError's distinct headline
-// wording, byte for byte, alongside the same one-line-message /
-// full-cause-tree contract TestSummaryErrorRendersHeadlineOnly pins for
-// installError.
-func TestWarmErrorKeepsItsOwnHeadline(t *testing.T) {
+// TestSummaryHeadlineCases drives every failureSummary headline method over
+// its own row: the message a method renders is its headline and nothing else,
+// while errors.Is still reaches both that method's sentinel and every cause
+// the recorder observed.
+func TestSummaryHeadlineCases(t *testing.T) {
 	t.Parallel()
-	var r failureRecorder
-	causes := []error{errTestWarmCause0, errTestWarmCause1}
-	for _, c := range causes {
-		r.record(c)
-	}
 
-	summary := r.summary()
-	err := summary.warmError()
-
-	const want = "installation failed: warm failed for 2 collections"
-	if got := err.Error(); got != want {
-		t.Fatalf("warmError().Error() = %q, want %q", got, want)
-	}
-	if !errors.Is(err, helpers.ErrInstallationFailed) {
-		t.Fatalf("expected errors.Is helpers.ErrInstallationFailed, got %v", err)
-	}
-	for i, c := range causes {
-		if !errors.Is(err, c) {
-			t.Fatalf("expected errors.Is causes[%d] = %v, got %v", i, c, err)
-		}
-	}
-}
-
-// TestOutdatedErrorKeepsItsOwnHeadline pins outdatedError's distinct
-// headline wording, byte for byte, alongside the same one-line-message /
-// full-cause-tree contract TestSummaryErrorRendersHeadlineOnly pins for
-// installError and TestWarmErrorKeepsItsOwnHeadline pins for warmError.
-func TestOutdatedErrorKeepsItsOwnHeadline(t *testing.T) {
-	t.Parallel()
-	var r failureRecorder
-	causes := []error{errTestOutdatedCause0, errTestOutdatedCause1}
-	for _, c := range causes {
-		r.record(c)
-	}
-
-	summary := r.summary()
-	err := summary.outdatedError()
-
-	const want = "latest version lookup failed for 2 collections"
-	if got := err.Error(); got != want {
-		t.Fatalf("outdatedError().Error() = %q, want %q", got, want)
-	}
-	if !errors.Is(err, helpers.ErrLatestVersionLookupFailed) {
-		t.Fatalf("expected errors.Is helpers.ErrLatestVersionLookupFailed, got %v", err)
-	}
-	for i, c := range causes {
-		if !errors.Is(err, c) {
-			t.Fatalf("expected errors.Is causes[%d] = %v, got %v", i, c, err)
-		}
+	for _, tc := range summaryHeadlineCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var r failureRecorder
+			for _, c := range tc.causes {
+				r.record(c)
+			}
+			err := tc.build(r.summary())
+			if got := err.Error(); got != tc.wantMsg {
+				t.Fatalf("Error() = %q, want %q", got, tc.wantMsg)
+			}
+			if !errors.Is(err, tc.wantSentinel) {
+				t.Fatalf("expected errors.Is %v, got %v", tc.wantSentinel, err)
+			}
+			for i, c := range tc.causes {
+				if !errors.Is(err, c) {
+					t.Fatalf("expected errors.Is causes[%d] = %v, got %v", i, c, err)
+				}
+			}
+		})
 	}
 }
 
