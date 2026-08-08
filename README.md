@@ -402,11 +402,19 @@ performs a full install rather than printing help.
   backoff sleep together, not per attempt - which is what actually bounds a slow-drip transfer. This
   ceiling also covers a cache-resident artifact fetched from an S3-backed cache, since that is a full
   artifact body transfer over HTTP too, not a cheap metadata check. An ordinary collection spends
-  this budget twice - once when the background prefetcher acquires it, once again when the install
-  worker acquires it - so the effective per-collection ceiling is 30 minutes. On a slow enough link
-  the collection fails closed with `artifact download deadline exceeded` and is not installed, rather
-  than hanging or completing arbitrarily late: a maximum-size (4 GiB) artifact needs roughly
-  38 Mbit/s sustained to finish inside the budget, while a real collection needs well under 1 Mbit/s.
+  this budget exactly once: whichever side actually acquires the artifact pays it alone, because the
+  other side never touches the network for that collection - either the background prefetcher
+  downloads ahead of the install worker and hands off the verified bytes, or, for an artifact that
+  was already cache-resident and was therefore never scheduled for prefetch at all, the install
+  worker acquires it itself. A second budget is spent only on a failure path: a failed prefetch
+  hands the worker nothing, so the worker's own fresh download pays a budget on top of the one the
+  failed prefetch already spent, and a cache-hit artifact that fails its pin/hash check or fails to
+  extract is evicted and refetched exactly once, spending a second budget for that same collection.
+  So 15 minutes bounds an ordinary collection, and 30 minutes bounds one that took a failure path.
+  On a slow enough link the collection fails closed with `artifact download deadline exceeded` and
+  is not installed, rather than hanging or completing arbitrarily late: a maximum-size (4 GiB)
+  artifact needs roughly 38 Mbit/s sustained to finish inside the budget, while a real collection
+  needs well under 1 Mbit/s.
   This ceiling is not configurable, unlike `--timeout` above: a knob on a safety ceiling is a knob an
   operator would raise in direct response to a truncation, which is exactly how the slow-drip attack
   this closes would succeed. A collection whose download stalls or drips fails that collection and the
