@@ -227,6 +227,16 @@ func (s *solveState) deriveOnce(term term, causeIdx int, changed map[string]bool
 // (derive the negation) or CONTRADICTED (nothing to derive - the backtrack
 // alone resolved it). Only INCONCLUSIVE, or exceeding the iteration cap,
 // signals a genuine defect.
+//
+// A defect reaching either of those two arms is still presented as a clean
+// resolution failure rather than as a panic or a run that never ends:
+// buildConflictError hands back whatever invariant violation the report walk
+// recorded, and a plain *ConflictError when it recorded none, so the caller
+// sees a run that did not resolve. That is deliberate for the CI consumer
+// this tool serves - a loud refusal costs a pipeline one red run, while a
+// panic or a hang costs it the diagnosis - and either arm ends the run in an
+// error rather than in an install of something the solver never proved.
+// TestNonConvergingConflictIsCleanFailure pins that presentation.
 func (s *solveState) resolveAndDerive(ctx context.Context, idx int, changed map[string]bool) error {
 	for guard := range 10_000 {
 		_ = guard

@@ -602,7 +602,12 @@ func fullExtBits(uni *packageUniverse) []uint64 {
 }
 
 // intersectExtAssignmentInto is intersectAssignmentInto's extended-universe
-// counterpart, used only by conflict resolution's satisfier search.
+// counterpart. Two consumers drive it, not one: conflict resolution's
+// satisfier search, which folds assignments into a throwaway running
+// intersection while it walks an incompatibility, and the partial solution's
+// own live running intersections, which it seeds when a package is first
+// materialized, extends as each further assignment is recorded, and replays
+// from scratch when a backtrack rebuilds them.
 func intersectExtAssignmentInto(running []uint64, t term, uni *packageUniverse) {
 	raw := rawExtBits(t.Set, uni)
 	if t.Positive {
