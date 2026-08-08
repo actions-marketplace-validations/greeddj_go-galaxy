@@ -3,7 +3,7 @@ package solver
 import (
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"testing"
 )
 
@@ -55,7 +55,7 @@ func fuzzDecodeGraph(data []byte) generatedGraph {
 		for k := 0; k < len(vpool) && len(vs) < vc; k++ {
 			vs = append(vs, vpool[(start+k)%len(vpool)])
 		}
-		sort.Strings(vs)
+		slices.Sort(vs)
 		g.versions[pkg] = vs
 
 		for _, v := range vs {

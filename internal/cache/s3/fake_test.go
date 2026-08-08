@@ -11,7 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -279,7 +279,7 @@ func (f *fakeS3) handleList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	f.mu.Unlock()
-	sort.Strings(keys)
+	slices.Sort(keys)
 
 	var body strings.Builder
 	body.WriteString(`<?xml version="1.0" encoding="UTF-8"?>`)

@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -74,7 +74,7 @@ func Outdated(ctx context.Context, cfg *config.Config, runtime *infra.Infra) err
 	// Sorted once, here, before both the report and the error build below, so
 	// the report's line order and the joined-cause order in the returned
 	// error agree with each other. reportOutdated itself mutates nothing.
-	sort.Slice(results, func(i, j int) bool { return results[i].Name < results[j].Name })
+	slices.SortFunc(results, func(a, b outdatedEntry) int { return strings.Compare(a.Name, b.Name) })
 
 	reportOutdated(runtime, results, lockPath)
 

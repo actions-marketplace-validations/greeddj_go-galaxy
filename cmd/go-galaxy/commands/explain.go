@@ -7,7 +7,7 @@ import (
 	"io"
 	"os"
 	"slices"
-	"sort"
+	"strings"
 
 	"github.com/greeddj/go-galaxy/cmd/go-galaxy/cliflags"
 	"github.com/greeddj/go-galaxy/internal/galaxy/lockfile"
@@ -104,7 +104,7 @@ func printRequiredBy(w io.Writer, target string, rdeps []lockfile.Entry, roots m
 	if roots[target] {
 		_, _ = fmt.Fprintln(w, "    - "+requirementsYAML+" (root)")
 	}
-	sort.Slice(rdeps, func(i, j int) bool { return rdeps[i].Name < rdeps[j].Name })
+	slices.SortFunc(rdeps, func(a, b lockfile.Entry) int { return strings.Compare(a.Name, b.Name) })
 	for _, r := range rdeps {
 		_, _ = fmt.Fprintf(w, "    - %s %s\n", r.Name, r.Version)
 	}
@@ -119,7 +119,7 @@ func printDepends(w io.Writer, entry lockfile.Entry) {
 	}
 	deps := make([]string, len(entry.Deps))
 	copy(deps, entry.Deps)
-	sort.Strings(deps)
+	slices.Sort(deps)
 	_, _ = fmt.Fprintln(w, "  depends on:")
 	for _, d := range deps {
 		_, _ = fmt.Fprintf(w, "    - %s\n", d)

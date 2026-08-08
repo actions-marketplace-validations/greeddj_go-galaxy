@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 	"github.com/greeddj/go-galaxy/internal/galaxy/lockfile"
+	"github.com/greeddj/go-galaxy/internal/testing/fakegalaxy"
 )
 
 // errTestBoom stands in for a lookup failure's cause in
@@ -238,6 +240,68 @@ func TestReportOutdatedTiers(t *testing.T) {
 	for _, c := range calls {
 		if c.tier == "Printf" {
 			t.Errorf("reportOutdated must never use the transient Printf tier, got %+v", c)
+		}
+	}
+}
+
+// TestOutdatedReportsInNameOrder pins the direction of the comparison
+// Outdated sorts its results with, which no other test in this package
+// reaches: TestReportOutdatedTiers hands reportOutdated an already-ordered
+// slice, so it exercises the report and never the sort ahead of it.
+//
+// The lockfile lists the three collections in an order that is neither
+// ascending nor descending, and queryLatestVersions fills its result slice by
+// lockfile index, so the sort is the only thing between that order and the
+// report. Workers is 1 deliberately: with a parallel pool the incoming order
+// would be nondeterministic, which would let a run pass by luck rather than
+// by the sort.
+//
+// KILLING MUTATION, run for real: swapping the comparison to
+// strings.Compare(b.Name, a.Name) fails this test on the loop below, with
+// `report line 0 = "Up to date: acme.gamma@1.0.0", want a line for
+// acme.alpha` - never on the length check above it, which a reordering
+// leaves satisfied. Reverting the argument order made it pass again.
+func TestOutdatedReportsInNameOrder(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	reqPath := filepath.Join(dir, "requirements.yml")
+
+	srv := fakegalaxy.New(t)
+	names := []string{"alpha", "beta", "gamma"}
+	entries := make([]lockfile.Entry, 0, len(names))
+	// Appended gamma, alpha, beta on purpose - see the doc comment above.
+	for _, i := range []int{2, 0, 1} {
+		srv.AddVersion("acme", names[i], "1.0.0", nil)
+		entries = append(entries, lockfile.Entry{
+			Name:    "acme." + names[i],
+			Version: "1.0.0",
+			Source:  srv.URL(),
+		})
+	}
+	mustWriteFile(t, reqPath, []byte("collections: []\n"))
+	if err := lockfile.Save(lockfile.ResolveDefaultPath(reqPath, ""), &lockfile.File{
+		SchemaVersion: lockfile.SchemaVersion,
+		Server:        srv.URL(),
+		Collections:   entries,
+	}); err != nil {
+		t.Fatalf("save lockfile: %v", err)
+	}
+
+	printer := &capturingPrinter{}
+	cfg := &config.Config{Server: srv.URL(), RequirementsFile: reqPath, Workers: 1}
+	if err := Outdated(context.Background(), cfg, infra.New(printer, srv.Client())); err != nil {
+		t.Fatalf("Outdated: err = %v, want nil", err)
+	}
+
+	// Every collection is at its latest version, so each lands on the Okf tier
+	// and the summary line lands elsewhere - leaving oks holding exactly the
+	// per-collection lines, in report order.
+	if len(printer.oks) != len(names) {
+		t.Fatalf("recorded %d up-to-date lines, want %d: %v", len(printer.oks), len(names), printer.oks)
+	}
+	for i, name := range names {
+		if !strings.Contains(printer.oks[i], "acme."+name) {
+			t.Fatalf("report line %d = %q, want a line for acme.%s", i, printer.oks[i], name)
 		}
 	}
 }

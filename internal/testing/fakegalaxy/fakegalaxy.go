@@ -25,7 +25,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -979,9 +979,7 @@ func sortedVersionKeys(versions map[string]*fakeVersionEntry) []string {
 	for v := range versions {
 		keys = append(keys, v)
 	}
-	sort.Slice(keys, func(i, j int) bool {
-		return compareDottedVersions(keys[i], keys[j]) < 0
-	})
+	slices.SortFunc(keys, compareDottedVersions)
 	return keys
 }
 

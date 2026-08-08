@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 
@@ -59,7 +59,7 @@ func generateGraph(seed int64, n, maxVersions int) generatedGraph {
 		for _, j := range perm[:1+rng.Intn(maxVersions)] {
 			vs = append(vs, vpool[j])
 		}
-		sort.Strings(vs)
+		slices.Sort(vs)
 		g.versions[pkg] = vs
 		for _, v := range vs {
 			dm := make(map[string]string)

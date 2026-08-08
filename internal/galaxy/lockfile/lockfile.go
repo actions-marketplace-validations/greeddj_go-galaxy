@@ -13,7 +13,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
+	"strings"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"go.yaml.in/yaml/v3"
@@ -267,10 +268,10 @@ func canonicalize(f *File) {
 	if f.SchemaVersion == 0 {
 		f.SchemaVersion = SchemaVersion
 	}
-	sort.Slice(f.Collections, func(i, j int) bool {
-		return f.Collections[i].Name < f.Collections[j].Name
+	slices.SortFunc(f.Collections, func(a, b Entry) int {
+		return strings.Compare(a.Name, b.Name)
 	})
 	for i := range f.Collections {
-		sort.Strings(f.Collections[i].Deps)
+		slices.Sort(f.Collections[i].Deps)
 	}
 }

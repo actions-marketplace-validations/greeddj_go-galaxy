@@ -1,8 +1,10 @@
 package collections
 
 import (
+	"cmp"
 	"context"
-	"sort"
+	"slices"
+	"strings"
 	"sync"
 
 	"github.com/psvmcc/hub/pkg/types"
@@ -94,12 +96,12 @@ func buildLevelIndex(levels [][]string) map[string]int {
 // cannot happen while collections and levels derive from the same graph -
 // therefore just defaults to level 0 and is fetched early, which is harmless.
 func sortTasksByLevel(tasks []collection, levelIndex map[string]int) {
-	sort.Slice(tasks, func(i, j int) bool {
-		ki, kj := tasks[i].key(), tasks[j].key()
-		if li, lj := levelIndex[ki], levelIndex[kj]; li != lj {
-			return li < lj
+	slices.SortFunc(tasks, func(a, b collection) int {
+		ka, kb := a.key(), b.key()
+		if c := cmp.Compare(levelIndex[ka], levelIndex[kb]); c != 0 {
+			return c
 		}
-		return ki < kj
+		return strings.Compare(ka, kb)
 	})
 }
 

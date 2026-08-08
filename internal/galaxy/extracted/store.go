@@ -25,7 +25,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 
@@ -383,7 +383,7 @@ func (s *Store) SweepPlan(keep map[string]bool) ([]string, error) {
 		}
 		planned = append(planned, name)
 	}
-	sort.Strings(planned)
+	slices.Sort(planned)
 	return planned, nil
 }
 

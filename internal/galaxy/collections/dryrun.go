@@ -7,7 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 
@@ -158,7 +158,7 @@ func classifyDryRun(
 	for key := range collections {
 		keys = append(keys, key)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 
 	// probe can cost a real Meta() round trip on the S3 backend
 	// (dryRunArtifactMeta) and, for install, a full filepath.WalkDir tally

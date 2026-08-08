@@ -2,7 +2,7 @@ package collections
 
 import (
 	"errors"
-	"sort"
+	"slices"
 	"testing"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
@@ -66,11 +66,14 @@ func unsortedLevelGraph() map[string][]string {
 // iteration order is randomized per run: a single iteration passing against
 // an unsorted implementation would not reliably catch a regression.
 //
-// KILLING MUTATION, run for real: deleting the "sort.Strings(current)" line
-// from topologicalLevels fails this test on the very first iteration. Real
-// output: "iteration 0: levels[0] = [m.m@1.0.0 b.b@1.0.0 y.y@1.0.0 c.c@1.0.0
-// z.z@1.0.0 a.a@1.0.0], want [a.a@1.0.0 b.b@1.0.0 c.c@1.0.0 m.m@1.0.0
-// y.y@1.0.0 z.z@1.0.0]".
+// KILLING MUTATION, run for real: deleting the "slices.Sort(current)" line
+// from topologicalLevels fails this test on the very first iteration, and on
+// the element loop rather than the length check - the mutation permutes the
+// level, it never changes what is in it. One run's output: "iteration 0:
+// levels[0] = [a.a@1.0.0 m.m@1.0.0 b.b@1.0.0 y.y@1.0.0 c.c@1.0.0 z.z@1.0.0],
+// want [a.a@1.0.0 b.b@1.0.0 c.c@1.0.0 m.m@1.0.0 y.y@1.0.0 z.z@1.0.0]". Only
+// one run's, because the permutation is map-iteration order, randomized per
+// run; which assertion fires is not, for the reason above.
 func TestInstallLevelsAreSortedWithinLevel(t *testing.T) {
 	t.Parallel()
 	graph := unsortedLevelGraph()
@@ -171,8 +174,8 @@ func assertLevel(t *testing.T, got []string, want []string) {
 	}
 	gotCopy := append([]string(nil), got...)
 	wantCopy := append([]string(nil), want...)
-	sort.Strings(gotCopy)
-	sort.Strings(wantCopy)
+	slices.Sort(gotCopy)
+	slices.Sort(wantCopy)
 	for i := range gotCopy {
 		if gotCopy[i] != wantCopy[i] {
 			t.Fatalf("expected %v, got %v", want, got)

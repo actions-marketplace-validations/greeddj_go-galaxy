@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"sort"
+	"slices"
 
 	"github.com/greeddj/go-galaxy/cmd/go-galaxy/cliflags"
 	"github.com/greeddj/go-galaxy/internal/galaxy/lockfile"
@@ -74,7 +74,7 @@ func printTree(w io.Writer, reqPath string, lf *lockfile.File, roots []string) {
 	}
 	sortedRoots := make([]string, len(roots))
 	copy(sortedRoots, roots)
-	sort.Strings(sortedRoots)
+	slices.Sort(sortedRoots)
 
 	_, _ = fmt.Fprintln(w, reqPath)
 	for i, root := range sortedRoots {
@@ -104,7 +104,7 @@ func walkTree(w io.Writer, by map[string]lockfile.Entry, fqdn, prefix string, is
 
 	deps := make([]string, len(entry.Deps))
 	copy(deps, entry.Deps)
-	sort.Strings(deps)
+	slices.Sort(deps)
 	for i, dep := range deps {
 		walkTree(w, by, dep, prefix+cont, i == len(deps)-1, seen)
 	}

@@ -59,7 +59,7 @@ func TestClassifyDryRunSortedOrder(t *testing.T) {
 	cols := make(map[string]collection, keyCount)
 	want := make([]string, keyCount)
 	for i := range keyCount {
-		// Zero-padded so lexicographic (sort.Strings) order equals the
+		// Zero-padded so lexicographic (slices.Sort) order equals the
 		// generated numeric order, letting want be built in one straight
 		// pass rather than pre-sorted by hand.
 		name := fmt.Sprintf("c%02d", i)

@@ -72,6 +72,56 @@ func TestPrintExplainRequiredByAndDepends(t *testing.T) {
 	}
 }
 
+// TestPrintExplainRequiredByIsNameSorted pins the direction of
+// printRequiredBy's comparison, which nothing else in this package asserts:
+// every other fixture here has at most one reverse dependency, so a reversed
+// comparison would order a one-element slice indistinguishably from a correct
+// one and pass unnoticed.
+//
+// The lockfile lists the three parents in an order that is neither ascending
+// nor descending, so the assertion cannot be satisfied by the input order
+// surviving unsorted either. Line positions are compared rather than a
+// rendered block, so the check states the ordering property itself instead of
+// re-encoding the surrounding layout.
+//
+// KILLING MUTATION, run for real: swapping printRequiredBy's comparison to
+// strings.Compare(b.Name, a.Name) fails this test with "required by lists
+// ns.beta at 58 and ns.alpha at 78; want ns.alpha before ns.beta, got:" and
+// the whole rendered report. Reverting the argument order made it pass again.
+func TestPrintExplainRequiredByIsNameSorted(t *testing.T) {
+	t.Parallel()
+	lf := &lockfile.File{
+		SchemaVersion: lockfile.SchemaVersion,
+		Collections: []lockfile.Entry{
+			{Name: "ns.gamma", Version: "3.0.0", Deps: []string{"ns.target"}},
+			{Name: "ns.alpha", Version: "1.0.0", Deps: []string{"ns.target"}},
+			{Name: "ns.beta", Version: "2.0.0", Deps: []string{"ns.target"}},
+			{Name: "ns.target", Version: "9.0.0"},
+		},
+	}
+
+	var buf strings.Builder
+	if err := printExplain(&buf, lf, "ns.target", map[string]bool{}); err != nil {
+		t.Fatalf("printExplain() error = %v, want nil", err)
+	}
+	out := buf.String()
+
+	// Ascending by name means ascending by first byte offset in the output.
+	for _, pair := range [][2]string{
+		{"ns.alpha", "ns.beta"},
+		{"ns.beta", "ns.gamma"},
+	} {
+		before, after := strings.Index(out, pair[0]), strings.Index(out, pair[1])
+		if before == -1 || after == -1 {
+			t.Fatalf("required by is missing %q (at %d) or %q (at %d), got:\n%s", pair[0], before, pair[1], after, out)
+		}
+		if before > after {
+			t.Fatalf("required by lists %s at %d and %s at %d; want %s before %s, got:\n%s",
+				pair[1], after, pair[0], before, pair[0], pair[1], out)
+		}
+	}
+}
+
 // TestPrintExplainNotFound checks that a target absent from the lockfile
 // returns errExplainNotFound rather than printing anything misleading.
 func TestPrintExplainNotFound(t *testing.T) {

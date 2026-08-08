@@ -14,7 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -1057,7 +1057,7 @@ func canonicalizeHeaders(host string, headers http.Header) (string, string) {
 	for name := range entries {
 		names = append(names, name)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 
 	var canonical strings.Builder
 	for _, name := range names {
@@ -1091,11 +1091,11 @@ func canonicalizeQuery(values url.Values) string {
 	for key := range values {
 		keys = append(keys, key)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 	pairs := make([]string, 0, len(values))
 	for _, key := range keys {
 		vals := values[key]
-		sort.Strings(vals)
+		slices.Sort(vals)
 		for _, value := range vals {
 			pairs = append(pairs, awsEncode(key)+"="+awsEncode(value))
 		}

@@ -2,7 +2,6 @@ package lockfile
 
 import (
 	"slices"
-	"sort"
 	"strings"
 )
 
@@ -149,7 +148,7 @@ func unionSortedNames(beforeIdx, afterIdx map[string]Entry) []string {
 			names = append(names, name)
 		}
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	return names
 }
 
@@ -237,8 +236,8 @@ func sameDeps(a, b []string) bool {
 	}
 	ac := slices.Clone(a)
 	bc := slices.Clone(b)
-	sort.Strings(ac)
-	sort.Strings(bc)
+	slices.Sort(ac)
+	slices.Sort(bc)
 	return slices.Equal(ac, bc)
 }
 
@@ -252,6 +251,6 @@ func renderDeps(deps []string) string {
 		return ""
 	}
 	sorted := slices.Clone(deps)
-	sort.Strings(sorted)
+	slices.Sort(sorted)
 	return strings.Join(sorted, ",")
 }

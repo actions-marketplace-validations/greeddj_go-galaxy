@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -1720,7 +1720,7 @@ func manifestJSON(ns, name, version string, deps map[string]string) string {
 		for depFQDN := range deps {
 			keys = append(keys, depFQDN)
 		}
-		sort.Strings(keys)
+		slices.Sort(keys)
 		pairs := make([]string, 0, len(deps))
 		for _, depFQDN := range keys {
 			pairs = append(pairs, fmt.Sprintf("%q: %q", depFQDN, deps[depFQDN]))
@@ -1986,9 +1986,9 @@ func assertSelectedKeys(t *testing.T, got []installedCollection, want ...string)
 	for _, item := range got {
 		gotKeys = append(gotKeys, item.Key)
 	}
-	sort.Strings(gotKeys)
+	slices.Sort(gotKeys)
 	wantSorted := append([]string(nil), want...)
-	sort.Strings(wantSorted)
+	slices.Sort(wantSorted)
 	if len(gotKeys) != len(wantSorted) {
 		t.Fatalf("selected keys = %v, want %v", gotKeys, wantSorted)
 	}

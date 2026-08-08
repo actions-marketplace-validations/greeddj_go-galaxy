@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"maps"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/Masterminds/semver/v3"
@@ -493,7 +493,7 @@ func normalizeSignatures(signatures []string) []string {
 	if len(out) == 0 {
 		return nil
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }
 
@@ -950,7 +950,7 @@ func requirementsSignatureFromSpec(spec map[string]requirementSpec, noDeps bool,
 		signatureKey := strings.Join(normalizeSignatures(entry.Signatures), ",")
 		parts = append(parts, fmt.Sprintf("%s|%s|%s|%s|%s", fqdn, constraint, entry.Source, entry.Type, signatureKey))
 	}
-	sort.Strings(parts)
+	slices.Sort(parts)
 	header := fmt.Sprintf("no-deps=%t\nservers=%s", noDeps, serversSig)
 	sum := sha256.Sum256([]byte(header + "\n" + strings.Join(parts, "\n")))
 	return hex.EncodeToString(sum[:])
@@ -1171,7 +1171,7 @@ func topologicalLevels(indegree map[string]int, reverse map[string][]string) ([]
 	levels := make([][]string, 0, len(indegree))
 	remaining := len(indegree)
 	for len(current) > 0 {
-		sort.Strings(current)
+		slices.Sort(current)
 		levels = append(levels, current)
 		remaining -= len(current)
 		next := make([]string, 0, len(current))
