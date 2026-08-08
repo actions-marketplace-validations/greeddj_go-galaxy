@@ -12,15 +12,6 @@ import (
 // cache-backend classes the S3 backend already speaks, so one operator
 // mistake produces one exit code regardless of which backend was configured.
 //
-// Until this existed, the local backend classified only contention -
-// helpers.ErrAnotherInstanceIsRunning from the instance lock and
-// helpers.ErrCacheBusy from a Bolt open timeout, both exit 8 - and returned
-// every other filesystem failure bare. Measured before the change: a cache
-// directory the process cannot write to exits 1, where the S3 backend against
-// a store it cannot reach exits 4. The taxonomy those classes belong to
-// describes a kind of failure, not a kind of backend, and a CI branching on
-// the exit code does not know which backend the run used.
-//
 // The split is deliberately two-way rather than per-errno, because a table of
 // error numbers is a second rule shape nobody would keep current:
 //

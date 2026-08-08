@@ -1211,21 +1211,18 @@ func TestLockDryRunSkipsMetricsAndSaysSo(t *testing.T) {
 }
 
 // TestLockDryRunRefusesAHostileBaselineAndSaysSo proves lock's --dry-run
-// preview no longer renders an adversarial baseline lockfile - it never loads
-// one. A lockfile entry whose name is not <namespace>.<name> in the alphabet
+// preview renders no adversarial baseline lockfile - it never loads one. A
+// lockfile entry whose name is not <namespace>.<name> in the alphabet
 // a Galaxy server itself accepts is refused by lockfile.Load, and
 // lockDryRunBaseline's documented policy takes over from there: warn on
 // stderr, then report every collection as added, exactly as it does for any
 // other baseline it cannot read.
 //
-// This test previously asserted the opposite - that the hostile name survived
-// a real YAML round trip and was printed, sanitized, into the report. That
-// was the repository's earlier answer to where this boundary belongs, and it
-// is the answer this change replaces: rendering a forged line is the harm,
-// and the printer's sanitization deliberately keeps "\n" so it cannot be the
-// thing that prevents it. The printer boundary is untouched and still covers
-// what no name alphabet can reach - a server's error text, a filesystem path,
-// a manifest.
+// Refusing such a name is where this boundary belongs, rather than rendering
+// it safely: printing a forged line is the harm, and the printer's
+// sanitization deliberately keeps "\n" so it cannot be the thing that
+// prevents it. That printer boundary still covers what no name alphabet can
+// reach - a server's error text, a filesystem path, a manifest.
 //
 // Assertion (1) is what keeps this a production-path test rather than a
 // lockfile unit test wearing this file's name: the refusal is observed
