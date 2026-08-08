@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	cacheManager "github.com/greeddj/go-galaxy/internal/galaxy/cache"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
@@ -20,12 +19,10 @@ func Warm(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
 	return runWarm(ctx, cfg, runtime)
 }
 
-// runWarm owns the backend lifecycle for the warm command: it rejects
-// --no-cache first, before anything is opened, then opens the backend, takes
-// its exclusive lock, and registers the release/close defers that must run
-// on every exit path - including one from warmWithState, which owns the
-// actual work once state is initialized. This is the same lifecycle/work
-// boundary runInstall already draws around prepareInstallPlan.
+// runWarm drives the warm command through the backend lifecycle every
+// collection command shares (see withBackend, which owns that lifecycle and
+// the lock-loss verdict), with warmWithState as its work half. The one thing
+// warm adds is its own refusal of --no-cache, made ahead of that lifecycle.
 func runWarm(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
 	// warm's entire output IS cache state: with --no-cache, initInstall would
 	// build a nil extract store and every download would be thrown away
@@ -34,29 +31,7 @@ func runWarm(ctx context.Context, cfg *config.Config, runtime *infra.Infra) erro
 	if cfg.NoCache {
 		return helpers.ErrWarmCacheDisabled
 	}
-	runtime.Output.Printf("🔥 Warming caches")
-	start := time.Now()
-	lockCtx, state, err := initInstall(ctx, cfg, runtime)
-	if err != nil {
-		return cacheManager.LockLostError(ctx, lockCtx, err)
-	}
-	defer func() {
-		if state.release != nil {
-			if err := state.release(); err != nil {
-				runtime.Output.Errorf("lock release: %v", err)
-			}
-		}
-	}()
-	defer func() {
-		_ = state.backend.Close(ctx)
-	}()
-
-	// The work runs under lockCtx and its outcome is judged against lockCtx,
-	// as a direct expression rather than a defer: this function returns the
-	// work's outcome from one place, so there is nothing a defer would buy,
-	// and a named return value would be needed to make one work at all. See
-	// runInstall for the full rationale behind this shape.
-	return cacheManager.LockLostError(ctx, lockCtx, warmWithState(lockCtx, cfg, runtime, state, start))
+	return withBackend(ctx, cfg, runtime, "🔥 Warming caches", warmWithState)
 }
 
 // warmWithState performs warm's actual work against an already-initialized

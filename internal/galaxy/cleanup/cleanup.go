@@ -194,31 +194,65 @@ func initCleanup(ctx context.Context, cfg *config.Config, runtime *infra.Infra) 
 	if err := backend.Open(ctx); err != nil {
 		return nil, nil, err
 	}
+	// One unwind covering every failure path from here on, in place of a
+	// hand-written pair at each of them, exactly as collections.initInstall
+	// does it: a return added later between the Lock below and the commit at
+	// the end gives back whatever this function had already taken, by
+	// construction rather than by the author having remembered to.
+	//
+	// Registered after a successful Open, deliberately: an Open that failed
+	// closes nothing today, and this unwind keeps that property rather than
+	// quietly changing it.
+	var releaseLock func() error
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		unwindBackend(ctx, backend, releaseLock)
+	}()
+
 	lockCtx, releaseLock, err := backend.Lock(ctx)
 	if err != nil {
-		_ = backend.Close(ctx)
 		return nil, nil, err
 	}
 	runtime.Output.Printf("🚀 load storage")
 	st, err := backend.LoadStore(lockCtx)
 	if err != nil {
-		_ = releaseLock()
-		_ = backend.Close(ctx)
 		return lockCtx, nil, err
 	}
 	runtime.Output.Printf("🚀 load projects registry")
 	registry, err := backend.LoadProjectRegistry(lockCtx)
 	if err != nil {
-		_ = releaseLock()
-		_ = backend.Close(ctx)
 		return lockCtx, nil, err
 	}
+	committed = true
 	return lockCtx, &cleanupState{
 		backend:  backend,
 		store:    st,
 		registry: registry,
 		release:  releaseLock,
 	}, nil
+}
+
+// unwindBackend gives back what initCleanup had already taken when it fails
+// after the backend was opened: the exclusive lock first, when one was
+// granted, and the backend itself second. It is a local twin of
+// collections.unwindBackend rather than something both packages import: the
+// two lifecycles they belong to are not interchangeable (runCleanup keeps a
+// defensive nil-state guard and a nil-backend check its collections
+// counterpart has no use for), and one shared helper would invite unifying
+// those too.
+//
+// releaseLock is nil when backend.Lock is what failed: there is no lock to
+// give back then, only the backend to close. Every failure of both calls is
+// swallowed on purpose - this runs while a run is already failing, and the
+// error it is failing with is the one the operator needs.
+func unwindBackend(ctx context.Context, backend cacheManager.Backend, releaseLock func() error) {
+	if releaseLock != nil {
+		_ = releaseLock()
+	}
+	_ = backend.Close(ctx)
 }
 
 func finalizeCleanup(

@@ -20,55 +20,12 @@ func Start(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error 
 	return runInstall(ctx, cfg, runtime)
 }
 
-// runInstall owns the backend lifecycle for the install command: it opens
-// the backend, takes its exclusive lock, and registers the release/close
-// defers that must run on every exit path - including one from
-// installWithState, which owns the actual work once state is initialized.
-// This is what makes the save/metrics tail reachable from a test with an
-// already-initialized state and no production seam.
-//
-// It also owns the lock-loss verdict for this command. lockCtx is the
-// backend's holder context (see cacheManager.Backend's Lock contract): every
-// piece of real work runs under it, so a run whose lock is stolen mid-flight
-// stops rather than continuing to install, commit, and persist
-// non-exclusively, and both the init error and the work's own return are
-// judged against it through cacheManager.LockLostError.
-//
-// "Stops" has a granularity, and it is one unit of work per worker - the same
-// shape runCleanup states for its own loops. A collection whose artifact
-// bytes are already in hand finishes extracting into the collections tree,
-// since neither the untar nor the extracted store's rename is interruptible.
-// What does stop is every write to the shared cache: on the S3 backend, the
-// only one whose lock can be taken away, the artifact commit and the tail
-// SaveStore both run under this context and fail once it ends.
-//
-// Judging through LockLostError is a direct expression rather than a defer
-// for two reasons: nonamedreturns is enabled, so a defer would need a named
-// return this function does not have, and both call sites are single returns
-// where a defer buys nothing anyway. The release defers are deliberately left
-// alone: releasing and closing must happen regardless of the verdict, and the
-// lock-loss error a release closure returns stays a logged line rather than
-// becoming the run's error, since by then the verdict has already been made
-// from the same fact.
+// runInstall drives the install command through the backend lifecycle every
+// collection command shares (see withBackend, which owns that lifecycle and
+// the lock-loss verdict), with installWithState as its work half. install
+// adds nothing of its own ahead of it.
 func runInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
-	runtime.Output.Printf("🚀 Starting installation process")
-	start := time.Now()
-	lockCtx, state, err := initInstall(ctx, cfg, runtime)
-	if err != nil {
-		return cacheManager.LockLostError(ctx, lockCtx, err)
-	}
-	defer func() {
-		if state.release != nil {
-			if err := state.release(); err != nil {
-				runtime.Output.Errorf("lock release: %v", err)
-			}
-		}
-	}()
-	defer func() {
-		_ = state.backend.Close(ctx)
-	}()
-
-	return cacheManager.LockLostError(ctx, lockCtx, installWithState(lockCtx, cfg, runtime, state, start))
+	return withBackend(ctx, cfg, runtime, "🚀 Starting installation process", installWithState)
 }
 
 // installWithState performs install's actual work against an

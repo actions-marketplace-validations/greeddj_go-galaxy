@@ -30,6 +30,68 @@ type installPlan struct {
 	levels      [][]string
 }
 
+// stateWork is the work half of a collection command's lifecycle/work split:
+// it runs against an already-initialized installState and never touches the
+// backend lifecycle itself - not state.release, not state.backend.Close.
+type stateWork func(ctx context.Context, cfg *config.Config, runtime *infra.Infra, state *installState, start time.Time) error
+
+// withBackend owns the backend lifecycle every collection command shares: it
+// opens the backend, takes its exclusive lock, and registers the release and
+// close defers that must run on every exit path - including one from work,
+// which owns the actual work once state is initialized. That split is what
+// makes each command's save/metrics tail reachable from a test holding an
+// already-initialized state, with no production seam.
+//
+// It also owns the lock-loss verdict. lockCtx is the backend's holder context
+// (see cacheManager.Backend's Lock contract): every piece of real work runs
+// under it, so a run whose lock is stolen mid-flight stops rather than
+// continuing to install, commit, and persist non-exclusively, and both the
+// init error and the work's own return are judged against it through
+// cacheManager.LockLostError. The Close defer keeps the caller's own ctx
+// instead, since it must still run once ownership is gone.
+//
+// "Stops" has a granularity, and on the two commands that have workers it is
+// one unit of work per worker - the same shape runCleanup states for its own
+// loops. A collection whose artifact bytes are already in hand finishes
+// extracting into the collections tree, since neither the untar nor the
+// extracted store's rename is interruptible. What does stop is every write to
+// the shared cache: on the S3 backend, the only one whose lock can be taken
+// away, an artifact commit and the tail SaveStore both run under this context
+// and fail once it ends.
+//
+// Judging through LockLostError is a direct expression rather than a defer
+// for two reasons: nonamedreturns is enabled, so a defer would need a named
+// return this function does not have, and both call sites are single returns
+// where a defer buys nothing anyway. The release defers are deliberately left
+// alone: releasing and closing must happen regardless of the verdict, and the
+// lock-loss error a release closure returns stays a logged line rather than
+// becoming the run's error, since by then the verdict has already been made
+// from the same fact.
+//
+// banner is passed through a constant format string rather than used as one:
+// go vet's printf check refuses a non-constant format, and every caller hands
+// a plain percent-free announcement here rather than something to expand.
+func withBackend(ctx context.Context, cfg *config.Config, runtime *infra.Infra, banner string, work stateWork) error {
+	runtime.Output.Printf("%s", banner)
+	start := time.Now()
+	lockCtx, state, err := initInstall(ctx, cfg, runtime)
+	if err != nil {
+		return cacheManager.LockLostError(ctx, lockCtx, err)
+	}
+	defer func() {
+		if state.release != nil {
+			if err := state.release(); err != nil {
+				runtime.Output.Errorf("lock release: %v", err)
+			}
+		}
+	}()
+	defer func() {
+		_ = state.backend.Close(ctx)
+	}()
+
+	return cacheManager.LockLostError(ctx, lockCtx, work(lockCtx, cfg, runtime, state, start))
+}
+
 // initInstall is the single function every collection command that can be in
 // dry-run mode must pass through, so emitting dryRunBanner here makes "no
 // command is in dry-run mode silently" a structural property rather than a
@@ -98,9 +160,26 @@ func initInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) 
 	if err := backend.Open(ctx); err != nil {
 		return nil, nil, err
 	}
+	// One unwind covering every failure path from here on, in place of a
+	// hand-written pair at each of them: a return added later between the
+	// Lock below and the commit at the end gives back whatever this function
+	// had already taken, by construction rather than by the author having
+	// remembered to.
+	//
+	// Registered after a successful Open, deliberately: an Open that failed
+	// closes nothing today, and this unwind keeps that property rather than
+	// quietly changing it.
+	var releaseLock func() error
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		unwindBackend(ctx, backend, releaseLock)
+	}()
+
 	lockCtx, releaseLock, err := backend.Lock(ctx)
 	if err != nil {
-		_ = backend.Close(ctx)
 		return nil, nil, err
 	}
 
@@ -114,24 +193,40 @@ func initInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) 
 	runtime.Output.Printf("🚀 load storage")
 	st, err := backend.LoadStore(lockCtx)
 	if err != nil {
-		_ = releaseLock()
-		_ = backend.Close(ctx)
 		return lockCtx, nil, err
 	}
 	runtime.Output.DebugSincef(snapshotStart, "%s", "load snapshot")
 	if err := clearCacheIfRequested(lockCtx, cfg, runtime, backend, st); err != nil {
-		_ = releaseLock()
-		_ = backend.Close(ctx)
 		return lockCtx, nil, err
 	}
 	recordProjectUnlessDryRun(lockCtx, cfg, runtime, backend)
 
+	committed = true
 	return lockCtx, &installState{
 		backend:      backend,
 		store:        st,
 		release:      releaseLock,
 		extractStore: extractStore,
 	}, nil
+}
+
+// unwindBackend gives back what initInstall had already taken when it fails
+// after the backend was opened: the exclusive lock first, when one was
+// granted, and the backend itself second. That order is the one the
+// hand-written pairs at each failure arm used, and it is deliberately the
+// reverse of the order withBackend's own two defers unwind in - both are kept
+// as they are, since unifying them is a decision about observable behavior
+// rather than about removing duplication.
+//
+// releaseLock is nil when backend.Lock is what failed: there is no lock to
+// give back then, only the backend to close. Every failure of both calls is
+// swallowed on purpose - this runs while a run is already failing, and the
+// error it is failing with is the one the operator needs.
+func unwindBackend(ctx context.Context, backend cacheManager.Backend, releaseLock func() error) {
+	if releaseLock != nil {
+		_ = releaseLock()
+	}
+	_ = backend.Close(ctx)
 }
 
 // clearCacheIfRequested honors --clear-cache by wiping the in-memory caches

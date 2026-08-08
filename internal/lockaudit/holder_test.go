@@ -22,16 +22,45 @@ type holderCase struct {
 
 // holderCases is the whole table, built by a function rather than declared as
 // a package-level var so it needs no gochecknoglobals exemption. It is closed
-// on purpose: these four are every command that takes the backend's exclusive
-// lock and then does work under it. A fifth such command added later must be
-// added here too - nothing detects its absence, which is the one gap this
-// gate cannot close from the inside.
+// on purpose: these two are every function that takes the backend's exclusive
+// lock and then does work under it. A third one added later must be added
+// here too - nothing detects its absence, which is the one gap this gate
+// cannot close from the inside.
+//
+// withBackend covers install, warm and lock at once, since all three reach
+// their lifecycle through it and none keeps one of its own - which is not
+// something this table can see, and is why delegateCases below is a second
+// closed table rather than a comment. cleanup is audited separately because
+// its own lifecycle genuinely differs (a defensive nil-state guard, and a
+// nil-backend check inside the close defer), so it is not a candidate for
+// that funnel.
 func holderCases() []holderCase {
 	return []holderCase{
+		{file: "internal/galaxy/collections/run.go", fn: "withBackend", work: "work"},
+		{file: "internal/galaxy/cleanup/cleanup.go", fn: "runCleanup", work: "cleanupWithState"},
+	}
+}
+
+// delegateCase is one row of the second closed table: the file holding a
+// collection command's entry function, that function's own name, and the work
+// function it must hand to withBackend.
+type delegateCase struct {
+	file string
+	fn   string
+	work string
+}
+
+// delegateCases is that whole table, and it is what keeps the audit's reach
+// unchanged now that one funnel stands in for three lifecycles. Auditing
+// withBackend alone proves the funnel is correct, never that a command still
+// goes through it: a command that quietly took a lifecycle of its own again
+// would be invisible to holderCases, which is exactly the passing no-op shape
+// this package refuses elsewhere.
+func delegateCases() []delegateCase {
+	return []delegateCase{
 		{file: "internal/galaxy/collections/install_command.go", fn: "runInstall", work: "installWithState"},
 		{file: "internal/galaxy/collections/warm_command.go", fn: "runWarm", work: "warmWithState"},
 		{file: "internal/galaxy/collections/lock_command.go", fn: "runLock", work: "lockWithState"},
-		{file: "internal/galaxy/cleanup/cleanup.go", fn: "runCleanup", work: "cleanupWithState"},
 	}
 }
 
@@ -66,6 +95,143 @@ func TestHolderContextIsThreadedAndJudged(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCollectionCommandsDelegateTheirLifecycle is the second half of the
+// gate. For each row: the function exists, it hands its own work function to
+// exactly one withBackend call, and it takes no backend lifecycle of its own.
+func TestCollectionCommandsDelegateTheirLifecycle(t *testing.T) {
+	t.Parallel()
+
+	root := moduleRoot(t)
+	for _, tc := range delegateCases() {
+		t.Run(tc.fn, func(t *testing.T) {
+			t.Parallel()
+
+			fset := token.NewFileSet()
+			path := filepath.Join(root, filepath.FromSlash(tc.file))
+			file := parseGoFile(t, fset, path)
+
+			// Same anti-vacuity check the holder half makes, for the same
+			// reason: a renamed command must fail this gate, not vanish
+			// from it.
+			fn := findFunc(file, tc.fn)
+			if fn == nil {
+				t.Fatalf("%s holds no function %s; this gate names it and cannot audit what it cannot find", tc.file, tc.fn)
+			}
+			if problems := auditDelegation(fn, tc.work); len(problems) > 0 {
+				t.Fatalf("%s: %s does not delegate its backend lifecycle:\n\t%s",
+					tc.file, tc.fn, strings.Join(problems, "\n\t"))
+			}
+		})
+	}
+}
+
+// delegateFixtureCase is one row of TestAuditReportsALifecycleTakenOutsideTheFunnel:
+// the body under audit and whether the audit must report it.
+type delegateFixtureCase struct {
+	name        string
+	body        string
+	wantProblem bool
+}
+
+// delegateFixtureCases returns the two departures the delegation half exists
+// to catch, plus the control that proves it can accept. The first negative is
+// a command that re-inlined its own lifecycle - the exact regression that
+// would otherwise slip past holderCases now that it names withBackend rather
+// than each command. The second is a command that reaches the funnel but
+// hands it somebody else's work function, which would run the wrong work
+// under a perfectly threaded holder context.
+func delegateFixtureCases() []delegateFixtureCase {
+	return []delegateFixtureCase{
+		{
+			name:        "the command took a backend lifecycle of its own",
+			body:        "\tholder, state, err := initInstall(ctx, cfg)\n\t_ = holder\n\t_ = state\n\treturn err",
+			wantProblem: true,
+		},
+		{
+			name:        "the command hands the funnel a different work function",
+			body:        `	return withBackend(ctx, cfg, runtime, "banner", otherWithState)`,
+			wantProblem: true,
+		},
+		{
+			name:        "the correct shape",
+			body:        `	return withBackend(ctx, cfg, runtime, "banner", workWithState)`,
+			wantProblem: false,
+		},
+	}
+}
+
+// TestAuditReportsALifecycleTakenOutsideTheFunnel runs the delegation
+// predicate against synthetic sources, so each departure is produced in
+// isolation without mutating the tree under test.
+func TestAuditReportsALifecycleTakenOutsideTheFunnel(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range delegateFixtureCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			problems := auditDelegationFixture(t, tc.body)
+			if tc.wantProblem && len(problems) == 0 {
+				t.Fatalf("the audit accepted a fixture it must report")
+			}
+			if !tc.wantProblem && len(problems) != 0 {
+				t.Fatalf("the audit reported the correct shape: %v", problems)
+			}
+		})
+	}
+}
+
+// auditDelegationFixture parses one in-memory command function and audits its
+// delegation, so a control states only the departure it is about.
+func auditDelegationFixture(t *testing.T, body string) []string {
+	t.Helper()
+
+	source := fmt.Sprintf("package fixture\n\nfunc runWork(ctx context.Context, cfg *config.Config) error {\n%s\n}\n", body)
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "fixture.go", source, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parsing fixture: %v", err)
+	}
+	fn := findFunc(file, "runWork")
+	if fn == nil {
+		t.Fatalf("fixture holds no runWork")
+	}
+	return auditDelegation(fn, "workWithState")
+}
+
+// auditDelegation reports every way fn departs from delegating its backend
+// lifecycle: it must call withBackend exactly once, hand it work as the work
+// half, and take no lifecycle of its own by calling initInstall directly.
+//
+// The first check bails out rather than accumulates, for the same reason
+// auditHolder's do: the argument check below is phrased in terms of the call
+// this one resolved.
+func auditDelegation(fn *ast.FuncDecl, work string) []string {
+	calls := collectCalls(fn, "withBackend")
+	if len(calls) != 1 {
+		return []string{fmt.Sprintf("holds %d calls to withBackend, want exactly 1", len(calls))}
+	}
+
+	var problems []string
+	if !lastArgIs(calls[0], work) {
+		problems = append(problems, fmt.Sprintf(
+			"withBackend is not handed %s as its work half, so this command's lifecycle would run somebody else's work", work))
+	}
+	if len(collectInitAssignments(fn)) > 0 {
+		problems = append(problems,
+			"this command takes a backend lifecycle of its own instead of going through withBackend, so nothing audits its holder context")
+	}
+	return problems
+}
+
+// lastArgIs reports whether call's final argument is the identifier name. The
+// work half is withBackend's last parameter, and naming it positionally from
+// the end keeps this check indifferent to a banner or a config argument
+// moving.
+func lastArgIs(call *ast.CallExpr, name string) bool {
+	return len(call.Args) > 0 && isIdent(call.Args[len(call.Args)-1], name)
 }
 
 // holderFixtureCase is one row of TestAuditReportsAMisthreadedLifecycle: the

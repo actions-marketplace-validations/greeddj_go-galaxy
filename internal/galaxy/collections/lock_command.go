@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	cacheManager "github.com/greeddj/go-galaxy/internal/galaxy/cache"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
@@ -19,44 +18,25 @@ func Lock(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
 	return runLock(ctx, cfg, runtime)
 }
 
-// runLock owns the backend lifecycle for the lock command: it opens the
-// backend, takes its exclusive lock, and registers the release/close defers
-// that must run on every exit path - including one from lockWithState, which
-// owns the actual work once state is initialized. Same lifecycle/work
-// boundary runInstall and runWarm already draw.
+// runLock drives the lock command through the backend lifecycle every
+// collection command shares (see withBackend, which owns that lifecycle and
+// the lock-loss verdict), with lockWithState as its work half. lock adds
+// nothing of its own ahead of it.
+//
+// --frozen is registered on lock because it shares helpers.CollectionFlags
+// with install and warm, and on lock it means something coherent with what it
+// means on those two: the lockfile is law. install/warm --frozen resolve FROM
+// the lockfile instead of the network; lock --frozen instead resolves fresh
+// (lockWithState always does, --frozen or not) and refuses to overwrite the
+// file when that fresh resolve disagrees with what is already there - see
+// lockFrozen's own doc comment for the gate itself. The banner below names
+// only the one thing every run does regardless of mode - resolve - rather
+// than what happens to the result, which is exactly where "Checking" and
+// "Generating" diverge: a plain run overwrites the file, a frozen one only
+// compares against it, and a single banner cannot truthfully claim either
+// without branching on cfg.Frozen.
 func runLock(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
-	// --frozen is registered on lock because it shares helpers.CollectionFlags
-	// with install and warm, and on lock it means something coherent with
-	// what it means on those two: the lockfile is law. install/warm --frozen
-	// resolve FROM the lockfile instead of the network; lock --frozen instead
-	// resolves fresh (lockWithState always does, --frozen or not) and refuses
-	// to overwrite the file when that fresh resolve disagrees with what is
-	// already there - see lockFrozen's own doc comment for the gate itself.
-	// The banner names only the one thing every run does regardless of mode -
-	// resolve - rather than what happens to the result, which is exactly
-	// where "Checking" and "Generating" diverge: a plain run overwrites the
-	// file, a frozen one only compares against it, and a single banner cannot
-	// truthfully claim either without branching on cfg.Frozen.
-	runtime.Output.Printf("🔒 Resolving for lockfile")
-	start := time.Now()
-	lockCtx, state, err := initInstall(ctx, cfg, runtime)
-	if err != nil {
-		return cacheManager.LockLostError(ctx, lockCtx, err)
-	}
-	defer func() {
-		if state.release != nil {
-			if err := state.release(); err != nil {
-				runtime.Output.Errorf("lock release: %v", err)
-			}
-		}
-	}()
-	defer func() {
-		_ = state.backend.Close(ctx)
-	}()
-
-	// Same shape as runInstall and runWarm: the work runs under lockCtx and
-	// its outcome is judged against lockCtx, as a direct expression.
-	return cacheManager.LockLostError(ctx, lockCtx, lockWithState(lockCtx, cfg, runtime, state, start))
+	return withBackend(ctx, cfg, runtime, "🔒 Resolving for lockfile", lockWithState)
 }
 
 // lockWithState performs lock's actual work against an already-initialized
