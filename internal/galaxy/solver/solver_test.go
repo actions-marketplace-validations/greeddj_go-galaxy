@@ -219,6 +219,50 @@ func TestTransitiveUnsatisfiableBacktrack(t *testing.T) {
 	}
 }
 
+// TestTransitiveUnknownPackageBacktrack is the neighbor above's
+// unknown-package twin, and it exists because one fixture cannot reach both
+// arms of isExternalLeaf. That test covers the causeNoVersions arm; every
+// other unknown-package test in this package pins an unsolvable graph, where
+// the error has to be a *ConflictError carrying a particular proof, so none
+// of them can tell whether the backjump exception is applied to a
+// causeUnknownPackage leaf at all. Here the graph is solvable:
+// acme.foo@2.0.0 depends on a package the provider has never heard of, so
+// conflict resolution has to merge through that leaf to reach the parent
+// version that required it, and settle on acme.foo@1.2.0. Solving at all is
+// this test's own positive control - a fixture that failed to solve would
+// prove nothing about which arm ran.
+//
+// KILLING MUTATION 1, run and reverted, narrowing isExternalLeaf's switch in
+// conflict.go to `case causeNoVersions:` alone:
+//
+//	solver_test.go:259: unexpected error: So, because acme.ghost has no published versions, version solving failed.
+//
+// That mutation was also run against the whole package, and this test is the
+// only one in it that fails - which is the measurement this test was written
+// for, since the arm is otherwise reachable but unpinned.
+//
+// KILLING MUTATION 2, run and reverted, dropping the exception altogether by
+// replacing shouldBackjump's body in conflict.go with `return
+// satisfier.isDecision() || prevLevel != satisfier.DecisionLevel`. It lands
+// on the same assertion with the same message, since removing the exception
+// and narrowing this leaf out of it leave the leaf on the same path:
+//
+//	solver_test.go:259: unexpected error: So, because acme.ghost has no published versions, version solving failed.
+func TestTransitiveUnknownPackageBacktrack(t *testing.T) {
+	t.Parallel()
+	const survivor = "1.2.0"
+	p := newFakeProvider().
+		withVersions("acme.foo", survivor, "2.0.0").
+		withDeps("acme.foo", "2.0.0", map[string]string{"acme.ghost": "^1.0.0"})
+	res, err := Solve(t.Context(), []Requirement{{Package: "acme.foo", Constraint: "*"}}, p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Versions["acme.foo"] != survivor {
+		t.Fatalf("Versions = %v, want acme.foo=%s", res.Versions, survivor)
+	}
+}
+
 // TestSolveStopsOnCanceledContext asserts Solve checks ctx for cancellation
 // ahead of the first unitPropagation call in its main loop, refusing to make
 // even one provider call once ctx is already canceled - and, as the
@@ -241,7 +285,7 @@ func TestSolveStopsOnCanceledContext(t *testing.T) {
 		// running `go test ./internal/galaxy/solver/ -run
 		// TestSolveStopsOnCanceledContext -race -v -count=1` makes this exact
 		// assertion fail with:
-		// "solver_test.go:247: Solve returned a non-nil result on an
+		// "solver_test.go:291: Solve returned a non-nil result on an
 		// already-canceled context: map[acme.foo:2.0.0]"
 		if res != nil {
 			t.Fatalf("Solve returned a non-nil result on an already-canceled context: %v", res.Versions)
