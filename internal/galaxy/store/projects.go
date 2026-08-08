@@ -38,9 +38,11 @@ func RecordProject(cacheDir, requirementsFile, downloadPath string) error {
 	if err != nil {
 		return err
 	}
-	if registry.Projects == nil {
-		registry.Projects = make(map[string]ProjectRecord)
-	}
+	// Defensive only and unreachable today: LoadProjectRegistry initializes
+	// Projects on every successful exit, so the write below already has a map
+	// to write into. It is kept so this function stands on its own rather than
+	// resting on that postcondition holding forever.
+	registry.Projects = ensureMap(registry.Projects)
 	registry.Projects[projectPath] = ProjectRecord{
 		RequirementsFile: absReq,
 		CollectionsPath:  collectionsPath,
@@ -56,6 +58,10 @@ func RecordProject(cacheDir, requirementsFile, downloadPath string) error {
 // compute which installed collections are still reachable, so an empty
 // registry would make it believe nothing is reachable and delete
 // everything.
+//
+// On every successful return Projects is non-nil, whether the file was
+// absent, decoded into entries, or decoded a projects key that was an
+// explicit JSON null.
 func LoadProjectRegistry(cacheDir string) (*ProjectRegistry, error) {
 	path := projectRegistryPath(cacheDir)
 	//nolint:gosec // path is derived from cacheDir and is intended for project registry IO.
@@ -71,9 +77,7 @@ func LoadProjectRegistry(cacheDir string) (*ProjectRegistry, error) {
 		return nil, fmt.Errorf("%w at %s: %w (remove the file or clear the cache to rebuild the registry)",
 			helpers.ErrCorruptProjectRegistry, path, err)
 	}
-	if registry.Projects == nil {
-		registry.Projects = make(map[string]ProjectRecord)
-	}
+	registry.Projects = ensureMap(registry.Projects)
 	return &registry, nil
 }
 

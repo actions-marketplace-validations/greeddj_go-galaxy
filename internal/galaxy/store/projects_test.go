@@ -63,6 +63,62 @@ func TestLoadProjectRegistryMissingFileReturnsEmpty(t *testing.T) {
 	}
 }
 
+// TestLoadProjectRegistryRestoresANullProjectsMap pins the loader's own
+// postcondition - on a successful return, Projects is never nil - against a
+// shape the missing-file branch never reaches: the file exists, decodes
+// cleanly, and carries an explicit JSON null under the projects key. Callers
+// read that map straight back from the load, cleanup's reachability pass
+// among them.
+//
+// Deleting the registry.Projects = ensureMap(registry.Projects) line from
+// LoadProjectRegistry fails the null subtest with:
+//
+//	expected an initialized registry, got &store.ProjectRegistry{Projects:map[string]store.ProjectRecord(nil)}
+//
+// The populated subtest keeps passing under that same mutation, and that is
+// its job: it proves the fixture reaches the decode at all rather than
+// tripping the missing-file branch TestLoadProjectRegistryMissingFileReturnsEmpty
+// already covers.
+func TestLoadProjectRegistryRestoresANullProjectsMap(t *testing.T) {
+	t.Parallel()
+
+	t.Run("explicit null projects map", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writeRegistryFile(t, dir, []byte(`{"projects": null}`))
+
+		registry, err := LoadProjectRegistry(dir)
+		if err != nil {
+			t.Fatalf("expected nil error for a null projects map, got %v", err)
+		}
+		if registry == nil || registry.Projects == nil {
+			t.Fatalf("expected an initialized registry, got %#v", registry)
+		}
+		if len(registry.Projects) != 0 {
+			t.Fatalf("expected no projects, got %#v", registry.Projects)
+		}
+	})
+
+	t.Run("populated projects map", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writeRegistryFile(t, dir, []byte(`{"projects": {"/p": {"requirements_file": "/p/requirements.yml", `+
+			`"collections_path": "/p/collections", "last_run": "2024-01-02T03:04:05Z"}}}`))
+
+		registry, err := LoadProjectRegistry(dir)
+		if err != nil {
+			t.Fatalf("expected nil error for a populated registry, got %v", err)
+		}
+		record, ok := registry.Projects["/p"]
+		if !ok {
+			t.Fatalf("expected an entry under /p, got %#v", registry.Projects)
+		}
+		if record.RequirementsFile != "/p/requirements.yml" {
+			t.Fatalf("expected the decoded requirements file, got %q", record.RequirementsFile)
+		}
+	})
+}
+
 // writeRegistryFile writes raw bytes at the project registry path under
 // dir, failing the test on error.
 func writeRegistryFile(t *testing.T, dir string, data []byte) {
