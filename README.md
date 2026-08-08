@@ -300,6 +300,19 @@ performs a full install rather than printing help.
 
 ### install options
 
+`warm`, `lock` and `outdated` take this entire set, not just `--dry-run`:
+`install`, `warm`, `lock` and `outdated` each register the identical collection
+flag set plus the S3 flags, on top of the four global options (`--verbose`,
+`--quiet`, `--dry-run`, `--cache-dir`) the root command declares once for every
+subcommand. A flag accepted by a command that has nothing to act on is
+accepted, not rejected - `outdated`, which opens no cache backend, warns on
+stderr about the cache-shaped flags rather than failing (see its entry under
+[Commands](#commands)). `cleanup` is the exception and takes only the four
+global options plus the S3 flags, listed separately under
+[cleanup options](#cleanup-options); `hash`, `tree` and `explain` take a
+two-flag set of their own, listed under
+[hash / tree / explain options](#hash--tree--explain-options).
+
 - `--verbose` - verbose output (`$GO_GALAXY_VERBOSE`)
 - `--quiet, -q` (`$GO_GALAXY_QUIET`) - suppress progress and log lines; results, warnings and
   errors still print. Ignored when `--verbose` is also set.
@@ -514,6 +527,21 @@ S3 cache options (if `--s3-bucket` is set, S3 backend is used):
 `cleanup`'s extracted-cache sweep keeps a collection warmed within the last 30 days even if no project currently installs it, so a `warm`-only machine does not lose the extracted trees it exists to produce; a warmed entry that goes stale (no warm run for 30 days) is swept like any other unreferenced entry.
 
 **Upgrade note:** this release bumps the cache snapshot schema, so the first `install`, `lock`, or `warm` run after upgrading rebuilds its metadata caches cold. If you run `cleanup` before that first run, it finds no persisted snapshot - the old one was dropped by the schema bump - so it skips the extracted-cache sweep entirely and leaves the snapshot untouched; the metadata caches still rebuild cold on the first `install`, `lock`, or `warm`.
+
+### hash / tree / explain options
+
+These three read-only commands take two flags of their own and none of the
+install set - they resolve nothing, open no cache backend, and make no request,
+so there is nothing for a worker count, a server or a cache flag to act on:
+
+- `--requirements-file, -r` (`$GO_GALAXY_REQUIREMENTS_FILE`,
+  `$ANSIBLE_GALAXY_REQUIREMENTS_FILE`)
+- `--lock-file` (`$GO_GALAXY_LOCK_FILE`) - defaults to `requirements.lock.yml`
+  beside the requirements file
+
+The four global options (`--verbose`, `--quiet`, `--dry-run`, `--cache-dir`)
+are still accepted, since the root command declares them for every subcommand,
+but none of the three has a write to suppress or a cache to place.
 
 ## requirements.yml
 
