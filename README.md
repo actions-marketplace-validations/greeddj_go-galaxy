@@ -1177,6 +1177,15 @@ it - not merely whether the flag was passed. `outdated` never honors
 `--frozen`, so its report always omits `frozen`, whatever the flag or
 `$GO_GALAXY_FROZEN` said.
 
+`offline` asks a different question than `frozen` does. It does not report
+whether anything was honored during the run: `--offline` (or
+`$GO_GALAXY_OFFLINE`) configures the HTTP transport for the whole command, so
+the field simply mirrors the flag as configured, identically for
+`install`/`warm`/`lock`/`outdated`. Like `frozen`, it carries `omitempty` and is
+therefore absent from the JSON whenever it is false - which is why the example
+above, an ordinary networked run, does not show it at all. A dashboard reading
+these reports should treat a missing `offline` as false rather than as unknown.
+
 `cache_hits`, `cache_misses`, and `bytes_downloaded` are artifact-level counters,
 not collection-level: a hit is one artifact served from the artifact cache and a
 miss is one artifact fetched from the origin, so `cache_hits + cache_misses`
