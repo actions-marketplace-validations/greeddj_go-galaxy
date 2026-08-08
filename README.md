@@ -139,6 +139,13 @@ name it explicitly, or tighten the directory's mode.
 | (the config file itself)           | `ANSIBLE_CONFIG`                                              |
 | (request timeout)                  | `ANSIBLE_GALAXY_SERVER_TIMEOUT`                               |
 
+`ANSIBLE_CONFIG` is the one row that is not a setting's environment override:
+it names the file the other rows are read from, and it is a discovery
+candidate rather than a strict source. A path in it that does not exist is
+skipped in favor of the next candidate, whereas `--ansible-config` and
+`$GO_GALAXY_ANSIBLE_CONFIG` name a file that has to be there - see
+[install options](#install-options) for the two behaviors side by side.
+
 One variable go-galaxy reads is deliberately absent from that table.
 `ANSIBLE_GALAXY_REQUIREMENTS_FILE` sits in ansible's namespace without being an
 ansible option: ansible-core declares no requirements-file setting, and
@@ -474,7 +481,13 @@ two-flag set of their own, listed under
 - `--download-path, -p` (`$GO_GALAXY_COLLECTIONS_PATH`, `$GO_GALAXY_DOWNLOAD_PATH`, `$ANSIBLE_COLLECTIONS_PATH`)
 - `--requirements-file, -r` (`$GO_GALAXY_REQUIREMENTS_FILE`, `$ANSIBLE_GALAXY_REQUIREMENTS_FILE` -
   a go-galaxy extension, not an ansible option)
-- `--ansible-config` (`$GO_GALAXY_ANSIBLE_CONFIG`, `$ANSIBLE_CONFIG`)
+- `--ansible-config` (`$GO_GALAXY_ANSIBLE_CONFIG`) - name an `ansible.cfg` explicitly. Both the
+  flag and that one variable are strict: the file has to be there, and a path that does not exist
+  is a usage error exiting `2`, never a silent fallback. `$ANSIBLE_CONFIG` is not a second source
+  for this flag and does not behave like one: it is the first candidate of ansible's own discovery
+  order (see [Configuration go-galaxy reads](#configuration-go-galaxy-reads) above), so a path that
+  does not exist there is not an error at all - discovery just moves on to `./ansible.cfg`,
+  `~/.ansible.cfg` and `/etc/ansible/ansible.cfg`, and finding none of them is fine too.
 - `--workers` (`$GO_GALAXY_WORKERS`) - number of concurrent workers; unset means one per CPU. A
   non-positive value is a usage error and exits `2`.
 - `--download-workers` (`$GO_GALAXY_DOWNLOAD_WORKERS`) - number of concurrent artifact downloads
