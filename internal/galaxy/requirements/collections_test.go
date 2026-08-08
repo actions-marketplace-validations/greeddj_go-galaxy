@@ -411,14 +411,24 @@ func TestParseCollectionsRejectsNamesOutsideTheAlphabet(t *testing.T) {
 	// Control on the same two shapes: the dotted form and the explicit form
 	// both parse when their identities are inside the alphabet, so neither
 	// rejection above is the shape itself being refused.
-	for _, input := range []string{"- name: acme.widgets\n", "- namespace: acme\n  name: widgets\n"} {
-		collections, _, err := ParseCollections([]byte(input), "https://default")
-		if err != nil {
-			t.Fatalf("ParseCollections(%q): %v", input, err)
-		}
-		if len(collections) != 1 || collections[0].Namespace != "acme" || collections[0].Name != "widgets" {
-			t.Fatalf("ParseCollections(%q) = %#v", input, collections)
-		}
+	controls := []struct {
+		name  string
+		input string
+	}{
+		{name: "dotted name", input: "- name: acme.widgets\n"},
+		{name: "explicit namespace, plain name", input: "- namespace: acme\n  name: widgets\n"},
+	}
+	for _, tc := range controls {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			collections, _, err := ParseCollections([]byte(tc.input), "https://default")
+			if err != nil {
+				t.Fatalf("ParseCollections(%q): %v", tc.input, err)
+			}
+			if len(collections) != 1 || collections[0].Namespace != "acme" || collections[0].Name != "widgets" {
+				t.Fatalf("ParseCollections(%q) = %#v", tc.input, collections)
+			}
+		})
 	}
 }
 

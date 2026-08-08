@@ -15,12 +15,17 @@ func TestArtifactKeyIsFlat(t *testing.T) {
 		"weird name/with spaces-1.0.0.tar.gz",
 	}
 	for _, filename := range cases {
-		key := ArtifactKey("https://galaxy.example.com", filename)
-		for _, r := range key {
-			if r == '/' {
-				t.Fatalf("ArtifactKey(%q) = %q, contains a %q", filename, key, "/")
+		t.Run(filename, func(t *testing.T) {
+			t.Parallel()
+			key := ArtifactKey("https://galaxy.example.com", filename)
+			// A plain inner loop: it scans the runes of one already-named
+			// case rather than iterating cases of its own.
+			for _, r := range key {
+				if r == '/' {
+					t.Fatalf("ArtifactKey(%q) = %q, contains a %q", filename, key, "/")
+				}
 			}
-		}
+		})
 	}
 }
 
@@ -72,19 +77,26 @@ func TestArtifactKeyFingerprintLength(t *testing.T) {
 // filenames that would themselves need percent-encoding.
 func TestIsScopedArtifactKeyRecognizesArtifactKeyOutput(t *testing.T) {
 	t.Parallel()
+	// Rows are named rather than derived from base or filename, for the reason
+	// the bases table above states: both carry "/", which a derived subtest name
+	// would render as extra nesting levels.
 	cases := []struct {
+		name     string
 		base     string
 		filename string
 	}{
-		{"https://galaxy.example.com", "ns-name-1.0.0.tar.gz"},
-		{"https://a.example.com/api", "acme-app-1.0.0.tar.gz"},
-		{"", "weird name/with spaces-1.0.0.tar.gz"},
+		{"server root", "https://galaxy.example.com", "ns-name-1.0.0.tar.gz"},
+		{"server with an api path", "https://a.example.com/api", "acme-app-1.0.0.tar.gz"},
+		{"empty base, filename needing encoding", "", "weird name/with spaces-1.0.0.tar.gz"},
 	}
 	for _, tc := range cases {
-		key := ArtifactKey(tc.base, tc.filename)
-		if !IsScopedArtifactKey(key) {
-			t.Fatalf("IsScopedArtifactKey(%q) = false, want true for ArtifactKey(%q, %q)'s own output", key, tc.base, tc.filename)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			key := ArtifactKey(tc.base, tc.filename)
+			if !IsScopedArtifactKey(key) {
+				t.Fatalf("IsScopedArtifactKey(%q) = false, want true for ArtifactKey(%q, %q)'s own output", key, tc.base, tc.filename)
+			}
+		})
 	}
 }
 
@@ -126,26 +138,36 @@ func TestScopedDepsCacheKeyNeverCollidesWithOldFormat(t *testing.T) {
 	t.Parallel()
 	oldFormatKey := "acme.widgets@1.0.0"
 
-	bases := []string{
-		"https://galaxy.example.com",
-		"https://galaxy.example.com/api/v3",
-		"",
+	// Each row carries a name of its own rather than being named by its base:
+	// one base is the empty string, which t.Run renders as a positional "#00"
+	// naming nothing, and the others contain "/", the character -run splits a
+	// subtest path on.
+	bases := []struct {
+		name string
+		base string
+	}{
+		{name: "server root", base: "https://galaxy.example.com"},
+		{name: "server with an api path", base: "https://galaxy.example.com/api/v3"},
+		{name: "empty base", base: ""},
 	}
-	for _, base := range bases {
-		got := ScopedDepsCacheKey(base, oldFormatKey)
-		if got == oldFormatKey {
-			t.Fatalf("ScopedDepsCacheKey(%q, %q) = %q, collides with the old-format key", base, oldFormatKey, got)
-		}
-		found := false
-		for _, r := range got {
-			if string(r) == DepsCacheKeySeparator {
-				found = true
-				break
+	for _, tc := range bases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ScopedDepsCacheKey(tc.base, oldFormatKey)
+			if got == oldFormatKey {
+				t.Fatalf("ScopedDepsCacheKey(%q, %q) = %q, collides with the old-format key", tc.base, oldFormatKey, got)
 			}
-		}
-		if !found {
-			t.Fatalf("ScopedDepsCacheKey(%q, %q) = %q, does not contain the %q separator", base, oldFormatKey, got, DepsCacheKeySeparator)
-		}
+			found := false
+			for _, r := range got {
+				if string(r) == DepsCacheKeySeparator {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("ScopedDepsCacheKey(%q, %q) = %q, does not contain the %q separator", tc.base, oldFormatKey, got, DepsCacheKeySeparator)
+			}
+		})
 	}
 }
 
