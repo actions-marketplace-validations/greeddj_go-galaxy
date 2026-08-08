@@ -1,4 +1,4 @@
-package helpers
+package cliflags
 
 import (
 	galaxyhelpers "github.com/greeddj/go-galaxy/internal/galaxy/helpers"
@@ -28,8 +28,4 @@ const (
 	// must not "restore parity" by deleting it - there is no parity to
 	// restore.
 	envRequirementsFileAnsible = "ANSIBLE_GALAXY_REQUIREMENTS_FILE"
-	// defaultVersion is used only when neither ldflags nor build info supply
-	// a version (e.g. a build without module/VCS info embedded).
-	defaultVersion = "unknown"
-	defaultBuilder = "go"
 )

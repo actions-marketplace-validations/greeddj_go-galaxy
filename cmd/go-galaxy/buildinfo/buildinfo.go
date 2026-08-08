@@ -1,9 +1,12 @@
-package helpers
+// Package buildinfo renders the version string the CLI reports for itself.
+// The Justfile's ldflags are the authoritative source; everything here exists
+// to keep a build without them - a plain `go build` or `go run` - reporting
+// something truthful, from the module and VCS metadata the toolchain already
+// embedded rather than from anywhere off the machine.
+package buildinfo
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"runtime"
 	"runtime/debug"
 )
@@ -72,13 +75,4 @@ func fillFromBuildInfo(version, commit, date string) (string, string, string) {
 		}
 	}
 	return version, commit, date
-}
-
-// defaultCacheDir returns the default cache directory path.
-func defaultCacheDir() string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return filepath.Join(defaultHomeDir, dirSuffix)
-	}
-	return filepath.Join(home, dirSuffix)
 }

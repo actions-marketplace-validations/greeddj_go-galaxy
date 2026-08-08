@@ -7,7 +7,7 @@ import (
 	"os"
 	"sort"
 
-	"github.com/greeddj/go-galaxy/cmd/go-galaxy/helpers"
+	"github.com/greeddj/go-galaxy/cmd/go-galaxy/cliflags"
 	"github.com/greeddj/go-galaxy/internal/galaxy/lockfile"
 	"github.com/greeddj/go-galaxy/internal/galaxy/requirements"
 	"github.com/greeddj/go-galaxy/internal/safeout"
@@ -27,7 +27,7 @@ func Tree() *cli.Command {
 		Name:    "tree",
 		Aliases: []string{"t"},
 		Usage:   "Print the resolved dependency tree from the lockfile",
-		Flags:   helpers.LockInspectFlags(),
+		Flags:   cliflags.LockInspectFlags(),
 		Action: func(_ context.Context, c *cli.Command) error {
 			reqPath := c.String("requirements-file")
 			lockPath := lockfile.ResolveDefaultPath(reqPath, c.String("lock-file"))

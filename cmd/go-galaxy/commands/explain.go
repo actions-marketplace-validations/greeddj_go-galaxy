@@ -9,7 +9,7 @@ import (
 	"slices"
 	"sort"
 
-	"github.com/greeddj/go-galaxy/cmd/go-galaxy/helpers"
+	"github.com/greeddj/go-galaxy/cmd/go-galaxy/cliflags"
 	"github.com/greeddj/go-galaxy/internal/galaxy/lockfile"
 	"github.com/greeddj/go-galaxy/internal/safeout"
 	"github.com/urfave/cli/v3"
@@ -30,7 +30,7 @@ func Explain() *cli.Command {
 		Aliases:   []string{"why"},
 		Usage:     "Explain why a collection was resolved to its locked version",
 		ArgsUsage: "<namespace.name>",
-		Flags:     helpers.LockInspectFlags(),
+		Flags:     cliflags.LockInspectFlags(),
 		Action: func(_ context.Context, c *cli.Command) error {
 			if c.NArg() < 1 {
 				return errExplainNoTarget

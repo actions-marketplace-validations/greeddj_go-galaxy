@@ -16,12 +16,12 @@ import (
 
 // testServerFlagDefault is the --server flag default used by every
 // newServerCmd-built command below; it stands in for
-// cmd/go-galaxy/helpers/flags.go's real defaultServerURL and only needs to
+// cmd/go-galaxy/cliflags/const.go's real defaultServerURL and only needs to
 // be distinguishable from the values under test.
 const testServerFlagDefault = "https://default.example"
 
 // newServerCmd builds a *cli.Command exposing the "server" and "token"
-// flags exactly as cmd/go-galaxy/helpers/flags.go defines them - server
+// flags exactly as cmd/go-galaxy/cliflags/flags.go defines them - server
 // defaulting to testServerFlagDefault and sourced from GO_GALAXY_SERVER and
 // ANSIBLE_GALAXY_SERVER, token with no default and sourced from
 // GO_GALAXY_TOKEN - so c.IsSet and c.String behave the same way they do for

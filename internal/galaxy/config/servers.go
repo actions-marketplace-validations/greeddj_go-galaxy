@@ -504,7 +504,7 @@ func envOrIni(id, key, iniValue string) string {
 // Hard-failing that command's config build over a field it never asked for
 // would violate the very contract this package already promises every
 // other unregistered flag; a real, flag-registering command's default is
-// never empty (see cmd/go-galaxy/helpers/flags.go's defaultServerURL), so
+// never empty (see cmd/go-galaxy/cliflags/const.go's defaultServerURL), so
 // this only ever fires for the "not registered at all" case in practice.
 func buildImplicitServer(rawURL string) (Server, error) {
 	if rawURL == "" {

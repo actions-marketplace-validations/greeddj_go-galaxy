@@ -212,7 +212,7 @@ func applyTimeout(cfg *Config, c *cli.Command) error {
 // and is skipped entirely, keeping the NumCPU fallback newConfigFromCLI
 // applies to its zero value. A command that does register the flag, with no
 // source filling it, reads runtime.NumCPU() from the flag's own Value rather
-// than 0 (see collectionBehaviorFlags in cmd/go-galaxy/helpers/flags.go), so
+// than 0 (see collectionBehaviorFlags in cmd/go-galaxy/cliflags/flags.go), so
 // n < 1 here is reachable only for a value some source genuinely supplied.
 //
 // The message names both the flag and the environment variable because

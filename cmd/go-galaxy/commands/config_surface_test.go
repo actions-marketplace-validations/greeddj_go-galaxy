@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/greeddj/go-galaxy/cmd/go-galaxy/helpers"
+	"github.com/greeddj/go-galaxy/cmd/go-galaxy/cliflags"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	galaxyhelpers "github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/urfave/cli/v3"
@@ -18,7 +18,7 @@ import (
 
 // buildConfigFor runs config.BuildCollectionConfig(c) through a two-level
 // *cli.Command tree mirroring main.go's real wiring: global flags on the
-// root app (helpers.CommonFlags), and subFlags on a single subcommand named
+// root app (cliflags.CommonFlags), and subFlags on a single subcommand named
 // sub. The subcommand's action does no I/O; it only captures
 // BuildCollectionConfig's result for the caller to assert on.
 func buildConfigFor(t *testing.T, sub string, subFlags []cli.Flag, args []string) (*config.Config, error) {
@@ -28,7 +28,7 @@ func buildConfigFor(t *testing.T, sub string, subFlags []cli.Flag, args []string
 	var gotErr error
 	app := &cli.Command{
 		Name:  "go-galaxy",
-		Flags: helpers.CommonFlags(),
+		Flags: cliflags.CommonFlags(),
 		Commands: []*cli.Command{
 			{
 				Name:  sub,
@@ -86,7 +86,7 @@ func TestCleanupConfigSurface(t *testing.T) {
 
 	t.Run("local cache", func(t *testing.T) {
 		args := []string{"--cache-dir=" + cacheDir, "--dry-run"}
-		cfg, err := buildConfigFor(t, "cleanup", helpers.S3Flags(), args)
+		cfg, err := buildConfigFor(t, "cleanup", cliflags.S3Flags(), args)
 		if err != nil {
 			t.Fatalf("BuildCollectionConfig() error = %v, want nil", err)
 		}
@@ -105,7 +105,7 @@ func TestCleanupConfigSurface(t *testing.T) {
 			"--s3-access-key=k",
 			"--s3-secret-key=s",
 		}
-		cfg, err := buildConfigFor(t, "cleanup", helpers.S3Flags(), args)
+		cfg, err := buildConfigFor(t, "cleanup", cliflags.S3Flags(), args)
 		if err != nil {
 			t.Fatalf("BuildCollectionConfig() error = %v, want nil", err)
 		}
@@ -124,7 +124,7 @@ func TestCollectionCommandConfigSurface(t *testing.T) {
 	neutralizeAnsibleDiscovery(t)
 	cacheDir := t.TempDir()
 
-	flags := append(helpers.CollectionFlags(), helpers.S3Flags()...)
+	flags := append(cliflags.CollectionFlags(), cliflags.S3Flags()...)
 	args := []string{
 		"--server=https://explicit.example",
 		"--download-path=/explicit/collections",
@@ -196,7 +196,7 @@ func serverIDs(cfg *config.Config) []string {
 // "the list survived" cannot be the fixture failing to collapse anything.
 //
 // KILLING MUTATION, run and reverted: restoring ANSIBLE_GALAXY_SERVER to the
-// server flag's Sources in cmd/go-galaxy/helpers/flags.go. The first row fails:
+// server flag's Sources in cmd/go-galaxy/cliflags/flags.go. The first row fails:
 //
 //	config_surface_test.go:212: server ids = [], want [hub pub]
 func TestAnsibleGalaxyServerDoesNotCollapseServerList(t *testing.T) {
@@ -204,7 +204,7 @@ func TestAnsibleGalaxyServerDoesNotCollapseServerList(t *testing.T) {
 		ansibleCfgWithServerList(t)
 		t.Setenv("ANSIBLE_GALAXY_SERVER", "https://forced.example/")
 
-		cfg, err := buildConfigFor(t, "install", helpers.CollectionFlags(), nil)
+		cfg, err := buildConfigFor(t, "install", cliflags.CollectionFlags(), nil)
 		if err != nil {
 			t.Fatalf("BuildCollectionConfig() error = %v, want nil", err)
 		}
@@ -217,7 +217,7 @@ func TestAnsibleGalaxyServerDoesNotCollapseServerList(t *testing.T) {
 		ansibleCfgWithServerList(t)
 		t.Setenv("GO_GALAXY_SERVER", "https://forced.example/")
 
-		cfg, err := buildConfigFor(t, "install", helpers.CollectionFlags(), nil)
+		cfg, err := buildConfigFor(t, "install", cliflags.CollectionFlags(), nil)
 		if err != nil {
 			t.Fatalf("BuildCollectionConfig() error = %v, want nil", err)
 		}
@@ -229,7 +229,7 @@ func TestAnsibleGalaxyServerDoesNotCollapseServerList(t *testing.T) {
 	t.Run("the flag still collapses it", func(t *testing.T) {
 		ansibleCfgWithServerList(t)
 
-		cfg, err := buildConfigFor(t, "install", helpers.CollectionFlags(), []string{"--server=https://forced.example/"})
+		cfg, err := buildConfigFor(t, "install", cliflags.CollectionFlags(), []string{"--server=https://forced.example/"})
 		if err != nil {
 			t.Fatalf("BuildCollectionConfig() error = %v, want nil", err)
 		}
@@ -243,7 +243,7 @@ func TestAnsibleGalaxyServerDoesNotCollapseServerList(t *testing.T) {
 // a row below asserts on can only have arrived through an env source.
 func aliasCfg(t *testing.T) *config.Config {
 	t.Helper()
-	cfg, err := buildConfigFor(t, "install", helpers.CollectionFlags(), nil)
+	cfg, err := buildConfigFor(t, "install", cliflags.CollectionFlags(), nil)
 	if err != nil {
 		t.Fatalf("BuildCollectionConfig() error = %v, want nil", err)
 	}
@@ -254,7 +254,7 @@ func aliasCfg(t *testing.T) *config.Config {
 // only two flags that lacked one: --timeout and --download-path, whose env
 // names were taken from ansible's own variables rather than derived from the
 // flag name. Each now accepts the flag-name-shaped spelling in second
-// position, so the convention every other flag in cmd/go-galaxy/helpers
+// position, so the convention every other flag in cmd/go-galaxy/cliflags
 // follows has no exception, while the name that shipped first keeps the
 // precedence it already had.
 //
@@ -279,7 +279,7 @@ func aliasCfg(t *testing.T) *config.Config {
 // and no ansible.cfg key feeds --timeout - applyTimeout reads it directly.
 //
 // KILLING MUTATIONS, all run and reverted, all on the Sources chains of the
-// timeout and download-path flags in cmd/go-galaxy/helpers. Quoted under
+// timeout and download-path flags in cmd/go-galaxy/cliflags. Quoted under
 // TMPDIR=/tmp, which keeps the longest line here at 139 columns against
 // lll's 140; the digits t.TempDir() appends differ on every run.
 //
@@ -374,7 +374,7 @@ func TestFlagNameEnvAliases(t *testing.T) {
 // mistaken for a promotion: go-galaxy's own name still wins.
 //
 // KILLING MUTATION, run and reverted, on the requirements-file Sources chain
-// in cmd/go-galaxy/helpers - drop envRequirementsFileAnsible from it, which is
+// in cmd/go-galaxy/cliflags - drop envRequirementsFileAnsible from it, which is
 // exactly the "restore parity" edit this test exists to stop:
 //
 //	config_surface_test.go:400: RequirementsFile = requirements.yml, want /from-ansible.yml
@@ -420,7 +420,7 @@ type workersEnvRow struct {
 }
 
 // TestWorkersEnvShapes pins how each GO_GALAXY_WORKERS shape resolves, driven
-// through the real helpers.CollectionFlags() rather than a hand-copied flag -
+// through the real cliflags.CollectionFlags() rather than a hand-copied flag -
 // which is the whole reason this test exists alongside TestApplyWorkers
 // (internal/galaxy/config), whose fixture builds its own --workers flag and so
 // can only pin the predicate, never the production flag's fields.
@@ -440,7 +440,7 @@ type workersEnvRow struct {
 // KILLING MUTATIONS, all run and reverted.
 //
 // M2, `Value: runtime.NumCPU()` deleted from the workers IntFlag in
-// cmd/go-galaxy/helpers. Only the empty-value row fails - the other three
+// cmd/go-galaxy/cliflags. Only the empty-value row fails - the other three
 // survive, and that selectivity is the point: the field is what turns a
 // declared-but-empty variable into the default rather than into a zero this
 // tool now refuses:
@@ -476,7 +476,7 @@ func TestWorkersEnvShapes(t *testing.T) {
 			neutralizeAnsibleDiscovery(t)
 			t.Setenv("GO_GALAXY_WORKERS", row.value)
 
-			cfg, err := buildConfigFor(t, "install", helpers.CollectionFlags(), nil)
+			cfg, err := buildConfigFor(t, "install", cliflags.CollectionFlags(), nil)
 			if row.wantErr {
 				if !errors.Is(err, galaxyhelpers.ErrInvalidWorkers) {
 					t.Fatalf("config error = %v, want %v", err, galaxyhelpers.ErrInvalidWorkers)

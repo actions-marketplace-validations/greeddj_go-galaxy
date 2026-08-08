@@ -3,7 +3,7 @@ package commands
 import (
 	"context"
 
-	"github.com/greeddj/go-galaxy/cmd/go-galaxy/helpers"
+	"github.com/greeddj/go-galaxy/cmd/go-galaxy/cliflags"
 	"github.com/greeddj/go-galaxy/internal/galaxy/collections"
 	"github.com/urfave/cli/v3"
 )
@@ -11,8 +11,8 @@ import (
 // Outdated returns the CLI command that lists collections in the lockfile
 // whose latest available Galaxy version differs from the locked version.
 func Outdated() *cli.Command {
-	flags := helpers.CollectionFlags()
-	flags = append(flags, helpers.S3Flags()...)
+	flags := cliflags.CollectionFlags()
+	flags = append(flags, cliflags.S3Flags()...)
 
 	return &cli.Command{
 		Name:    "outdated",

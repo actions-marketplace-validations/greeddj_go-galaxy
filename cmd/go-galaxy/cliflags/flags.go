@@ -1,6 +1,13 @@
-package helpers
+// Package cliflags declares the urfave/cli flag sets the commands share, and
+// the defaults those flags advertise. It owns the CLI surface only: what a
+// flag is named, what it accepts, and which environment variables feed it.
+// Turning a parsed command into configuration belongs to
+// internal/galaxy/config, which is why nothing here reads a value back.
+package cliflags
 
 import (
+	"os"
+	"path/filepath"
 	"runtime"
 
 	galaxyhelpers "github.com/greeddj/go-galaxy/internal/galaxy/helpers"
@@ -246,4 +253,13 @@ func S3Flags() []cli.Flag {
 			Sources: cli.EnvVars("GO_GALAXY_S3_PATH_STYLE_DISABLED"),
 		},
 	}
+}
+
+// defaultCacheDir returns the default cache directory path.
+func defaultCacheDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return filepath.Join(defaultHomeDir, dirSuffix)
+	}
+	return filepath.Join(home, dirSuffix)
 }

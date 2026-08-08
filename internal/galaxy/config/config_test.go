@@ -28,8 +28,8 @@ const (
 // three flags applyAnsibleConfig reads (download-path, cache-dir, server),
 // runs it with args, and returns the *cli.Command captured from inside the
 // action so applyAnsibleConfig can be driven directly against it. Flags are
-// built inline (mirroring cmd/go-galaxy/helpers/flags_test.go's pattern)
-// rather than importing the cmd helpers package, to avoid an import cycle.
+// built inline (mirroring cmd/go-galaxy/cliflags/flags_test.go's pattern)
+// rather than importing the cliflags package, to avoid an import cycle.
 func newApplyAnsibleConfigCmd(t *testing.T, args []string) *cli.Command {
 	t.Helper()
 
@@ -590,7 +590,7 @@ func TestApplyAnsibleConfigServer(t *testing.T) {
 }
 
 // newAnsibleConfigCmd builds a *cli.Command exposing only the "ansible-config"
-// flag as it is really defined in cmd/go-galaxy/helpers/flags.go: no default
+// flag as it is really defined in cmd/go-galaxy/cliflags/flags.go: no default
 // value, sourced only from GO_GALAXY_ANSIBLE_CONFIG (ANSIBLE_CONFIG is
 // handled by discovery, not by the flag itself). Matching that shape matters
 // here because c.IsSet("ansible-config") is exactly what distinguishes

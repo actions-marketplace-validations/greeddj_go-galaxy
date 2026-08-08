@@ -5,18 +5,18 @@ import (
 	"net/http"
 	"net/url"
 
-	"github.com/greeddj/go-galaxy/cmd/go-galaxy/helpers"
+	"github.com/greeddj/go-galaxy/cmd/go-galaxy/cliflags"
 	"github.com/greeddj/go-galaxy/internal/galaxy/collections"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/fetch"
-	galaxyhelpers "github.com/greeddj/go-galaxy/internal/galaxy/helpers"
+	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/urfave/cli/v3"
 )
 
 // Install returns the CLI command that installs collections from requirements.
 func Install() *cli.Command {
-	flags := helpers.CollectionFlags()
-	flags = append(flags, helpers.S3Flags()...)
+	flags := cliflags.CollectionFlags()
+	flags = append(flags, cliflags.S3Flags()...)
 
 	return &cli.Command{
 		Name:    "install",
@@ -62,7 +62,7 @@ func serverAuths(servers []config.Server) []fetch.ServerAuth {
 			continue
 		}
 		auths = append(auths, fetch.ServerAuth{
-			Origin:      galaxyhelpers.Origin(parsed),
+			Origin:      helpers.Origin(parsed),
 			Token:       s.Token.Reveal(),
 			InsecureTLS: s.InsecureSkipTLSVerify,
 		})

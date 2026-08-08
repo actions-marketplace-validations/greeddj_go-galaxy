@@ -3,7 +3,7 @@ package commands
 import (
 	"context"
 
-	"github.com/greeddj/go-galaxy/cmd/go-galaxy/helpers"
+	"github.com/greeddj/go-galaxy/cmd/go-galaxy/cliflags"
 	"github.com/greeddj/go-galaxy/internal/galaxy/collections"
 	"github.com/urfave/cli/v3"
 )
@@ -12,8 +12,8 @@ import (
 // into the cache without populating the install path. Intended for
 // CI image bake: subsequent install runs hardlink instantly.
 func Warm() *cli.Command {
-	flags := helpers.CollectionFlags()
-	flags = append(flags, helpers.S3Flags()...)
+	flags := cliflags.CollectionFlags()
+	flags = append(flags, cliflags.S3Flags()...)
 
 	return &cli.Command{
 		Name:    "warm",
