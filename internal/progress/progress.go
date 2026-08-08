@@ -181,9 +181,10 @@ func isTerminal(f *os.File) bool {
 // This helper and Errorf below own no Progress, so they resolve their
 // destination on every call rather than once at construction. They are the
 // path cmd/go-galaxy/main.go prints a run's final line through, which is
-// exactly why they cannot skip the check: before this they printed color
-// unconditionally, so `go-galaxy install > install.log 2>&1` put escape bytes
-// in front of the one line an operator greps for.
+// exactly why they cannot skip the check: printing color unconditionally
+// would put escape bytes in front of the one line an operator greps for
+// whenever stdout is redirected, as `go-galaxy install > install.log 2>&1`
+// does.
 func Okf(format string, args ...any) {
 	s := stream{w: os.Stdout, color: colorEnabled(os.Stdout)}
 	writeLine(s.w, s.ok(), safeout.Clean(fmt.Sprintf(format, args...)))

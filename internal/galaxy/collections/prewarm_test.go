@@ -287,8 +287,8 @@ func TestPrewarmSkippedUnderRefresh(t *testing.T) {
 // TestPrewarmSkippedWhenSnapshotReplays proves the prewarmRootMetadata call
 // site's position: placed after resolveCollectionsInternal's snapshot-replay
 // return, a resolve that replays a persisted snapshot must keep issuing zero
-// metadata requests, exactly as it did before this package gained a
-// prewarm - a warm run's whole point is paying nothing on the network.
+// metadata requests - a warm run's whole point is paying nothing on the
+// network, and a prewarm placed above that return would spend it anyway.
 //
 // The second resolve deliberately runs against a fresh Store seeded with
 // only the resolved-snapshot fields recordResolution itself writes -

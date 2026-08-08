@@ -101,21 +101,21 @@ func newSymlinkedNamespaceInstallDeps(t *testing.T, col collection, cacheDir, se
 // for isDestinationSideFailure: a cache-hit artifact whose extraction fails
 // only because the namespace component is a symlink escaping
 // cfg.DownloadPath must fail the collection without ever calling
-// artifacts.Delete. Before isDestinationSideFailure existed,
-// prepareWithRecovery's action arm evicted on every action failure
-// unclassified, which for this specific cause would have spent a real,
-// destructive Delete against shared cache state on every affected run - and
-// then forced a real refetch that hits the identical symlinked-namespace
+// artifacts.Delete. Without isDestinationSideFailure,
+// prepareWithRecovery's action arm would evict on every action failure
+// unclassified, which for this specific cause spends a real, destructive
+// Delete against shared cache state on every affected run - and then
+// forces a real refetch that hits the identical symlinked-namespace
 // refusal again, still failing the collection, so the escape's error class
-// alone cannot tell the fixed behavior apart from the reintroduced bug. A
-// real fakegalaxy server is wired in specifically so that distinction is
-// only visible through the Delete counter: with the fix, this test's own
-// error assertion and its zero-Delete assertion agree; if isDestinationSideFailure's
-// classification were reverted and the action arm evicted unconditionally
-// again, the error assertion would still pass - the second attempt fails the
-// exact same way, since no artifact ever repairs a destination-side problem -
-// while the eviction-count assertion is the only one that catches the
-// regression.
+// alone cannot tell the classified behavior apart from the unclassified
+// one. A real fakegalaxy server is wired in specifically so that
+// distinction is only visible through the Delete counter: as classified,
+// this test's own error assertion and its zero-Delete assertion agree; if
+// isDestinationSideFailure's classification were dropped and the action arm
+// evicted unconditionally, the error assertion would still pass - the
+// second attempt fails the exact same way, since no artifact ever repairs a
+// destination-side problem - while the eviction-count assertion is the only
+// one that catches the regression.
 func TestInstallCollectionNamespaceEscapeEvictsNothing(t *testing.T) {
 	t.Parallel()
 	srv := fakegalaxy.New(t)

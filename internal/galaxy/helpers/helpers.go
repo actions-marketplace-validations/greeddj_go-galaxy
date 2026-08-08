@@ -13,8 +13,8 @@ import (
 // accept, so a half outside it cannot name a collection any Galaxy server
 // could serve. Enforcing it on the way in is what turns a hostile identifier
 // into a classified failure at the boundary it entered through, instead of an
-// unclassified one much later: a name carrying a newline used to pass every
-// check, be printed into reports as extra lines of its own choosing, and
+// unclassified one much later: a name carrying a newline would otherwise pass
+// every check, print into reports as extra lines of its own choosing, and
 // finally fail while a URL was being built - reported as a network failure,
 // the one class a CI is most likely to retry forever.
 //

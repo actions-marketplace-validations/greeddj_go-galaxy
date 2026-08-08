@@ -64,10 +64,10 @@ func (s *solveState) resolveConflict(ctx context.Context, startIdx int) (int, *i
 			}
 			// The reference algorithm assumes a satisfier always exists for
 			// a genuinely satisfied incompatibility; under the
-			// boundary-extended universe this holds for every package
-			// (unlike the old published-only reading, where a one-version
-			// package's term could be vacuously "true" from the very
-			// start). Reaching this means the assumption broke - a defect,
+			// boundary-extended universe this holds for every package, which
+			// a published-only reading would not give: there a one-version
+			// package's term can be vacuously "true" from the very start.
+			// Reaching this means the assumption broke - a defect,
 			// not a legitimate proof - so fail loudly instead of guessing.
 			return 0, nil, fmt.Errorf("no satisfier found for a satisfied incompatibility: %w", errSolverBug)
 		}

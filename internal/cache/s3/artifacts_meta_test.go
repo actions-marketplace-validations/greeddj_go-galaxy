@@ -4,8 +4,8 @@ package s3
 // cacheManager.ArtifactStore's own doc comment requires (absent, present
 // with a recorded digest, present with no recorded metadata, present with a
 // non-hex recorded digest), that Meta's found always equals Has's own result
-// for the identical key, and that Has - which now shares headArtifact with
-// Meta - still costs exactly the single HEAD request it always did.
+// for the identical key, and that Has, which shares headArtifact with Meta,
+// still costs exactly one HEAD request.
 
 import (
 	"bytes"
@@ -201,9 +201,9 @@ func TestArtifactsHeadArtifactPropagatesNonNotFoundError(t *testing.T) {
 }
 
 // TestArtifactsHasSharesHeadArtifactWithMetaOneHeadRequest proves Has costs
-// exactly the single HEAD request it always did, now that it shares
-// headArtifact with Meta (internal/cache/s3/artifacts.go) instead of issuing
-// its own independent headObject call - the mechanical basis for
+// exactly one HEAD request even though it shares headArtifact with Meta
+// (internal/cache/s3/artifacts.go) rather than issuing its own independent
+// headObject call - the mechanical basis for
 // dryRunArtifactMeta's own claim (internal/galaxy/collections/dryrun.go)
 // that replacing a dry run's Has call with a Meta call costs the S3 backend
 // nothing extra. Both a present and an absent key are checked, since

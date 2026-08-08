@@ -14,14 +14,14 @@ import (
 	"github.com/urfave/cli/v3"
 )
 
-// A missing lockfile used to mean different things to different commands: the
-// lockfile exit class for the three that take --frozen, the environment-usage
-// class for tree, explain and outdated, where a bare fs.ErrNotExist reached
-// the usage classifier, and nothing at all for hash. The first two are the
-// same fact - the lockfile a command was told to read is not there - and this
-// file pins that they now classify the same, with hash's fallback pinned
-// beside them so the exception stays a decision rather than a forgotten
-// corner.
+// A missing lockfile is one fact - the lockfile a command was told to read is
+// not there - and every command that requires one classifies it in the
+// lockfile exit class: the three that take --frozen, plus tree, explain and
+// outdated, where a bare fs.ErrNotExist would otherwise reach the usage
+// classifier and report an environment problem instead. This file pins that
+// shared classification, with hash's own fallback to the requirements file
+// pinned beside them so the exception stays a decision rather than a
+// forgotten corner.
 //
 // outdated is covered by its own package's test rather than here: it is not a
 // cmd/go-galaxy/commands entry point at all. What is shared, and what makes

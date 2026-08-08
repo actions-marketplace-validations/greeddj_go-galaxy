@@ -231,10 +231,10 @@ func TestInstallRecordMatchesRefusesUnsafeMarkerSHA(t *testing.T) {
 	mustMkdirAll(t, infoDir)
 	mustWriteFile(t, filepath.Join(infoDir, "GALAXY.yml"), []byte("format_version: 1.0.0\n"))
 
-	// The coincidental file: exactly where the old, unguarded
+	// The coincidental file: exactly where an unguarded
 	// filepath.Join(installPath, helpers.ExtractMarkerPrefix+sha) would land
-	// for this traversal sha, so a bare os.Stat would find it and (absent
-	// the fix) treat it as "marker present".
+	// for this traversal sha, so a bare os.Stat would find it and, with no
+	// shape guard on the sha, treat it as "marker present".
 	const traversalSHA = "../../../../../home/ci/.ssh/authorized_keys"
 	coincidental := filepath.Join(downloadPath, "home", "ci", ".ssh", "authorized_keys")
 	mustMkdirAll(t, filepath.Dir(coincidental))

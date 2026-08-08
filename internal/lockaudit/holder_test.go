@@ -51,7 +51,7 @@ type delegateCase struct {
 }
 
 // delegateCases is that whole table, and it is what keeps the audit's reach
-// unchanged now that one funnel stands in for three lifecycles. Auditing
+// wide, since one funnel stands in for three lifecycles. Auditing
 // withBackend alone proves the funnel is correct, never that a command still
 // goes through it: a command that quietly took a lifecycle of its own again
 // would be invisible to holderCases, which is exactly the passing no-op shape
@@ -137,8 +137,8 @@ type delegateFixtureCase struct {
 
 // delegateFixtureCases returns the two departures the delegation half exists
 // to catch, plus the control that proves it can accept. The first negative is
-// a command that re-inlined its own lifecycle - the exact regression that
-// would otherwise slip past holderCases now that it names withBackend rather
+// a command that inlines a lifecycle of its own - the exact regression that
+// would otherwise slip past holderCases, since it names withBackend rather
 // than each command. The second is a command that reaches the funnel but
 // hands it somebody else's work function, which would run the wrong work
 // under a perfectly threaded holder context.

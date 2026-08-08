@@ -256,10 +256,10 @@ func TestServerCandidates(t *testing.T) {
 	}
 }
 
-// TestUnmatchedSourceIsWarnedAboutOncePerHost covers the signal a lockfile's
-// source: used to give nobody. A source naming a host no configured server
-// does is still requested - the run continues, mirroring the download path's
-// own host-mismatch warning rather than refusing - but it is now visible.
+// TestUnmatchedSourceIsWarnedAboutOncePerHost covers the signal a source:
+// naming a host no configured server does carries. Such a source is still
+// requested - the run continues, mirroring the download path's own
+// host-mismatch warning rather than refusing - and is named once per host.
 //
 // The three rows are the three answers this can have, and each is needed:
 // silence on a match by id, silence on a match by origin (the case a

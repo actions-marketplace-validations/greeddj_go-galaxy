@@ -193,26 +193,24 @@ func refuseRedirect(req *http.Request, _ []*http.Request) error {
 // straight into newRequest, and callers higher up construct that ctx from
 // the relevant budget (see internal/galaxy/cache's stateDeadlineBackend and
 // internal/galaxy/collections' downloadCollectionToCache/fetchArtifact). So a
-// budget expiry still returns the raw context-carrying error here, unwrapped,
-// exactly as it did before this predicate existed, and
+// budget expiry returns the raw context-carrying error here, unwrapped, and
 // internal/galaxy/cache's deadlineError / internal/galaxy/collections'
 // artifactDeadlineError normalize it into their own sentinel by testing
-// errors.Is against that same raw error - true by construction now, not by
+// errors.Is against that same raw error - true by construction, not by
 // coincidence of how the standard library happens to shape a timeout error.
 //
 // helpers.ErrCacheBackendUnavailable means the backend did not answer for a
 // reason that is not this program's own doing; no consumer of that sentinel
 // has to reason about an error tree that also carries a context signal.
 //
-// This changes no exit code today: cmd/go-galaxy/exitcode's isTransportError
-// already matches both context.DeadlineExceeded and
+// The predicate is not what decides the exit code: cmd/go-galaxy/exitcode's
+// isTransportError matches both context.DeadlineExceeded and
 // helpers.ErrCacheBackendUnavailable into the same ExitNetwork class, so a
-// dial timeout or a ResponseHeaderTimeout classifies the same way on either
-// side of this predicate. What this buys is message accuracy - the sentinel
-// now means what it says for every transport failure with a live caller
-// context, not only a connect refusal - and defense in depth for a future
-// consumer that comes to distinguish the two classes without knowing this
-// history.
+// dial timeout or a ResponseHeaderTimeout classifies the same way whichever
+// of the two it carries. What it buys is message accuracy - the sentinel
+// means what it says for every transport failure with a live caller context,
+// not only a connect refusal - and defense in depth for a future consumer
+// that distinguishes the two classes.
 //
 // The funnel's boundary: only a failure c.client.Do itself returns is
 // normalized here. A mid-stream body-read failure - Artifacts'

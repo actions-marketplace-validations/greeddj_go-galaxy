@@ -111,11 +111,11 @@ func (a *concurrentProbeArtifacts) Delete(context.Context, string) error {
 // never closes the gate - each of its Has calls then blocks until
 // ctx.Done() fires, so the test would both record peak==1 and run out the
 // full 2s timeout before the first call even returns. Second, and the
-// reason for this test's existence over the pre-split version: Workers=1
-// alongside DownloadWorkers=4 means an implementation still (wrongly) bounded
-// by cfg.Workers reaches peak==1 and then hangs on the same ctx.Done() path a
-// sequential one would, which is exactly what makes peak==4 prove the pool
-// moved to the new knob rather than merely being renamed.
+// reason the two knobs are set apart here: Workers=1 alongside
+// DownloadWorkers=4 means an implementation wrongly bounded by cfg.Workers
+// reaches peak==1 and then hangs on the same ctx.Done() path a sequential
+// one would, which is exactly what makes peak==4 prove the pool is bounded
+// by DownloadWorkers rather than by Workers.
 func TestBuildPrefetchTasksProbesConcurrentlyBoundedByDownloadWorkers(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)

@@ -115,7 +115,7 @@ func newTransport(timeout time.Duration, tlsConfig *tls.Config) *http.Transport 
 		IdleConnTimeout:       helpers.FetchIdleConnTimeout,
 		TLSHandshakeTimeout:   helpers.FetchTLSHandshakeTimeout,
 		ExpectContinueTimeout: helpers.FetchExpectContinueTimeout,
-		// ResponseHeaderTimeout bounds time-to-first-byte: timeout is now a
+		// ResponseHeaderTimeout bounds time-to-first-byte: timeout is a
 		// no-progress budget rather than a whole-response cap, so a slow but
 		// steadily streaming artifact download is not truncated by it.
 		ResponseHeaderTimeout: timeout,

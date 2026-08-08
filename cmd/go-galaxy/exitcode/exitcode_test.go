@@ -1033,7 +1033,7 @@ func (fakeSignal) Signal()        {}
 
 // TestFromSignal checks the shell-convention 128+signal mapping for the
 // signals go-galaxy handles (plus SIGQUIT, still a valid direct FromSignal
-// input even though main.go no longer subscribes to it) and the
+// input even though main.go does not subscribe to it) and the
 // non-syscall.Signal fallback.
 func TestFromSignal(t *testing.T) {
 	t.Parallel()

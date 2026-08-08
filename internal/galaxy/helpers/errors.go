@@ -68,9 +68,10 @@ var (
 	// something that names the offending archive path. The classification is
 	// existence-based rather than errno-based, so it deliberately covers both
 	// collision shapes under one name - "two entries want the same path" is
-	// the actionable fact either way. Previously a duplicate regular-file
-	// entry silently won; that is a deliberate behavior change, not a
-	// regression.
+	// the actionable fact either way. Refusing the archive outright is
+	// deliberate: letting the later entry win is what would make a colliding
+	// archive undetectable, since nothing on disk afterwards records that a
+	// path was claimed twice.
 	ErrArchiveDuplicateEntry = errors.New("archive contains a duplicate entry")
 
 	// ErrArtifactNotTarGz indicates downloaded bytes do not have the outer

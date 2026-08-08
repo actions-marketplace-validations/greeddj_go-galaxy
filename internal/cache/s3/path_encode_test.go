@@ -173,9 +173,9 @@ func assertCachedEndpointCase(t *testing.T, tt cachedEndpointCase) {
 
 // TestRequestURLUsesCachedEndpoint proves requestURL derives its host and
 // scheme from the fields newClient parsed once at construction, rather than
-// re-parsing cfg.Endpoint on every call. requestURL no longer calls
-// url.Parse at all (a structural change verifiable by inspection), so
-// identical output here for every case is what proves the removal did not
+// re-parsing cfg.Endpoint on every call. requestURL calls url.Parse
+// nowhere (a structural property verifiable by inspection), so identical
+// output here for every case is what proves the cached fields cannot
 // shift any byte of the signed-and-sent URL.
 func TestRequestURLUsesCachedEndpoint(t *testing.T) {
 	t.Parallel()

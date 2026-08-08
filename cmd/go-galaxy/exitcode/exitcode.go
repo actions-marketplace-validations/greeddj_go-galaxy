@@ -368,7 +368,7 @@ func isSymlinkError(err error) bool {
 // ExitNetwork; once collections.Start joins it behind
 // helpers.ErrInstallationFailed the isInstallError entry above claims it
 // first, as ExitInstall - identical to every other per-collection failure,
-// helpers.ErrDownloadFailed included, so this is not a behavior change. It
+// helpers.ErrDownloadFailed included. It
 // never classifies as ExitInterrupt: the sentinel deliberately does not wrap
 // its context.DeadlineExceeded/context.Canceled cause with %w (see its own
 // doc comment), so that raw signal never reaches errors.Is(err,

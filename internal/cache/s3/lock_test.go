@@ -155,7 +155,7 @@ func seedLockObject(ctx context.Context, t *testing.T, b *Backend, deadline time
 }
 
 // TestLockAcquiresOnEmptyBucket confirms a fresh bucket lets Lock succeed
-// immediately and stamps the new wire format's token and deadline metadata.
+// immediately and stamps the wire format's token and deadline metadata.
 func TestLockAcquiresOnEmptyBucket(t *testing.T) {
 	t.Parallel()
 	b := newTestBackend(t)
@@ -703,8 +703,8 @@ func assertWaitCeilingErrClassification(t *testing.T, tc waitCeilingErrCase) {
 // explicit refresh call from the caller.
 //
 // Rather than sleeping past several heartbeat ticks and comparing two reads
-// (the old approach needed a 1.5s sleep just to guarantee the two RFC3339,
-// second-resolution timestamps differed), the test rolls the deadline an
+// (which needs a 1.5s sleep just to guarantee the two RFC3339,
+// second-resolution timestamps differ), the test rolls the deadline an
 // hour into the past under the holder's own token - the same unconditional
 // same-token write the heartbeat itself performs - and waits for the
 // heartbeat to observably push it forward again. That is unambiguous at any

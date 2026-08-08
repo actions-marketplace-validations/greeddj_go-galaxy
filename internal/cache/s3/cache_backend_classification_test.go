@@ -127,10 +127,10 @@ func TestClientDoClassifiesConnectionFailureAsCacheBackendUnavailable(t *testing
 
 // TestClientDoClassifiesLiveTimeoutShapesAsCacheBackendUnavailable is the
 // test the closed-listener headline case above cannot be: that fixture
-// produces a connect refusal, the one shape that was already excluded from
-// context.DeadlineExceeded before Client.do's predicate was changed to test
-// req.Context().Err() instead of the error's shape, so it is structurally
-// incapable of killing a regression back to that shape-based predicate. Both
+// produces a connect refusal, the one shape an error-shape predicate would
+// exclude from context.DeadlineExceeded anyway, so it is structurally
+// incapable of killing a regression from Client.do's req.Context().Err()
+// test back to that shape-based predicate. Both
 // rows below instead reproduce the two outage shapes that DO satisfy
 // errors.Is(err, context.DeadlineExceeded) while the caller's own context
 // stays live - a black-holed endpoint (dial times out) and one that accepts a

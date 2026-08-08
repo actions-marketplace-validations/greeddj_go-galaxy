@@ -88,7 +88,7 @@ func TestClearCacheFilesPreservesLockFile(t *testing.T) {
 
 // TestClearCacheFilesReclaimsLegacySnapshotFiles confirms the nine
 // pre-consolidation per-bucket snapshot files are reclaimed as orphans,
-// since they are no longer opened by the consolidated single-file layout.
+// since the consolidated single-file layout never opens them.
 func TestClearCacheFilesReclaimsLegacySnapshotFiles(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

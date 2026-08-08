@@ -621,8 +621,8 @@ func TestRemoveInstalledRejectsTraversalVersion(t *testing.T) {
 //	--- FAIL: TestRemoveUnusedCannotForgeAReportLine (0.01s)
 //
 // under the mutation, the forged version passes buildInstalledRecord's
-// IsPathElement check same as before this fix, so the hostile collection is
-// indexed and genuinely removed by removeUnused, whose bare-%s "removed"
+// IsPathElement check unchanged, so the hostile collection is indexed
+// and genuinely removed by removeUnused, whose bare-%s "removed"
 // line carries the forged newline and trailing text straight through -
 // exactly the injected line this test exists to catch. The scan is what
 // fails first under this mutation; the survival and warning checks below it
@@ -1310,8 +1310,8 @@ func recordAbsentWorkspaceProject(t *testing.T, cfg *config.Config, runtime *inf
 // is absent contributes nothing to installedByKey/reachable, but its
 // snapshot Installed entries survive untouched (removeUnused only prunes
 // entries it actually iterated), so their extracted artifact trees must
-// still be kept. Under the old on-disk-derived keep set, an empty
-// installedByKey meant Sweep(empty) wiped the entire extracted cache.
+// still be kept. With an on-disk-derived keep set, an empty
+// installedByKey means Sweep(empty) wipes the entire extracted cache.
 func TestSweepKeepsCacheWhenWorkspaceAbsent(t *testing.T) {
 	t.Parallel()
 	cacheDir := t.TempDir()
@@ -1521,7 +1521,7 @@ func TestSweepDropsUnreferencedSha(t *testing.T) {
 // a MANIFEST.json nested deeper - as a collection's own test fixtures might
 // ship one - must never be mistaken for an installed collection. The nested
 // manifest here declares a different, unreferenced collection identity, so
-// under the old full-tree walk it would have been discovered as its own
+// under a full-tree walk it would be discovered as its own
 // installedCollection and, being unreferenced, deleted by removeUnused. The
 // top-level collection is kept reachable via requirements.yml so its
 // directory is never a deletion candidate either way, isolating the
@@ -3569,10 +3569,10 @@ func reloadStoreThroughFreshBackend(t *testing.T, cfg *config.Config, runtime *i
 // holds across repeated runs, not just a single one: two consecutive Start
 // calls against a cache dir that never gains a persisted snapshot must both
 // leave the extracted store untouched. This only passes when both halves of
-// the fix are in place together - if the read-side guard alone landed
-// without the write-side guard, the first run would still fabricate a
-// persisted-and-empty snapshot that the second run would then read as real
-// evidence and wipe the extracted dir on.
+// the rule are in place together - with the read-side guard alone and no
+// write-side guard, the first run still fabricates a persisted-and-empty
+// snapshot that the second run then reads as real evidence and wipes the
+// extracted dir on.
 func TestStartTwiceWithNoSnapshotLeavesExtractedCacheIntact(t *testing.T) {
 	t.Parallel()
 	cacheDir := t.TempDir()
@@ -4083,10 +4083,10 @@ func TestBuildReachablePhase2FollowsTransitiveDependencyEdge(t *testing.T) {
 // ever reading its own requirements file in phase 1) but records a
 // requirements file requiring foo.bar when requireFooBar is true, or
 // referencing nothing when it is false. The project keys are deliberately
-// chosen so the skipped project sorts LAST: under the pre-fix single loop,
-// foo.bar would already have been indexed (aa-holder having already been
-// scanned earlier in that same loop) by the time the loop reached the
-// skipped project, so ordering alone could never explain a survival here -
+// chosen so the skipped project sorts LAST: under a single-loop design,
+// foo.bar would already be indexed (aa-holder having been scanned earlier
+// in that same loop) by the time the loop reached the skipped project, so
+// ordering alone could never explain a survival here -
 // only whether the skipped project's own roots are actually consulted
 // despite never having been scanned.
 func buildSkippedProjectRootsFixture(t *testing.T, cacheDir string, requireFooBar bool) string {

@@ -47,8 +47,8 @@ var errRequirementsNotRegular = errors.New("requirements file is not a regular f
 //
 // A path that does not exist at all - including a dangling symlink -
 // returns the Stat error unchanged, still satisfying errors.Is(err,
-// fs.ErrNotExist), so projectRequirementRoots keeps routing it to its
-// tolerated stale-entry arm exactly as it did before this gate existed.
+// fs.ErrNotExist), so projectRequirementRoots routes it to its tolerated
+// stale-entry arm.
 func loadRequirements(path, defaultSource string) ([]requirements.CollectionRequirement, error) {
 	// #nosec G703 -- path is a registry-recorded requirements file path (a
 	// fixed set of candidates this program itself wrote via

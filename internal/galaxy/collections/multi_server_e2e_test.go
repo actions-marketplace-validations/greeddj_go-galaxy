@@ -739,13 +739,13 @@ func TestMultiServerArtifactCacheKeyIsScopedPerServer(t *testing.T) {
 // TestMultiServerDepsCacheKeyIsScopedPerServer is the deps-cache sibling of
 // TestMultiServerArtifactCacheKeyIsScopedPerServer: two projects sharing one
 // cache dir each pin ns.shared@1.0.0 to a different server, and each
-// server's copy of ns.shared declares a different dependency. Before the
-// fix, both projects' resolves shared one deps-cache entry keyed only by
-// "ns.shared@1.0.0" with no server component, so the second project's
-// resolve would silently reuse the first project's cached dependency map
-// instead of ever asking its own server. With the fix, each server's
-// dependency map lands under its own scoped key, so both projects end up
-// with their own server's transitive dependency installed.
+// server's copy of ns.shared declares a different dependency. Keyed only by
+// "ns.shared@1.0.0" with no server component, both projects' resolves would
+// share one deps-cache entry, so the second project's resolve would silently
+// reuse the first project's cached dependency map instead of ever asking its
+// own server. Scoped per server, each server's dependency map lands under
+// its own key, so both projects end up with their own server's transitive
+// dependency installed.
 func TestMultiServerDepsCacheKeyIsScopedPerServer(t *testing.T) {
 	t.Parallel()
 	srvA := fakegalaxy.New(t)

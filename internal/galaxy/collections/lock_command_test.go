@@ -777,8 +777,8 @@ func TestLockFrozenWithRefreshDetectsUpstreamPublication(t *testing.T) {
 // The no-warning assertion below pins the silence half of
 // lockDryRunBaseline's own documented policy - "an absent file is silent" -
 // which, unlike its "present but unloadable warns" half
-// (TestLockDryRunWarnsOnAnUnreadableBaseline), had no coverage of its own
-// before this assertion existed. It is genuinely pinned, not documentary:
+// (TestLockDryRunWarnsOnAnUnreadableBaseline), is covered nowhere
+// else. It is genuinely pinned, not documentary:
 // deleting the `if errors.Is(err, fs.ErrNotExist)` guard in lockfile.Load
 // makes lockfile.IsNotExist stop recognizing this fixture's missing-file
 // error, so lockDryRunBaseline takes its warn branch instead of its silent

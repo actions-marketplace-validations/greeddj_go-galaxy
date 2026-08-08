@@ -83,7 +83,7 @@ func TestDeleteObjectSurfacesXMLErrorDetails(t *testing.T) {
 // TestPutObjectSurfacesXMLErrorDetails proves handlePutResponse's default
 // (non-2xx, non-precondition, non-not-found) branch enriches its error the
 // same way, covering an overwrite PUT that the backend rejects with a
-// throttling response. This is an unconditional PUT, which now retries a
+// throttling response. This is an unconditional PUT, which retries a
 // 503 internally, so the failure is armed indefinitely: a bounded count
 // would let a later retry attempt succeed in writing the object instead of
 // exercising the failure this test means to cover.

@@ -254,11 +254,12 @@ func prefetchOne(
 	// absent, and within a single run this prefetcher is the only committer of
 	// the key - each key maps to exactly one task, and the key's own install
 	// worker blocks on this prefetch via Wait before it could commit - so the
-	// key cannot have appeared in the cache between the scan and now. The single
-	// case the old re-probe still caught (the scan's Has erroring while the key
-	// was in fact cached) now costs one byte-identical redundant re-download,
-	// which is safe (same origin bytes, idempotent commit and ingest) and far
-	// rarer than the per-prefetch Has it removes from the critical path.
+	// key cannot have appeared in the cache between the scan and now. The
+	// single case a re-probe here would still catch (the scan's Has erroring
+	// while the key was in fact cached) costs one byte-identical redundant
+	// re-download instead, which is safe (same origin bytes, idempotent commit
+	// and ingest) and far rarer than the per-prefetch Has such a re-probe
+	// would put on the critical path.
 	// useCache stays true: the artifact must still be committed to the shared
 	// cache for every other consumer (a different project, a later run), on
 	// top of handing its temp off to this run's own install worker.

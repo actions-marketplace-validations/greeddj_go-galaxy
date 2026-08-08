@@ -214,7 +214,7 @@ func (s *solveState) deriveOnce(term term, causeIdx int, changed map[string]bool
 // term's negation into changed.
 //
 // A single resolveConflict call is not always enough: relation's Case C and
-// conflict resolution's own satisfier search now share the same
+// conflict resolution's own satisfier search share the same
 // boundary-extended running intersection, but the incompatibility a
 // backjump returns can still legitimately come back CONTRADICTED (the
 // backjump undid exactly the assignment(s) that had made it satisfied,

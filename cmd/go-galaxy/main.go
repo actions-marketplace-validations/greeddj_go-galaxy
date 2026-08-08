@@ -86,12 +86,12 @@ func (r *errRecorder) Write(p []byte) (int, error) {
 //
 // Usage and Description carry two facts a CI author cannot learn anywhere
 // else from the binary itself. The first is that a bare go-galaxy installs:
-// DefaultCommand makes it so, and nothing printed said as much, which is a
-// surprising amount of work for a command someone ran to see what it does.
-// The second is the exit-code classes. They exist to be branched on, so a
-// pipeline author is exactly who needs them, and until now they appeared only
-// in the README. Description is the one field that reaches --help with them,
-// since urfave renders a DESCRIPTION block whenever it is non-empty.
+// DefaultCommand makes it so, and nothing else the binary prints would say
+// so, which is a surprising amount of work for a command someone ran to see
+// what it does. The second is the exit-code classes. They exist to be
+// branched on, so a pipeline author is exactly who needs them. Description is
+// the one field that reaches --help with them, since urfave renders a
+// DESCRIPTION block whenever it is non-empty.
 //
 // Each phrase below is the leading phrase of the matching row in README's
 // Exit codes table rather than a fresh wording, so the two cannot come to

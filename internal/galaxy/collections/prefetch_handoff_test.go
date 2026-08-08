@@ -94,7 +94,7 @@ func newS3StyleArtifacts(t *testing.T) *s3StyleArtifacts {
 // Has reports whether key has already been committed to the stub bucket,
 // counting the call (keyed by key) so a test can assert exactly how many Has
 // probes a given key saw - the signal Test C uses to prove the prefetch
-// scan's single probe replaced the old scan-plus-reprobe pair.
+// scan costs one probe rather than a scan-plus-reprobe pair.
 func (a *s3StyleArtifacts) Has(_ context.Context, key string) (bool, error) {
 	a.mu.Lock()
 	a.hasCount[key]++

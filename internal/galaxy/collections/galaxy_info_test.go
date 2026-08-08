@@ -80,7 +80,7 @@ func TestBuildGalaxyYAMLKeepsQuerylessURLs(t *testing.T) {
 
 // TestBuildGalaxyYAMLNilMetaUnchanged asserts the artifact-cache-hit fast
 // path, which has no version metadata to strip anything from, still writes
-// the same minimal document it always did.
+// a minimal document with the metadata-sourced fields left empty.
 func TestBuildGalaxyYAMLNilMetaUnchanged(t *testing.T) {
 	t.Parallel()
 

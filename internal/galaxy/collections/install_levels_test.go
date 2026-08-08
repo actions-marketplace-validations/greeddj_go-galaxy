@@ -140,7 +140,7 @@ func TestInstallLevelsJoinsInFlightWorkerOnMissingCollection(t *testing.T) {
 	case err := <-done:
 		t.Fatalf("installLevels returned without joining its in-flight worker: %v", err)
 	case <-time.After(100 * time.Millisecond):
-		// Expected: the fix keeps installLevels blocked in runInstallLevel's
+		// Expected: installLevels stays blocked in runInstallLevel's
 		// deferred wg.Wait() until key1's worker is released below.
 	}
 

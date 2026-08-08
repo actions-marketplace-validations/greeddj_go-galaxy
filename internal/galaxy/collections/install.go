@@ -884,14 +884,14 @@ func downloadCollectionToCache(
 // The comparison is by normalized origin (helpers.Origin: scheme, hostname,
 // and port with the scheme's default filled in), not by hostname alone. That
 // is the same key internal/galaxy/fetch dispatches on when it decides whether
-// to attach a token and whether to relax TLS verification, so the signal now
-// has the granularity of the mechanisms it exists to illuminate: a download
-// URL that keeps the host and downgrades https to http, or moves to another
-// port, reaches an endpoint that gets neither the operator's credential nor
-// the operator's TLS policy, and it used to reach it silently. The cost is
-// accepted rather than unnoticed - a deployment legitimately serving
-// downloads from another port of the same host now warns where it did not -
-// and it stays a warning: the install proceeds either way.
+// to attach a token and whether to relax TLS verification, so the signal has
+// the granularity of the mechanisms it exists to illuminate: a download URL
+// that keeps the host and downgrades https to http, or moves to another port,
+// reaches an endpoint that gets neither the operator's credential nor the
+// operator's TLS policy, and nothing but this warning would say so. The
+// cost is accepted rather than unnoticed - a deployment legitimately serving
+// downloads from another port of the same host warns - and it stays a
+// warning: the install proceeds either way.
 func warnIfOffServerDownloadHost(runtime *infra.Infra, base, downloadURL string) {
 	if strings.TrimSpace(base) == "" {
 		return

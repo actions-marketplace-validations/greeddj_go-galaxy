@@ -78,8 +78,7 @@ type cleanSaveSkipBackend struct {
 //     Meta.RequirementsHash is empty, so snapshotMatchesRequirements is
 //     false, the fresh resolve genuinely runs, recordResolution's
 //     SetResolvedAll dirties the store, and the persisted-and-empty
-//     snapshot still gets created exactly as it did before this decorator
-//     existed.
+//     snapshot still gets created.
 //   - The one genuine residual: an abandoned prefetch worker can still call
 //     SetAPICache between a SaveStore call's own Dirty() check here and
 //     finalizeInstall's own copy of the state it is about to save,
@@ -93,7 +92,8 @@ type cleanSaveSkipBackend struct {
 //     neither a save nor this decorator's check synchronizes with that
 //     goroutine at all. This is disclosed, not fixed: fixing it would mean
 //     restructuring the defer order finalizeInstall relies on for an
-//     unrelated reason, which this change does not touch.
+//     unrelated reason, and this decorator deliberately leaves that order
+//     alone.
 func WithCleanSaveSkip(b Backend) Backend {
 	if b == nil {
 		return nil

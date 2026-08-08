@@ -76,8 +76,8 @@ func TestDebugAnsibleConfigReportsServerListWithoutLeakingToken(t *testing.T) {
 	assertContainsAll(t, printer.debugLines[2], `""`, "url=https://c.example", "token=false", "insecure_skip_tls_verify=false")
 }
 
-// TestDebugAnsibleConfigNilSafe checks the existing nil-guard contract
-// (nil Infra, nil Output, nil cfg) still holds now that the method does
+// TestDebugAnsibleConfigNilSafe checks that the nil-guard contract
+// (nil Infra, nil Output, nil cfg) holds even though the method does
 // more than the ansible.cfg-sourced branch.
 func TestDebugAnsibleConfigNilSafe(t *testing.T) {
 	t.Parallel()

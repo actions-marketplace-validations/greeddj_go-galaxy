@@ -411,7 +411,7 @@ func TestFrozenInstallRejectsWildcardLockfilePin(t *testing.T) {
 			t.Errorf("exitcode.FromError(err) = %d, want %d", got, exitcode.ExitLock)
 		}
 		assertPathAbsent(t, manifestPathFor(f.downloadPath, "app"))
-		// The glob-shaped sidecar a pre-fix binary would have created from the
+		// The glob-shaped sidecar an unguarded binary would create from the
 		// literal "*" version text - see newInstallTarget's ".info" naming.
 		assertPathAbsent(t, wildcardInfoDir)
 	})

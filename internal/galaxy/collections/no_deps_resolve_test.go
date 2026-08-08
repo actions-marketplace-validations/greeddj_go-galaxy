@@ -1,8 +1,8 @@
 package collections
 
 // This file drives resolveCollectionsInternal directly under cfg.NoDeps -
-// the --no-deps fast path, which now goes through the version solver's
-// NewNoDepsProvider wrapping rather than the deleted resolveWithoutDeps -
+// the --no-deps fast path, which goes through the version solver's
+// NewNoDepsProvider wrapping rather than a no-deps path of its own -
 // proving the same two guarantees at the production entry point: an
 // unpinned root resolves to a concrete version rather than keeping the
 // literal "*" constraint, and an exactly pinned root resolves with zero

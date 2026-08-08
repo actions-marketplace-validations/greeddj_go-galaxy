@@ -184,12 +184,12 @@ func serverIDs(cfg *config.Config) []string {
 	return ids
 }
 
-// TestAnsibleGalaxyServerDoesNotCollapseServerList pins the precedence fix:
+// TestAnsibleGalaxyServerDoesNotCollapseServerList pins one precedence rule:
 // ANSIBLE_GALAXY_SERVER is the env spelling of the [galaxy] server key, so a
-// configured server_list still wins over it. Before the fix it was a source of
-// the --server flag, which made it precedence rule 1 - exporting it silently
-// reduced a two-server configuration to one anonymous server, and a private hub
-// simply disappeared, with no warning even under --verbose.
+// configured server_list wins over it. Treating it as a source of the --server
+// flag instead would make it precedence rule 1 - exporting it would silently
+// reduce a two-server configuration to one anonymous server, and a private hub
+// would simply disappear, with no warning even under --verbose.
 //
 // The two control rows are what make the first one mean something: on the same
 // fixture, the two spellings that ARE rule 1 must still collapse the list, so
@@ -253,7 +253,7 @@ func aliasCfg(t *testing.T) *config.Config {
 // TestFlagNameEnvAliases pins the GO_GALAXY_<FLAG_NAME> env spelling on the
 // only two flags that lacked one: --timeout and --download-path, whose env
 // names were taken from ansible's own variables rather than derived from the
-// flag name. Each now accepts the flag-name-shaped spelling in second
+// flag name. Each accepts the flag-name-shaped spelling in second
 // position, so the convention every other flag in cmd/go-galaxy/cliflags
 // follows has no exception, while the name that shipped first keeps the
 // precedence it already had.

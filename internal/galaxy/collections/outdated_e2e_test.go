@@ -208,19 +208,19 @@ func TestOutdatedSanitizesServerReasonPhrase(t *testing.T) {
 	}
 }
 
-// TestOutdatedRefusesAHostileLockfileEntryName covers the channel that used
-// to reach the report unfiltered: a lockfile entry's own Name. It no longer
-// reaches it at all. A name outside the alphabet a Galaxy server itself
-// accepts is refused by lockfile.Load, so outdated fails before it builds a
-// URL, before it prints a line, and before it touches the network.
+// TestOutdatedRefusesAHostileLockfileEntryName covers one channel into the
+// report - a lockfile entry's own Name - and pins that it never reaches the
+// report at all. A name outside the alphabet a Galaxy server itself accepts
+// is refused by lockfile.Load, so outdated fails before it builds a URL,
+// before it prints a line, and before it touches the network.
 //
-// These two subtests previously asserted the opposite - that such a name was
-// printed, sanitized, on outdated's failure line. That was the repository's
-// earlier answer to where this boundary belongs. The printer boundary itself
-// is untouched and still proven here: TestOutdatedSanitizesServerReasonPhrase
-// covers the channel no name alphabet can reach, a server's own HTTP reason
-// phrase, and it is that test - not these - which pins that safeout.Clean's
-// replacement actually fires for this report.
+// The printer boundary itself is untouched and still proven here:
+// TestOutdatedSanitizesServerReasonPhrase covers the channel no name
+// alphabet can reach, a server's own HTTP reason phrase, and it is that
+// test - not this one - which pins that safeout.Clean's replacement
+// actually fires for this report. A name refused at load never reaches the
+// printer at all, so these rows pin the refusal rather than anything about
+// how a value that does reach the report is rendered.
 //
 // The two rows differ in which check refuses them, and both are kept because
 // a single alphabet check replacing two different rejections is exactly the

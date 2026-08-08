@@ -77,12 +77,12 @@ func TestLockInspectFlags(t *testing.T) {
 			want: wantStringFlag{
 				name: "requirements-file",
 				// The default is what makes hash, tree and explain agree with
-				// install about which file they read when nobody says. Each
-				// used to re-implement it in its own Action instead, so the
-				// three --help outputs advertised no default while install's
-				// advertised one. The lock-file row below expects an empty
-				// Value, and is the positive control that this assertion can
-				// distinguish the two rather than passing on anything.
+				// install about which file they read when nobody says. Without
+				// it each would re-implement the default in its own Action, and
+				// the three --help outputs would advertise no default while
+				// install's advertised one. The lock-file row below expects an
+				// empty Value, and is the positive control that this assertion
+				// can distinguish the two rather than passing on anything.
 				//
 				// KILLING MUTATION, run and reverted - drop the Value line
 				// from LockInspectFlags's requirements-file flag, which is

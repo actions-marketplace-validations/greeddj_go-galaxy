@@ -57,10 +57,9 @@ type installTarget struct {
 // col's identity was safe to use at all - the single validating chokepoint
 // every construction of both of col's on-disk locations (the install
 // directory and the .info sidecar) must go through, so they cannot be
-// computed two different ways, one of them unguarded. This replaces the
-// former collectionInstallPath and collectionInfoDir: one chokepoint instead
-// of two, and the install path now gets the identifier validation only the
-// sidecar path previously had.
+// computed two different ways, one of them unguarded. One chokepoint for the
+// two locations means both are validated by the identical rule, rather than
+// by two rules maintained separately and free to drift apart.
 //
 // col.Namespace, col.Name, and col.Version must each be helpers.IsPathElement
 // before they are ever joined: path.Join fuses a leading ".." in Version into

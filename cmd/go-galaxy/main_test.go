@@ -144,10 +144,10 @@ func handleResultCases() []handleResultCase {
 var errTestUsage = errors.New("flag parse error")
 
 // TestRootCommandDisclosesDefaultCommandAndExitCodes pins the two facts the
-// binary now tells a CI author about itself. A bare go-galaxy installs, which
-// DefaultCommand has always made true and nothing printed ever said; and the
-// exit-code classes, which exist to be branched on and until now lived only in
-// the README, out of reach of anyone reading --help.
+// binary tells a CI author about itself in --help: a bare go-galaxy installs,
+// which DefaultCommand makes true but which no flag or argument spells out;
+// and the exit-code classes, which exist to be branched on and would
+// otherwise be reachable only through the README's full table.
 //
 // The rows are built from the exitcode constants rather than from literals
 // repeated here, so the pin is on the numbers themselves: renumbering a class

@@ -294,7 +294,7 @@ func buildMinimalTarGz(t *testing.T) []byte {
 // way into the artifact cache - it really is a gzip-compressed tar - and then
 // fails during extraction with helpers.ErrArchiveEntryEscapesDestination. It
 // is what a test needs to reach the extraction arm of the corruption-recovery
-// path now that shapeless bytes are refused before they get that far.
+// path, since shapeless bytes are refused before they get that far.
 func buildEscapingTarGz(t *testing.T) []byte {
 	t.Helper()
 	return buildTarGzWithEntry(t, "../escape.txt", []byte("outside\n"))

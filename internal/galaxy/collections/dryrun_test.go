@@ -773,8 +773,8 @@ func TestWriteRunMetricsDryRunSkipsAndWarns(t *testing.T) {
 
 // countingArtifactMetaCalls is a stub cacheManager.ArtifactStore that counts,
 // per artifact key, how many times Has and Meta were each called - proving
-// dryRunArtifactMeta replaces the dry run's former Has() round trip rather
-// than adding a second one alongside it (see
+// dryRunArtifactMeta costs the dry run one round trip rather than a Has()
+// call plus a Meta() one (see
 // TestClassifyDryRunCallsMetaExactlyOncePerCollectionNeverHas). Fetch,
 // TempFile, Commit, and Delete are never called by a dry-run probe, so they
 // return errStubNotImplemented (declared in prefetch_scan_test.go) to make an
@@ -818,8 +818,8 @@ func (a *countingArtifactMetaCalls) Delete(context.Context, string) error {
 
 // TestClassifyDryRunCallsMetaExactlyOncePerCollectionNeverHas is the direct
 // mechanical proof behind dryRunArtifactMeta's own doc comment claim: on the
-// S3 backend, replacing the dry run's former Has() call with a Meta() call
-// costs nothing extra, because production code calls ArtifactStore.Meta at
+// S3 backend, a dry run's Meta() call costs no more than a Has() call
+// would, because production code calls ArtifactStore.Meta at
 // most once per collection - once for a collection that reaches the artifact
 // probe, never for one already reported settled - and never calls Has at
 // all. This fixture's nil root makes nothing settled, so every collection

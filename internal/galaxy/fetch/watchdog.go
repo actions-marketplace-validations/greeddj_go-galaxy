@@ -14,9 +14,9 @@ import (
 // watchdogTransport wraps a base http.RoundTripper so that every response
 // body read through it is guarded by a per-read inactivity timer: once idle
 // elapses between two body reads (or before the first one), the stuck read
-// is unblocked instead of hanging indefinitely. This replaces the whole
-// response http.Client.Timeout, which bounded total transfer time rather
-// than progress, and so truncated large-but-healthy artifact downloads.
+// is unblocked instead of hanging indefinitely. It stands in for a
+// whole-response http.Client.Timeout, which would bound total transfer time
+// rather than progress and so truncate large-but-healthy artifact downloads.
 type watchdogTransport struct {
 	base http.RoundTripper
 	idle time.Duration

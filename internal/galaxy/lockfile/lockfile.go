@@ -240,13 +240,12 @@ func IsNotExist(err error) bool {
 //
 // The distinction it draws is between commands, not between failures. "The
 // lockfile you asked me to read is not there" is a fact about the lockfile,
-// which is why it classifies as the lockfile exit class; reaching a command
-// through a bare fs.ErrNotExist instead lands it in the environment-usage
-// class, which is where the same absence used to send `tree`, `explain` and
-// `outdated` while it already sent `install --frozen` and its two siblings to
-// the lockfile class. Every command that requires a lockfile goes through
-// here, so the classification is a property of the loader rather than
-// something each call site has to remember.
+// which is why it classifies as the lockfile exit class; a bare fs.ErrNotExist
+// reaching a command instead lands it in the environment-usage class, the
+// wrong class for that fact. Every command that requires a lockfile goes
+// through here, so all of them stay in the lockfile class and the
+// classification is a property of the loader rather than something each call
+// site has to remember.
 //
 // hash is the one deliberate exception and does not call this: a missing
 // lockfile there is not a failure at all, since it falls back to hashing the

@@ -461,12 +461,12 @@ func extractRegularFile(tarReader *tar.Reader, header *tar.Header, targetPath st
 
 // classifyOpenRegularFileError runs only after os.OpenFile in
 // extractRegularFile has already failed - the happy path pays nothing for
-// this. Regular files now extract read-only (see extractRegularFile above),
-// so a tarball with two entries competing for one path fails this OpenFile
-// with a bare permission error against whatever the earlier entry already
-// put there, which is undebuggable on its own: previously, with writable
-// extracted files, the second entry's O_TRUNC open silently succeeded and
-// the last entry won. An os.Stat of the target distinguishes "this path is
+// this. Regular files extract read-only (see extractRegularFile above), so a
+// tarball with two entries competing for one path fails this OpenFile with a
+// bare permission error against whatever the earlier entry already put
+// there, which is undebuggable on its own: with writable extracted files the
+// second entry's O_TRUNC open would silently succeed and the last entry
+// would win. An os.Stat of the target distinguishes "this path is
 // already occupied by something our own extraction just created" from a
 // genuine open failure against an absent path (an unwritable destination, a
 // vanished parent directory, and so on), and reports the former as

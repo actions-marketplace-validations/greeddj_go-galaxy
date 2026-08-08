@@ -212,9 +212,9 @@ func TestArtifactsDeleteToleratesMissingSidecar(t *testing.T) {
 }
 
 // The digest-shape predicate itself (valid hex, wrong length, uppercase,
-// non-hex characters) moved to helpers.IsSHA256Hex and is exercised by
-// helpers.TestIsSHA256Hex; this package now only calls it, so it no longer
-// needs its own copy of that table.
+// non-hex characters) lives in helpers.IsSHA256Hex and is exercised by
+// helpers.TestIsSHA256Hex; this package only calls it, so it keeps no
+// copy of that table here.
 
 // assertLocalMetaFoundMatchesHas re-probes testArtifactKey with Has and
 // fails the test unless it reports the identical presence metaFound just

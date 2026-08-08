@@ -815,7 +815,7 @@ func TestLoadDropsV3BoltAndRebuilds(t *testing.T) {
 // TestLoadToleratesLegacyRootsBucket proves Load tolerates a leftover "roots"
 // Bolt bucket from before the field was removed from Store: a current-schema
 // snapshot with real installed data, plus a legacy roots bucket planted
-// directly (bypassing Save, which no longer writes one), must still load
+// directly (bypassing Save, which never writes one), must still load
 // successfully with the installed entry intact, and a subsequent Save must
 // still succeed. This deliberately does not assert that the roots bucket
 // still exists after Load/Save: whether a future sweep drops that leftover
@@ -830,9 +830,9 @@ func TestLoadToleratesLegacyRootsBucket(t *testing.T) {
 	mustSave(t, dbs, st)
 
 	err := dbs.db.Update(func(tx *bolt.Tx) error {
-		// "roots" is the literal legacy bucket name, no longer a named
-		// constant since helpers.StoreBucketRoots was removed along with the
-		// field it backed.
+		// "roots" is the literal legacy bucket name, spelled out here
+		// because Store carries no roots field and therefore no named
+		// constant for it.
 		rootsBucket, err := tx.CreateBucketIfNotExists([]byte("roots"))
 		if err != nil {
 			return err

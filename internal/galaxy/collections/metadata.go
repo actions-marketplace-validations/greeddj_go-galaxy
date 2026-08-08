@@ -155,10 +155,10 @@ func tryServerRootMetadata(
 		// Record the winner only on success: a 404 here means only that this
 		// collection is absent under this apiRoot, not that the apiRoot is
 		// wrong, so a 404 must never blacklist an apiRoot for the server.
-		// One benign, intended behavior change: once a winner is known, a
-		// later collection's 404 surfaces as the winner root's 404 rather
-		// than the last candidate's, since the losing candidates are no
-		// longer probed - same error class, fewer round trips.
+		// One benign, intended consequence of the memo: once a winner is
+		// known, a later collection's 404 surfaces as the winner root's 404
+		// rather than the last candidate's, since the losing candidates are
+		// never probed again - same error class, fewer round trips.
 		deps.apiRoots.recordWinner(cand.base, cand.apiRoot)
 		return &root, true, nil
 	}

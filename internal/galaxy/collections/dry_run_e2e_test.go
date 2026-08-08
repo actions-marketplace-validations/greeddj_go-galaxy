@@ -918,7 +918,7 @@ func TestWarmDryRunSkipsMetrics(t *testing.T) {
 // TestWarmDryRunBannerSurvivesQuiet proves dryRunBanner's output actually
 // reaches a human even in --quiet mode for warm, against the real
 // progress.Printer (not a test stub) - mirroring
-// TestInstallDryRunBannerSurvivesQuiet on the warm side, now that initInstall
+// TestInstallDryRunBannerSurvivesQuiet on the warm side, since initInstall
 // emits the banner for every dry-run command rather than installWithState
 // alone.
 func TestWarmDryRunBannerSurvivesQuiet(t *testing.T) {

@@ -356,13 +356,13 @@ func TestParseCollectionsNullValue(t *testing.T) {
 // checks it for two things at once. It is rejected - no Galaxy server has a
 // collection whose name contains a dot - and it is rejected as an invalid
 // name rather than as a namespace/name conflict, which is the property this
-// test has always existed to pin: helpers.SplitFQDN does not split three
+// test exists to pin: helpers.SplitFQDN does not split three
 // parts, so there is no ambiguous split for the explicit namespace to
 // conflict with, and reporting one would send the operator looking for a
 // contradiction that is not there.
 //
-// Until the name alphabet existed this entry parsed successfully and was
-// carried as a collection called "a.b.c".
+// Without the name alphabet this entry parses successfully and is carried
+// as a collection called "a.b.c".
 func TestParseCollectionsNamespaceWithThreePartNameIsRejectedAsAName(t *testing.T) {
 	t.Parallel()
 	input := "- namespace: foo\n  name: a.b.c\n"
@@ -393,9 +393,9 @@ func TestParseCollectionsNamespaceWithThreePartNameIsRejectedAsAName(t *testing.
 //
 // The explicit-namespace row is why the check sits at the entry level and not
 // inside helpers.SplitFQDN: that form never reaches SplitFQDN, since the name
-// carries no dot for it to split. Before this, such a namespace was carried
-// into the resolver, which printed it - on an ordinary run with no flags -
-// and the run then failed while a URL was being built, unclassified.
+// carries no dot for it to split. Without the entry-level check such a
+// namespace reaches the resolver, which prints it - on an ordinary run with
+// no flags - and the run then fails while a URL is being built, unclassified.
 func TestParseCollectionsRejectsNamesOutsideTheAlphabet(t *testing.T) {
 	t.Parallel()
 	for _, tc := range rejectedRequirementNameCases() {

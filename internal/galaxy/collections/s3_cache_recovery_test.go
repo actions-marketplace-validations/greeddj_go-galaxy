@@ -14,7 +14,7 @@ package collections
 // stub cacheManager.ArtifactStore that wraps a real local.Artifacts - so
 // Has/TempFile/Commit/Delete all behave exactly like a real cache - and
 // overrides only Fetch, to reproduce on its first call the wrapped
-// helpers.ErrSHA256Mismatch the S3 backend's verifyArtifactSHA now returns on
+// helpers.ErrSHA256Mismatch the S3 backend's verifyArtifactSHA returns on
 // a corrupt read.
 
 import (

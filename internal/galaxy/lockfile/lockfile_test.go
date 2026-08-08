@@ -407,11 +407,11 @@ func TestResolveDefaultPath(t *testing.T) {
 // lockfile entry's name: a name outside the alphabet a Galaxy server itself
 // accepts makes the whole file invalid, so nothing downstream ever holds it.
 //
-// Before this, such a name loaded successfully and was carried until
-// something else tripped over it - for a name carrying a newline, that was
-// URL construction, which reported a network failure and so invited a CI to
-// retry a file no retry could ever repair. The rows here are the two ways a
-// name can be wrong and the control that proves the fixture loads at all.
+// Without this boundary such a name loads successfully and is carried until
+// something else trips over it - for a name carrying a newline, that is URL
+// construction, which reports a network failure and so invites a CI to retry
+// a file no retry could ever repair. The rows here are the two ways a name
+// can be wrong and the control that proves the fixture loads at all.
 func TestLoadRejectsAnInvalidCollectionName(t *testing.T) {
 	t.Parallel()
 	for _, tc := range invalidCollectionNameCases() {

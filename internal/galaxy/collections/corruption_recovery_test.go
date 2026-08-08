@@ -143,7 +143,7 @@ func TestInstallCollectionCacheHitExtractFailureRefetchesOnce(t *testing.T) {
 // The corrupt bytes are a well-formed archive whose entry escapes the
 // destination, not arbitrary non-gzip bytes: the failure has to land in
 // extraction for this test to cover the arm it means to, and the download arm
-// this fixture takes now refuses shapeless bytes before committing them, which
+// this fixture takes refuses shapeless bytes before committing them, which
 // would move the failure earlier and quietly retarget the test.
 func TestInstallCollectionCacheHitExtractFailureRefetchOnceThenFails(t *testing.T) {
 	t.Parallel()

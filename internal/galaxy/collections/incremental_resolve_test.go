@@ -1,7 +1,7 @@
 package collections
 
 // This file pins the incremental snapshot-reuse path
-// (tryIncrementalResolveWithSnapshot) now that its recursive
+// (tryIncrementalResolveWithSnapshot), since its recursive
 // resolveCollectionsInternal call for the changed-root subset goes through
 // the version solver: an unchanged root's subgraph must be served verbatim
 // from the snapshot with zero network access, a newly added root's subgraph
