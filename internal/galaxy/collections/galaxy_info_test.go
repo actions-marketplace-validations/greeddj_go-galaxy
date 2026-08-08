@@ -13,7 +13,7 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
 	"github.com/psvmcc/hub/pkg/types"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // presignedQuery is the shape of a real object-storage presigned URL's query

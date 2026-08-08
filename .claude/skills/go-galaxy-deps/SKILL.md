@@ -41,7 +41,7 @@ go tool fieldalignment -fix ./...
 3. `just deps` to sync `vendor/`.
 4. `just lint` to confirm.
 
-The current allowlist (stdlib `$gostd` plus): `go/ast`, `go/parser`, `go/token` (stdlib that `$gostd` does not expand to), `github.com/greeddj/go-galaxy`, `github.com/Masterminds/semver/v3`, `github.com/briandowns/spinner`, `github.com/klauspost/pgzip`, `github.com/psvmcc/hub`, `github.com/urfave/cli/v3`, `go.etcd.io/bbolt`, `gopkg.in/yaml.v3`. Read [.golangci.yml](.golangci.yml) rather than trusting this list.
+The current allowlist (stdlib `$gostd` plus): `go/ast`, `go/parser`, `go/token` (stdlib that `$gostd` does not expand to), `github.com/greeddj/go-galaxy`, `github.com/Masterminds/semver/v3`, `github.com/briandowns/spinner`, `github.com/klauspost/pgzip`, `github.com/psvmcc/hub`, `github.com/urfave/cli/v3`, `go.etcd.io/bbolt`, `go.yaml.in/yaml/v3`. Read [.golangci.yml](.golangci.yml) rather than trusting this list.
 
 ## fieldalignment -fix caveats
 

@@ -37,9 +37,24 @@ linters:
             - github.com/psvmcc/hub
             - github.com/urfave/cli/v3
             - go.etcd.io/bbolt
-            - gopkg.in/yaml.v3
+            - go.yaml.in/yaml/v3
     lll:
       line-length: 140
+    musttag:
+      # musttag keys its built-in list of (de)serializers by module path, so
+      # the YAML entry points it knows are gopkg.in/yaml.v3's. Naming the fork
+      # this module actually imports keeps every yaml.Marshal/yaml.Unmarshal
+      # call in scope; without these two entries the linter goes quiet on them
+      # rather than failing, which is the shape of coverage loss nothing
+      # announces. Same two functions and argument positions as the built-in
+      # pair they stand in for.
+      functions:
+        - name: go.yaml.in/yaml/v3.Marshal
+          tag: yaml
+          arg-pos: 0
+        - name: go.yaml.in/yaml/v3.Unmarshal
+          tag: yaml
+          arg-pos: 1
     misspell:
       locale: US
   exclusions:

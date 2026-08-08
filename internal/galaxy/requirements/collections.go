@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // Collections is a list of collection requirements.

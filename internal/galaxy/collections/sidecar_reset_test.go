@@ -16,7 +16,7 @@ import (
 	"testing"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // TestWriteGalaxyInfoOverwritesRelativeInRootSymlink proves a relative,

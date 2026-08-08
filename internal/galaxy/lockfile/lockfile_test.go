@@ -1,6 +1,8 @@
 package lockfile
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -119,7 +121,7 @@ func TestLoadWrapsUnreadableFileAsInvalid(t *testing.T) {
 // err }` guard, so every os.ReadFile failure is wrapped) confirmed to fail
 // this test with:
 //
-//	lockfile_test.go:144: expected IsNotExist, got lockfile is invalid: open
+//	lockfile_test.go:146: expected IsNotExist, got lockfile is invalid: open
 //	/.../missing.yml: no such file or directory
 //	--- FAIL: TestLoadAbsentFileIsNotInvalid (0.00s)
 //
@@ -548,4 +550,147 @@ func TestLoadAcceptsBareServerListIDAsSource(t *testing.T) {
 	if got := f.Collections[0].Source; got != source {
 		t.Fatalf("Source = %q, want %q", got, source)
 	}
+}
+
+// canonicalLockfileGolden is the exact byte sequence Save must write for the
+// fixture canonicalGoldenFile builds. It is spelled out rather than derived,
+// because deriving it from the same emitter that produced it would assert
+// nothing: the whole point is that these bytes stay put when the emitter
+// underneath them is upgraded or replaced.
+const canonicalLockfileGolden = `server: https://galaxy.ansible.com
+collections:
+    - name: ansible.netcommon
+      version: 7.2.1
+      source: https://galaxy.ansible.com
+      deps:
+        - a.first
+        - m.middle
+        - z.last
+    - name: ansible.posix
+      version: 2.0.0
+      source: ""
+    - name: community.general
+      version: 11.1.0
+      source: https://galaxy.ansible.com
+      sha256: 3b1f2c4d5e6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e
+      deps:
+        - ansible.netcommon
+        - ansible.posix
+schema_version: 1
+`
+
+// canonicalGoldenFile builds the fixture canonicalLockfileGolden pins. It
+// covers the three shapes an entry takes on disk - one carrying a sha256 and
+// dependencies, one minimal enough that its source renders as the empty
+// string, and one whose dependencies arrive unsorted - and it lists the
+// collections themselves out of order, so the golden states what
+// canonicalization produces rather than what the fixture already was.
+func canonicalGoldenFile() *File {
+	return &File{
+		Server:        "https://galaxy.ansible.com",
+		SchemaVersion: SchemaVersion,
+		Collections: []Entry{
+			{
+				Name:    "community.general",
+				Version: "11.1.0",
+				Source:  "https://galaxy.ansible.com",
+				SHA256:  "3b1f2c4d5e6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e",
+				Deps:    []string{"ansible.posix", "ansible.netcommon"},
+			},
+			{Name: "ansible.posix", Version: "2.0.0"},
+			{
+				Name:    "ansible.netcommon",
+				Version: "7.2.1",
+				Source:  "https://galaxy.ansible.com",
+				Deps:    []string{"z.last", "a.first", "m.middle"},
+			},
+		},
+	}
+}
+
+// TestSaveEmitsCanonicalBytes is the lockfile's golden test. The bytes Save
+// writes are a public contract rather than an implementation detail: Hash is
+// the SHA256 of exactly those bytes and `go-galaxy hash` prints it, so an
+// operator who recorded that digest in a CI gate is broken by any move in the
+// emitter's output - a different indent width, a different rendering of the
+// empty string, a reordered or requoted scalar. Pinning the bytes literally
+// makes such a move fail here instead of in somebody's pipeline.
+//
+// The second assertion recomputes the expected digest from the same literal
+// instead of restating a hex string, so what it pins is the relationship -
+// the hash is the hash of the bytes Save writes - rather than a number that
+// would have to be recomputed by hand whenever the fixture changed. It is
+// separately reachable rather than implied by the first: because the fixture
+// is deliberately out of canonical order, a Hash that stopped canonicalizing
+// its copy would hash the fixture's own order, leaving Save correct and
+// failing only here.
+func TestSaveEmitsCanonicalBytes(t *testing.T) {
+	t.Parallel()
+
+	// The literal names the schema version textually, so a bump would
+	// otherwise leave it describing a file this package no longer writes.
+	if tail := fmt.Sprintf("schema_version: %d\n", SchemaVersion); !strings.HasSuffix(canonicalLockfileGolden, tail) {
+		t.Fatalf("golden literal does not end in %q: the schema version moved without it", tail)
+	}
+
+	f := canonicalGoldenFile()
+	path := filepath.Join(t.TempDir(), DefaultName)
+	if err := Save(path, f); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	data, err := os.ReadFile(path) // #nosec G304 -- path is built from this test's own t.TempDir
+	if err != nil {
+		t.Fatalf("reading back %s: %v", path, err)
+	}
+
+	// Mutation (swapping the ansible.netcommon and ansible.posix blocks in
+	// canonicalLockfileGolden, so the literal no longer states the order
+	// canonicalization produces) confirmed to fail this test with:
+	//
+	//	Save wrote non-canonical bytes; first difference at line 3:
+	//	 got: "    - name: ansible.netcommon"
+	//	want: "    - name: ansible.posix"
+	//	--- FAIL: TestSaveEmitsCanonicalBytes (0.01s)
+	if got := string(data); got != canonicalLockfileGolden {
+		line, gotLine, wantLine := firstLineDifference(got, canonicalLockfileGolden)
+		t.Fatalf("Save wrote non-canonical bytes; first difference at line %d:\n got: %q\nwant: %q", line, gotLine, wantLine)
+	}
+
+	sum := sha256.Sum256([]byte(canonicalLockfileGolden))
+	want := hex.EncodeToString(sum[:])
+	got, err := f.Hash()
+	if err != nil {
+		t.Fatalf("Hash: %v", err)
+	}
+	if got != want {
+		t.Fatalf("Hash = %s, want %s: the SHA256 of the bytes Save writes", got, want)
+	}
+}
+
+// firstLineDifference returns the 1-based number of the first line on which
+// got and want differ, together with that line from each. Reporting one line
+// rather than dumping both files keeps the failure readable: every shape this
+// golden exists to catch - a changed indent, a changed empty-string
+// rendering, a requoted scalar - lands on a single line, which a whole-file
+// dump would bury. Identical inputs return a zero line, which the sole caller
+// never reaches because it compares first.
+func firstLineDifference(got, want string) (int, string, string) {
+	gotLines := strings.Split(got, "\n")
+	wantLines := strings.Split(want, "\n")
+	for i := range max(len(gotLines), len(wantLines)) {
+		gotLine, wantLine := lineAt(gotLines, i), lineAt(wantLines, i)
+		if gotLine != wantLine {
+			return i + 1, gotLine, wantLine
+		}
+	}
+	return 0, "", ""
+}
+
+// lineAt returns lines[i], or a marker when i is past the end - the shape a
+// file that gained or lost trailing lines produces.
+func lineAt(lines []string, i int) string {
+	if i < len(lines) {
+		return lines[i]
+	}
+	return "<no such line>"
 }

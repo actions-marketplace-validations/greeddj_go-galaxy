@@ -81,7 +81,7 @@ func (s Secret) MarshalJSON() ([]byte, error) {
 	return json.Marshal(s.redacted())
 }
 
-// MarshalYAML implements yaml.Marshaler (gopkg.in/yaml.v3, already a
+// MarshalYAML implements yaml.Marshaler (go.yaml.in/yaml/v3, already a
 // project dependency) for the same reason as MarshalJSON, covering
 // GALAXY.yml-shaped output.
 func (s Secret) MarshalYAML() (any, error) {

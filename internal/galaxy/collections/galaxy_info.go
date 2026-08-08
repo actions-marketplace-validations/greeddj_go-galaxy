@@ -7,7 +7,7 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/psvmcc/hub/pkg/types"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // galaxyYAMLFileName is the sidecar file name inside a collection's .info

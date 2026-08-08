@@ -11,7 +11,7 @@ import (
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/urfave/cli/v3"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // testServerFlagDefault is the --server flag default used by every

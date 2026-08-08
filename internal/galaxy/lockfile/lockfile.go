@@ -16,7 +16,7 @@ import (
 	"sort"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 var errNilFile = errors.New("lockfile: nil File")
