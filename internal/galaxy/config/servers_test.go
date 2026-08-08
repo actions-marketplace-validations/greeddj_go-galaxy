@@ -937,14 +937,127 @@ func TestSecretRedactionDumpNestedInPointerConfig(t *testing.T) {
 	})
 }
 
-// TestTokenFlagAppliesToSingleServer checks the case --token exists for:
-// one effective server, credential handed to it on the command line rather
-// than through an ansible.cfg section.
-func TestTokenFlagAppliesToSingleServer(t *testing.T) {
+// TestTokenFlagCases covers what the --token flag does to the resolved server
+// list: which shapes hand a credential to a server, which are refused, and
+// which leave an already-configured token alone. Each row carries its own
+// assertions, since a refusal and a resolved *Config have nothing in common to
+// state as one set of expected fields.
+func TestTokenFlagCases(t *testing.T) {
 	t.Parallel()
+	for _, tc := range tokenFlagCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := newServerCmd(t, tc.args)
+			cfg, err := runResolveServers(t, c, tc.ansCfg)
+			tc.check(t, cfg, err)
+		})
+	}
+}
 
-	c := newServerCmd(t, []string{"--server=https://hub.example.com", "--token=s3cr3t"})
-	cfg, err := runResolveServers(t, c, ansibleConfig{})
+// tokenFlagCase is one row of TestTokenFlagCases: the command line the row
+// runs, the ansible.cfg it resolves against, and the row's own assertions over
+// whatever resolveServers returned.
+type tokenFlagCase struct {
+	check  func(t *testing.T, cfg *Config, err error)
+	ansCfg ansibleConfig
+	name   string
+	args   []string
+}
+
+// hubWithINIToken is the ansible.cfg the rows about an already-configured
+// credential resolve against: one server_list entry whose section carries a
+// token, so the flag has something to override, to clear, or to leave alone.
+func hubWithINIToken() ansibleConfig {
+	return ansibleConfig{
+		Galaxy:        ansibleGalaxyConfig{ServerList: "hub"},
+		GalaxyServers: map[string]map[string]string{"hub": {"url": "https://hub.example.com", "token": "from-ini"}},
+	}
+}
+
+// tokenFlagCases enumerates what --token does to the resolved server list: the
+// shapes that hand over, override or clear a credential, the two that are
+// refused outright, and the one that leaves a configured token untouched. The
+// plaintext transport rule owns two rows rather than one - the non-loopback
+// refusal and the loopback exception - because a single row asserting both
+// outcomes hides the second behind whichever of the two fails first. Each
+// row's assertions sit in their own named function below rather than in a
+// closure here, so one row's branches are not counted against the whole table.
+func tokenFlagCases() []tokenFlagCase {
+	return []tokenFlagCase{
+		{
+			// checks the case --token exists for: one effective server,
+			// credential handed to it on the command line rather than through
+			// an ansible.cfg section.
+			name:  "applies to single server",
+			args:  []string{"--server=https://hub.example.com", "--token=s3cr3t"},
+			check: checkTokenAppliesToSingleServer,
+		},
+		{
+			// checks precedence: an explicit command-line or environment token
+			// wins over one configured in ansible.cfg, the same direction every
+			// other explicitly-set value takes.
+			name:   "overrides configured token",
+			args:   []string{"--token=from-flag"},
+			ansCfg: hubWithINIToken(),
+			check:  checkTokenOverridesConfiguredToken,
+		},
+		{
+			// checks that exporting GO_GALAXY_TOKEN= forces an anonymous run
+			// without editing any config, which is the point of treating an
+			// explicitly empty value as "no token" rather than as "unset".
+			name:   "clears when explicitly empty",
+			args:   []string{"--token="},
+			ansCfg: hubWithINIToken(),
+			check:  checkTokenClearsWhenExplicitlyEmpty,
+		},
+		{
+			// checks the ambiguity refusal: with two servers in effect the flag
+			// names neither, and guessing could send a private hub's credential
+			// to the public Galaxy.
+			name: "rejected with multiple servers",
+			args: []string{"--token=s3cr3t"},
+			ansCfg: ansibleConfig{
+				Galaxy: ansibleGalaxyConfig{ServerList: "hub,public"},
+				GalaxyServers: map[string]map[string]string{
+					"hub":    {"url": "https://hub.example.com"},
+					"public": {"url": "https://galaxy.ansible.com"},
+				},
+			},
+			check: checkTokenRejectedWithMultipleServers,
+		},
+		{
+			// checks that --token is held to the same transport rule as a
+			// configured token: a credential must not be sent in the clear to
+			// anything but loopback.
+			name:  "rejected over plaintext non-loopback",
+			args:  []string{"--server=http://hub.example.com", "--token=s3cr3t"},
+			check: checkTokenRejectedOverPlaintextNonLoopback,
+		},
+		{
+			// the loopback half of that same transport rule: 127.0.0.1 is the
+			// one plaintext destination a credential may reach, so this shape
+			// resolves rather than being refused.
+			name:  "allowed over plaintext loopback",
+			args:  []string{"--server=http://127.0.0.1:8080", "--token=s3cr3t"},
+			check: checkTokenAllowedOverPlaintextLoopback,
+		},
+		{
+			// checks that a command which never sets the flag - including one
+			// that does not register it - changes nothing, so the flag cannot
+			// silently strip a configured credential.
+			name:   "unset leaves servers untouched",
+			args:   nil,
+			ansCfg: hubWithINIToken(),
+			check:  checkTokenUnsetLeavesServersUntouched,
+		},
+	}
+}
+
+// checkTokenAppliesToSingleServer asserts the "applies to single server" row:
+// resolution succeeds, yields exactly one server, and that server carries the
+// flag's value.
+func checkTokenAppliesToSingleServer(t *testing.T, cfg *Config, err error) {
+	t.Helper()
 	if err != nil {
 		t.Fatalf("resolveServers() error = %v, want nil", err)
 	}
@@ -956,18 +1069,10 @@ func TestTokenFlagAppliesToSingleServer(t *testing.T) {
 	}
 }
 
-// TestTokenFlagOverridesConfiguredToken checks precedence: an explicit
-// command-line or environment token wins over one configured in
-// ansible.cfg, the same direction every other explicitly-set value takes.
-func TestTokenFlagOverridesConfiguredToken(t *testing.T) {
-	t.Parallel()
-
-	ansCfg := ansibleConfig{
-		Galaxy:        ansibleGalaxyConfig{ServerList: "hub"},
-		GalaxyServers: map[string]map[string]string{"hub": {"url": "https://hub.example.com", "token": "from-ini"}},
-	}
-	c := newServerCmd(t, []string{"--token=from-flag"})
-	cfg, err := runResolveServers(t, c, ansCfg)
+// checkTokenOverridesConfiguredToken asserts the "overrides configured token"
+// row: the resolved server carries the flag's value rather than the section's.
+func checkTokenOverridesConfiguredToken(t *testing.T, cfg *Config, err error) {
+	t.Helper()
 	if err != nil {
 		t.Fatalf("resolveServers() error = %v, want nil", err)
 	}
@@ -976,19 +1081,10 @@ func TestTokenFlagOverridesConfiguredToken(t *testing.T) {
 	}
 }
 
-// TestTokenFlagClearsWhenExplicitlyEmpty checks that exporting
-// GO_GALAXY_TOKEN= forces an anonymous run without editing any config,
-// which is the point of treating an explicitly empty value as "no token"
-// rather than as "unset".
-func TestTokenFlagClearsWhenExplicitlyEmpty(t *testing.T) {
-	t.Parallel()
-
-	ansCfg := ansibleConfig{
-		Galaxy:        ansibleGalaxyConfig{ServerList: "hub"},
-		GalaxyServers: map[string]map[string]string{"hub": {"url": "https://hub.example.com", "token": "from-ini"}},
-	}
-	c := newServerCmd(t, []string{"--token="})
-	cfg, err := runResolveServers(t, c, ansCfg)
+// checkTokenClearsWhenExplicitlyEmpty asserts the "clears when explicitly
+// empty" row: the resolved server ends up with no token at all.
+func checkTokenClearsWhenExplicitlyEmpty(t *testing.T, cfg *Config, err error) {
+	t.Helper()
 	if err != nil {
 		t.Fatalf("resolveServers() error = %v, want nil", err)
 	}
@@ -997,54 +1093,37 @@ func TestTokenFlagClearsWhenExplicitlyEmpty(t *testing.T) {
 	}
 }
 
-// TestTokenFlagRejectedWithMultipleServers checks the ambiguity refusal:
-// with two servers in effect the flag names neither, and guessing could
-// send a private hub's credential to the public Galaxy.
-func TestTokenFlagRejectedWithMultipleServers(t *testing.T) {
-	t.Parallel()
-
-	ansCfg := ansibleConfig{
-		Galaxy: ansibleGalaxyConfig{ServerList: "hub,public"},
-		GalaxyServers: map[string]map[string]string{
-			"hub":    {"url": "https://hub.example.com"},
-			"public": {"url": "https://galaxy.ansible.com"},
-		},
-	}
-	c := newServerCmd(t, []string{"--token=s3cr3t"})
-	if _, err := runResolveServers(t, c, ansCfg); !errors.Is(err, helpers.ErrAmbiguousGalaxyToken) {
+// checkTokenRejectedWithMultipleServers asserts the "rejected with multiple
+// servers" row: resolution fails with ErrAmbiguousGalaxyToken.
+func checkTokenRejectedWithMultipleServers(t *testing.T, _ *Config, err error) {
+	t.Helper()
+	if !errors.Is(err, helpers.ErrAmbiguousGalaxyToken) {
 		t.Fatalf("resolveServers() error = %v, want ErrAmbiguousGalaxyToken", err)
 	}
 }
 
-// TestTokenFlagRejectedOverPlaintext checks that --token is held to the
-// same transport rule as a configured token: a credential must not be sent
-// in the clear to anything but loopback.
-func TestTokenFlagRejectedOverPlaintext(t *testing.T) {
-	t.Parallel()
-
-	c := newServerCmd(t, []string{"--server=http://hub.example.com", "--token=s3cr3t"})
-	if _, err := runResolveServers(t, c, ansibleConfig{}); !errors.Is(err, helpers.ErrInsecureTokenTransport) {
+// checkTokenRejectedOverPlaintextNonLoopback asserts the "rejected over
+// plaintext non-loopback" row: resolution fails with ErrInsecureTokenTransport.
+func checkTokenRejectedOverPlaintextNonLoopback(t *testing.T, _ *Config, err error) {
+	t.Helper()
+	if !errors.Is(err, helpers.ErrInsecureTokenTransport) {
 		t.Fatalf("resolveServers() error = %v, want ErrInsecureTokenTransport", err)
 	}
+}
 
-	loopback := newServerCmd(t, []string{"--server=http://127.0.0.1:8080", "--token=s3cr3t"})
-	if _, err := runResolveServers(t, loopback, ansibleConfig{}); err != nil {
+// checkTokenAllowedOverPlaintextLoopback asserts the "allowed over plaintext
+// loopback" row: resolution succeeds.
+func checkTokenAllowedOverPlaintextLoopback(t *testing.T, _ *Config, err error) {
+	t.Helper()
+	if err != nil {
 		t.Fatalf("resolveServers() over loopback error = %v, want nil", err)
 	}
 }
 
-// TestTokenFlagUnsetLeavesServersUntouched checks that a command which
-// never sets the flag - including one that does not register it - changes
-// nothing, so the flag cannot silently strip a configured credential.
-func TestTokenFlagUnsetLeavesServersUntouched(t *testing.T) {
-	t.Parallel()
-
-	ansCfg := ansibleConfig{
-		Galaxy:        ansibleGalaxyConfig{ServerList: "hub"},
-		GalaxyServers: map[string]map[string]string{"hub": {"url": "https://hub.example.com", "token": "from-ini"}},
-	}
-	c := newServerCmd(t, nil)
-	cfg, err := runResolveServers(t, c, ansCfg)
+// checkTokenUnsetLeavesServersUntouched asserts the "unset leaves servers
+// untouched" row: the resolved server still carries the configured token.
+func checkTokenUnsetLeavesServersUntouched(t *testing.T, cfg *Config, err error) {
+	t.Helper()
 	if err != nil {
 		t.Fatalf("resolveServers() error = %v, want nil", err)
 	}
