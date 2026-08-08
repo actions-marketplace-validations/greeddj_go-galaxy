@@ -1153,58 +1153,81 @@ func (metaFoundWithErrorArtifacts) Delete(context.Context, string) error {
 	return errStubNotImplemented
 }
 
-// TestInstallDryRunProbeTreatsMetaErrorAsNotCached proves dryRunArtifactMeta's
-// `err != nil` half of its `if err != nil || !found` guard, reached through
-// installDryRunProbe: a Meta call answering found=true alongside a non-nil
-// error must be classified not-cached, never a cache hit and never a
-// probe-level fail of its own - a store that could not be consulted is not
-// evidence the artifact is absent, and reporting it as either "cached" or
-// "would fail" would both be lies a preview cannot afford.
-//
-// root is nil so newInstallTarget's own nil-root guard makes the collection
-// report ok=false before the pin check, isolating this test to the artifact
-// probe branch alone - the same isolation
-// TestClassifyDryRunCallsMetaExactlyOncePerCollectionNeverHas already uses.
-func TestInstallDryRunProbeTreatsMetaErrorAsNotCached(t *testing.T) {
+// TestDryRunProbeMetaErrorCases covers dryRunArtifactMeta's `err != nil` half
+// of its `if err != nil || !found` guard, one row per probe that reaches it.
+// Every row asserts the same three-field verdict; the probe under test, and
+// the route by which it arrives at that verdict, are stated on the row.
+func TestDryRunProbeMetaErrorCases(t *testing.T) {
 	t.Parallel()
-	cfg := &config.Config{}
 	col := collection{Namespace: "acme", Name: "app", Version: "1.0.0"}
 
-	probe := installDryRunProbe(cfg, store.New(), metaFoundWithErrorArtifacts{}, nil)
-	got := probe(context.Background(), col)
+	for _, tc := range dryRunProbeMetaErrorCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			probe := tc.buildProbe(t)
+			got := probe(context.Background(), col)
 
-	if got.cached {
-		t.Errorf("expected cached=false when Meta answers found=true alongside a non-nil error, got %+v", got)
-	}
-	if got.fail != nil {
-		t.Errorf("expected no fail verdict from a Meta error alone, got %v", got.fail)
-	}
-	if got.settled {
-		t.Errorf("expected settled=false, got %+v", got)
+			if got.cached {
+				t.Errorf("expected cached=false when Meta answers found=true alongside a non-nil error, got %+v", got)
+			}
+			if got.fail != nil {
+				t.Errorf("expected no fail verdict from a Meta error alone, got %v", got.fail)
+			}
+			if got.settled {
+				t.Errorf("expected settled=false, got %+v", got)
+			}
+		})
 	}
 }
 
-// TestWarmDryRunProbeTreatsMetaErrorAsNotCached is
-// TestInstallDryRunProbeTreatsMetaErrorAsNotCached's counterpart for
-// warmDryRunProbe: the identical Meta failure must also be reported as
-// not-cached there, before ever reaching extractStore.Ready under a sha this
-// probe could not have named from a genuine cache miss anyway.
-func TestWarmDryRunProbeTreatsMetaErrorAsNotCached(t *testing.T) {
-	t.Parallel()
-	cfg := &config.Config{}
-	col := collection{Namespace: "acme", Name: "app", Version: "1.0.0"}
-	extractStore := extracted.NewStore(t.TempDir())
+// dryRunProbeMetaErrorCase is one table entry for
+// TestDryRunProbeMetaErrorCases.
+type dryRunProbeMetaErrorCase struct {
+	// buildProbe returns the probe this row exercises, built against
+	// metaFoundWithErrorArtifacts and whatever else that probe needs.
+	buildProbe func(t *testing.T) dryRunProbe
+	name       string
+}
 
-	probe := warmDryRunProbe(cfg, metaFoundWithErrorArtifacts{}, extractStore, map[string]string{})
-	got := probe(context.Background(), col)
-
-	if got.cached {
-		t.Errorf("expected cached=false when Meta answers found=true alongside a non-nil error, got %+v", got)
-	}
-	if got.fail != nil {
-		t.Errorf("expected no fail verdict from a Meta error alone, got %v", got.fail)
-	}
-	if got.settled {
-		t.Errorf("expected settled=false, got %+v", got)
+// dryRunProbeMetaErrorCases enumerates the probes that reach
+// dryRunArtifactMeta, one row each, with the fixture that row's probe is
+// built against.
+func dryRunProbeMetaErrorCases() []dryRunProbeMetaErrorCase {
+	return []dryRunProbeMetaErrorCase{
+		{
+			// Proves dryRunArtifactMeta's `err != nil` half of its
+			// `if err != nil || !found` guard, reached through
+			// installDryRunProbe: a Meta call answering found=true alongside a
+			// non-nil error must be classified not-cached, never a cache hit
+			// and never a probe-level fail of its own - a store that could not
+			// be consulted is not evidence the artifact is absent, and
+			// reporting it as either "cached" or "would fail" would both be
+			// lies a preview cannot afford.
+			//
+			// root is nil so newInstallTarget's own nil-root guard makes the
+			// collection report ok=false before the pin check, isolating this
+			// row to the artifact probe branch alone - the same isolation
+			// TestClassifyDryRunCallsMetaExactlyOncePerCollectionNeverHas
+			// already uses.
+			name: "install",
+			buildProbe: func(t *testing.T) dryRunProbe {
+				t.Helper()
+				cfg := &config.Config{}
+				return installDryRunProbe(cfg, store.New(), metaFoundWithErrorArtifacts{}, nil)
+			},
+		},
+		{
+			// The "install" row's counterpart for warmDryRunProbe: the
+			// identical Meta failure must also be reported as not-cached
+			// there, before ever reaching extractStore.Ready under a sha this
+			// probe could not have named from a genuine cache miss anyway.
+			name: "warm",
+			buildProbe: func(t *testing.T) dryRunProbe {
+				t.Helper()
+				cfg := &config.Config{}
+				extractStore := extracted.NewStore(t.TempDir())
+				return warmDryRunProbe(cfg, metaFoundWithErrorArtifacts{}, extractStore, map[string]string{})
+			},
+		},
 	}
 }
