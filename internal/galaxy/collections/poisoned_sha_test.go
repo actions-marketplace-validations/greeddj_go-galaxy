@@ -167,8 +167,8 @@ func TestInstallRejectsPoisonedMetadataSHAOnCacheHit(t *testing.T) {
 // report false (so installCollection reinstalls rather than trusting the
 // poisoned record) and never touch the victim on the way to that answer.
 //
-// The GALAXY.yml sidecar installRecordMatches also checks is seeded here,
-// deliberately: without it, installRecordMatches would already return false
+// The GALAXY.yml sidecar matchingInstalledRecord also checks is seeded here,
+// deliberately: without it, matchingInstalledRecord would already report false
 // for that unrelated reason, letting a regression in its own
 // markerRel guard hide behind the missing sidecar instead of being
 // caught by this test.
@@ -209,10 +209,10 @@ func TestCanSkipInstallRefusesPoisonedSnapshotSHA(t *testing.T) {
 	assertFileContent(t, victim, victimContent)
 }
 
-// TestInstallRecordMatchesRefusesUnsafeMarkerSHA proves installRecordMatches's
-// own markerRel call specifically, independent of canSkipInstall's
-// separate verifyExtractMarker backstop: a file is seeded at exactly the
-// location a naive filepath.Join(installPath,
+// TestInstallRecordMatchesRefusesUnsafeMarkerSHA proves
+// matchingInstalledRecord's own markerRel call specifically, independent of
+// canSkipInstall's separate verifyExtractMarker backstop: a file is seeded at
+// exactly the location a naive filepath.Join(installPath,
 // helpers.ExtractMarkerPrefix+entry.ArtifactSHA256) would find present - so
 // a bare os.Stat-based check using that join would coincidentally succeed
 // and falsely report a match - and installRecordMatches must still return

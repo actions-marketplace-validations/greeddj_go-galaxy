@@ -247,8 +247,8 @@ func TestVerifyExtractMarkerRealInstallReturnsTrue(t *testing.T) {
 // reachable only through the symlinked "ansible_collections" prefix. Unlike
 // that test - which stays true even with either one of two rooting gates
 // reverted, since the other alone still suffices - this one is killed by
-// reverting installRecordMatches's own two target.root.Stat calls to a plain,
-// absolute os.Stat on their own, with no second gate standing behind it.
+// reverting matchingInstalledRecord's own two target.root.Stat calls to a
+// plain, absolute os.Stat on their own, with no second gate standing behind it.
 func TestInstallRecordMatchesSymlinkedPrefixReturnsFalse(t *testing.T) {
 	t.Parallel()
 	col := collection{Namespace: "acme", Name: "widgets", Version: "1.0.0"}
@@ -309,19 +309,20 @@ func TestInstallRecordMatchesRealInstallReturnsTrue(t *testing.T) {
 // extract marker, and a GALAXY.yml sidecar all exist, but only reachable
 // through the symlinked "ansible_collections" prefix, exactly as they would
 // if an earlier, unpatched binary had installed through the symlink. Every
-// check installRecordMatches performs goes through target.root.Stat, which
+// check matchingInstalledRecord performs goes through target.root.Stat, which
 // refuses to traverse the escaping component, so this must report false - a
 // silent wrong "true" here would skip a real install and keep serving
 // whatever sits at the symlink's target forever.
 //
 // This test is conjunction-killed by design, not a weak or vacuous check:
-// canSkipInstall layers two independent rooting gates - installRecordMatches's
-// own two target.root.Stat calls, and verifyExtractMarker's rooted
-// scanTree/readExtractMarker pass - and reverting only one of them still
-// leaves the other refusing the symlinked seed on its own, so this test stays
-// green either way. That is expected, not a gap: each gate has its own
-// single-gate killer elsewhere - TestInstallRecordMatchesSymlinkedPrefixReturnsFalse
-// pins the installRecordMatches half, TestVerifyExtractMarkerSymlinkedPrefixLeavesOutsideMarkerIntact
+// canSkipInstall layers two independent rooting gates -
+// matchingInstalledRecord's own two target.root.Stat calls, and
+// verifyExtractMarker's rooted scanTree/readExtractMarker pass - and
+// reverting only one of them still leaves the other refusing the symlinked
+// seed on its own, so this test stays green either way. That is expected, not
+// a gap: each gate has its own single-gate killer elsewhere -
+// TestInstallRecordMatchesSymlinkedPrefixReturnsFalse pins the
+// matchingInstalledRecord half, TestVerifyExtractMarkerSymlinkedPrefixLeavesOutsideMarkerIntact
 // pins the verifyExtractMarker half - and this test is what proves the two
 // gates actually compose into one fail-closed decision at the canSkipInstall
 // level, the property canSkipInstall's own defense-in-depth is supposed to

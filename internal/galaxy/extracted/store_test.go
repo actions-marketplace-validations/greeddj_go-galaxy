@@ -94,6 +94,17 @@ func TestStoreEnsureConcurrent(t *testing.T) {
 	}
 }
 
+// The nested entry is what makes this test defend materializeEntry's
+// directory arm: writeTarball emits no directory headers at all, so sub/
+// exists in the CAS tree only because archive.ensureDir created it, and it
+// exists under dst only because the walk's directory arm creates each
+// directory before descending into it. Deleting that arm fails this test,
+// and five others, with
+//
+//	Materialize: open <dst>/sub/bar.txt: no such file or directory
+//
+// reported from copyFile's OpenFile rather than from os.Link, since
+// materializeFile falls back to a byte copy on any link failure.
 func TestMaterializeUsesHardlinks(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

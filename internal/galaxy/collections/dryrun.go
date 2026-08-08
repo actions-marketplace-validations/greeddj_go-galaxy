@@ -296,7 +296,7 @@ func warnIfFrozenOffline(runtime *infra.Infra, cfg *config.Config) {
 // pass, the same cost a real install's canSkipInstall pays for the same
 // collection, is only paid for a collection that already looks installed by
 // the cheap check, exactly as canSkipInstall itself only calls
-// verifyExtractMarker after its own installRecordMatches call passes. A
+// verifyExtractMarker after its own matchingInstalledRecord call passes. A
 // settled verdict returns immediately, without ever reaching the pin check
 // below it: installRecordMatches already requires entry.ArtifactSHA256 ==
 // col.SHA256 (when a pin exists), so a settled collection is already

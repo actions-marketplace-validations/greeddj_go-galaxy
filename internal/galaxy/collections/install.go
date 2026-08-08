@@ -692,14 +692,16 @@ func installEntryMatches(col collection, entry store.InstalledEntry, installPath
 	return true
 }
 
-// installRecordMatches reports whether a collection's store entry, extract
+// matchingInstalledRecord reports whether a collection's store entry, extract
 // marker, and GALAXY.yml sidecar are all present and consistent for target,
-// using only cheap target.root.Stat calls - no tree walk. This is the check
-// shouldSchedulePrefetch uses to decide whether to spend a background
-// download ahead of time: a wrong "skip" there only costs a lost prefetch
-// head start, since installCollection's canSkipInstall below always
-// re-checks strictly (including the tally) before actually skipping the
-// install itself, so correctness never depends on this cheap version.
+// using only cheap target.root.Stat calls - no tree walk. It returns that
+// store entry when they are, and the zero InstalledEntry when they are not.
+// This is the check shouldSchedulePrefetch uses, through installRecordMatches,
+// to decide whether to spend a background download ahead of time: a wrong
+// "skip" there only costs a lost prefetch head start, since
+// installCollection's canSkipInstall below always re-checks strictly
+// (including the tally) before actually skipping the install itself, so
+// correctness never depends on this cheap version.
 //
 // Both stats go through target.root rather than a plain os.Stat, which is
 // what makes this check itself symlink-swap safe: an install directory or
@@ -707,44 +709,47 @@ func installEntryMatches(col collection, entry store.InstalledEntry, installPath
 // cfg.DownloadPath is not found by root.Stat (it refuses to traverse the
 // escaping component), so this correctly reports false rather than mistaking
 // a symlink-only fake for a real install.
-func installRecordMatches(target installTarget, col collection, st *store.Store) bool {
+func matchingInstalledRecord(target installTarget, col collection, st *store.Store) (store.InstalledEntry, bool) {
 	if st == nil {
-		return false
+		return store.InstalledEntry{}, false
 	}
 	entry, ok := st.GetInstalled(col.key())
 	if !ok || !installEntryMatches(col, entry, target.path) {
-		return false
+		return store.InstalledEntry{}, false
 	}
 
 	markerRelPath, ok := markerRel(target, entry.ArtifactSHA256)
 	if !ok {
-		return false
+		return store.InstalledEntry{}, false
 	}
 	if _, err := target.root.Stat(markerRelPath); err != nil {
-		return false
+		return store.InstalledEntry{}, false
 	}
 
 	if _, err := target.root.Stat(path.Join(target.info, galaxyYAMLFileName)); err != nil {
-		return false
+		return store.InstalledEntry{}, false
 	}
 
-	return true
+	return entry, true
+}
+
+// installRecordMatches is matchingInstalledRecord's boolean form.
+func installRecordMatches(target installTarget, col collection, st *store.Store) bool {
+	_, ok := matchingInstalledRecord(target, col, st)
+	return ok
 }
 
 // canSkipInstall reports whether a collection is already installed and its
 // extracted tree still matches the tally recorded at extraction time. It
 // layers verifyExtractMarker's fs.WalkDir pass on top of
-// installRecordMatches's cheap checks, and is called only from
+// matchingInstalledRecord's cheap checks, and is called only from
 // installCollection: this is the gate that actually decides whether real
 // work is skipped, so unlike the prefetch scan's use of installRecordMatches,
 // a false "skip" here would silently keep serving a corrupted shared
 // extracted-store cache to every future install. See verifyExtractMarker for
 // exactly what the tally catches and does not catch.
 func canSkipInstall(target installTarget, col collection, st *store.Store, out output.Printer) bool {
-	if !installRecordMatches(target, col, st) {
-		return false
-	}
-	entry, ok := st.GetInstalled(col.key())
+	entry, ok := matchingInstalledRecord(target, col, st)
 	if !ok {
 		return false
 	}

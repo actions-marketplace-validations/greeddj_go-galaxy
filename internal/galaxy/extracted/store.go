@@ -747,6 +747,20 @@ func isReady(root *os.Root, dirRel string) bool {
 // Materialize mirrors srcRoot into dstRoot using hardlinks, falling back
 // to copy for files that cannot be linked (e.g. cross-device). The
 // ReadyMarker at the root is skipped.
+//
+// No entry below the root creates a parent directory of its own, and none
+// needs to: dstRoot is created here before the walk starts,
+// filepath.WalkDir visits a directory before anything inside it, and
+// materializeEntry's directory arm creates each one as it is visited, so
+// every directory on an entry's path exists by the time that entry is
+// reached. Every entry the walk creates nothing for is one that cannot hold
+// another entry beneath it: srcRoot itself, whose dstRoot counterpart
+// already exists; the root's ReadyMarker, which writeReadyMarker leaves a
+// regular file on every extraction; and, in materializeEntry's default arm,
+// anything that is neither directory, symlink, nor regular file. That makes
+// the directory arm and the dstRoot MkdirAll below load-bearing rather than
+// conveniences: without either, materializeFile and materializeSymlink have
+// no directory to write into.
 func Materialize(srcRoot, dstRoot string) error {
 	if err := os.MkdirAll(dstRoot, helpers.DirMod); err != nil {
 		return err
@@ -793,9 +807,6 @@ func materializeSymlink(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), helpers.DirMod); err != nil {
-		return err
-	}
 	_ = os.Remove(dst)
 	return os.Symlink(target, dst)
 }
@@ -809,9 +820,6 @@ func materializeSymlink(src, dst string) error {
 // EEXIST link error and then an EACCES/EISDIR open inside copyFile, hiding
 // the real cause behind a confusing downstream failure.
 func materializeFile(src, dst string, perm os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(dst), helpers.DirMod); err != nil {
-		return err
-	}
 	if err := os.Remove(dst); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}

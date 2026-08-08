@@ -11,8 +11,8 @@ import (
 )
 
 // galaxyYAMLFileName is the sidecar file name inside a collection's .info
-// directory. Both writeGalaxyInfo and installRecordMatches join it onto the
-// same target.info; a single constant keeps a typo in either literal from
+// directory. Both writeGalaxyInfo and matchingInstalledRecord join it onto
+// the same target.info; a single constant keeps a typo in either literal from
 // silently reproducing the disagreement this file's chokepoint closes.
 const galaxyYAMLFileName = "GALAXY.yml"
 

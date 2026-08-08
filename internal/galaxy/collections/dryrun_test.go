@@ -75,7 +75,7 @@ func TestClassifyDryRunSortedOrder(t *testing.T) {
 		// artifacts is nil throughout: dryRunArtifactMeta treats a nil store as
 		// "not cached", which is the only classification this test needs and
 		// avoids depending on any real cache state. root is nil too - cfg has no
-		// DownloadPath, and a nil store already makes installRecordMatches
+		// DownloadPath, and a nil root already makes installRecordMatches
 		// unreachable through newInstallTarget's own nil-root guard, so there is
 		// nothing for a real root to add here.
 		classifyDryRun(context.Background(), runtime, cfg, cols, installDryRunVerbs, installDryRunProbe(cfg, nil, nil, nil))
