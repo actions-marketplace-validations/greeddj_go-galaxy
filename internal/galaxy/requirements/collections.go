@@ -1,3 +1,15 @@
+// Package requirements parses an ansible-style requirements.yml into the
+// collection entries the resolver works from. It accepts both shapes ansible
+// writes - a bare list, or a mapping carrying a collections: key - with each
+// item either a "namespace.name" string or a mapping, reports separately
+// whether the file declared roles (which this tool does not install), and
+// refuses any other shape rather than guessing at it.
+//
+// This is one of the boundaries an untrusted identifier enters the program
+// through, so an entry is validated here rather than downstream:
+// parseCollectionItem is where both item shapes converge on the collection
+// name alphabet, and validateRequirement rejects a non-Galaxy type: and a
+// source: embedding URL userinfo before anything can print or request it.
 package requirements
 
 import (

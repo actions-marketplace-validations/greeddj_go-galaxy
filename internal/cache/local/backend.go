@@ -1,3 +1,16 @@
+// Package local implements the cache backend backed by the local filesystem.
+// Snapshot state lives in a single BoltDB file under the configured cache
+// directory, the project registry is a JSON file beside it, a cached artifact
+// is one plain file whose key is a single path element joined onto its own
+// directory, and exclusive access is an advisory flock. That flock cannot be
+// taken from a live holder, so Lock returns the caller's own context as the
+// holder context rather than deriving one.
+//
+// A failure this package produces is labeled by classifyCacheFailure, which
+// puts it into the same cache-backend classes the S3 backend speaks so that
+// one operator mistake yields one exit code whichever backend was configured.
+// Its own doc comment holds the two classes it assigns and the three shapes it
+// deliberately passes through unlabeled.
 package local
 
 import (

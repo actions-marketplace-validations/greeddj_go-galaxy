@@ -1,3 +1,16 @@
+// Package progress renders go-galaxy's operator-facing output. Progress
+// implements output.Printer and, being an io.Writer as well, can be installed
+// as the standard log package's sink. Regular lines go to stdout and warnings
+// and failures to stderr, with a spinner drawn only when stdout is a terminal
+// and the run is neither quiet nor verbose - elsewhere, a CI above all, the
+// same lines are printed plainly rather than dropped. Whether a status marker
+// carries color is decided per destination rather than once per process, since
+// redirecting stdout leaves stderr a terminal.
+//
+// Every line the package writes funnels through writeLine, which takes its
+// message as a safeout.Text: the payload is sanitized first and this package's
+// own markers and prefixes are added afterward, so a decoration is never
+// re-sanitized and no unconverted string reaches the writer.
 package progress
 
 import (

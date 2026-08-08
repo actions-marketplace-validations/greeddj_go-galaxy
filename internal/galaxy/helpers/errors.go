@@ -1,3 +1,16 @@
+// Package helpers is this module's shared vocabulary: the sentinel errors
+// every other package wraps with %w, the tuning constants and size caps they
+// enforce, the server-scoped cache-key builders, and small pure predicates
+// over untrusted values - IsPathElement, IsCollectionName, IsSHA256Hex,
+// IsExactVersion. It exists so a value's shape is judged by one rule wherever
+// it enters the program, and so an error class can be matched across layers
+// without either layer importing the other.
+//
+// It sits at the bottom of the import graph and depends on nothing else in
+// this module except internal/safeout, whose rune predicate IsPathElement
+// consults. WriteFileAtomic is the only thing here that touches a filesystem;
+// everything else is a value, a predicate, or a wrapper the caller drives -
+// Retry and NewSizeLimitedReader among them.
 package helpers
 
 import "errors"

@@ -1,3 +1,16 @@
+// Package fetch builds the *http.Client every outbound request in this program
+// shares, the S3 cache backend's included. New stacks three transports over
+// the pooled ones: a watchdog that fails a body read which has stopped making
+// progress, token attachment, and TLS-policy dispatch. The client itself
+// carries no overall Timeout, deliberately - the watchdog bounds inactivity
+// instead, so a slow but steadily streaming artifact download is not truncated
+// for being large.
+//
+// Both credential-bearing layers key on the request URL's normalized origin
+// (helpers.Origin) and never on a server id, a configured URL, or a prefix
+// match, so a URL that merely resembles a configured server receives neither
+// its token nor its relaxed certificate checking. NewOffline builds the same
+// client shape around a transport that refuses every request instead.
 package fetch
 
 import (

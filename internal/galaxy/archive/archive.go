@@ -1,3 +1,20 @@
+// Package archive unpacks collection tarballs. ExtractTarGz and
+// ExtractTarGzStream walk a gzipped tar into a destination directory,
+// refusing what must not land there: an empty, absolute or escaping entry
+// path, a path component that is itself a symlink, a symlink target leaving
+// the destination, a second entry colliding with a path already written, and
+// anything breaching the entry-count, entry-size, total-size or
+// decompressed-stream caps declared in internal/galaxy/helpers. The refusals
+// are named by sentinel, so a failing extraction says which rule stopped it.
+// The context is checked on every read taken out of the decompressor, so a
+// canceled unpack stops at the next read rather than at the end of the
+// archive.
+//
+// ProbeTarGz answers the cheaper question of whether a file is even shaped
+// like a gzipped tar, for a caller holding bytes nothing else has looked at,
+// and FileHashSHA256 hashes one. Nothing here resolves a path through an
+// os.Root: the caller hands this package a destination directory it has
+// already contained, and containment stays that caller's property.
 package archive
 
 import (

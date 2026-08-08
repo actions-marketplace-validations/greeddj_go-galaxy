@@ -1,3 +1,16 @@
+// Package cache declares the persistence seam every implementation under
+// internal/cache satisfies - Backend for state and locking, ArtifactStore for
+// cached tarballs - and holds the behavior that belongs to the seam rather
+// than to either side of it: the Backend decorators WithStateDeadline and
+// WithCleanSaveSkip, the LockLostError verdict a caller turns a run's outcome
+// into, and the cache-policy-aware JSON fetch a Galaxy metadata request goes
+// through, with the Policy deciding whether it may read or write the
+// snapshot's response cache.
+//
+// The concurrency contract splits along those two interfaces: a Backend value
+// is used by one goroutine at a time, while the ArtifactStore it hands back is
+// shared by every worker. Both interfaces state it in full; a new
+// implementation is bound by what they say, not by what today's two do.
 package cache
 
 import (

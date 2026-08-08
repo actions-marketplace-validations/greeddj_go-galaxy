@@ -1,3 +1,16 @@
+// Package config resolves one *Config per run from the three places a setting
+// can come from: the parsed CLI command, the environment, and an ansible.cfg.
+// BuildCollectionConfig is the entry point and the only place that precedence
+// is decided; discoverAnsibleConfigPath is where an ansible.cfg candidate is
+// accepted or refused, and resolveServers is where the Galaxy server list and
+// each server's credential and TLS policy are settled.
+//
+// Every credential this package produces is a Secret, which renders a fixed
+// redacted placeholder on each serialization path and yields its plaintext
+// only through Reveal. This package makes no network request and opens no
+// cache backend, and it runs before an output printer exists - so a non-fatal
+// problem is queued on Config.Warnings and drained later rather than printed
+// from here.
 package config
 
 import (

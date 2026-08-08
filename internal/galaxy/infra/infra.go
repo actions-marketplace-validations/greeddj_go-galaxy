@@ -1,3 +1,15 @@
+// Package infra holds Infra, the per-run container of runtime dependencies
+// threaded through every subsystem: the operator-output printer, the shared
+// HTTP client, the clock and temp-directory functions a test substitutes, and
+// this run's metrics counters. Extending Infra is preferred over introducing a
+// new global or widening an already-wide signature. New always allocates fresh
+// counters, so nothing carries over between two runs in one process.
+//
+// It also carries the artifact-download, metadata-fetch and cache-state
+// budgets as test-only override fields. Read each one through its accessor -
+// ArtifactDeadline, MetadataDeadline, StateDeadline - never the field, so a
+// nil Infra or a non-positive override falls back to the helpers constant by
+// construction rather than by caller convention.
 package infra
 
 import (

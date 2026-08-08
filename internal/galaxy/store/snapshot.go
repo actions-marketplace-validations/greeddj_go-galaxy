@@ -1,3 +1,17 @@
+// Package store is go-galaxy's persisted cache state in memory - cached API
+// responses, versions lists, dependency edges, resolved versions, and what is
+// installed or warmed - together with the local plumbing behind it: the BoltDB
+// snapshot file, the project registry, the instance lock, and the
+// cache-directory sweeps. Store is the value both cache backends move: the
+// local one bucket-maps it into Bolt, the S3 one marshals it as gzipped JSON.
+//
+// Store guards its own maps with an internal RWMutex, so callers go through
+// the methods rather than reading or writing a field across goroutines.
+// Persisting goes through snapshotData, the single copy path where age
+// eviction and the meta stamps are applied, so both backends inherit one set
+// of retention rules; helpers.StoreSnapshotSchemaVersion decides what a binary
+// will read back, and ValidateSchema refuses anything newer than it
+// understands.
 package store
 
 import (

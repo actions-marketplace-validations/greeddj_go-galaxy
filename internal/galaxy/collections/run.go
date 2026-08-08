@@ -1,3 +1,17 @@
+// Package collections implements the commands that resolve Galaxy collections
+// and put them where they are wanted: install, warm, lock, and outdated.
+// Resolution turns a requirements file into an exact version per transitive
+// collection, and the install side then downloads, verifies, extracts, and
+// records each one under the configured collections path.
+//
+// install, warm and lock reach the cache backend through one funnel,
+// withBackend: it opens the backend, takes its exclusive lock, and runs the
+// command's own work half under the holder context that lock returns, so a run
+// that stops owning the cache stops writing to it. Splitting each command into
+// a lifecycle half and a work half is also what makes its save-and-report tail
+// reachable from a test holding an already-initialized state, with no
+// production seam. outdated deliberately opens no backend at all, and
+// therefore takes no lock and serves no cached metadata.
 package collections
 
 import (

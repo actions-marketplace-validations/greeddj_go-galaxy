@@ -1,3 +1,11 @@
+// Package output declares Printer, the operator-output interface every
+// subsystem takes instead of depending on a concrete renderer. Its methods
+// fall into three tiers that behave differently under --quiet and --verbose:
+// Printf is transient progress, PersistentPrintf/Okf/Errorf/Warnf are results
+// that always emit, and Debugf/DebugSincef appear only in verbose mode.
+// internal/progress holds the implementation; keeping the interface in a
+// package that imports only time is what lets a test substitute a recorder
+// without pulling the renderer in with it.
 package output
 
 import "time"

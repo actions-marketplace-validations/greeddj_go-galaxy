@@ -1,3 +1,15 @@
+// Package s3 implements the cache backend backed by an S3-compatible object
+// store, together with the minimal SigV4-signing HTTP client it speaks to one
+// through - there is no AWS SDK here. Snapshot state and the project registry
+// are each a single gzipped-JSON object, artifacts are objects under their own
+// key prefix, and exclusive access is a distributed lock built on conditional
+// writes plus a heartbeat that renews the holder's TTL and cancels the holder
+// context once another acquirer's token appears. Open refuses a store that
+// does not actually enforce those conditional writes, since the lock's whole
+// mutual-exclusion guarantee rests on them.
+//
+// Which of this package's errors carries which cache-backend failure class is
+// settled by the partition documented in variables.go, not per call site.
 package s3
 
 import (

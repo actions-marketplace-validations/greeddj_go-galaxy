@@ -1,3 +1,17 @@
+// Package cleanup implements the cleanup command. It walks every project the
+// cache backend's registry records, works out which installed collections some
+// project's requirements file still reaches, and removes the ones nothing
+// does - the on-disk copy, its cached artifact, and its snapshot entry - then
+// sweeps the extracted store and the artifact keys written under the
+// pre-multi-server shape. Start is the entry point; runCleanup owns the
+// backend lifecycle and the lock-loss verdict, and cleanupWithState owns the
+// work once the snapshot and the registry are loaded.
+//
+// Reachability is computed over the whole registry before anything is deleted,
+// so one project's requirement keeping another project's copy alive never
+// depends on iteration order. Every removal resolves through an os.Root opened
+// at the owning project's own collections path, and --dry-run reports exactly
+// the candidates a real run would act on without deleting any of them.
 package cleanup
 
 import (

@@ -1,3 +1,9 @@
+// Package main is the go-galaxy executable. It assembles the urfave/cli
+// command tree from cmd/go-galaxy/commands, installs the signal handler whose
+// cancellation every command runs under, and turns what comes back into a
+// process exit code through cmd/go-galaxy/exitcode - the decision handleResult
+// owns. The Version, Commit, Date and BuiltBy variables are injected at link
+// time by the Justfile's LDFLAGS and are this binary's only build-info source.
 package main
 
 import (
