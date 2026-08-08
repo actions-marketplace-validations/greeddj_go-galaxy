@@ -2,6 +2,7 @@ package collections
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
@@ -326,5 +327,50 @@ func TestExactVersionFromConstraints(t *testing.T) {
 					tt.constraints, version, exact, tt.wantVersion, tt.wantExact)
 			}
 		})
+	}
+}
+
+// TestOverlongConstraintIsRejectedAsInvalid pins how this package classifies
+// a constraint string the semver library declines to parse at all: as an
+// invalid constraint that fails the call, never as a range that merely
+// contributes no exact pin. Where the library draws that line is the
+// library's own property and is deliberately not asserted here; what is
+// pinned is that exactVersionFromConstraints surfaces such a refusal as an
+// error instead of swallowing it and reporting "no exact version".
+//
+// The positive control runs the identical call on a single clause of the
+// same shape, so the refusal cannot be mistaken for a fixture that never
+// reached the classification in the first place.
+func TestOverlongConstraintIsRejectedAsInvalid(t *testing.T) {
+	t.Parallel()
+	// Eighty ">=1.0.0," clauses, less the trailing comma, make a 639-byte
+	// constraint - each clause valid on its own, only their joined length
+	// unusual.
+	const repeats = 80
+	overlong := strings.TrimSuffix(strings.Repeat(">=1.0.0,", repeats), ",")
+
+	// Killing mutation: dropping repeats to 10 leaves a 79-byte constraint
+	// the library parses happily, which contributes no pin and no error, so
+	// the assertion below fails with:
+	//   exactVersionFromConstraints(<79-byte constraint>) expected an error, got version="" exact=false
+	version, exact, err := exactVersionFromConstraints([]string{overlong})
+	if err == nil {
+		t.Fatalf("exactVersionFromConstraints(<%d-byte constraint>) expected an error, got version=%q exact=%v",
+			len(overlong), version, exact)
+	}
+	if !strings.Contains(err.Error(), "invalid version constraint") {
+		t.Fatalf("exactVersionFromConstraints(<%d-byte constraint>) error = %v, want it to report an invalid constraint",
+			len(overlong), err)
+	}
+
+	// Positive control: one clause of the identical shape is accepted and
+	// classified as a range contributing no pin, so the refusal above is
+	// about the joined string rather than ">=1.0.0" being unparseable.
+	version, exact, err = exactVersionFromConstraints([]string{">=1.0.0"})
+	if err != nil {
+		t.Fatalf("exactVersionFromConstraints([\">=1.0.0\"]) unexpected error: %v", err)
+	}
+	if exact || version != "" {
+		t.Fatalf("exactVersionFromConstraints([\">=1.0.0\"]) = (%q, %v), want (\"\", false)", version, exact)
 	}
 }
