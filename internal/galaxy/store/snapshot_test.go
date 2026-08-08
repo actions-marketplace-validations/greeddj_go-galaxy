@@ -396,7 +396,7 @@ func TestWasPersistedFalseAfterOutdatedSchemaLoad(t *testing.T) {
 // TestLoadRejectsCorruptResolvedEntry proves Load reports an error
 // instead of silently coercing a genuinely corrupt resolved value into a
 // garbage version string. Every current-schema value is written as valid
-// JSON by saveResolved, so an unmarshal failure here can only mean the
+// JSON by saveJSONBucket, so an unmarshal failure here can only mean the
 // stored bytes are corrupt.
 func TestLoadRejectsCorruptResolvedEntry(t *testing.T) {
 	t.Parallel()

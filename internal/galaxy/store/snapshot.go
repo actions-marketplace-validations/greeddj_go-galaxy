@@ -970,18 +970,10 @@ func ValidateSchema(version int) error {
 	}
 }
 
-// runLoadSteps reads the eight data buckets in the given transaction.
-func runLoadSteps(tx *bolt.Tx, store *Store) error {
-	steps := []func() error{
-		func() error { return loadJSONBucket(tx, helpers.StoreBucketAPICache, store.APICache) },
-		func() error { return loadJSONBucket(tx, helpers.StoreBucketInstalled, store.Installed) },
-		func() error { return loadJSONBucket(tx, helpers.StoreBucketDepsCache, store.DepsCache) },
-		func() error { return loadJSONBucket(tx, helpers.StoreBucketGraph, store.Graph) },
-		func() error { return loadJSONBucket(tx, helpers.StoreBucketRequirements, store.Requirements) },
-		func() error { return loadJSONBucket(tx, helpers.StoreBucketResolved, store.Resolved) },
-		func() error { return loadJSONBucket(tx, helpers.StoreBucketVersions, store.Versions) },
-		func() error { return loadJSONBucket(tx, helpers.StoreBucketWarmed, store.Warmed) },
-	}
+// runSteps runs each step in order and returns the first error, leaving the
+// remaining steps unrun. Both bucket runners below share it, so the rule that
+// a failing bucket aborts the rest is stated once rather than per runner.
+func runSteps(steps []func() error) error {
 	for _, step := range steps {
 		if err := step(); err != nil {
 			return err
@@ -990,27 +982,35 @@ func runLoadSteps(tx *bolt.Tx, store *Store) error {
 	return nil
 }
 
+// runLoadSteps reads the eight data buckets in the given transaction.
+func runLoadSteps(tx *bolt.Tx, store *Store) error {
+	return runSteps([]func() error{
+		func() error { return loadJSONBucket(tx, helpers.StoreBucketAPICache, store.APICache) },
+		func() error { return loadJSONBucket(tx, helpers.StoreBucketInstalled, store.Installed) },
+		func() error { return loadJSONBucket(tx, helpers.StoreBucketDepsCache, store.DepsCache) },
+		func() error { return loadJSONBucket(tx, helpers.StoreBucketGraph, store.Graph) },
+		func() error { return loadJSONBucket(tx, helpers.StoreBucketRequirements, store.Requirements) },
+		func() error { return loadJSONBucket(tx, helpers.StoreBucketResolved, store.Resolved) },
+		func() error { return loadJSONBucket(tx, helpers.StoreBucketVersions, store.Versions) },
+		func() error { return loadJSONBucket(tx, helpers.StoreBucketWarmed, store.Warmed) },
+	})
+}
+
 // runSaveSteps writes the eight data buckets in the given transaction, in a
 // fixed order (api_cache, deps_cache, installed, graph, requirements,
 // resolved, versions_cache, warmed) that callers rely on for fault injection
 // tests.
 func runSaveSteps(tx *bolt.Tx, data snapshotData) error {
-	steps := []func() error{
-		func() error { return saveAPICache(tx, data) },
-		func() error { return saveDepsCache(tx, data) },
-		func() error { return saveInstalled(tx, data) },
-		func() error { return saveGraph(tx, data) },
-		func() error { return saveRequirements(tx, data) },
-		func() error { return saveResolved(tx, data) },
-		func() error { return saveVersions(tx, data) },
-		func() error { return saveWarmed(tx, data) },
-	}
-	for _, step := range steps {
-		if err := step(); err != nil {
-			return err
-		}
-	}
-	return nil
+	return runSteps([]func() error{
+		func() error { return saveJSONBucket(tx, helpers.StoreBucketAPICache, data.APICache) },
+		func() error { return saveJSONBucket(tx, helpers.StoreBucketDepsCache, data.DepsCache) },
+		func() error { return saveJSONBucket(tx, helpers.StoreBucketInstalled, data.Installed) },
+		func() error { return saveJSONBucket(tx, helpers.StoreBucketGraph, data.Graph) },
+		func() error { return saveJSONBucket(tx, helpers.StoreBucketRequirements, data.Requirements) },
+		func() error { return saveJSONBucket(tx, helpers.StoreBucketResolved, data.Resolved) },
+		func() error { return saveJSONBucket(tx, helpers.StoreBucketVersions, data.Versions) },
+		func() error { return saveJSONBucket(tx, helpers.StoreBucketWarmed, data.Warmed) },
+	})
 }
 
 // loadMeta reads the meta bucket into store.Meta. When the meta bucket does
@@ -1094,54 +1094,6 @@ func saveMeta(tx *bolt.Tx, meta SnapshotMeta) error {
 	return nil
 }
 
-func saveAPICache(tx *bolt.Tx, data snapshotData) error {
-	return saveBucket(tx, helpers.StoreBucketAPICache, data.APICache, func(entry APICacheEntry) ([]byte, error) {
-		return json.Marshal(&entry)
-	})
-}
-
-func saveDepsCache(tx *bolt.Tx, data snapshotData) error {
-	return saveBucket(tx, helpers.StoreBucketDepsCache, data.DepsCache, func(entry DepsCacheEntry) ([]byte, error) {
-		return json.Marshal(&entry)
-	})
-}
-
-func saveInstalled(tx *bolt.Tx, data snapshotData) error {
-	return saveBucket(tx, helpers.StoreBucketInstalled, data.Installed, func(entry InstalledEntry) ([]byte, error) {
-		return json.Marshal(&entry)
-	})
-}
-
-func saveGraph(tx *bolt.Tx, data snapshotData) error {
-	return saveBucket(tx, helpers.StoreBucketGraph, data.Graph, func(entry []string) ([]byte, error) {
-		return json.Marshal(&entry)
-	})
-}
-
-func saveRequirements(tx *bolt.Tx, data snapshotData) error {
-	return saveBucket(tx, helpers.StoreBucketRequirements, data.Requirements, func(entry RequirementSpec) ([]byte, error) {
-		return json.Marshal(&entry)
-	})
-}
-
-func saveResolved(tx *bolt.Tx, data snapshotData) error {
-	return saveBucket(tx, helpers.StoreBucketResolved, data.Resolved, func(entry ResolvedEntry) ([]byte, error) {
-		return json.Marshal(&entry)
-	})
-}
-
-func saveVersions(tx *bolt.Tx, data snapshotData) error {
-	return saveBucket(tx, helpers.StoreBucketVersions, data.Versions, func(entry VersionsEntry) ([]byte, error) {
-		return json.Marshal(&entry)
-	})
-}
-
-func saveWarmed(tx *bolt.Tx, data snapshotData) error {
-	return saveBucket(tx, helpers.StoreBucketWarmed, data.Warmed, func(entry WarmedEntry) ([]byte, error) {
-		return json.Marshal(&entry)
-	})
-}
-
 // ensureEmptyBucket recreates a bucket to ensure it is empty.
 func ensureEmptyBucket(tx *bolt.Tx, name string) (*bolt.Bucket, error) {
 	bucket := tx.Bucket([]byte(name))
@@ -1167,10 +1119,10 @@ func loadBucket(tx *bolt.Tx, name string, fn func(k, v []byte) error) error {
 // exist is not an error; loadBucket above owns that contract.
 //
 // A value that does not decode is reported as an error rather than stored as a
-// zero T: every current-schema value is written as valid JSON by saveBucket, so
-// a decode failure means the stored bytes are genuinely corrupt, and coercing
-// them into a zero entry would hand a caller a garbage record it cannot tell
-// from a real one.
+// zero T: every current-schema value is written as valid JSON by
+// saveJSONBucket, so a decode failure means the stored bytes are genuinely
+// corrupt, and coercing them into a zero entry would hand a caller a garbage
+// record it cannot tell from a real one.
 //
 // The error names both the bucket and the key because a caller of Load
 // otherwise gets a bare encoding/json message identifying neither, leaving an
@@ -1193,15 +1145,19 @@ func loadJSONBucket[T any](tx *bolt.Tx, name string, dst map[string]T) error {
 	})
 }
 
-// saveBucket writes data to a bucket using the encode callback, within the
-// caller's transaction.
-func saveBucket[T any](tx *bolt.Tx, name string, data map[string]T, encode func(T) ([]byte, error)) error {
+// saveJSONBucket replaces the named bucket's contents with data, within the
+// caller's transaction, encoding every value as JSON under its map key.
+//
+// The encoding is not a parameter because every bucket of this snapshot is
+// JSON, and the load side assumes exactly that: loadJSONBucket above decodes
+// whatever it finds as JSON and treats anything else as corruption.
+func saveJSONBucket[T any](tx *bolt.Tx, name string, data map[string]T) error {
 	bucket, err := ensureEmptyBucket(tx, name)
 	if err != nil {
 		return err
 	}
 	for key, entry := range data {
-		encoded, err := encode(entry)
+		encoded, err := json.Marshal(&entry)
 		if err != nil {
 			return err
 		}
