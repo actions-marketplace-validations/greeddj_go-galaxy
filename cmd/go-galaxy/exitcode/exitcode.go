@@ -77,10 +77,10 @@ const (
 	// fact and everything else is evidence for it. The supersession is
 	// mechanical, not positional: cacheManager.LockLostError renders the run's
 	// own error with %v, flattening its tree so no other class can match it
-	// through errors.Is. This case's own position in fromErrorTail carries
-	// none of that weight: the reasons it sits where it sits are stated at
-	// the isCacheBusyError case itself, and every one of them is about the
-	// acquisition producers.
+	// through errors.Is. This class's own position in the exitClasses table
+	// carries none of that weight: the reasons it sits where it sits are
+	// stated at that table's isCacheBusyError entry, and every one of them is
+	// about the acquisition producers.
 	ExitCacheBusy = 8
 	// ExitCacheCorrupt indicates the persisted cache state itself - a project
 	// registry that exists but fails to decode, a state object that could
@@ -111,102 +111,97 @@ const (
 // shell-convention exit code (128 + signal number), per FromSignal.
 const signalExitBase = 128
 
-// FromError classifies err into an exit code by matching it against the
-// known sentinel errors declared in internal/galaxy/helpers, in priority
-// order: cancellation, integrity, lock, install, network, cache contention,
-// cache corruption, resolution, then usage/config. The first matching class
-// wins; unrecognized errors fall back to ExitError. The per-class checks are
-// split into helpers below to keep this function short; each still
-// short-circuits on the first match.
-func FromError(err error) int {
-	switch {
-	case err == nil:
-		return ExitOK
-	// This case is correct only because no sentinel this program raises to
-	// describe why work ended leaves a context sentinel reachable through
-	// errors.Is - see helpers.ErrReadStalled's and
-	// helpers.ErrArtifactDownloadDeadline's doc comments. A future sentinel
-	// that wraps a context.Canceled/context.DeadlineExceeded cause with %w
-	// would silently steal this case instead of being caught by it, since
-	// this case is checked first and cannot distinguish "the sentinel's cause
-	// happens to be a context error" from "the caller genuinely canceled".
-	case errors.Is(err, context.Canceled):
-		return ExitInterrupt
+// exitClass pairs one classification predicate with the exit code it yields.
+type exitClass struct {
+	match func(error) bool
+	code  int
+}
+
+// exitClasses is the classification precedence FromError walks, top to
+// bottom, returning the code of the first entry whose predicate matches it.
+// The order is observable behavior rather than an implementation detail - it
+// decides the exit code a CI branches on, and a single error tree routinely
+// satisfies several of these predicates at once - so it is stated as data in
+// one place, and each entry whose position is load-bearing carries the
+// argument for that position in place.
+//
+//nolint:gochecknoglobals // a fixed, immutable ordered table, not mutable shared state.
+var exitClasses = []exitClass{
+	{match: isCanceled, code: ExitInterrupt},
 	// isIntegrityError must be checked before isInstallError: after
 	// collections.Start started joining per-collection causes behind
 	// helpers.ErrInstallationFailed, every integrity failure's error tree
-	// also contains that sentinel, so placing this case any lower would make
+	// also contains that sentinel, so placing this entry any lower would make
 	// it unreachable - isInstallError would already have claimed the error.
 	// Cancellation still outranks it.
-	case isIntegrityError(err):
-		return ExitIntegrity
-	case isLockError(err):
-		return ExitLock
-	case isInstallError(err):
-		return ExitInstall
-	default:
-		return fromErrorTail(err)
-	}
+	{match: isIntegrityError, code: ExitIntegrity},
+	{match: isLockError, code: ExitLock},
+	{match: isInstallError, code: ExitInstall},
+	{match: isNetworkError, code: ExitNetwork},
+	// isCacheBusyError sits in exactly this one position, for four
+	// independent reasons. Not above isCanceled: a Ctrl-C that races a
+	// contention failure must still report as ExitInterrupt, not as
+	// contention. Not above isIntegrityError/isLockError/isInstallError: if a
+	// contention failure is ever folded behind helpers.ErrInstallationFailed
+	// by annotateSaveFailure, it must classify ExitInstall like every other
+	// per-collection cause, exactly as helpers.ErrStateObjectDeadline already
+	// does - placing this entry any higher would invert that rule for
+	// contention alone. Not above isNetworkError: a contention verdict
+	// arriving joined with a genuine transport failure must keep the wire
+	// failure as the actionable cause. Not below isUsageError: isUsageError's
+	// fs.ErrNotExist arm is broad enough that any error tree carrying an os
+	// path error would satisfy it, which would swallow a contention failure
+	// that happens to wrap one.
+	{match: isCacheBusyError, code: ExitCacheBusy},
+	// isCacheCorruptError sits directly below isCacheBusyError and above
+	// isResolutionError. It must stay below the isLockError and
+	// isInstallError entries above, for the identical reason
+	// isCacheBusyError's own comment gives: if either of this class's
+	// sentinels is ever joined behind helpers.ErrInstallationFailed,
+	// isInstallError must claim the tree first and classify it ExitInstall,
+	// the same per-collection aggregation rule every class in this table
+	// already follows. It sits above isResolutionError and isUsageError so
+	// that isUsageError's broad fs.ErrNotExist arm can never claim a
+	// state-object read that happens to wrap an os-level cause ahead of this
+	// more specific verdict - the same defensive posture isCacheBusyError's
+	// own position takes against that identical arm.
+	{match: isCacheCorruptError, code: ExitCacheCorrupt},
+	{match: isResolutionError, code: ExitResolution},
+	{match: isUsageError, code: ExitUsage},
 }
 
-// fromErrorTail classifies err by the rule FromError's own doc comment
-// states - network, cache contention, cache corruption, resolution, then
-// usage/config, in that order - falling back to ExitError when nothing
-// matches. Split out of
-// FromError purely to stay under the cyclomatic-complexity budget:
-// golangci-lint's cyclop reported "calculated cyclomatic complexity for
-// function FromError is 11, max is 10" once the cache-contention case was
-// added as an eleventh branch.
-//
-// The split carries a footgun for a future editor: Go evaluates a switch's
-// cases in source order, and a switch's default case - which is what routes
-// here - is reached only once none of the preceding cases matched. So ANY
-// case added anywhere in FromError's own switch, even one written textually
-// below its `default:` line, outranks every class fromErrorTail classifies,
-// regardless of where in this function's own switch that class's check sits.
-func fromErrorTail(err error) int {
-	switch {
-	case isNetworkError(err):
-		return ExitNetwork
-	// isCacheBusyError sits in exactly this one position, for four
-	// independent reasons. Not above context.Canceled (checked in FromError,
-	// ahead of this function): a Ctrl-C that races a contention failure must
-	// still report as ExitInterrupt, not as contention. Not above
-	// isIntegrityError/isLockError/isInstallError (also checked in FromError,
-	// ahead of this function): if a contention failure is ever folded behind
-	// helpers.ErrInstallationFailed by annotateSaveFailure, it must classify
-	// ExitInstall like every other per-collection cause, exactly as
-	// helpers.ErrStateObjectDeadline already does - placing this case any
-	// higher would invert that rule for contention alone. Not above
-	// isNetworkError: a contention verdict arriving joined with a genuine
-	// transport failure must keep the wire failure as the actionable cause.
-	// Not below isUsageError: isUsageError's fs.ErrNotExist arm is broad
-	// enough that any error tree carrying an os path error would satisfy
-	// it, which would swallow a contention failure that happens to wrap one.
-	case isCacheBusyError(err):
-		return ExitCacheBusy
-	// isCacheCorruptError sits directly below isCacheBusyError and above
-	// isResolutionError. It must stay below FromError's own
-	// isLockError/isInstallError cases (checked ahead of fromErrorTail
-	// entirely), for the identical reason isCacheBusyError's own comment
-	// gives: if either of this class's sentinels is ever joined behind
-	// helpers.ErrInstallationFailed, isInstallError must claim the tree
-	// first and classify it ExitInstall, the same per-collection
-	// aggregation rule every class in this function already follows. It
-	// sits above isResolutionError and isUsageError so that isUsageError's
-	// broad fs.ErrNotExist arm can never claim a state-object read that
-	// happens to wrap an os-level cause ahead of this more specific verdict
-	// - the same defensive posture isCacheBusyError's own position takes
-	// against that identical arm.
-	case isCacheCorruptError(err):
-		return ExitCacheCorrupt
-	case isResolutionError(err):
-		return ExitResolution
-	case isUsageError(err):
-		return ExitUsage
-	default:
-		return ExitError
+// FromError classifies err into an exit code by matching it against the known
+// sentinel errors declared in internal/galaxy/helpers. A nil error is ExitOK;
+// otherwise exitClasses is walked top to bottom and the first class whose
+// predicate matches wins, with an error no class recognizes falling back to
+// ExitError. The priority order is that table's own order - cancellation,
+// integrity, lock, install, network, cache contention, cache corruption,
+// resolution, then usage/config - and the reason a class sits where it sits
+// is stated on its entry there.
+func FromError(err error) int {
+	if err == nil {
+		return ExitOK
 	}
+	for _, class := range exitClasses {
+		if class.match(err) {
+			return class.code
+		}
+	}
+	return ExitError
+}
+
+// isCanceled reports whether err carries a caller's own cancellation.
+//
+// Classifying it ahead of every other class is correct only because no
+// sentinel this program raises to describe why work ended leaves a context
+// sentinel reachable through errors.Is - see helpers.ErrReadStalled's and
+// helpers.ErrArtifactDownloadDeadline's doc comments. A future sentinel that
+// wraps a context.Canceled/context.DeadlineExceeded cause with %w would
+// silently steal this class instead of being caught by it, since this class
+// is checked first and cannot distinguish "the sentinel's cause happens to be
+// a context error" from "the caller genuinely canceled".
+func isCanceled(err error) bool {
+	return errors.Is(err, context.Canceled)
 }
 
 // isCacheCorruptError reports whether err says the persisted cache state
@@ -371,7 +366,7 @@ func isSymlinkError(err error) bool {
 // walk aborting on a credential failure or an exhausted retry budget.
 // helpers.ErrArtifactDownloadDeadline classifies here, unaggregated, as
 // ExitNetwork; once collections.Start joins it behind
-// helpers.ErrInstallationFailed the isInstallError case above claims it
+// helpers.ErrInstallationFailed the isInstallError entry above claims it
 // first, as ExitInstall - identical to every other per-collection failure,
 // helpers.ErrDownloadFailed included, so this is not a behavior change. It
 // never classifies as ExitInterrupt: the sentinel deliberately does not wrap
@@ -480,7 +475,7 @@ func isTransportError(err error) bool {
 // predicate on the error tree, not an enumeration of which command produced
 // it: a lockfile entry whose name is not a "namespace.name" FQDN carries
 // helpers.ErrLockfileInvalid instead, and isLockError is checked ahead of
-// isNetworkError in FromError's own switch, so errors.Is walking the joined
+// isNetworkError in the exitClasses table, so errors.Is walking the joined
 // tree lets isLockError claim it first regardless of what else is joined
 // alongside it.
 func isMetadataFetchError(err error) bool {
@@ -650,8 +645,8 @@ func isCollectionNameUsageError(err error) bool {
 // per-collection work begins - a worker in install/warm's case, buildLockfile's
 // own iteration in lock's case, which has no worker pool at all - which is
 // what keeps the sentinel out of helpers.ErrInstallationFailed's aggregation
-// and therefore out of isInstallError above, checked earlier in FromError's
-// own switch.
+// and therefore out of isInstallError above, checked earlier in the
+// exitClasses table.
 func isCollectionListUsageError(err error) bool {
 	return errors.Is(err, helpers.ErrInvalidCollectionsList) ||
 		errors.Is(err, helpers.ErrInvalidCollectionEntry) ||

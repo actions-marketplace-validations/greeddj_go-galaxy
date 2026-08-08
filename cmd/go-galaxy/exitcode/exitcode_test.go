@@ -405,7 +405,7 @@ var fromErrorCases = []exitCase{
 		// Paired with the bare row above: the identical headline, this time
 		// joined with a cause that must classify differently - a lockfile
 		// entry whose name is not a "namespace.name" FQDN. isLockError is
-		// checked ahead of isNetworkError in FromError's own switch, so it
+		// checked ahead of isNetworkError in the exitClasses table, so it
 		// claims the whole joined tree even though the headline alone would
 		// have classified ExitNetwork. This is the predicate isMetadataFetchError's
 		// own doc comment describes: which cause is joined determines the
@@ -515,9 +515,9 @@ func TestIntegritySentinelsMapToExitIntegrity(t *testing.T) {
 // identical headline joined with helpers.ErrDownloadFailed instead - proves
 // this is not just "any joined error becomes ExitIntegrity": only the
 // presence of an actual integrity sentinel does. The killing mutation is
-// moving the isIntegrityError case below isLockError/isInstallError in
-// FromError, which makes isInstallError claim the headline first; verified,
-// that mutation makes this test fail with:
+// moving the isIntegrityError entry of exitClasses below the isLockError
+// and isInstallError entries, which makes isInstallError claim the headline
+// first; verified, that mutation makes this test fail with:
 // "exitcode_test.go:528: FromError(integrity join) = 5, want 7".
 func TestIntegrityOutranksInstallFailureHeadline(t *testing.T) {
 	t.Parallel()
@@ -739,11 +739,11 @@ func TestMixedDeadlineAndStallShapeIsNotInterrupt(t *testing.T) {
 
 // TestFromErrorInterruptSurvivesStallSentinel is what makes the rejected
 // alternative fix (checking helpers.ErrReadStalled ahead of the
-// context.Canceled case in FromError) enforceable: joining the production
+// isCanceled entry of exitClasses) enforceable: joining the production
 // stall shape with a genuine, separate context.Canceled - the shape a real
 // Ctrl-C produces alongside an in-flight stall - must still classify as
-// ExitInterrupt. Any stall case placed above the cancellation case in
-// FromError's switch would make this test fail.
+// ExitInterrupt. Any stall class placed above the isCanceled entry in
+// exitClasses would make this test fail.
 func TestFromErrorInterruptSurvivesStallSentinel(t *testing.T) {
 	t.Parallel()
 	//nolint:errorlint // pinning the real, deliberately non-wrapping shape watchdogBody.Read builds.
@@ -875,11 +875,10 @@ func TestStateObjectDeadlineClassification(t *testing.T) {
 // ever changes: the per-collection aggregation rule outranks the cache-busy
 // class, exactly as it already outranks every other per-collection cause.
 //
-// KILLING MUTATION, run and reverted: moving the isCacheBusyError case in
-// fromErrorTail above isInstallError's case in FromError makes this test
-// fail with:
+// KILLING MUTATION, run and reverted: moving the isCacheBusyError entry of
+// exitClasses above its isInstallError entry makes this test fail with:
 //
-//	exitcode_test.go:888: FromError(joined) = 8, want 5
+//	exitcode_test.go:887: FromError(joined) = 8, want 5
 func TestCacheBusyFoldedBehindInstallFailureClassifiesAsInstall(t *testing.T) {
 	t.Parallel()
 	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
@@ -889,11 +888,11 @@ func TestCacheBusyFoldedBehindInstallFailureClassifiesAsInstall(t *testing.T) {
 	}
 }
 
-// TestNetworkOutranksCacheBusyWithoutAnInstallHeadline pins fromErrorTail's
-// own ordering: isNetworkError is checked before isCacheBusyError, so a tree
-// carrying both a network-class and a cache-busy sentinel - with no
-// helpers.ErrInstallationFailed headline to route it through FromError's
-// earlier cases instead - classifies as ExitNetwork, not ExitCacheBusy.
+// TestNetworkOutranksCacheBusyWithoutAnInstallHeadline pins one adjacent pair
+// of exitClasses: isNetworkError is checked before isCacheBusyError, so a
+// tree carrying both a network-class and a cache-busy sentinel - with no
+// helpers.ErrInstallationFailed headline to route it to an earlier entry
+// instead - classifies as ExitNetwork, not ExitCacheBusy.
 func TestNetworkOutranksCacheBusyWithoutAnInstallHeadline(t *testing.T) {
 	t.Parallel()
 	joined := errors.Join(helpers.ErrCacheBusy, helpers.ErrCacheBackendUnavailable)
@@ -903,7 +902,7 @@ func TestNetworkOutranksCacheBusyWithoutAnInstallHeadline(t *testing.T) {
 }
 
 // TestCacheBusyOutranksUsage pins that isCacheBusyError is checked before
-// isUsageError in fromErrorTail: a helpers.ErrCacheBusy wrapped around
+// isUsageError in exitClasses: a helpers.ErrCacheBusy wrapped around
 // fs.ErrNotExist (isUsageError's own broad fs.ErrNotExist arm) still
 // classifies as ExitCacheBusy, not ExitUsage.
 func TestCacheBusyOutranksUsage(t *testing.T) {
@@ -914,10 +913,10 @@ func TestCacheBusyOutranksUsage(t *testing.T) {
 	}
 }
 
-// TestCanceledOutranksCacheBusy pins FromError's top-level priority: a
+// TestCanceledOutranksCacheBusy pins the top of exitClasses: a
 // context.Canceled sentinel still outranks a joined helpers.ErrCacheBusy,
-// since the cancellation case is checked before fromErrorTail is ever
-// reached.
+// since the isCanceled entry is checked before the isCacheBusyError entry is
+// ever reached.
 func TestCanceledOutranksCacheBusy(t *testing.T) {
 	t.Parallel()
 	joined := errors.Join(context.Canceled, helpers.ErrCacheBusy)
@@ -927,7 +926,7 @@ func TestCanceledOutranksCacheBusy(t *testing.T) {
 }
 
 // TestCacheCorruptOutranksUsage pins that isCacheCorruptError is checked
-// before isUsageError in fromErrorTail, mirroring TestCacheBusyOutranksUsage:
+// before isUsageError in exitClasses, mirroring TestCacheBusyOutranksUsage:
 // a helpers.ErrCorruptProjectRegistry wrapped around fs.ErrNotExist
 // (isUsageError's own broad fs.ErrNotExist arm) still classifies as
 // ExitCacheCorrupt, not ExitUsage.
@@ -939,10 +938,10 @@ func TestCacheCorruptOutranksUsage(t *testing.T) {
 	}
 }
 
-// TestCanceledOutranksCacheCorrupt pins FromError's top-level priority: a
+// TestCanceledOutranksCacheCorrupt pins the top of exitClasses: a
 // context.Canceled sentinel still outranks a joined
-// helpers.ErrCorruptProjectRegistry, since the cancellation case is checked
-// before fromErrorTail is ever reached.
+// helpers.ErrCorruptProjectRegistry, since the isCanceled entry is checked
+// before the isCacheCorruptError entry is ever reached.
 func TestCanceledOutranksCacheCorrupt(t *testing.T) {
 	t.Parallel()
 	joined := errors.Join(context.Canceled, helpers.ErrCorruptProjectRegistry)
@@ -1065,11 +1064,11 @@ func TestFromSignal(t *testing.T) {
 // helpers.ErrLockfileInvalid and helpers.ErrGalaxyServerURLUserinfo into one
 // error, and the two belong to different classes on their own - the lockfile
 // class, and the Galaxy-server configuration class that lands in ExitUsage.
-// FromError's switch checks isLockError ahead of the tail that would claim
-// the second, so the run exits ExitLock, which is the right answer: the file
+// exitClasses puts isLockError ahead of the entry that would claim the
+// second, so the run exits ExitLock, which is the right answer: the file
 // that failed to load is the lockfile, not an operator's server config.
 //
-// The negative half is the point of the test - without it, "it exits 3" would
+// The negative half is the point of the test - without it, "it exits 6" would
 // not distinguish this ordering from one where the usage class had simply
 // never been reachable for this shape at all.
 func TestLockfileUserinfoClassifiesAsLock(t *testing.T) {
@@ -1081,5 +1080,168 @@ func TestLockfileUserinfoClassifiesAsLock(t *testing.T) {
 	}
 	if got := FromError(helpers.ErrGalaxyServerURLUserinfo); got != ExitUsage {
 		t.Errorf("FromError(bare userinfo sentinel) = %d, want ExitUsage (%d)", got, ExitUsage)
+	}
+}
+
+// wantExitClassOrder is the precedence exitClasses must express, written out
+// as exit codes so the expectation is readable as the contract a CI branches
+// on rather than as a list of predicate names. Kept as a separate literal
+// from the table it checks: a copy of exitClasses's own order would agree
+// with any reordering by construction.
+//
+//nolint:gochecknoglobals // a fixed table consumed by one test, not mutable shared state
+var wantExitClassOrder = []int{
+	ExitInterrupt,
+	ExitIntegrity,
+	ExitLock,
+	ExitInstall,
+	ExitNetwork,
+	ExitCacheBusy,
+	ExitCacheCorrupt,
+	ExitResolution,
+	ExitUsage,
+}
+
+// TestExitClassOrderIsPinned pins exitClasses's order entry by entry. It is a
+// change detector on purpose: swapping two entries of that table is a
+// one-line, compiling edit that silently changes which exit code a CI reads
+// for an error tree carrying both classes, so the order is a specification
+// and a silent reordering is exactly the failure this must catch. The length
+// check comes first so that an added or removed class is reported as such
+// rather than as a cascade of mismatched codes.
+//
+// KILLING MUTATION, run and reverted: swapping the isCacheBusyError and
+// isCacheCorruptError entries of exitClasses makes this test fail with:
+//
+//	exitcode_test.go:1125: exitClasses[5].code = 9, want 8
+//	exitcode_test.go:1125: exitClasses[6].code = 8, want 9
+func TestExitClassOrderIsPinned(t *testing.T) {
+	t.Parallel()
+	if len(exitClasses) != len(wantExitClassOrder) {
+		t.Fatalf("len(exitClasses) = %d, want %d", len(exitClasses), len(wantExitClassOrder))
+	}
+	for i, want := range wantExitClassOrder {
+		if got := exitClasses[i].code; got != want {
+			t.Errorf("exitClasses[%d].code = %d, want %d", i, got, want)
+		}
+	}
+}
+
+// exitPrecedenceCase is one adjacent-pair precedence expectation: higher and
+// lower are sentinels whose classes sit next to each other in exitClasses,
+// wantJoined is the code their join must produce, and wantHigher/wantLower
+// are the codes each must produce on its own.
+type exitPrecedenceCase struct {
+	higher     error
+	lower      error
+	name       string
+	wantJoined int
+	wantHigher int
+	wantLower  int
+}
+
+// adjacentExitPrecedenceCases holds one row per adjacent pair of exitClasses,
+// each naming a sentinel that reaches only the higher class and one that
+// reaches only the lower. Adjacent pairs are what a reordering actually
+// disturbs first, and covering every pair means no swap anywhere in the table
+// can leave this table silent.
+//
+//nolint:gochecknoglobals // a fixed table consumed by one test, not mutable shared state
+var adjacentExitPrecedenceCases = []exitPrecedenceCase{
+	{
+		name:       "interrupt over integrity",
+		higher:     context.Canceled,
+		lower:      helpers.ErrSHA256Mismatch,
+		wantJoined: ExitInterrupt,
+		wantHigher: ExitInterrupt,
+		wantLower:  ExitIntegrity,
+	},
+	{
+		name:       "integrity over lock",
+		higher:     helpers.ErrSHA256Mismatch,
+		lower:      helpers.ErrLockfileDrift,
+		wantJoined: ExitIntegrity,
+		wantHigher: ExitIntegrity,
+		wantLower:  ExitLock,
+	},
+	{
+		name:       "lock over install",
+		higher:     helpers.ErrLockfileDrift,
+		lower:      helpers.ErrInstallationFailed,
+		wantJoined: ExitLock,
+		wantHigher: ExitLock,
+		wantLower:  ExitInstall,
+	},
+	{
+		name:       "install over network",
+		higher:     helpers.ErrInstallationFailed,
+		lower:      helpers.ErrDownloadFailed,
+		wantJoined: ExitInstall,
+		wantHigher: ExitInstall,
+		wantLower:  ExitNetwork,
+	},
+	{
+		name:       "network over cache busy",
+		higher:     helpers.ErrCacheBackendUnavailable,
+		lower:      helpers.ErrCacheBusy,
+		wantJoined: ExitNetwork,
+		wantHigher: ExitNetwork,
+		wantLower:  ExitCacheBusy,
+	},
+	{
+		name:       "cache busy over cache corrupt",
+		higher:     helpers.ErrCacheBusy,
+		lower:      helpers.ErrCorruptProjectRegistry,
+		wantJoined: ExitCacheBusy,
+		wantHigher: ExitCacheBusy,
+		wantLower:  ExitCacheCorrupt,
+	},
+	{
+		name:       "cache corrupt over resolution",
+		higher:     helpers.ErrStateObjectTooLarge,
+		lower:      helpers.ErrDependencyGraphHasACycle,
+		wantJoined: ExitCacheCorrupt,
+		wantHigher: ExitCacheCorrupt,
+		wantLower:  ExitResolution,
+	},
+	{
+		name:       "resolution over usage",
+		higher:     helpers.ErrDependencyGraphHasACycle,
+		lower:      fs.ErrNotExist,
+		wantJoined: ExitResolution,
+		wantHigher: ExitResolution,
+		wantLower:  ExitUsage,
+	},
+}
+
+// TestAdjacentExitClassPrecedence proves each adjacent pair of exitClasses
+// resolves the way the table says: an error tree carrying both sentinels
+// classifies as the higher entry's code. The two solo assertions are the
+// positive control, and they are what makes the joined one mean anything -
+// without them, "the lower class did not win" would be indistinguishable from
+// "the lower sentinel is not recognized at all", which is the state a deleted
+// predicate leaves behind.
+//
+// KILLING MUTATION, run and reverted: swapping the isCacheBusyError and
+// isCacheCorruptError entries of exitClasses makes the "cache busy over cache
+// corrupt" row fail with:
+//
+//	exitcode_test.go:1237: FromError(joined) = 9, want 8
+func TestAdjacentExitClassPrecedence(t *testing.T) {
+	t.Parallel()
+	for _, tt := range adjacentExitPrecedenceCases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			joined := errors.Join(tt.higher, tt.lower)
+			if got := FromError(joined); got != tt.wantJoined {
+				t.Errorf("FromError(joined) = %d, want %d", got, tt.wantJoined)
+			}
+			if got := FromError(tt.higher); got != tt.wantHigher {
+				t.Errorf("FromError(higher alone) = %d, want %d", got, tt.wantHigher)
+			}
+			if got := FromError(tt.lower); got != tt.wantLower {
+				t.Errorf("FromError(lower alone) = %d, want %d", got, tt.wantLower)
+			}
+		})
 	}
 }
