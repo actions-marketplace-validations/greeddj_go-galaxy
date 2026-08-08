@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -152,10 +153,10 @@ func TestClientDoClassifiesConnectionFailureAsCacheBackendUnavailable(t *testing
 // real transport error each shape produces on this toolchain (reported at the
 // caller's line, since the helper calls t.Helper()):
 //
-//	cache_backend_classification_test.go:201: expected errors.Is(err, helpers.ErrCacheBackendUnavailable),
+//	cache_backend_classification_test.go:202: expected errors.Is(err, helpers.ErrCacheBackendUnavailable),
 //	got Get "http://127.0.0.1:<port>/test/some-key": dial tcp 127.0.0.1:<port>: i/o timeout
 //
-//	cache_backend_classification_test.go:201: expected errors.Is(err, helpers.ErrCacheBackendUnavailable),
+//	cache_backend_classification_test.go:202: expected errors.Is(err, helpers.ErrCacheBackendUnavailable),
 //	got Get "http://127.0.0.1:<port>/test/some-key": net/http: timeout awaiting response headers
 //
 // while TestClientDoClassifiesConnectionFailureAsCacheBackendUnavailable and
@@ -279,7 +280,7 @@ func assertLiveTimeoutClassifiesAsCacheBackendUnavailable(
 // "if req.Context().Err() != nil { return nil, err }" branch from Client.do
 // makes this test fail with:
 //
-//	cache_backend_classification_test.go:340: expected NOT errors.Is(err, helpers.ErrCacheBackendUnavailable),
+//	cache_backend_classification_test.go:348: expected NOT errors.Is(err, helpers.ErrCacheBackendUnavailable),
 //	got cache backend unavailable: s3 request failed: Get "http://127.0.0.1:<port>/test/some-key": context canceled
 //
 // while TestClientDoClassifiesConnectionFailureAsCacheBackendUnavailable
@@ -287,7 +288,9 @@ func assertLiveTimeoutClassifiesAsCacheBackendUnavailable(
 func TestClientDoExcludesCallerCancellationFromCacheBackendUnavailable(t *testing.T) {
 	t.Parallel()
 
+	var reachedHandler atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		reachedHandler.Store(true)
 		<-r.Context().Done() // never respond; the server's own context ends once the client tears the connection down.
 	}))
 	t.Cleanup(srv.Close)
@@ -307,6 +310,11 @@ func TestClientDoExcludesCallerCancellationFromCacheBackendUnavailable(t *testin
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	// Idempotent backstop for the early-exit paths below: httptest.Server.Close
+	// blocks until every outstanding request completes, and the handler only
+	// returns once this context ends, so a t.Fatal between here and the explicit
+	// cancel() would leave the cleanup deadlocked on a request nobody cancels.
+	defer cancel()
 	req, err := client.newRequest(ctx, http.MethodGet, "some-key", nil, nil, emptySHA256, nil, putCondition{})
 	if err != nil {
 		t.Fatalf("newRequest: %v", err)
@@ -321,10 +329,10 @@ func TestClientDoExcludesCallerCancellationFromCacheBackendUnavailable(t *testin
 		errCh <- doErr
 	}()
 
-	// Give the request time to reach the handler and start blocking before
-	// canceling, so the cancellation races an in-flight round trip rather
-	// than a request that has not even been dispatched yet.
-	time.Sleep(50 * time.Millisecond)
+	// Wait for the handler to actually observe the request before canceling,
+	// so the cancellation races an in-flight round trip rather than a request
+	// that has not even been dispatched yet.
+	waitForLockEvent(t, "the handler to receive the in-flight request", reachedHandler.Load)
 	cancel()
 
 	select {
@@ -356,7 +364,7 @@ func TestClientDoExcludesCallerCancellationFromCacheBackendUnavailable(t *testin
 // helpers.ErrCacheBackendUnusable, helpers.ErrCacheBackendUnavailable)`)
 // makes this test fail with:
 //
-//	cache_backend_classification_test.go:376: expected NOT errors.Is(err, helpers.ErrCacheBackendUnavailable),
+//	cache_backend_classification_test.go:384: expected NOT errors.Is(err, helpers.ErrCacheBackendUnavailable),
 //	got cache backend cannot be used as configured: cache backend unavailable: s3 backend does not enforce
 //	conditional PUT (If-None-Match); distributed locking cannot guarantee mutual exclusion
 //
