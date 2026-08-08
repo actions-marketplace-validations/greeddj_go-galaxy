@@ -4,6 +4,46 @@ Fast Ansible Galaxy collections installer for CI.
 
 > **Note:** This project was created in collaboration with the Claude Code.
 
+## Table of contents
+
+- [Motivation](#motivation)
+- [Scope](#scope)
+- [Benchmarks](#benchmarks)
+- [Compatibility with ansible-galaxy](#compatibility-with-ansible-galaxy)
+- [Features](#features)
+- [Install](#install)
+- [Verifying a release](#verifying-a-release)
+- [Usage](#usage)
+- [requirements.yml](#requirementsyml)
+- [ansible.cfg](#ansiblecfg)
+- [Galaxy servers and authentication](#galaxy-servers-and-authentication)
+- [Notes](#notes)
+- [S3 Cache (optional)](#s3-cache-optional)
+- [Security / Trust model](#security--trust-model)
+- [Reproducible CI](#reproducible-ci)
+- [Color](#color)
+- [Exit codes](#exit-codes)
+- [Metrics](#metrics)
+
+## Motivation
+
+CI pipelines often spend minutes downloading and unpacking Galaxy collections.
+go-galaxy is built to reduce that wait time with faster installs and smarter caching,
+so pipelines finish sooner and changes ship faster.
+
+## Scope
+
+- Collections only (Galaxy API sources).
+- `requirements.yml` must contain a `collections` list.
+- `roles` entries are ignored with a warning.
+- ansible.cfg options supported:
+  - `[defaults] collections_path`
+  - `[galaxy] server`
+  - `[galaxy] server_list`
+  - `[galaxy] cache_dir`
+  - `[galaxy_server.<id>]` sections (`url`, `token`, `validate_certs`; see
+    [Galaxy servers and authentication](#galaxy-servers-and-authentication))
+
 ## Benchmarks
 
 `go-galaxy` vs `ansible-galaxy` on three requirements files (1 / 10 / 100 root
@@ -83,25 +123,6 @@ has no metrics report), and `summary.md` concatenates every table produced.
   numbers are network-bound; warm/frozen are CPU/IO-bound.
 
 </details>
-
-## Motivation
-
-CI pipelines often spend minutes downloading and unpacking Galaxy collections.
-go-galaxy is built to reduce that wait time with faster installs and smarter caching,
-so pipelines finish sooner and changes ship faster.
-
-## Scope
-
-- Collections only (Galaxy API sources).
-- `requirements.yml` must contain a `collections` list.
-- `roles` entries are ignored with a warning.
-- ansible.cfg options supported:
-  - `[defaults] collections_path`
-  - `[galaxy] server`
-  - `[galaxy] server_list`
-  - `[galaxy] cache_dir`
-  - `[galaxy_server.<id>]` sections (`url`, `token`, `validate_certs`; see
-    [Galaxy servers and authentication](#galaxy-servers-and-authentication))
 
 ## Compatibility with ansible-galaxy
 
@@ -313,13 +334,21 @@ Running `go-galaxy` with no command runs `install`, so a bare invocation
 performs a full install rather than printing help.
 
 - `install` (`i`) - install collections from `requirements.yml`.
-- `lock` (`l`) - resolve and write `requirements.lock.yml` for reproducible CI. Under `--frozen`, `lock` becomes a drift gate instead of a writer: it still resolves fresh (`lock` always does), but compares that fresh resolve against the lockfile already on disk and fails the run instead of overwriting the file when they differ, exiting with the lockfile exit code (`6`). The gate mirrors `lock`'s own resolution per the exact flags in effect - what it compares against is whatever `lock --<those flags>` would write - so `lock --frozen` alone reuses a cached resolve when `requirements.yml` is unchanged, and a version merely published upstream is not drift by itself: it gates the requirements-to-lockfile relationship, not upstream publication. Add `--refresh` (`lock --frozen --refresh`) to gate upstream publication too: `--refresh` makes the fresh resolve reach the live servers instead of reusing the cached one, so a newer version published upstream with `requirements.yml` unchanged now shows up as drift. A missing lockfile and one that exists but cannot be loaded each fail with their own distinct error rather than being reported as drift. Under `--dry-run`, `lock` diffs a fresh resolve against whatever lockfile is already on disk and reports what would change, without writing a lockfile; `--frozen` and `--dry-run` compose (both suppress the write, `--frozen` supplies the stricter verdict) - see [install options](#install-options) for the full `--dry-run` semantics.
+- `lock` (`l`) - resolve and write `requirements.lock.yml` for reproducible CI. See [lock](#lock) below for its `--frozen` drift gate and its `--dry-run` preview.
 - `warm` (`w`) - populate the artifact + extracted caches without installing (for CI image bake). Requires a cache: `--no-cache` is rejected as a usage error rather than downloading everything and discarding it. A warmed collection's extracted tree is protected from `cleanup` for 30 days after its last warm, so a machine that warms and then stops warming eventually reclaims the space. Under `--dry-run`, `warm` reports per collection whether it is already warm or would be warmed, downloads no artifact, and writes no warmed entry; it still rejects `--no-cache` as a usage error regardless of `--dry-run`, since `--no-cache` leaves warm nothing to do either way - see [install options](#install-options) for the full `--dry-run` semantics.
 - `hash` (`h`) - print a deterministic cache key (`sha256:…`) for use as a CI cache key.
 - `tree` (`t`) - print the resolved dependency tree from the lockfile; requires a lockfile and fails if one is absent.
 - `explain` (`why`) - takes `<namespace.name>`; prints the locked version, source, and sha256, what requires it, and what it depends on, all read from the lockfile.
-- `outdated` (`o`) - compare each lockfile entry against the latest version on its Galaxy server; requires network and is refused under `--offline`. It deliberately opens no cache backend, so it never takes the exclusive cache lock (it can run alongside an `install` or `warm` against the same cache) and every version it reports is a live answer rather than a cached one. That is also why `--no-cache`, `--refresh`, `--clear-cache`, `--cache-dir` and `--s3-bucket` have nothing to act on; `--no-deps` and `--download-path` likewise, since it resolves no dependency graph and writes nothing to the collections tree, and `--frozen` likewise, since the lockfile is already the only source of the locked side and the servers are always asked for the latest. Setting any of those (except the two path flags, which cannot be told apart from their defaults) prints one stderr warning naming them; the other `--s3-*` flags are not individually named, since none of them do anything for any command unless `--s3-bucket` is also set. It honors `--metrics-file`: the report's `collections` is the number of entries checked and `failures` is the number of lookups that failed, while `frozen` is always absent, since no `outdated` run ever honors that flag. A run in which any lookup failed exits with the network code (`4`). One failure shape is classified more specifically, and now at load rather than at lookup: a lockfile entry's `name` must be `<namespace>.<name>` with each half matching `^[a-z][a-z0-9_]*$` - the alphabet galaxy.ansible.com and Automation Hub themselves accept - and a lockfile carrying anything else is refused as invalid with the lockfile code (`6`) before a single request is made. Previously only the two-part split was checked, so a name carrying characters a URL cannot contain loaded fine and failed later while the request was being built, reported as a network failure (`4`) that no retry could repair.
+- `outdated` (`o`) - compare each lockfile entry against the latest version on its Galaxy server. See [outdated](#outdated) below for what it does not do: no cache backend, no lock, no cached answer.
 - `cleanup` (`c`) - remove unused cached collections across projects.
+
+#### lock
+
+- `lock` (`l`) - resolve and write `requirements.lock.yml` for reproducible CI. Under `--frozen`, `lock` becomes a drift gate instead of a writer: it still resolves fresh (`lock` always does), but compares that fresh resolve against the lockfile already on disk and fails the run instead of overwriting the file when they differ, exiting with the lockfile exit code (`6`). The gate mirrors `lock`'s own resolution per the exact flags in effect - what it compares against is whatever `lock --<those flags>` would write - so `lock --frozen` alone reuses a cached resolve when `requirements.yml` is unchanged, and a version merely published upstream is not drift by itself: it gates the requirements-to-lockfile relationship, not upstream publication. Add `--refresh` (`lock --frozen --refresh`) to gate upstream publication too: `--refresh` makes the fresh resolve reach the live servers instead of reusing the cached one, so a newer version published upstream with `requirements.yml` unchanged now shows up as drift. A missing lockfile and one that exists but cannot be loaded each fail with their own distinct error rather than being reported as drift. Under `--dry-run`, `lock` diffs a fresh resolve against whatever lockfile is already on disk and reports what would change, without writing a lockfile; `--frozen` and `--dry-run` compose (both suppress the write, `--frozen` supplies the stricter verdict) - see [install options](#install-options) for the full `--dry-run` semantics.
+
+#### outdated
+
+- `outdated` (`o`) - compare each lockfile entry against the latest version on its Galaxy server; requires network and is refused under `--offline`. It deliberately opens no cache backend, so it never takes the exclusive cache lock (it can run alongside an `install` or `warm` against the same cache) and every version it reports is a live answer rather than a cached one. That is also why `--no-cache`, `--refresh`, `--clear-cache`, `--cache-dir` and `--s3-bucket` have nothing to act on; `--no-deps` and `--download-path` likewise, since it resolves no dependency graph and writes nothing to the collections tree, and `--frozen` likewise, since the lockfile is already the only source of the locked side and the servers are always asked for the latest. Setting any of those (except the two path flags, which cannot be told apart from their defaults) prints one stderr warning naming them; the other `--s3-*` flags are not individually named, since none of them do anything for any command unless `--s3-bucket` is also set. It honors `--metrics-file`: the report's `collections` is the number of entries checked and `failures` is the number of lookups that failed, while `frozen` is always absent, since no `outdated` run ever honors that flag. A run in which any lookup failed exits with the network code (`4`). One failure shape is classified more specifically, and now at load rather than at lookup: a lockfile entry's `name` must be `<namespace>.<name>` with each half matching `^[a-z][a-z0-9_]*$` - the alphabet galaxy.ansible.com and Automation Hub themselves accept - and a lockfile carrying anything else is refused as invalid with the lockfile code (`6`) before a single request is made. Previously only the two-part split was checked, so a name carrying characters a URL cannot contain loaded fine and failed later while the request was being built, reported as a network failure (`4`) that no retry could repair.
 
 ### Global options
 
@@ -344,83 +373,9 @@ two-flag set of their own, listed under
 - `--verbose` - verbose output (`$GO_GALAXY_VERBOSE`)
 - `--quiet, -q` (`$GO_GALAXY_QUIET`) - suppress progress and log lines; results, warnings and
   errors still print. Ignored when `--verbose` is also set.
-- `--dry-run` (`$GO_GALAXY_DRY_RUN`) - report what `install`, `warm`, or `lock` would do, without
-  downloading any artifact, creating any install tree or extracted tree, recording any install,
-  writing any warmed entry, writing any lockfile, registering the project, honoring
-  `--clear-cache`, or writing the metrics report. It still takes the exclusive cache lock. It
-  updates the resolve-side metadata caches, but only when a persisted snapshot already existed for
-  this cache; against a cache that was never saved before, the run saves nothing and prints a
-  stderr warning that the caches it built are discarded - a preview must never leave behind a
-  persisted-and-empty snapshot that a later `cleanup` would read as evidence that nothing is
-  installed or warmed anywhere.
-  For `install` and `warm`, each collection is reported as would install/would warm, already up to
-  date/already warm, or would fail. A would-fail verdict covers, for both commands, the artifact
-  not being cached while `--offline` forbids downloading it (exits with the install-failure code,
-  `5`), or the cached artifact's own recorded digest disagreeing with a well-formed lockfile pin
-  while `--offline` forbids refetching a replacement (exits with the dedicated integrity code,
-  `7`); `install` alone adds a third cause, since only it writes an install tree: the collection's
-  install directory sits under a namespace path a real install would refuse to write to - an
-  escaping symlink, or a regular file blocking it - and extraction would fail the identical way
-  (exits with `5`). A dangling namespace symlink is deliberately not a would-fail: a real install
-  removes it and creates the directory fresh, so the preview reports the collection normally. Each
-  cause exits with the code a real run hitting that same cause would. One asymmetry is deliberate,
-  and it depends on the cache backend: the recorded-digest cause can fire where the real run still
-  succeeds, because under a pin a real install re-hashes the tarball rather than trusting the
-  recorded digest - so on the local cache backend, a cache whose recorded digest was altered while
-  its bytes were left intact is refused by the preview and installed for real anyway. On the S3
-  backend that same cache fails the real run too, because it re-checks the recorded digest against
-  the freshly downloaded bytes before the pin is ever re-hashed - so there the preview's refusal
-  matches what actually happens. The preview refuses it either way, because that cache is damaged
-  either way. The dry-run banner is printed to stderr and survives `--quiet`, because the flag is
-  env-sourced (`$GO_GALAXY_DRY_RUN`) and an org-wide CI environment block would otherwise turn
-  every install, warm, or lock run into a silent no-op.
-  Before any collection is even resolved, `install --dry-run` also checks whether
-  `ansible_collections` itself is usable: a real directory, an in-root relative symlink to one, or
-  an absent entry are all fine; an escaping or dangling symlink is refused with the install-failure
-  code (`5`), and a regular file sitting there is refused unclassified (exit `1`) - matching a
-  real, non-dry-run install exit-for-exit on every one of those shapes, and aborting the whole
-  preview before resolution ever starts rather than reporting on any collection at all.
-  For `install` and `warm`, a dry run still reports a cached artifact's presence, not its actual
-  on-disk bytes: it does compare the artifact cache's own recorded digest against the lockfile pin
-  (the integrity would-fail cause above), but a tarball whose bytes silently drift while that
-  recorded digest is never updated cannot be detected without re-hashing it - a full object
-  download on the S3 backend, the exact cost this preview exists to avoid. Under `--frozen
-  --offline`, a collection in exactly that state is still reported cached - `Already warm`,
-  `Would warm (artifact cached)`, or `Would install (artifact cached)` - even though the real run
-  would fail closed with a checksum-mismatch error. `Up to date` is not affected, because a real
-  install skips such a collection without ever opening its tarball. The run prints a one-time
-  stderr warning whenever both flags are set together, naming this narrower residual; it is a
-  disclosure, not a fix.
-  For `lock`, a dry run builds the lockfile in memory from a fresh resolve, loads whatever
-  lockfile is already on disk, and reports how the two differ instead of writing anything. A
-  `Would change: server <from> -> <to>` line prints first when the file-level `server` field
-  itself would change, followed by one line per added, updated, or removed collection - `Would
-  add: <name>@<version>`, `Would update: <name> (<field> <from> -> <to>; ...)`, `Would remove:
-  <name>@<version>` - and a trailing summary whose verdict is `lockfile would change` unless
-  nothing at all would change, in which case it reads `lockfile is up to date`; a change to only
-  the file-level `server` field flips this verdict even though every per-collection count stays
-  zero, since that alone would still rewrite the file on a real run. A lockfile already on disk
-  that cannot be loaded (a bad schema version, unparseable YAML, or any other read failure) is
-  warned about on stderr and then treated the same as no lockfile at all - every collection
-  reports as added - because a real `lock` run never reads that file, it only overwrites it, so
-  the preview cannot fail on it either.
-  **Breaking change (after v1.0.2):** through v1.0.2, `--dry-run` (and `$GO_GALAXY_DRY_RUN`) had
-  no effect on `install` or `warm` - only `cleanup` implemented it - so `install --dry-run` performed a
-  full, real install and `warm --dry-run` performed a full, real warm; `lock --dry-run` refused to
-  run at all, exiting with the usage code (`2`). `install` and `warm` now install and warm
-  nothing, and preview instead; `lock` now previews instead of refusing. A CI job that carried an
-  ambient `$GO_GALAXY_DRY_RUN` and was really installing collections will now finish successfully
-  with nothing installed; a bake job carrying the same ambient variable will now finish
-  successfully with an empty cache, producing a green build and an empty image; a lock job
-  carrying it will now finish successfully having left the lockfile untouched instead of exiting
-  with a usage error. In every case the stderr banner above is the only signal, so a job that
-  branches on the exit code alone will not notice. If a shared `$GO_GALAXY_DRY_RUN` CI environment
-  variable is set, scope it to the jobs that actually want it, or unset it for `install`, `warm`,
-  and `lock` jobs where it must not silently do nothing. `cleanup` implements its own `--dry-run`
-  (see [cleanup options](#cleanup-options)). `hash`, `tree` and `explain` ignore the flag, since
-  they have no product and write nothing for it to suppress. `outdated` writes no product either,
-  but it does write one externally consumed report - the metrics file - so `--dry-run` suppresses
-  that report and prints a stderr warning naming the path, and changes nothing else about the run.
+- `--dry-run` (`$GO_GALAXY_DRY_RUN`) - report what a command would do, without doing it and
+  without leaving anything behind that a later run would read as real. See
+  [--dry-run](#--dry-run) at the end of this section for what each command suppresses.
 - `--cache-dir` (`$GO_GALAXY_CACHE_DIR`, `$ANSIBLE_GALAXY_CACHE_DIR`)
 - `--server` (`$GO_GALAXY_SERVER`) - **Breaking change:** `$ANSIBLE_GALAXY_SERVER`
   is no longer read as a spelling of this flag. It now behaves as `[galaxy] server`
@@ -535,6 +490,86 @@ S3 cache options (if `--s3-bucket` is set, S3 backend is used):
 - `--s3-path-style-disabled` (`$GO_GALAXY_S3_PATH_STYLE_DISABLED`) - switch to virtual-hosted-style
   addressing (`<bucket>.<endpoint>/<key>`). Path style (`<endpoint>/<bucket>/<key>`) is the default,
   which is what the flag disables.
+
+#### --dry-run
+
+- `--dry-run` (`$GO_GALAXY_DRY_RUN`) - report what `install`, `warm`, or `lock` would do, without
+  downloading any artifact, creating any install tree or extracted tree, recording any install,
+  writing any warmed entry, writing any lockfile, registering the project, honoring
+  `--clear-cache`, or writing the metrics report. It still takes the exclusive cache lock. It
+  updates the resolve-side metadata caches, but only when a persisted snapshot already existed for
+  this cache; against a cache that was never saved before, the run saves nothing and prints a
+  stderr warning that the caches it built are discarded - a preview must never leave behind a
+  persisted-and-empty snapshot that a later `cleanup` would read as evidence that nothing is
+  installed or warmed anywhere.
+  For `install` and `warm`, each collection is reported as would install/would warm, already up to
+  date/already warm, or would fail. A would-fail verdict covers, for both commands, the artifact
+  not being cached while `--offline` forbids downloading it (exits with the install-failure code,
+  `5`), or the cached artifact's own recorded digest disagreeing with a well-formed lockfile pin
+  while `--offline` forbids refetching a replacement (exits with the dedicated integrity code,
+  `7`); `install` alone adds a third cause, since only it writes an install tree: the collection's
+  install directory sits under a namespace path a real install would refuse to write to - an
+  escaping symlink, or a regular file blocking it - and extraction would fail the identical way
+  (exits with `5`). A dangling namespace symlink is deliberately not a would-fail: a real install
+  removes it and creates the directory fresh, so the preview reports the collection normally. Each
+  cause exits with the code a real run hitting that same cause would. One asymmetry is deliberate,
+  and it depends on the cache backend: the recorded-digest cause can fire where the real run still
+  succeeds, because under a pin a real install re-hashes the tarball rather than trusting the
+  recorded digest - so on the local cache backend, a cache whose recorded digest was altered while
+  its bytes were left intact is refused by the preview and installed for real anyway. On the S3
+  backend that same cache fails the real run too, because it re-checks the recorded digest against
+  the freshly downloaded bytes before the pin is ever re-hashed - so there the preview's refusal
+  matches what actually happens. The preview refuses it either way, because that cache is damaged
+  either way. The dry-run banner is printed to stderr and survives `--quiet`, because the flag is
+  env-sourced (`$GO_GALAXY_DRY_RUN`) and an org-wide CI environment block would otherwise turn
+  every install, warm, or lock run into a silent no-op.
+  Before any collection is even resolved, `install --dry-run` also checks whether
+  `ansible_collections` itself is usable: a real directory, an in-root relative symlink to one, or
+  an absent entry are all fine; an escaping or dangling symlink is refused with the install-failure
+  code (`5`), and a regular file sitting there is refused unclassified (exit `1`) - matching a
+  real, non-dry-run install exit-for-exit on every one of those shapes, and aborting the whole
+  preview before resolution ever starts rather than reporting on any collection at all.
+  For `install` and `warm`, a dry run still reports a cached artifact's presence, not its actual
+  on-disk bytes: it does compare the artifact cache's own recorded digest against the lockfile pin
+  (the integrity would-fail cause above), but a tarball whose bytes silently drift while that
+  recorded digest is never updated cannot be detected without re-hashing it - a full object
+  download on the S3 backend, the exact cost this preview exists to avoid. Under `--frozen
+  --offline`, a collection in exactly that state is still reported cached - `Already warm`,
+  `Would warm (artifact cached)`, or `Would install (artifact cached)` - even though the real run
+  would fail closed with a checksum-mismatch error. `Up to date` is not affected, because a real
+  install skips such a collection without ever opening its tarball. The run prints a one-time
+  stderr warning whenever both flags are set together, naming this narrower residual; it is a
+  disclosure, not a fix.
+  For `lock`, a dry run builds the lockfile in memory from a fresh resolve, loads whatever
+  lockfile is already on disk, and reports how the two differ instead of writing anything. A
+  `Would change: server <from> -> <to>` line prints first when the file-level `server` field
+  itself would change, followed by one line per added, updated, or removed collection - `Would
+  add: <name>@<version>`, `Would update: <name> (<field> <from> -> <to>; ...)`, `Would remove:
+  <name>@<version>` - and a trailing summary whose verdict is `lockfile would change` unless
+  nothing at all would change, in which case it reads `lockfile is up to date`; a change to only
+  the file-level `server` field flips this verdict even though every per-collection count stays
+  zero, since that alone would still rewrite the file on a real run. A lockfile already on disk
+  that cannot be loaded (a bad schema version, unparseable YAML, or any other read failure) is
+  warned about on stderr and then treated the same as no lockfile at all - every collection
+  reports as added - because a real `lock` run never reads that file, it only overwrites it, so
+  the preview cannot fail on it either.
+  **Breaking change (after v1.0.2):** through v1.0.2, `--dry-run` (and `$GO_GALAXY_DRY_RUN`) had
+  no effect on `install` or `warm` - only `cleanup` implemented it - so `install --dry-run` performed a
+  full, real install and `warm --dry-run` performed a full, real warm; `lock --dry-run` refused to
+  run at all, exiting with the usage code (`2`). `install` and `warm` now install and warm
+  nothing, and preview instead; `lock` now previews instead of refusing. A CI job that carried an
+  ambient `$GO_GALAXY_DRY_RUN` and was really installing collections will now finish successfully
+  with nothing installed; a bake job carrying the same ambient variable will now finish
+  successfully with an empty cache, producing a green build and an empty image; a lock job
+  carrying it will now finish successfully having left the lockfile untouched instead of exiting
+  with a usage error. In every case the stderr banner above is the only signal, so a job that
+  branches on the exit code alone will not notice. If a shared `$GO_GALAXY_DRY_RUN` CI environment
+  variable is set, scope it to the jobs that actually want it, or unset it for `install`, `warm`,
+  and `lock` jobs where it must not silently do nothing. `cleanup` implements its own `--dry-run`
+  (see [cleanup options](#cleanup-options)). `hash`, `tree` and `explain` ignore the flag, since
+  they have no product and write nothing for it to suppress. `outdated` writes no product either,
+  but it does write one externally consumed report - the metrics file - so `--dry-run` suppresses
+  that report and prints a stderr warning naming the path, and changes nothing else about the run.
 
 ### cleanup options
 
