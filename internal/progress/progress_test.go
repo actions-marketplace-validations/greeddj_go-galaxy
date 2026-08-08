@@ -76,8 +76,8 @@ func TestStateATransient(t *testing.T) {
 		defer p.Close()
 		p.Printf("x")
 		assertEmpty(t, out)
-		if p.s.Suffix != " x" {
-			t.Fatalf("expected spinner suffix %q, got %q", " x", p.s.Suffix)
+		if got := string(p.s.suffixText()); got != " x" {
+			t.Fatalf("expected spinner suffix %q, got %q", " x", got)
 		}
 	})
 
@@ -410,8 +410,8 @@ func TestClose(*testing.T) {
 }
 
 // TestPrintfSuffixRace drives concurrent spinner-suffix updates through Printf
-// against concurrent reads that hold the spinner lock, mirroring how the render
-// goroutine reads Suffix. It must stay clean under the race detector.
+// against concurrent reads that take the spinner lock, mirroring how the render
+// goroutine reads the suffix. It must stay clean under the race detector.
 func TestPrintfSuffixRace(t *testing.T) {
 	p := newProgress(false, false, true, io.Discard, io.Discard)
 	if p.s == nil {
@@ -427,9 +427,7 @@ func TestPrintfSuffixRace(t *testing.T) {
 	for range workers {
 		wg.Go(func() {
 			for range iterations {
-				p.s.Lock()
-				_ = p.s.Suffix
-				p.s.Unlock()
+				_ = p.s.suffixText()
 			}
 		})
 		wg.Go(func() {
@@ -756,8 +754,8 @@ func TestPackageLevelHelpersSanitizeCallerText(t *testing.T) {
 }
 
 // TestPrintfSpinnerSuffixIsSanitized covers Printf's spinner branch (state
-// A): a hostile message must reach the spinner's Suffix field already
-// sanitized, and must never reach out directly. The benign row is this
+// A): a hostile message must reach the spinner's suffix already sanitized,
+// and must never reach out directly. The benign row is this
 // test's positive control, on the same fixture shape, proving the suffix
 // carries real content rather than always being empty or replaced.
 func TestPrintfSpinnerSuffixIsSanitized(t *testing.T) {
@@ -768,8 +766,8 @@ func TestPrintfSpinnerSuffixIsSanitized(t *testing.T) {
 		p, out, _ := stateA()
 		defer p.Close()
 		p.Printf("%s", "benign text")
-		if want := " benign text"; p.s.Suffix != want {
-			t.Fatalf("suffix = %q, want %q", p.s.Suffix, want)
+		if got, want := string(p.s.suffixText()), " benign text"; got != want {
+			t.Fatalf("suffix = %q, want %q", got, want)
 		}
 		assertEmpty(t, out)
 	})
@@ -780,8 +778,8 @@ func TestPrintfSpinnerSuffixIsSanitized(t *testing.T) {
 		defer p.Close()
 		p.Printf("%s", hostileCallerText)
 		want := " " + hostileCallerTextClean
-		if p.s.Suffix != want {
-			t.Fatalf("suffix = %q, want %q", p.s.Suffix, want)
+		if got := string(p.s.suffixText()); got != want {
+			t.Fatalf("suffix = %q, want %q", got, want)
 		}
 		assertEmpty(t, out)
 	})
@@ -845,12 +843,15 @@ func TestResultMarkerEscapesSurviveAHostileMessage(t *testing.T) {
 	}
 }
 
-// TestSpinnerWritesOutsideThisPackagesWriters pins the spinner-frame
-// guarantee this package relies on: newProgress never assigns p.s.Writer,
-// so spinner frames render through a writer this package does not own -
-// neither out nor errOut - and are not its responsibility to sanitize.
-// Only the lines this package writes itself are. The assertions below check
-// exactly that, and stay valid however the spinner chooses its own writer.
+// TestSpinnerWritesOutsideThisPackagesWriters pins the arrangement this
+// package's sanitization boundary depends on: the spinner writes to os.Stdout
+// directly rather than through either stream a Progress holds, so a frame is
+// never composed by writeLine and adds no sanitization duty there. The
+// production constructor does point a stream at os.Stdout too, and frames and
+// lines do share that file - which is exactly why emit stops and restarts the
+// spinner around every line it writes. The only caller-controlled text a
+// frame carries is the suffix, and that arrives already sanitized - which
+// TestPrintfSpinnerSuffixIsSanitized pins separately.
 func TestSpinnerWritesOutsideThisPackagesWriters(t *testing.T) {
 	t.Parallel()
 	var out, errOut bytes.Buffer
@@ -859,11 +860,11 @@ func TestSpinnerWritesOutsideThisPackagesWriters(t *testing.T) {
 	if p.s == nil {
 		t.Fatal("expected spinner to be created for verbose=false, quiet=false, terminal=true")
 	}
-	if p.s.Writer == io.Writer(&out) {
-		t.Fatal("spinner.Writer must not be this package's out buffer")
+	if p.s.w == io.Writer(&out) {
+		t.Fatal("the spinner must not draw on this package's out buffer")
 	}
-	if p.s.Writer == io.Writer(&errOut) {
-		t.Fatal("spinner.Writer must not be this package's errOut buffer")
+	if p.s.w == io.Writer(&errOut) {
+		t.Fatal("the spinner must not draw on this package's errOut buffer")
 	}
 }
 

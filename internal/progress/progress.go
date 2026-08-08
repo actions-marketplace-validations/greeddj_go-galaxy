@@ -8,22 +8,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/briandowns/spinner"
 	"github.com/greeddj/go-galaxy/internal/safeout"
 )
 
 const (
-	spinnerDelay   = 100 * time.Millisecond
-	spinnerCharSet = 14
-	spinnerColor   = "green"
-	ansiRed        = "\x1b[1m\x1b[31m"
-	ansiGreen      = "\x1b[1m\x1b[32m"
-	ansiYellow     = "\x1b[1m\x1b[33m"
-	ansiReset      = "\x1b[1m\x1b[0m"
-	okGlyph        = "✔"
-	failGlyph      = "✗"
-	warnGlyph      = "!"
-	debugPrefix    = "🚧 Debug: "
+	ansiRed     = "\x1b[1m\x1b[31m"
+	ansiGreen   = "\x1b[1m\x1b[32m"
+	ansiYellow  = "\x1b[1m\x1b[33m"
+	ansiReset   = "\x1b[1m\x1b[0m"
+	okGlyph     = "✔"
+	failGlyph   = "✗"
+	warnGlyph   = "!"
+	debugPrefix = "🚧 Debug: "
 )
 
 // Environment variables that override the terminal check, in the precedence
@@ -97,7 +93,7 @@ func forcesColor(value string) bool {
 // goes to out; error and failure lines go to errOut so diagnostics do not
 // contaminate stdout consumers.
 type Progress struct {
-	s      *spinner.Spinner
+	s      *spinner
 	out    stream
 	errOut stream
 	mu     sync.Mutex
@@ -132,10 +128,13 @@ func newStreamProgress(verbose, quiet, terminal bool, out, errOut stream) *Progr
 		}
 	}
 
-	spin := spinner.New(spinner.CharSets[spinnerCharSet], spinnerDelay)
-	if out.color {
-		_ = spin.Color(spinnerColor)
-	}
+	// Whether frames are drawn is decided by os.Stdout itself, not by the
+	// terminal parameter: the parameter is what selects between this
+	// package's output states, and a test constructing state A passes it
+	// true while running with a pipe on stdout. Measured, not assumed - a
+	// test binary's stdout is a pipe under `go test`, under `go test -v`,
+	// and under `go test -v` with a real pty as the go tool's own stdout.
+	spin := newSpinner(os.Stdout, isTerminal(os.Stdout), out.color)
 
 	p := &Progress{
 		v:      verbose,
@@ -144,7 +143,7 @@ func newStreamProgress(verbose, quiet, terminal bool, out, errOut stream) *Progr
 		out:    out,
 		errOut: errOut,
 	}
-	p.s.Start()
+	p.s.start()
 	return p
 }
 
@@ -190,11 +189,12 @@ func (p *Progress) Printf(format string, args ...any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.s != nil {
-		// The spinner render goroutine reads Suffix under the spinner's own
-		// lock, so the update must take that same lock to avoid a data race.
-		p.s.Lock()
-		p.s.Suffix = " " + string(safeout.Clean(fmt.Sprintf(format, args...)))
-		p.s.Unlock()
+		// The leading space separates the suffix from the frame glyph and is
+		// sanitized along with the message rather than prepended after it:
+		// Clean maps rune by rune, so cleaning the joined string yields the
+		// same value as joining the cleaned one, and doing it this way keeps
+		// a plain string from ever being cast to safeout.Text here.
+		p.s.setSuffix(safeout.Clean(" " + fmt.Sprintf(format, args...)))
 		return
 	}
 	if p.q {
@@ -272,12 +272,21 @@ func (p *Progress) Write(payload []byte) (int, error) {
 	return len(payload), nil
 }
 
-// Close stops the spinner if it is running.
+// Close stops the spinner if it is running and drops it.
+//
+// Dropping it is what makes the restore final. emit restarts the spinner
+// around every line it writes, so a Progress that kept a stopped spinner
+// would hide the cursor and spawn a fresh render goroutine on the next Okf or
+// Warnf - after the run's only Close, with nothing left to stop it. Nothing
+// prints after Close today, but that is the order the callers happen to have
+// rather than something the type enforces, and this restore is this package's
+// own to keep.
 func (p *Progress) Close() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.s != nil {
-		p.s.Stop()
+		p.s.stop()
+		p.s = nil
 	}
 }
 
@@ -289,9 +298,9 @@ func (p *Progress) Close() {
 // helpers, which own no spinner, reach writeLine directly instead.
 func (p *Progress) emit(dst stream, prefix string, msg safeout.Text) {
 	if p.s != nil {
-		p.s.Stop()
+		p.s.stop()
 		writeLine(dst.w, prefix, msg)
-		p.s.Restart()
+		p.s.restart()
 		return
 	}
 	writeLine(dst.w, prefix, msg)

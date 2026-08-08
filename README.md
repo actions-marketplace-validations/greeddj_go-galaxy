@@ -1022,7 +1022,8 @@ terminal check rather than disabling color outright.
 
 The spinner is a separate decision and is not affected by `NO_COLOR`: it is
 drawn only when stdout is a terminal, and under `NO_COLOR` it still runs, just
-without color.
+without color. `TERM=dumb` is narrower still: it removes the color from the
+spinner's frames while leaving the status markers colored.
 
 ## Exit codes
 
