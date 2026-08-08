@@ -14,7 +14,7 @@ import (
 // that path. It never leaves this package: loadRequirements's only caller,
 // projectRequirementRoots, folds it into helpers.ErrProjectRequirementsUnreadable
 // exactly like any other non-fs.ErrNotExist load failure, the same pattern
-// errWorkspaceUnrooted already follows for the workspace side (cleanup.go).
+// errWorkspaceUnrooted already follows for the workspace side (workspace.go).
 // It is deliberately distinct from fs.ErrNotExist so a non-regular entry
 // aborts the run instead of being tolerated as a stale registry entry - the
 // two states genuinely differ: a missing file means "this project declares
@@ -36,7 +36,7 @@ var errRequirementsNotRegular = errors.New("requirements file is not a regular f
 // for the same duration. os.Stat gates against exactly that shape before
 // ever delegating to requirements.LoadCollections, mirroring
 // manifestIsRegularFile's identical reasoning for the MANIFEST.json leaf
-// (cleanup.go).
+// (scan.go).
 //
 // Stat, not Lstat, is deliberate: a symlinked requirements.yml is a
 // legitimate, already-supported shape (store.RecordProject records whatever

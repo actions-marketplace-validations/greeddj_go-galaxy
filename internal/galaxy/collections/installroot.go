@@ -70,7 +70,7 @@ type installTarget struct {
 // Validating the joined result after the fact cannot close this - by the time
 // a path exists to inspect, the escape has already happened - so the three
 // components are what is validated, before any join is computed, and never
-// the composed "<ns>.<name>-<version>.info" element: cleanup.go's
+// the composed "<ns>.<name>-<version>.info" element: remove.go's
 // removeInstalled validates the same three components with the same
 // predicate, so the deleter never refuses a sidecar directory this function
 // created as an unsafe identifier. That symmetry is specific to the sidecar
@@ -103,7 +103,7 @@ func newInstallTarget(root *os.Root, cfg *config.Config, col collection) (instal
 
 // openCollectionsRoot opens the single os.Root every install-side write
 // funnels through, rooted at downloadPath itself rather than at its
-// ansible_collections subdirectory - the same boundary cleanup.go's own
+// ansible_collections subdirectory - the same boundary remove.go's own
 // removeWorkspaceFiles draws (see removeInstalled's doc comment there) and
 // for the same reason: a swap of ansible_collections itself, not just a
 // component beneath it, must also be constrained.

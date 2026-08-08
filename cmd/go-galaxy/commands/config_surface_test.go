@@ -79,7 +79,7 @@ func assertConfigField[T comparable](t *testing.T, field string, got, want T) {
 // without erroring - install-only flags it never registers (server,
 // download-path, and so on) simply resolve to their zero values, which is
 // safe because cleanup never reads those Config fields (it consumes only
-// DryRun, CacheDir, and S3Cache; see internal/galaxy/cleanup/cleanup.go).
+// DryRun, CacheDir, and S3Cache; see internal/galaxy/cleanup).
 func TestCleanupConfigSurface(t *testing.T) {
 	neutralizeAnsibleDiscovery(t)
 	cacheDir := t.TempDir()

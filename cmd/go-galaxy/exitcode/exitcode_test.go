@@ -986,7 +986,7 @@ var genericSentinels = []struct {
 		err:  helpers.ErrOutdatedSchemaVersion,
 	},
 	{
-		// Consumed at the producer: internal/galaxy/cleanup/cleanup.go warns
+		// Consumed at the producer: internal/galaxy/cleanup/scan.go warns
 		// and continues past a MANIFEST.json that fails to parse, treating it
 		// as neither a reachability root nor a deletion candidate rather than
 		// returning it from Start.
