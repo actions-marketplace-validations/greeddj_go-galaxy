@@ -32,6 +32,7 @@ linters:
             - go/token
             - github.com/greeddj/go-galaxy
             - github.com/Masterminds/semver/v3
+            - github.com/ProtonMail/go-crypto
             - github.com/klauspost/pgzip
             - github.com/psvmcc/hub
             - github.com/urfave/cli/v3
