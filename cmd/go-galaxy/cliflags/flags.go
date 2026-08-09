@@ -126,15 +126,19 @@ func collectionBehaviorFlags() []cli.Flag {
 			// non-positive workers value that any source supplied, and urfave
 			// marks a declared-but-empty env var as set while skipping the
 			// parse for it - so a CI block exporting GO_GALAXY_WORKERS= reads
-			// this Value, one worker per CPU, and is accepted. Remove it and
-			// that same shape reads 0 and exits 2 instead.
-			Value:   runtime.NumCPU(),
+			// this Value and is accepted. Remove it and that same shape reads 0
+			// and exits 2 instead. The value being derived rather than literal
+			// costs that property nothing: runtime.GOMAXPROCS(0) is always at
+			// least 1, and DefaultInstallWorkers floors its result at
+			// MinDefaultInstallWorkers, so what lands here is never
+			// non-positive and never the 0 applyWorkers refuses.
+			Value:   galaxyhelpers.DefaultInstallWorkers(runtime.GOMAXPROCS(0)),
 			Sources: cli.EnvVars("GO_GALAXY_WORKERS"),
 		},
 		&cli.IntFlag{
 			Name:    "download-workers",
 			Usage:   "Number of concurrent artifact downloads and cache presence probes; these wait on the network, not the CPU",
-			Value:   galaxyhelpers.DefaultDownloadWorkers(runtime.NumCPU()),
+			Value:   galaxyhelpers.DefaultDownloadWorkers(runtime.GOMAXPROCS(0)),
 			Sources: cli.EnvVars("GO_GALAXY_DOWNLOAD_WORKERS"),
 		},
 		&cli.BoolFlag{

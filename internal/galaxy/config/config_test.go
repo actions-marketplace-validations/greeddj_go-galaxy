@@ -559,6 +559,95 @@ func TestDownloadWorkersDefault(t *testing.T) {
 	})
 }
 
+// TestInstallWorkersDefault covers helpers.DefaultInstallWorkers's own clamp
+// (procs, floored at MinDefaultInstallWorkers and capped at
+// MaxDefaultInstallWorkers), plus newConfigFromCLI's Workers fallback, which
+// applies that identical default whenever no source supplied a positive
+// --workers value. It is TestDownloadWorkersDefault's sibling, against the
+// other of the two worker pools.
+//
+// The rows are spelled as permitted CPUs rather than cores because that is
+// what the parameter means: under a CFS quota runtime.NumCPU() reports the
+// node while runtime.GOMAXPROCS(0) reports the quota, and this function is
+// fed the latter (see helpers.DefaultInstallWorkers). Every want is
+// hand-spelled rather than computed from the two constants, since a want
+// built from the constant it checks moves with any mutation of that constant
+// and so could never fail against one.
+//
+// Two rows the boundaries suggest collapse into one each, and that is a
+// property of the values rather than a gap: the floor is 2, so "one below the
+// floor" IS the 1-cpu row, and "the floor itself" IS the 2-cpu row.
+//
+// The registered-but-unset shape is deliberately absent here. newIntFlagCmd's
+// defaultValue is a hand-copy of the production flag's own Value, so a row
+// asserting it would compare that copy against itself; the real flag's Value
+// is pinned by TestWorkersEnvShapes (cmd/go-galaxy/commands) instead.
+//
+// KILLING MUTATIONS, both run for real against helpers.DefaultInstallWorkers.
+//
+// M1, the floor removed - the whole body rewritten to
+// `min(procs, MaxDefaultInstallWorkers)`. Only the 1-cpu row fails, since it
+// is the only row whose input sits below the floor at all:
+//
+//	config_test.go:623: DefaultInstallWorkers(1) = 1, want 2
+//
+// The 2-cpu row does NOT fail this mutation: its input already equals
+// MinDefaultInstallWorkers, so the floor was never what kept that row at 2 -
+// only the 1-cpu row's outcome actually depends on the floor existing.
+//
+// M2, the cap removed - the body rewritten to
+// `max(procs, MinDefaultInstallWorkers)`. Both rows above the cap fail while
+// the row exactly at it survives, which is what makes the trio a pin on the
+// boundary rather than on clamping in general:
+//
+//	config_test.go:623: DefaultInstallWorkers(17) = 17, want 16
+//	config_test.go:623: DefaultInstallWorkers(128) = 128, want 16
+func TestInstallWorkersDefault(t *testing.T) {
+	t.Run("derives from permitted cpu", func(t *testing.T) {
+		tests := []struct {
+			name  string
+			procs int
+			want  int
+		}{
+			{name: "1 permitted cpu floors to the minimum", procs: 1, want: 2},
+			{name: "2 permitted cpus already equal the minimum", procs: 2, want: 2},
+			{name: "3 permitted cpus pass through unclamped", procs: 3, want: 3},
+			{name: "15 permitted cpus stay one below the maximum", procs: 15, want: 15},
+			{name: "16 permitted cpus reach the maximum exactly", procs: 16, want: 16},
+			{name: "17 permitted cpus cap at the maximum", procs: 17, want: 16},
+			{name: "a 128-cpu node caps at the maximum", procs: 128, want: 16},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				if got := helpers.DefaultInstallWorkers(tt.procs); got != tt.want {
+					t.Fatalf("DefaultInstallWorkers(%d) = %d, want %d", tt.procs, got, tt.want)
+				}
+			})
+		}
+	})
+
+	t.Run("explicit positive value survives unoverridden", func(t *testing.T) {
+		c := newIntFlagCmd(t, "workers", "GO_GALAXY_WORKERS",
+			helpers.DefaultInstallWorkers(runtime.GOMAXPROCS(0)), true, []string{"--workers=3"})
+		cfg := newConfigFromCLI(c)
+		if cfg.Workers != 3 {
+			t.Fatalf("cfg.Workers = %d, want 3", cfg.Workers)
+		}
+	})
+
+	// The cleanup shape: no --workers flag exists at all, so c.Int reads 0 and
+	// newConfigFromCLI's own fallback - not the flag's Value - is what supplies
+	// the default. This is the one subtest here that actually exercises it.
+	t.Run("an unregistered flag falls back to the derived default", func(t *testing.T) {
+		c := newIntFlagCmd(t, "workers", "GO_GALAXY_WORKERS", 0, false, nil)
+		cfg := newConfigFromCLI(c)
+		want := helpers.DefaultInstallWorkers(runtime.GOMAXPROCS(0))
+		if cfg.Workers != want {
+			t.Fatalf("cfg.Workers = %d, want %d (the derived default)", cfg.Workers, want)
+		}
+	})
+}
+
 // TestApplyAnsibleConfigServer checks the server -> Server mapping with the
 // same three precedence scenarios as TestApplyAnsibleConfigDownloadPath.
 func TestApplyAnsibleConfigServer(t *testing.T) {
@@ -870,11 +959,11 @@ func assertDiscoveryFallsThroughCleanly(t *testing.T, gotPath string, err error)
 // ini value over the env one (returning ini whenever it is non-empty). Two
 // rows fail - the first, on the precedence itself:
 //
-//	config_test.go:886: Server = "https://ini.example", want "https://env.example"
+//	config_test.go:975: Server = "https://ini.example", want "https://env.example"
 //
 // and the third, because a non-empty ini value shadows the empty-env case too:
 //
-//	config_test.go:911: Server = "https://ini.example", want the flag default "https://default.example"
+//	config_test.go:1000: Server = "https://ini.example", want the flag default "https://default.example"
 func TestAnsibleGalaxyServerEnv(t *testing.T) {
 	const envServer = "https://env.example"
 

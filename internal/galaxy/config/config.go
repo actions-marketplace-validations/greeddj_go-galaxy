@@ -62,8 +62,8 @@ type Config struct {
 	// DownloadWorkers bounds the artifact-download and cache-presence-probe
 	// pool the prefetcher runs, separately from Workers: that pool only waits
 	// on the network, never extracts a tree, so its useful size is not the
-	// install/warm worker pool's own CPU-bound count. See
-	// helpers.DefaultDownloadWorkers for the default derivation.
+	// install/warm worker pool's own. See helpers.DefaultDownloadWorkers and
+	// helpers.DefaultInstallWorkers for the two default derivations.
 	DownloadWorkers            int
 	Refresh                    bool
 	NoCache                    bool
@@ -181,9 +181,9 @@ func newConfigFromCLI(c *cli.Command) *Config {
 	// since this runs before applyWorkers - but that config is discarded, so
 	// the fallback never reaches a caller for such a value. A registering
 	// command with no source filling the flag does not reach this at all: it
-	// reads the flag's own Value, one worker per CPU.
+	// reads the flag's own Value, which is this same derivation.
 	if cfg.Workers < 1 {
-		cfg.Workers = runtime.NumCPU()
+		cfg.Workers = helpers.DefaultInstallWorkers(runtime.GOMAXPROCS(0))
 	}
 	// Same fallback shape as Workers above, and for the identical two
 	// reasons: a command that does not register --download-workers (cleanup)
@@ -195,7 +195,7 @@ func newConfigFromCLI(c *cli.Command) *Config {
 	// one whose zero value would otherwise mean "unbounded" the way a
 	// non-positive worker count could be misread.
 	if cfg.DownloadWorkers < 1 {
-		cfg.DownloadWorkers = helpers.DefaultDownloadWorkers(runtime.NumCPU())
+		cfg.DownloadWorkers = helpers.DefaultDownloadWorkers(runtime.GOMAXPROCS(0))
 	}
 	cfg.Verbose = c.Bool("verbose")
 	cfg.Quiet = !cfg.Verbose && c.Bool("quiet")
@@ -222,11 +222,12 @@ func applyTimeout(cfg *Config, c *cli.Command) error {
 //
 // The predicate is "present and non-positive", which two facts make correct.
 // A command that does not register --workers (cleanup) reads IsSet == false
-// and is skipped entirely, keeping the NumCPU fallback newConfigFromCLI
-// applies to its zero value. A command that does register the flag, with no
-// source filling it, reads runtime.NumCPU() from the flag's own Value rather
-// than 0 (see collectionBehaviorFlags in cmd/go-galaxy/cliflags/flags.go), so
-// n < 1 here is reachable only for a value some source genuinely supplied.
+// and is skipped entirely, keeping the helpers.DefaultInstallWorkers fallback
+// newConfigFromCLI applies to its zero value. A command that does register the
+// flag, with no source filling it, reads that same default from the flag's own
+// Value rather than 0 (see collectionBehaviorFlags in
+// cmd/go-galaxy/cliflags/flags.go), so n < 1 here is reachable only for a
+// value some source genuinely supplied.
 //
 // The message names both the flag and the environment variable because
 // c.IsSet cannot tell argv from env: an operator whose CI block exports

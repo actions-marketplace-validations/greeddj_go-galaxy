@@ -497,12 +497,22 @@ const (
 	// retried attempts of a Galaxy API GET or artifact download.
 	FetchRetryBackoffCap = 5 * time.Second
 
-	// DownloadWorkersPerCPU is the per-core multiplier DefaultDownloadWorkers
+	// MinDefaultInstallWorkers floors DefaultInstallWorkers' result. See that
+	// function's doc comment for why the floor buys latency hiding rather
+	// than throughput, and for what it costs on a single permitted CPU.
+	MinDefaultInstallWorkers = 2
+	// MaxDefaultInstallWorkers caps DefaultInstallWorkers' result. See that
+	// function's doc comment for the memory budget the number is derived
+	// from and for the measured gain it must not remove.
+	MaxDefaultInstallWorkers = 16
+
+	// DownloadWorkersPerCPU is the per-CPU multiplier DefaultDownloadWorkers
 	// applies before clamping. An artifact download or cache presence probe
 	// waits on the network, not the CPU - a HEAD probe or a streamed GET into
 	// a temp file, never an extraction - so a useful pool size is a multiple
-	// of the core count rather than the core count itself, unlike cfg.Workers,
-	// whose pool extracts a tree per worker and is genuinely CPU-bound.
+	// of the permitted CPU count rather than that count itself, unlike
+	// cfg.Workers, whose pool extracts a tree per worker and is capped by what
+	// those concurrent extractions cost in memory (see DefaultInstallWorkers).
 	DownloadWorkersPerCPU = 4
 	// MinDefaultDownloadWorkers floors DefaultDownloadWorkers' result so a
 	// single- or dual-core CI runner still gets meaningful download
@@ -628,27 +638,81 @@ func FetchRetryPolicy() RetryPolicy {
 	return RetryPolicy{Base: FetchRetryBackoffBase, Cap: FetchRetryBackoffCap, MaxAttempts: FetchRetryMaxAttempts}
 }
 
+// DefaultInstallWorkers derives the default size of the install and warm
+// worker pool - the one that extracts a collection tree per worker - from
+// procs, floored at MinDefaultInstallWorkers and capped at
+// MaxDefaultInstallWorkers.
+//
+// procs is the CPU this process is PERMITTED to use, never the machine's core
+// count, so a caller passes runtime.GOMAXPROCS(0) and never runtime.NumCPU().
+// The two disagree under a CFS bandwidth quota - what Kubernetes limits.cpu
+// and most containerized CI runners impose - because a quota bounds how much
+// CPU time the cgroup may consume without changing which CPUs are visible:
+// measured in a container on an 8-vCPU guest, --cpus=2 leaves
+// runtime.NumCPU() reporting 8 while runtime.GOMAXPROCS(0) reports 2. Only a
+// cpuset (--cpuset-cpus=0-1) narrows both. Sizing from the core count there
+// hands a pod limited to 2 CPUs on a 64-core node a 64-worker pool for the 2
+// CPUs it may actually use.
+//
+// The floor buys latency hiding, not throughput. An install worker does not
+// only extract: it can block on an artifact acquisition the prefetcher did
+// not cover, and at a single worker one stalled acquisition serializes the
+// whole run behind it. What that costs is small and measured: on 1 permitted
+// CPU, warm goes from 0.612 s at one worker to 0.686 s at two, a 12% penalty
+// paid so that one stall cannot become the run's critical path.
+//
+// The cap is memory, not throughput, and two constraints meet at its value.
+// The first is a budget of 64 MiB for gzip block pools: every concurrent
+// extraction holds one pgzip reader, and pgzip.NewReader eagerly fills a pool
+// of defaultBlocks (4) buffers of defaultBlockSize (1 MiB) before it reads a
+// byte, so a worker reserves 4 MiB for as long as it is extracting and
+// 64 MiB / 4 MiB is 16 workers. That budget sits below the smaller of the two
+// measured peak-RSS figures for a 100-collection corpus (93.0 MiB
+// frozen+offline, 183.0 MiB s3-warm) and is roughly a third of the larger, so
+// the pools stay a fraction of a real run's whole footprint instead of
+// dominating it; an uncapped one-per-CPU pool on a 64-core node would reserve
+// 64 * 4 MiB = 256 MiB in block pools alone, more than either measured peak
+// in total. The second constraint is that a cap must never remove a measured
+// gain, and ext4 was still improving at 12 workers, so nothing below that is
+// admissible. 16 satisfies both.
+//
+// Disclosed residual: this default encodes no filesystem's metadata-mutation
+// behavior, and metadata mutation - not CPU - is what an extraction is
+// actually bounded by (creating 46,100 entries costs 12.766 s where
+// traversing the same 46,100 costs 0.278 s, a factor of 46; across a cold
+// 100-collection corpus the total user CPU is 1.2-2.4 s against 15.9-86.8 s
+// of system time). On a filesystem that serializes metadata mutation this is
+// therefore not the best value - measured, APFS on a 12-core host has its
+// optimum at 4, well under what this function returns there - and the remedy
+// is --workers, which replaces this default outright. Deriving the default from
+// the filesystem instead would mean probing it, which is a different
+// mechanism from this one.
+func DefaultInstallWorkers(procs int) int {
+	return min(max(procs, MinDefaultInstallWorkers), MaxDefaultInstallWorkers)
+}
+
 // DefaultDownloadWorkers derives the default size of the artifact-download
-// and cache-presence-probe worker pool from the machine's core count:
-// cpus * DownloadWorkersPerCPU, floored at MinDefaultDownloadWorkers and
-// capped at MaxDefaultDownloadWorkers.
+// and cache-presence-probe worker pool from the CPU this process is permitted
+// to use: procs * DownloadWorkersPerCPU, floored at MinDefaultDownloadWorkers
+// and capped at MaxDefaultDownloadWorkers. procs carries exactly the meaning
+// it has in DefaultInstallWorkers, and a caller supplies it the same way.
 //
 // This is a deliberately different derivation from cfg.Workers' own worker
-// count (one per CPU), and the split stops at exactly these two pools. An
-// install or warm worker extracts a tree in the same goroutine that
-// downloaded it, so its parallelism is genuinely CPU-bound and stays sized
-// to the core count - raising it to this function's own ceiling would mean
-// up to 32 simultaneous extractions on one machine, trading speed for
-// thrashing on a small runner rather than gaining anything. A download or
-// cache-presence-probe worker, by contrast, only waits on the network - a
-// HEAD probe or a streamed GET into a temp file, never an extraction - so
-// its useful pool size tracks outstanding requests rather than CPU cores,
-// and sizing it to the core count alone would leave a low-core CI runner far
-// below what the network link can sustain. outdated is deliberately left on
-// cfg.Workers rather than gaining this knob too, so the split has exactly
-// one seam.
-func DefaultDownloadWorkers(cpus int) int {
-	return min(max(cpus*DownloadWorkersPerCPU, MinDefaultDownloadWorkers), MaxDefaultDownloadWorkers)
+// count (see DefaultInstallWorkers), and the split stops at exactly these two
+// pools. An install or warm worker extracts a tree in the same goroutine that
+// downloaded it, so its pool tracks permitted CPU and is capped by what those
+// concurrent extractions cost in memory - raising it to this function's own
+// ceiling would mean up to 32 simultaneous extractions on one machine,
+// trading speed for thrashing on a small runner rather than gaining anything.
+// A download or cache-presence-probe worker, by contrast, only waits on the
+// network - a HEAD probe or a streamed GET into a temp file, never an
+// extraction - so its useful pool size tracks outstanding requests rather
+// than CPU at all, and sizing it to the permitted CPU alone would leave a
+// low-core CI runner far below what the network link can sustain. outdated is
+// deliberately left on cfg.Workers rather than gaining this knob too, so the
+// split has exactly one seam.
+func DefaultDownloadWorkers(procs int) int {
+	return min(max(procs*DownloadWorkersPerCPU, MinDefaultDownloadWorkers), MaxDefaultDownloadWorkers)
 }
 
 // ReadOnlyPerm strips every write bit (owner, group, other) from perm,

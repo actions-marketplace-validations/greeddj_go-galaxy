@@ -429,7 +429,7 @@ type workersEnvRow struct {
 // without it, "the declared-but-empty variable was accepted" would be
 // indistinguishable from "this harness never reads the environment at all",
 // since a harness ignoring the environment entirely would accept that row too
-// and resolve to the very same NumCPU default.
+// and resolve to the very same derived default.
 //
 // The two checks below say "config error" rather than naming
 // BuildCollectionConfig the way the rest of this file does, and that has to
@@ -439,7 +439,7 @@ type workersEnvRow struct {
 //
 // KILLING MUTATIONS, all run and reverted.
 //
-// M2, `Value: runtime.NumCPU()` deleted from the workers IntFlag in
+// M2, the `Value` field deleted outright from the workers IntFlag in
 // cmd/go-galaxy/cliflags. Only the empty-value row fails - the other three
 // survive, and that selectivity is the point: the field is what turns a
 // declared-but-empty variable into the default rather than into a zero this
@@ -466,7 +466,7 @@ type workersEnvRow struct {
 func TestWorkersEnvShapes(t *testing.T) {
 	rows := []workersEnvRow{
 		{name: "a positive value is read", value: "3", want: 3},
-		{name: "a declared but empty value reads the flag default", value: "", want: runtime.NumCPU()},
+		{name: "a declared but empty value reads the flag default", value: "", want: galaxyhelpers.DefaultInstallWorkers(runtime.GOMAXPROCS(0))},
 		{name: "zero is refused", value: "0", wantErr: true},
 		{name: "a negative value is refused", value: "-1", wantErr: true},
 	}
