@@ -219,7 +219,7 @@ func TestLoadKeyringReadsEveryArmorBlock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadKeyring(%s) = %v, want nil", twoKeyFixture, err)
 	}
-	// Killing mutation, actually run against this file: replace loadKeyring's
+	// Killing mutation, actually run against this file: replace readEntities'
 	// `readArmoredKeyRing(data)` call with the single-block
 	// `openpgp.ReadArmoredKeyRing(bytes.NewReader(data))` it replaced. This
 	// assertion then fails with
@@ -282,7 +282,7 @@ func TestLoadKeyringRefusesSecretKeyMaterial(t *testing.T) {
 			}
 			// Killing mutation, actually run against this file: drop the
 			// `|| bytes.Contains(data, []byte(privateKeyArmorHeader))` arm of
-			// loadKeyring's routing test. Only the secret.asc row then fails,
+			// readEntities' routing test. Only the secret.asc row then fails,
 			// with
 			//
 			//	keyring_test.go:296: LoadKeyring(secret.asc) error does not name the problem:

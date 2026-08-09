@@ -26,16 +26,18 @@ const (
 )
 
 // CountSpec is a parsed required-valid-signature-count policy: how many
-// signatures must verify, and whether a signature that was checked and failed
-// is fatal on top of that count.
+// signatures must verify, and whether verifying nothing at all is tolerated on
+// top of that count.
 //
 // The two halves are independent, and what each spelling means binds whoever
 // writes the decision function:
 //
 //   - bare N requires N valid signatures. A signature that failed is tolerated
 //     as long as N others verified.
-//   - +N requires N valid signatures AND makes any signature that was checked
-//     and failed fatal. The leading + is the strict marker, never part of the
+//   - +N requires N valid signatures AND that at least one signature verified.
+//     It does NOT make a checked-and-failed signature fatal - "all" is the
+//     spelling for that - so +N with two failures beside one success passes
+//     whenever N is one. The leading + is the strict marker, never part of the
 //     number.
 //   - all, with or without the +, requires every signature checked to verify.
 //     Count carries no floor there, and ParseCountSpec never sets All and a
@@ -43,6 +45,15 @@ const (
 //   - Count 0 is a floor of zero, so an empty signature list satisfies it. It
 //     is an operator asking for no floor at all, and it is the only spelling
 //     under which the rule below has nothing to refuse.
+//
+// The strict marker contributes exactly one clause, and making it contribute
+// the stronger one instead is not a local edit: a counted policy stops
+// checking at its Count-th success, so a signature sitting after that point is
+// never examined and could not be found to have failed. "Any checked signature
+// that failed is fatal" would therefore mean something different depending on
+// where in the list the failure sat, unless the early stop went too - which
+// would also cost every run the public-key operations that stop exists to
+// avoid.
 //
 // The trap this doc exists for: a non-strict spelling is satisfied VACUOUSLY
 // when nothing was gathered. Bare N passes on zero signatures, and so does all,
@@ -72,8 +83,10 @@ type CountSpec struct {
 	Count int
 	// All requires every signature checked to verify, in place of a count.
 	All bool
-	// Strict makes any signature that was checked and failed fatal, on top of
-	// whichever of Count or All applies.
+	// Strict requires that at least one signature verified, on top of
+	// whichever of Count or All applies. It is what closes the vacuous pass
+	// described above, and it is not a rule about failures - see this type's
+	// own doc comment for why the stronger reading is "all" rather than this.
 	Strict bool
 }
 

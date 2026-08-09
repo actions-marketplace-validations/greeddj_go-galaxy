@@ -41,7 +41,7 @@ var countSpecCases = []countSpecCase{
 	{name: "strict all", value: "+all", want: CountSpec{All: true, Strict: true}},
 	// "+0" is accepted, and it is the row showing the two halves are
 	// independent: the strict marker is not part of the number, so it survives
-	// a floor of zero and still forbids a checked signature from failing.
+	// a floor of zero and still requires that some signature verified.
 	{name: "strict zero", value: "+0", want: CountSpec{Count: 0, Strict: true}},
 	// The generic refusal has to name what would have been accepted, since a
 	// value this small offers nothing else to reason from.

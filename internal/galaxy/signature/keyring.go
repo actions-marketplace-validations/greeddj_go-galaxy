@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
+	pgperrors "github.com/ProtonMail/go-crypto/openpgp/errors"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 )
 
@@ -158,26 +159,7 @@ func loadKeyring(path string, limit int64) (*Keyring, error) {
 		return nil, fmt.Errorf("%w: %q", helpers.ErrKeyringIsKeybox, path)
 	}
 
-	var entities openpgp.EntityList
-	// bytes.Contains rather than a prefix test: openpgp's own armor.Decode
-	// scans lines for an armor header and ignores whatever precedes it, so a
-	// file carrying one after a leading comment is a file the armored reader
-	// can read, and a prefix test would route it to the binary reader and
-	// refuse a keyring that is fine. The converse misroute - a binary keyring
-	// whose bytes happen to contain one of these exact header lines, sent to
-	// the armored reader and refused - is accepted rather than closed: it takes
-	// a deliberately built file to hit, while a leading comment line is
-	// something ordinary tooling writes.
-	//
-	// The needle is the two block types openpgp.ReadArmoredKeyRing itself
-	// accepts, never the bare armorBlockStart prefix, so this test is exactly
-	// as selective as the reader behind it: a PEM certificate or any other
-	// armored object routes to the binary reader and is refused there.
-	if bytes.Contains(data, []byte(publicKeyArmorHeader)) || bytes.Contains(data, []byte(privateKeyArmorHeader)) {
-		entities, err = readArmoredKeyRing(data)
-	} else {
-		entities, err = openpgp.ReadKeyRing(bytes.NewReader(data))
-	}
+	entities, err := readEntities(data)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %q: %w", helpers.ErrKeyringUnreadable, path, err)
 	}
@@ -192,6 +174,38 @@ func loadKeyring(path string, limit int64) (*Keyring, error) {
 	}
 
 	return &Keyring{path: path, entities: entities}, nil
+}
+
+// readEntities reads data as key material, choosing the encoding from the bytes
+// and putting the packet framing gate in front of the parser in either case.
+//
+// bytes.Contains rather than a prefix test: openpgp's own armor.Decode scans
+// lines for an armor header and ignores whatever precedes it, so a file
+// carrying one after a leading comment is a file the armored reader can read,
+// and a prefix test would route it to the binary reader and refuse a keyring
+// that is fine. The converse misroute - a binary keyring whose bytes happen to
+// contain one of these exact header lines, sent to the armored reader and
+// refused - is accepted rather than closed: it takes a deliberately built file
+// to hit, while a leading comment line is something ordinary tooling writes.
+//
+// The needle is the two block types openpgp.ReadArmoredKeyRing itself accepts,
+// never the bare armorBlockStart prefix, so this test is exactly as selective
+// as the reader behind it: a PEM certificate or any other armored object routes
+// to the binary reader and is refused there.
+//
+// The binary branch is already decoded, so it is gated here; the armored branch
+// gates each block's decoded bytes inside readKeyArmorBlock, where the decode
+// happens. Between them no path reaches go-crypto's packet parser ungated - see
+// checkPacketFraming for what that buys and why a keyring needs it too.
+func readEntities(data []byte) (openpgp.EntityList, error) {
+	if bytes.Contains(data, []byte(publicKeyArmorHeader)) || bytes.Contains(data, []byte(privateKeyArmorHeader)) {
+		return readArmoredKeyRing(data)
+	}
+	if err := checkPacketFraming(data); err != nil {
+		return nil, err
+	}
+
+	return openpgp.ReadKeyRing(bytes.NewReader(data))
 }
 
 // readArmoredKeyRing reads the entities of every armor block in data, in file
@@ -212,8 +226,8 @@ func loadKeyring(path string, limit int64) (*Keyring, error) {
 // the whole file is already in memory, which the size ceiling above
 // guarantees.
 //
-// A block that is not key material is a refusal, not something skipped: the
-// underlying reader names the type it found, and skipping would put the loader
+// A block that is not key material is a refusal, not something skipped:
+// readKeyArmorBlock names the type it found, and skipping would put the loader
 // back in the business of using part of a file quietly. The cut itself errs the
 // same way. isArmorBlockStart recognizes every opening line armor.Decode does,
 // so no real block start is missed and no two blocks are ever merged into one
@@ -230,7 +244,7 @@ func readArmoredKeyRing(data []byte) (openpgp.EntityList, error) {
 		if blockStart < 0 {
 			return nil
 		}
-		block, err := openpgp.ReadArmoredKeyRing(bytes.NewReader(data[blockStart:end]))
+		block, err := readKeyArmorBlock(data[blockStart:end])
 		if err != nil {
 			return err
 		}
@@ -258,6 +272,35 @@ func readArmoredKeyRing(data []byte) (openpgp.EntityList, error) {
 	}
 
 	return entities, nil
+}
+
+// readKeyArmorBlock decodes one armored block and reads the key material out of
+// it, with the packet framing gate standing between the two steps.
+//
+// It stands in for openpgp.ReadArmoredKeyRing, which performs both steps in one
+// call with nothing in between, and reproduces that function's own two refusals
+// so that a failure keeps the shape a caller already gets: input holding no
+// armor block at all, and a block whose type is neither half of a key. The
+// substitution exists only for the gate - see checkPacketFraming for what an
+// ungated decoded stream costs, and note that it costs it here on the
+// operator's own file, which is why this closes with the blob path rather than
+// after it.
+func readKeyArmorBlock(data []byte) (openpgp.EntityList, error) {
+	decoded, blockType, err := decodeArmorBlock(data)
+	if armorDecodeFoundNothing(err) {
+		return nil, pgperrors.InvalidArgumentError("no armored data found")
+	}
+	if err != nil {
+		return nil, err
+	}
+	if blockType != openpgp.PublicKeyType && blockType != openpgp.PrivateKeyType {
+		return nil, pgperrors.InvalidArgumentError("expected public or private key block, got: " + blockType)
+	}
+	if err := checkPacketFraming(decoded); err != nil {
+		return nil, err
+	}
+
+	return openpgp.ReadKeyRing(bytes.NewReader(decoded))
 }
 
 // nextLine returns the line of data beginning at off, without its terminator,
