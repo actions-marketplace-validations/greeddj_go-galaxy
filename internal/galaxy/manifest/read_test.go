@@ -1,0 +1,398 @@
+package manifest
+
+import (
+	"archive/tar"
+	"bytes"
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
+	"github.com/klauspost/pgzip"
+)
+
+// testManifest is the document every fixture below carries as its top-level
+// MANIFEST.json. Its exact bytes are what the positive assertions compare
+// against, so a walk that returned some other entry's body would fail on the
+// content rather than merely on the length.
+const testManifest = `{"collection_info":{"namespace":"acme","name":"widgets","version":"1.0.0"}}`
+
+// testEntry describes one tar entry for tarStream. declaredSize overrides the
+// size the entry's header announces, which is the only way to build a header
+// declaring more bytes than the archive carries; zero means "the length of
+// content". typeflag defaults to tar.TypeReg, which is not its own zero value.
+type testEntry struct {
+	name         string
+	content      []byte
+	declaredSize int64
+	typeflag     byte
+}
+
+// tarStream renders entries, in order, into a raw tar byte stream.
+//
+// It writes each entry through its own tar.Writer, which is what lets one
+// declare a size it never writes: a tar stream is a concatenation of
+// self-contained 512-byte blocks, while a single writer refuses to emit a
+// second header after an entry whose body it never received. Flush reports
+// exactly that shortfall, and for an over-declaring entry that report is this
+// builder's purpose rather than a failure - it also suppresses the padding
+// Flush would otherwise write, which keeps the stream block-aligned for the
+// entries that follow.
+func tarStream(t *testing.T, entries []testEntry) []byte {
+	t.Helper()
+
+	// A fixed stamp, so a fixture's bytes never depend on when it was built.
+	modTime := time.Date(2024, time.January, 1, 0, 0, 0, 0, time.UTC)
+
+	var buf bytes.Buffer
+	for _, e := range entries {
+		size := e.declaredSize
+		if size == 0 {
+			size = int64(len(e.content))
+		}
+		typeflag := e.typeflag
+		if typeflag == 0 {
+			typeflag = tar.TypeReg
+		}
+
+		tw := tar.NewWriter(&buf)
+		header := &tar.Header{Typeflag: typeflag, Name: e.name, Size: size, Mode: 0o644, ModTime: modTime}
+		if err := tw.WriteHeader(header); err != nil {
+			t.Fatalf("failed to write the tar header for %s: %v", e.name, err)
+		}
+		if len(e.content) > 0 {
+			if _, err := tw.Write(e.content); err != nil {
+				t.Fatalf("failed to write the tar content for %s: %v", e.name, err)
+			}
+		}
+		_ = tw.Flush()
+	}
+
+	// The trailer: two zero blocks.
+	buf.Write(make([]byte, 2*512))
+	return buf.Bytes()
+}
+
+// writeArtifact gzips entries into a file under the test's own temp directory
+// and returns its absolute path, which is the shape ReadFromTarGz takes.
+func writeArtifact(t *testing.T, entries []testEntry) string {
+	t.Helper()
+
+	var buf bytes.Buffer
+	gz := pgzip.NewWriter(&buf)
+	if _, err := gz.Write(tarStream(t, entries)); err != nil {
+		t.Fatalf("failed to compress the fixture: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("failed to close the fixture's gzip writer: %v", err)
+	}
+	return writeFile(t, "artifact.tar.gz", buf.Bytes())
+}
+
+// writePaddedArtifact writes an artifact carrying padBytes of zeros ahead of a
+// top-level MANIFEST.json, so the manifest sits a chosen distance into the
+// decompressed stream.
+//
+// The padding is compressed in chunks rather than assembled in memory, so a
+// fixture reaching past the production scan bound never holds its own
+// decompressed size; being zeros, it also leaves the file on disk around a
+// hundred kilobytes whatever padBytes is. Both properties are what make a test
+// at the real ceiling cheap enough to run unconditionally.
+func writePaddedArtifact(t *testing.T, padBytes int64) string {
+	t.Helper()
+
+	var buf bytes.Buffer
+	gz := pgzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+
+	modTime := time.Date(2024, time.January, 1, 0, 0, 0, 0, time.UTC)
+	pad := &tar.Header{Typeflag: tar.TypeReg, Name: "pad.bin", Size: padBytes, Mode: 0o644, ModTime: modTime}
+	if err := tw.WriteHeader(pad); err != nil {
+		t.Fatalf("failed to write the padding header: %v", err)
+	}
+	chunk := make([]byte, 1<<20)
+	for written := int64(0); written < padBytes; written += int64(len(chunk)) {
+		if _, err := tw.Write(chunk[:min(int64(len(chunk)), padBytes-written)]); err != nil {
+			t.Fatalf("failed to write the padding body: %v", err)
+		}
+	}
+
+	manifest := &tar.Header{
+		Typeflag: tar.TypeReg, Name: helpers.ManifestFileName,
+		Size: int64(len(testManifest)), Mode: 0o644, ModTime: modTime,
+	}
+	if err := tw.WriteHeader(manifest); err != nil {
+		t.Fatalf("failed to write the manifest header: %v", err)
+	}
+	if _, err := tw.Write([]byte(testManifest)); err != nil {
+		t.Fatalf("failed to write the manifest body: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("failed to close the fixture's tar writer: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("failed to close the fixture's gzip writer: %v", err)
+	}
+	return writeFile(t, "padded.tar.gz", buf.Bytes())
+}
+
+// writeFile drops data at name under the test's own temp directory and returns
+// the absolute path.
+func writeFile(t *testing.T, name string, data []byte) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, data, helpers.FileMod); err != nil {
+		t.Fatalf("failed to write the fixture %s: %v", name, err)
+	}
+	return path
+}
+
+// nonManifestEntries is the surrounding content a real collection carries,
+// returned fresh per call so a caller can append to it without aliasing.
+func nonManifestEntries() []testEntry {
+	return []testEntry{
+		{name: "README.md", content: []byte("# acme.widgets\n")},
+		{name: "roles/", typeflag: tar.TypeDir},
+		{name: "plugins/modules/widget.py", content: []byte("# widget\n")},
+	}
+}
+
+func TestReadFromTarGzFindsFirstEntry(t *testing.T) {
+	t.Parallel()
+
+	artifact := writeArtifact(t, append(
+		[]testEntry{{name: helpers.ManifestFileName, content: []byte(testManifest)}},
+		nonManifestEntries()...))
+
+	got, err := ReadFromTarGz(artifact)
+	if err != nil {
+		t.Fatalf("ReadFromTarGz(manifest first) error = %v, want the manifest", err)
+	}
+	if string(got) != testManifest {
+		t.Fatalf("ReadFromTarGz(manifest first) = %q, want %q", got, testManifest)
+	}
+}
+
+func TestReadFromTarGzFindsLateEntry(t *testing.T) {
+	t.Parallel()
+
+	artifact := writeArtifact(t, append(nonManifestEntries(),
+		testEntry{name: helpers.ManifestFileName, content: []byte(testManifest)},
+		testEntry{name: "FILES.json", content: []byte(`{"files":[]}`)}))
+
+	got, err := ReadFromTarGz(artifact)
+	if err != nil {
+		t.Fatalf("ReadFromTarGz(manifest fourth) error = %v, want the manifest", err)
+	}
+	if string(got) != testManifest {
+		t.Fatalf("ReadFromTarGz(manifest fourth) = %q, want %q", got, testManifest)
+	}
+}
+
+func TestReadFromTarGzRejectsMissingManifest(t *testing.T) {
+	t.Parallel()
+
+	// The positive control comes first: the identical entries plus a top-level
+	// manifest are read back, so the refusal below is this walk finding no
+	// manifest rather than the fixture being unreadable to begin with.
+	control := writeArtifact(t, append(nonManifestEntries(),
+		testEntry{name: helpers.ManifestFileName, content: []byte(testManifest)}))
+	got, err := ReadFromTarGz(control)
+	if err != nil || string(got) != testManifest {
+		t.Fatalf("ReadFromTarGz(control with a manifest) = %q, %v, want the manifest and no error", got, err)
+	}
+
+	artifact := writeArtifact(t, nonManifestEntries())
+	if _, err := ReadFromTarGz(artifact); !errors.Is(err, helpers.ErrManifestNotFound) {
+		t.Fatalf("ReadFromTarGz(no manifest) error = %v, want the not-found sentinel", err)
+	}
+}
+
+func TestReadFromTarGzRejectsNestedManifest(t *testing.T) {
+	t.Parallel()
+
+	nested := testEntry{name: "vendored/other/" + helpers.ManifestFileName, content: []byte(`{"decoy":true}`)}
+
+	// The positive control puts the nested entry AHEAD of the real one, so a
+	// name check matching on the base name alone would return the decoy rather
+	// than merely accepting an archive that has both.
+	//
+	// Relaxing that check - path.Clean(header.Name) in topLevelManifest
+	// replaced by path.Base(header.Name), applied through go test -overlay so
+	// no production file is edited - fails here first:
+	//
+	//	read_test.go:234: ReadFromTarGz(nested entry ahead of the real one) = "{\"decoy\":true}", want the top-level manifest (err: <nil>)
+	control := writeArtifact(t, []testEntry{
+		nested,
+		{name: helpers.ManifestFileName, content: []byte(testManifest)},
+	})
+	got, err := ReadFromTarGz(control)
+	if err != nil || string(got) != testManifest {
+		t.Fatalf("ReadFromTarGz(nested entry ahead of the real one) = %q, want the top-level manifest (err: %v)", got, err)
+	}
+
+	artifact := writeArtifact(t, append(nonManifestEntries(), nested))
+	if _, err := ReadFromTarGz(artifact); !errors.Is(err, helpers.ErrManifestNotFound) {
+		t.Fatalf("ReadFromTarGz(nested manifest only) error = %v, want the not-found sentinel", err)
+	}
+}
+
+func TestReadFromTarGzRejectsOversizeEntry(t *testing.T) {
+	t.Parallel()
+
+	// An entry declaring one byte past the per-entry cap and carrying nothing.
+	// The walk has to refuse it on its header alone, since reading past a body
+	// this size is exactly what the cap exists to prevent - and the fixture
+	// could not carry those bytes anyway.
+	oversize := testEntry{name: "huge.bin", declaredSize: helpers.ArchiveMaxEntrySize + 1}
+	manifest := testEntry{name: helpers.ManifestFileName, content: []byte(testManifest)}
+
+	// The positive control is the same stream with the over-declared entry
+	// left out, so the refusal below is the size check answering rather than
+	// the manifest sitting somewhere this walk never looks.
+	control := writeArtifact(t, []testEntry{{name: "small.bin", content: []byte("x")}, manifest})
+	got, err := ReadFromTarGz(control)
+	if err != nil || string(got) != testManifest {
+		t.Fatalf("ReadFromTarGz(control without the over-declared entry) = %q, %v, want the manifest", got, err)
+	}
+
+	artifact := writeArtifact(t, []testEntry{oversize, manifest})
+	if _, err := ReadFromTarGz(artifact); !errors.Is(err, helpers.ErrArchiveEntryIsTooLarge) {
+		t.Fatalf("ReadFromTarGz(over-declared entry ahead of the manifest) error = %v, want the entry-size sentinel", err)
+	}
+}
+
+func TestReadFromTarGzRejectsScanOverrun(t *testing.T) {
+	t.Parallel()
+
+	// Both fixtures carry a real top-level MANIFEST.json BEHIND their padding,
+	// which is what makes the refusal mean something: an archive that simply
+	// ran out of entries would be refused by the end of the stream alone, so
+	// the manifest behind the bound is the only thing separating "stopped at
+	// the ceiling" from "read everything and found nothing".
+	//
+	// Loosening the ceiling - max: helpers.ManifestScanMaxBytes in
+	// readFromTarGzStream replaced by max: helpers.ArchiveMaxDecompressedSize,
+	// applied through go test -overlay so no production file is edited - lets
+	// the walk reach that manifest and hand it back:
+	//
+	//	read_test.go:285: ReadFromTarGz(manifest past the scan bound) error = <nil>, want the not-found sentinel
+	beyond := writePaddedArtifact(t, helpers.ManifestScanMaxBytes+(1<<20))
+	if _, err := ReadFromTarGz(beyond); !errors.Is(err, helpers.ErrManifestNotFound) {
+		t.Fatalf("ReadFromTarGz(manifest past the scan bound) error = %v, want the not-found sentinel", err)
+	}
+
+	// The control sits just under the same ceiling, so the refusal above is
+	// the bound answering rather than padding this walk cannot read through.
+	within := writePaddedArtifact(t, helpers.ManifestScanMaxBytes-(1<<20))
+	got, err := ReadFromTarGz(within)
+	if err != nil || string(got) != testManifest {
+		t.Fatalf("ReadFromTarGz(manifest just inside the scan bound) = %q, %v, want the manifest", got, err)
+	}
+}
+
+func TestReadFromTarGzRejectsNonGzip(t *testing.T) {
+	t.Parallel()
+
+	// The positive control proves a path handed to this function is read at
+	// all, so the two refusals below are the gzip header answering rather than
+	// anything about how the fixture reached disk.
+	control := writeArtifact(t, []testEntry{{name: helpers.ManifestFileName, content: []byte(testManifest)}})
+	got, err := ReadFromTarGz(control)
+	if err != nil || string(got) != testManifest {
+		t.Fatalf("ReadFromTarGz(control gzipped artifact) = %q, %v, want the manifest", got, err)
+	}
+
+	text := writeFile(t, "error-page.html", []byte("<html><body>404 Not Found</body></html>"))
+	if _, err := ReadFromTarGz(text); !errors.Is(err, helpers.ErrArtifactNotTarGz) {
+		t.Fatalf("ReadFromTarGz(an error page) error = %v, want the shape sentinel", err)
+	}
+
+	// A bare tar, never compressed: a well-formed archive of the right inner
+	// shape that is still not what this function reads.
+	bare := writeFile(t, "bare.tar", tarStream(t, []testEntry{{name: helpers.ManifestFileName, content: []byte(testManifest)}}))
+	if _, err := ReadFromTarGz(bare); !errors.Is(err, helpers.ErrArtifactNotTarGz) {
+		t.Fatalf("ReadFromTarGz(an uncompressed tar) error = %v, want the shape sentinel", err)
+	}
+}
+
+func TestReadFromTarGzRejectsEmptyManifest(t *testing.T) {
+	t.Parallel()
+
+	// A one-byte manifest is the positive control, and it is the tightest one
+	// available: the entry sits at the same position under the same name, so
+	// only its length separates it from the refusal below.
+	control := writeArtifact(t, append(nonManifestEntries(),
+		testEntry{name: helpers.ManifestFileName, content: []byte("{")}))
+	got, err := ReadFromTarGz(control)
+	if err != nil || string(got) != "{" {
+		t.Fatalf("ReadFromTarGz(one-byte manifest) = %q, %v, want that one byte", got, err)
+	}
+
+	// A signature over a zero-byte document verifies whenever a keyring key
+	// made it, so an empty manifest reaching a verifier is indistinguishable
+	// from a real one. It is refused here, where the difference between an
+	// empty document and a real one is still visible.
+	//
+	// Admitting it instead - `if size <= 0` in readManifestBody replaced by
+	// `if size < 0`, applied through go test -overlay so no production file
+	// is edited - fails on that refusal:
+	//
+	//	read_test.go:348: ReadFromTarGz(zero-length manifest) error = <nil>, want the not-found sentinel
+	artifact := writeArtifact(t, append(nonManifestEntries(),
+		testEntry{name: helpers.ManifestFileName}))
+	if _, err := ReadFromTarGz(artifact); !errors.Is(err, helpers.ErrManifestNotFound) {
+		t.Fatalf("ReadFromTarGz(zero-length manifest) error = %v, want the not-found sentinel", err)
+	}
+}
+
+func TestReadFromTarGzNeverReportsAnEmptyManifest(t *testing.T) {
+	t.Parallel()
+
+	// A header declaring more than the archive carries, in the two shapes that
+	// differ. Both are pinned because only one of them errors, and the contract
+	// - a nil error never comes with no bytes - has to hold across both.
+	const declared = 100
+	body := []byte("0123456789")
+
+	// The archive's own trailer sits behind the short body, so the read is
+	// satisfied from it: exactly the declared count, padded with NUL.
+	padded := writeArtifact(t, []testEntry{
+		{name: helpers.ManifestFileName, content: body, declaredSize: declared},
+	})
+	got, err := ReadFromTarGz(padded)
+	if err != nil || len(got) != declared {
+		t.Fatalf("ReadFromTarGz(header over a short body) = %d bytes, %v, want %d bytes and no error", len(got), err, declared)
+	}
+
+	// The same header with the stream ending inside the body instead: nothing
+	// follows it, not even a trailer, so archive/tar has nothing to satisfy the
+	// declaration from.
+	var raw bytes.Buffer
+	tw := tar.NewWriter(&raw)
+	header := &tar.Header{Typeflag: tar.TypeReg, Name: helpers.ManifestFileName, Size: declared, Mode: 0o644}
+	if err := tw.WriteHeader(header); err != nil {
+		t.Fatalf("failed to write the truncated fixture's header: %v", err)
+	}
+	if _, err := tw.Write(body); err != nil {
+		t.Fatalf("failed to write the truncated fixture's body: %v", err)
+	}
+
+	var compressed bytes.Buffer
+	gz := pgzip.NewWriter(&compressed)
+	if _, err := gz.Write(raw.Bytes()); err != nil {
+		t.Fatalf("failed to compress the truncated fixture: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("failed to close the truncated fixture's gzip writer: %v", err)
+	}
+
+	truncated := writeFile(t, "truncated.tar.gz", compressed.Bytes())
+	got, err = ReadFromTarGz(truncated)
+	if err == nil || len(got) != 0 {
+		t.Fatalf("ReadFromTarGz(stream ending inside the manifest) = %d bytes, %v, want no bytes and an error", len(got), err)
+	}
+}
