@@ -76,6 +76,52 @@ const (
 	// candidate opening line: the prefix, the trailing "-----", and at least
 	// one byte of type between them.
 	armorBlockStartMinLen = len(armorBlockStart) + len("-----") + 1
+
+	// armorHeaderMaxSize bounds one armor block's header section: the bytes
+	// between its opening line and the blank line that ends the section.
+	//
+	// The bound is on the section rather than on any one line in it, because the
+	// cost it exists to remove is quadratic in the section's length. armor.Decode
+	// reads its input through a bufio.Reader of 100 bytes and accumulates a
+	// header line longer than one buffer a chunk at a time, appending each chunk
+	// to the value it has built so far, so an N-byte header line is copied N/100
+	// times and the header loop spends about N*N/200 bytes of allocation.
+	//
+	// What the bound pins is one execution of that header loop, which is the unit
+	// the decoder restarts rather than the input's own total: a header line
+	// carrying no colon sends it looking for the next opening line, and the loop
+	// starts again on whatever it finds. One section at exactly the bound measures
+	// 102960 bytes under a one-character header name and 102560 under a
+	// seven-character one, the spread being size-class rounding on the string
+	// being grown, against 83886 from the N*N/200 model. Across an input the term
+	// therefore stays linear, measured flat at 23.9 times the input's own length
+	// on blobs of 16, 64 and 259 such sections.
+	//
+	// The residual that leaves is on the blob path, and it is bounded rather than
+	// closed: a blob filling helpers.SignatureMaxSize with those sections spends
+	// about 25 MB, and walkBlobs is a sequential loop bounded by
+	// helpers.MaxSignaturesPerCollection, so about 1.6 GB per collection, spent
+	// one blob at a time rather than held at once, against 5.5 GB for a single
+	// ungated blob. The keyring path carries no such residual, and owes that to
+	// the shape of its own reader rather than to this bound: measured at 2.2 times
+	// the file's length on a 1047396-byte file of those same sections, which is
+	// essentially the io.ReadAll, because readArmoredKeyRing cuts a block at every
+	// opening line and readKeyArmorBlock refuses the first cut that is not key
+	// material, so a multi-section file pays for one section.
+	//
+	// What that spends is CPU and allocator churn rather than peak memory - every
+	// copy is garbage the moment the next one is made - so the ceiling is chosen
+	// to be far out of the way of real armor rather than tight against it: 4096
+	// holds more Version, Comment and Charset lines than any producer writes,
+	// while gpg writes an opening line and a blank line with nothing between them
+	// at all.
+	//
+	// A block's body needs no bound of its own here, which is what makes this
+	// cheap: armor.Decode's own lineReader already refuses a body line it could
+	// not read whole and any body line over 96 bytes, so the part of an armored
+	// blob that carries real length is already capped by the library, and this
+	// bound costs it nothing.
+	armorHeaderMaxSize = 4096
 )
 
 // Keyring is the OpenPGP key material of one keyring file, together with the

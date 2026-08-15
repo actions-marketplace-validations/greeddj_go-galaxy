@@ -137,8 +137,8 @@ const (
 // amplifyingBlob is a whole new-format packet: 0xc2 is the signature tag, 0x08
 // declares an eight-octet body, and that body is a v6 signature header (version
 // 6, signature type 0x13, RSA, SHA-256) whose four-octet hashed subpacket
-// length is 0xffffffff. Handed to go-crypto ungated it allocates 4.00 GiB,
-// which is the whole of what checkPacketFraming exists to refuse.
+// length is 0xffffffff. Handed to go-crypto ungated it allocates 4.00 GiB - one
+// header shape reaching that allocation, and framing_test.go measures the rest.
 //
 //nolint:gochecknoglobals // a fixed table consumed by the tests, not mutable shared state
 var synthesizedBlobs = map[string][]byte{
