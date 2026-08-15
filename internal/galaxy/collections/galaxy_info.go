@@ -2,7 +2,6 @@ package collections
 
 import (
 	"path"
-	"strings"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
@@ -85,7 +84,7 @@ func writeGalaxyInfo(target installTarget, cfg *config.Config, col collection, m
 // by construction rather than by coincidence. meta, when present, contributes
 // only the informational fields col has no equivalent for: the download and
 // version URLs (with any capability-bearing query string stripped, see
-// withoutQuery) and the signatures Galaxy attached to this version.
+// helpers.WithoutQuery) and the signatures Galaxy attached to this version.
 func buildGalaxyYAML(cfg *config.Config, col collection, meta *types.GalaxyCollectionVersionInfo) GalaxyYAML {
 	g := GalaxyYAML{
 		FormatVer: "1.0.0",
@@ -95,30 +94,9 @@ func buildGalaxyYAML(cfg *config.Config, col collection, meta *types.GalaxyColle
 		Version:   col.Version,
 	}
 	if meta != nil {
-		g.DownloadURL = withoutQuery(meta.DownloadURL)
+		g.DownloadURL = helpers.WithoutQuery(meta.DownloadURL)
 		g.Signatures = meta.Signatures
-		g.VersionURL = withoutQuery(meta.Href)
+		g.VersionURL = helpers.WithoutQuery(meta.Href)
 	}
 	return g
-}
-
-// withoutQuery returns raw up to, but not including, its first "?".
-//
-// A Galaxy NG or Automation Hub deployment backs its artifacts with object
-// storage and answers with a presigned download URL, whose query string is
-// a time-limited bearer capability: anyone holding that exact URL can fetch
-// the artifact without credentials. GALAXY.yml is written into the
-// collections tree, which routinely outlives the run and gets uploaded
-// wholesale as a CI artifact, so persisting the query there hands that
-// capability to everyone who can read the build's output. The scheme, host
-// and path are kept, since they are the informational part - where this
-// collection actually came from - and carry no capability on their own.
-//
-// The cut is textual rather than a url.Parse round trip precisely because
-// it cannot fail: the first literal "?" always begins the query, so a URL
-// this tool could not parse still gets stripped rather than silently
-// written through intact.
-func withoutQuery(raw string) string {
-	before, _, _ := strings.Cut(raw, "?")
-	return before
 }

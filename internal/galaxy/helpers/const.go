@@ -392,9 +392,9 @@ const (
 	// SignatureFetchDeadline bounds one collection's signature phase end to
 	// end: every signature source gathered for that collection - a server's own
 	// signatures carried in version metadata and each configured source alike -
-	// together with each size-limited body read and every retry attempt and
-	// backoff sleep between them, as one shared budget rather than one spent
-	// per source.
+	// together with each size-limited body read, and any retry attempt and
+	// backoff sleep a gatherer makes between them, as one shared budget rather
+	// than one spent per source.
 	//
 	// It exists for the same reason MetadataFetchDeadline and
 	// ArtifactDownloadDeadline do: the read-inactivity watchdog bounds the gap
@@ -407,18 +407,25 @@ const (
 	// the phase's and not a request's.
 	//
 	// Throughput is not what sizes this one, and that is the difference from
-	// its three siblings: each of them covers a single transfer, while this
-	// covers up to MaxSignaturesPerCollection independent requests. The bytes
+	// its three siblings: each of those is sized for one transfer's throughput,
+	// the metadata one's shared page-loop budget included, since a paging
+	// resolve is still one server answering one question. This budget instead
+	// covers up to MaxSignaturesPerCollection independent requests, each to a
+	// location a requirements file or a server's metadata chose. The bytes
 	// are the easy term - 64 blobs of SignatureMaxSize (1 MiB) is 64 MiB worst
 	// case, needing 64 MiB / 60 s = 1,118,481 B/s (1.07 MiB/s, about
 	// 8.9 Mbit/s), a slower link than StateObjectDeadline (4.27 MiB/s) or
 	// ArtifactDownloadDeadline (4.55 MiB/s) already demands, and a realistic
 	// collection carries one or two blobs of a few KiB, needing 136 B/s. The
-	// binding term is per-source latency instead: one source that black-holes
-	// costs FetchDialContextTimeout x FetchRetryMaxAttempts plus backoff, and
-	// one that accepts a connection and never answers costs the operator's own
-	// --timeout (ResponseHeaderTimeout) x the same attempts - which at a raised
-	// --timeout exceeds this whole budget on a single source.
+	// binding term is per-source latency instead, and what one source costs
+	// depends on which disjunct below its gatherer satisfies. Under the
+	// single-attempt one - the disjunct Fetcher.FetchRequirementSource, the only
+	// per-source fetch that exists today, satisfies by retrying nothing - a
+	// source that black-holes costs FetchDialContextTimeout and one that accepts
+	// a connection and never answers costs the operator's own --timeout
+	// (ResponseHeaderTimeout). A gatherer that retries multiplies whichever of
+	// the two it hit by its attempt count plus backoff. Already at one attempt,
+	// a raised --timeout lets a single source consume this whole budget.
 	//
 	// That is a constraint on the producer, not an argument for a larger value:
 	// a phase budget alone lets the first source in a list starve every source
@@ -565,6 +572,15 @@ const (
 	FetchTLSHandshakeTimeout = 3 * time.Second
 	// FetchExpectContinueTimeout is the expect-continue timeout.
 	FetchExpectContinueTimeout = 1 * time.Second
+	// FetchMaxRedirects bounds how many hops one request may be redirected
+	// through before the client refuses to follow another.
+	//
+	// The number is net/http's own default, and matching it is the point: a
+	// client this program builds is redirected exactly as far as one carrying
+	// no CheckRedirect of its own, so imposing the ceiling by hand changes
+	// nothing about how far a hostile server can bounce a request. See
+	// fetch.checkRedirect for why it has to be imposed by hand there at all.
+	FetchMaxRedirects = 10
 
 	// FetchRetryMaxAttempts bounds how many times a Galaxy API GET or an
 	// artifact download is attempted before its last failure is returned as

@@ -1250,12 +1250,20 @@ policy, not the artifact or the server that served it. Every other
 signature-related failure classifies by what actually failed rather than by the
 phase it was found in: a keyring that cannot be read, a keyring in a container
 format this tool cannot open, `signatures:` declared with no keyring
-configured, and an unaccepted required-count or ignored-status-code value all
-exit `2`; a signature source that could not be fetched, or a signature phase
-that overran its deadline, exits `4`; an artifact carrying no `MANIFEST.json`
-exits `5` with the other artifact-shape failures; and a manifest chain that
-does not match its own digests exits `7`, since what failed there is bytes
-against a digest.
+configured, an unaccepted required-count or ignored-status-code value, and a
+signature source this tool would never fetch all exit `2`. That last class is
+about the source's own spelling rather than about reaching it: a value naming
+nothing fetchable (no scheme, a scheme outside `file`, `http` and `https`, an
+`http`/`https` URL naming no host such as `https:///sig.asc`, or a `file` URL
+naming another host or a relative path), or one embedding a credential in its
+userinfo (`https://user:pass@hub/sig.asc`), is refused before any request is
+composed, and the remedy is editing the entry in `requirements.yml`. A source
+this tool would have fetched and could not obtain - a network failure, an
+unreadable `file://` path, an offline-mode refusal - or a signature phase that
+overran its deadline, exits `4` instead; an artifact carrying no
+`MANIFEST.json` exits `5` with the other artifact-shape failures; and a
+manifest chain that does not match its own digests exits `7`, since what failed
+there is bytes against a digest.
 
 ## Metrics
 

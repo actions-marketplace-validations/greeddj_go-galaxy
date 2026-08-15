@@ -45,7 +45,12 @@ type Blob struct {
 	// Origin names where this blob came from - a URL, a file path, or a
 	// server's own signature entry. Nothing here parses or validates it; it is
 	// carried so a Failure can say which source produced it, and it is
-	// reported back verbatim.
+	// reported back verbatim. Fetcher.FetchRequirementSource fills it with the
+	// source it was handed under the cuts helpers makes - the query string
+	// (helpers.WithoutQuery), the userinfo (helpers.WithoutUserinfo) and the
+	// fragment (helpers.WithoutFragment) - so neither a presigned source's
+	// capability nor an embedded credential rides into a message this value is
+	// rendered into, and a file source names the path that was opened.
 	Origin string
 	// Data is the raw signature, armored or binary. Which of the two it
 	// carries is decided from these bytes, never from Origin.

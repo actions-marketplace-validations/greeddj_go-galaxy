@@ -228,14 +228,33 @@ func FromError(err error) int {
 
 // isCanceled reports whether err carries a caller's own cancellation.
 //
-// Classifying it ahead of every other class is correct only because no
-// sentinel this program raises to describe why work ended leaves a context
-// sentinel reachable through errors.Is - see helpers.ErrReadStalled's and
-// helpers.ErrArtifactDownloadDeadline's doc comments. A future sentinel that
-// wraps a context.Canceled/context.DeadlineExceeded cause with %w would
-// silently steal this class instead of being caught by it, since this class
-// is checked first and cannot distinguish "the sentinel's cause happens to be
-// a context error" from "the caller genuinely canceled".
+// Classifying it ahead of every other class is correct only under a rule every
+// sentinel this program raises to describe why work ended is bound by: such a
+// sentinel may leave context.Canceled reachable through errors.Is ONLY when
+// that value is the caller's own cancellation passed through unchanged. This
+// class is checked first and cannot tell "the sentinel's cause happens to be a
+// cancellation" from "the caller genuinely canceled", so a sentinel that broke
+// the rule would silently steal it.
+//
+// The rule is over context.Canceled and nothing else, because that is the only
+// value this predicate matches. context.DeadlineExceeded is deliberately not
+// its business: isTransportError matches that one itself, so a remote peer
+// driving a timeout into an error tree is the classification working rather
+// than the rule being broken - which is exactly what
+// helpers.ErrSignatureSourceUnavailable wrapping a black-holed host's dial
+// timeout is, since net's own timeout error answers errors.Is for that value.
+//
+// The deadline sentinels are the never half, and each states the rule on
+// itself - see helpers.ErrReadStalled's and helpers.ErrArtifactDownloadDeadline's
+// doc comments - binding whatever raises one to render the context cause with
+// %v, so a hostile or degraded peer's stall cannot arrive here as a
+// cancellation. That is a constraint on a producer rather than a survey of
+// them: it binds one written tomorrow exactly as it binds the ones written
+// already. helpers.ErrSignatureSourceUnavailable is the ONLY-when half:
+// signature.transportCause unwraps the *url.Error http.Client produced and
+// hands back its cause for the caller to wrap with %w, so a real Ctrl-C during
+// a signature fetch reaches this class and reports as an interrupt, which is
+// the correct answer for a signal the operator sent.
 func isCanceled(err error) bool {
 	return errors.Is(err, context.Canceled)
 }
@@ -508,10 +527,23 @@ func isNetworkError(err error) bool {
 // whole signature phase overran helpers.SignatureFetchDeadline. Both classify
 // exactly like their siblings in isTransportError - ExitNetwork unaggregated,
 // ExitInstall once joined behind helpers.ErrInstallationFailed by a
-// per-collection worker - and neither ever classifies ExitInterrupt: the
-// deadline sentinel's own doc comment binds its producer to render the context
-// cause with %v rather than wrap it with %w, so no context sentinel stays
-// reachable through errors.Is.
+// per-collection worker.
+//
+// The two part company on the interrupt class above, and the rule deciding
+// which way each one goes lives on isCanceled.
+//
+// helpers.ErrSignatureFetchDeadline is a budget this program imposed, so
+// whatever comes to raise it must render the context cause with %v and it must
+// never classify ExitInterrupt - a constraint on that future producer rather
+// than an observation about present code, since nothing raises this sentinel
+// yet and the classification below is written to bind the producer instead of
+// describing one.
+//
+// helpers.ErrSignatureSourceUnavailable carries whatever failed the transfer,
+// and signature.transportCause deliberately keeps a genuine context.Canceled
+// reachable, so an operator's Ctrl-C during a signature fetch classifies as the
+// interrupt it was rather than as a network failure - the shape that rule's
+// exception exists for.
 //
 // It is a sibling of isTransportError rather than two more lines inside it
 // purely to stay under the cyclomatic-complexity budget, the same reason
@@ -627,14 +659,20 @@ func isUsageError(err error) bool {
 }
 
 // isSignatureConfigError reports whether err says this run's signature
-// configuration cannot be used as given: a source naming a scheme this tool
-// does not fetch, a keyring it cannot read or whose container format it does
-// not open, a requirements file declaring signatures with no keyring
-// configured, or a required-count or ignored-status-code value it does not
-// accept. The predicate every member shares is the one every other usage
-// sentinel shares: an operator has to change something - a flag, an
-// environment value, ansible.cfg, or the requirements file - and no retry
-// repairs it.
+// configuration cannot be used as given: a source that does not name something
+// this tool fetches, a source URL embedding a credential in its userinfo, a
+// keyring it cannot read or whose container format it does not open, a
+// requirements file declaring signatures with no keyring configured, or a
+// required-count or ignored-status-code value it does not accept. The predicate
+// every member shares is the one every other usage sentinel shares: an operator
+// has to change something - a flag, an environment value, ansible.cfg, or the
+// requirements file - and no retry repairs it.
+//
+// helpers.ErrSignatureSourceUserinfo belongs here on that predicate rather than
+// by association with the fetch that raised it: the value is refused before a
+// request is composed, and the remedy is deleting the credential from the
+// requirements file. It is deliberately not isSignatureTransportError's, since
+// nothing was fetched and no endpoint answered.
 //
 // None of them is a signature verdict, which is what keeps them out of
 // isSignatureError and its exit class: a run that hits one of these never
@@ -642,6 +680,7 @@ func isUsageError(err error) bool {
 // tell a pipeline the artifact was rejected when the configuration was.
 func isSignatureConfigError(err error) bool {
 	return errors.Is(err, helpers.ErrUnsupportedSignatureSource) ||
+		errors.Is(err, helpers.ErrSignatureSourceUserinfo) ||
 		errors.Is(err, helpers.ErrKeyringUnreadable) ||
 		errors.Is(err, helpers.ErrKeyringIsKeybox) ||
 		errors.Is(err, helpers.ErrKeyringRequired) ||

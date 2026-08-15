@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -153,6 +154,202 @@ func TestNewOffline_AttachesNothing_ReachesNoTransport(t *testing.T) {
 	}
 	if got := req.Header.Get("Authorization"); got != "" {
 		t.Fatalf("Authorization header = %q, want empty: nothing must be attached before the offline rejection", got)
+	}
+}
+
+// TestNewUnauthenticatedAttachesNoAuthorization pins the property the
+// constructor exists for: a client built with no server configuration at all
+// attaches no credential, whatever origin the request happens to name.
+//
+// The positive control on the same fixture is what makes that mean anything.
+// The second half drives fetch.New against the very same server, configured
+// with that server's own origin and a token, and requires the header to arrive
+// - so "no Authorization was seen" is separated from "no request was seen",
+// which is otherwise the identical observation.
+func TestNewUnauthenticatedAttachesNoAuthorization(t *testing.T) {
+	t.Parallel()
+
+	// Buffered, and read after each round trip rather than shared as a slice:
+	// the handler runs on the server's own goroutine, so a channel handoff is
+	// what makes the read ordered with respect to it under -race.
+	headers := make(chan string, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headers <- r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	parsed, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q) error = %v, want nil", srv.URL, err)
+	}
+
+	resp, err := fetch.NewUnauthenticated(waitBound, false).Do(mustGetRequest(t, srv.URL))
+	if err != nil {
+		t.Fatalf("Do error = %v, want nil", err)
+	}
+	_ = resp.Body.Close()
+	if got := <-headers; got != "" {
+		t.Fatalf("unauthenticated client sent Authorization = %q, want empty", got)
+	}
+
+	control := fetch.New(waitBound, []fetch.ServerAuth{{Origin: helpers.Origin(parsed), Token: "t"}})
+	controlResp, err := control.Do(mustGetRequest(t, srv.URL))
+	if err != nil {
+		t.Fatalf("positive control: Do error = %v, want nil", err)
+	}
+	_ = controlResp.Body.Close()
+	if got, want := <-headers, "Token t"; got != want {
+		t.Fatalf("positive control: Authorization = %q, want %q; the fixture cannot show a header at all", got, want)
+	}
+}
+
+// TestNewUnauthenticatedOfflineRefuses covers the offline parameter this
+// constructor takes and NewOffline's own does not: it must select the same
+// refuse-everything transport rather than quietly building a live client.
+func TestNewUnauthenticatedOfflineRefuses(t *testing.T) {
+	t.Parallel()
+
+	resp, err := fetch.NewUnauthenticated(waitBound, true).Do(mustGetRequest(t, "https://galaxy.example.com/sig.asc"))
+	if resp != nil {
+		_ = resp.Body.Close()
+		t.Fatal("Do returned a non-nil response, want nil: an offline client must never reach a transport")
+	}
+	if !errors.Is(err, helpers.ErrOfflineMode) {
+		t.Fatalf("Do error = %v, want errors.Is(err, helpers.ErrOfflineMode)", err)
+	}
+}
+
+// redirectQuery is the capability a presigned URL carries. It is what
+// net/http's own refererForURL would hand to a redirect target: that function
+// strips a URL's userinfo and suppresses the header on an https->http
+// downgrade, and keeps the query string through both.
+const redirectQuery = "?X-Amz-Signature=deadbeef&X-Amz-Expires=900"
+
+// redirectBody is what the redirect target answers with, so a test can tell
+// "the hop arrived carrying no Referer" from "the hop never happened".
+const redirectBody = "redirect-target-body"
+
+// TestClientsSendNoRefererAcrossARedirect pins the third property
+// NewUnauthenticated's contract rests on, and pins it where it actually lives:
+// on newClient, so every client this package builds has it. The two
+// constructors are run against one fixture pair for exactly that reason - a
+// property proven on one of them says nothing about the other.
+//
+// The positive control is in the same assertion block rather than a separate
+// test: the redirect must be followed and the target's own body must arrive,
+// since "the target saw no Referer" is otherwise indistinguishable from "the
+// target was never reached at all".
+func TestClientsSendNoRefererAcrossARedirect(t *testing.T) {
+	t.Parallel()
+
+	// Buffered and read after each round trip: the handler runs on the
+	// server's own goroutine, so the channel handoff is what orders the read
+	// with respect to it under -race.
+	referers := make(chan string, 2)
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		referers <- r.Header.Get("Referer")
+		_, _ = w.Write([]byte(redirectBody))
+	}))
+	defer target.Close()
+
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/dest", http.StatusFound)
+	}))
+	defer source.Close()
+
+	sourceURL, err := url.Parse(source.URL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q) error = %v, want nil", source.URL, err)
+	}
+
+	clients := []struct {
+		client *http.Client
+		name   string
+	}{
+		// The shared client is built with the redirecting origin configured as
+		// a Galaxy server, which is the shape a presigned artifact download
+		// actually takes: a configured host answering with a hop elsewhere.
+		{name: "New", client: fetch.New(waitBound, []fetch.ServerAuth{{Origin: helpers.Origin(sourceURL), Token: "t"}})},
+		{name: "NewUnauthenticated", client: fetch.NewUnauthenticated(waitBound, false)},
+	}
+
+	for _, tc := range clients {
+		// Deleting req.Header.Del("Referer") from checkRedirect, applied
+		// through go test -overlay so no production file is edited, fails on
+		// the last assertion - at the New row, since t.Fatalf stops the test
+		// before the second client runs. The header goes to the log, since it
+		// carries the fixture's own ephemeral port and no two runs would agree:
+		//
+		//	client_test.go:299: New: the redirect target received a Referer
+		resp, err := tc.client.Do(mustGetRequest(t, source.URL+"/sig.asc"+redirectQuery))
+		if err != nil {
+			t.Fatalf("%s: Do error = %v, want nil", tc.name, err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			t.Fatalf("%s: ReadAll error = %v, want nil", tc.name, err)
+		}
+		if string(body) != redirectBody {
+			t.Fatalf("%s: body = %q, want the redirect target's own body; the hop did not arrive", tc.name, body)
+		}
+		if got := <-referers; got != "" {
+			t.Logf("Referer = %q", got)
+			t.Fatalf("%s: the redirect target received a Referer", tc.name)
+		}
+	}
+}
+
+// TestClientsStillRefuseAnEndlessRedirectChain is the other half of assigning
+// CheckRedirect at all: the field REPLACES http.Client's own default check, so
+// a hook that only stripped a header would turn this fixture from a bounded
+// failure into an unbounded loop.
+//
+// The hop count is asserted as well as the error, because the error alone would
+// also be produced by a hook that refused the first redirect outright - which
+// would break every legitimate presigned download in the process.
+func TestClientsStillRefuseAnEndlessRedirectChain(t *testing.T) {
+	t.Parallel()
+
+	var hops atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hops.Add(1)
+		http.Redirect(w, r, "/again", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	// Two mutations, applied through go test -overlay so no production file is
+	// edited, one per half of what this hook owes the fixture.
+	//
+	// Returning nil unconditionally - the shape a hook that only stripped the
+	// Referer would have, and exactly what assigning CheckRedirect costs, since
+	// the field REPLACES http.Client's own default check - does not fail this
+	// test, it hangs it, following the fixture's redirects forever. The
+	// artifact is a timeout under an explicit -timeout rather than an
+	// assertion, recorded as it came:
+	//
+	//	panic: test timed out after 20s
+	//		running tests:
+	//			TestClientsStillRefuseAnEndlessRedirectChain (20s)
+	//
+	// Refusing at the first hop instead - len(via) >= 1 - passes both
+	// assertions above it and fails the hop count, which is what makes that
+	// one pinned rather than documentary:
+	//
+	//	client_test.go:352: server served 1 requests, want 10: the ceiling must bite where net/http's own default did
+	resp, err := fetch.New(waitBound, nil).Do(mustGetRequest(t, srv.URL+"/sig.asc"))
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("Do error = nil, want a refusal: a self-redirecting server must not be followed forever")
+	}
+	if !strings.Contains(err.Error(), "stopped after 10 redirects") {
+		t.Fatalf("Do error = %v, want net/http's own redirect-ceiling wording", err)
+	}
+	if got := hops.Load(); got != 10 {
+		t.Fatalf("server served %d requests, want 10: the ceiling must bite where net/http's own default did", got)
 	}
 }
 

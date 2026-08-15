@@ -1336,6 +1336,20 @@ var signatureExitCases = []exitCase{
 		wantCode: ExitInstall,
 	},
 	{
+		// The message deliberately names a credential-free rendering of the
+		// offending value, which is what the producer builds; the row is here
+		// for the class, and the hygiene of that rendering is pinned in the
+		// producer's own package.
+		name:     "signature source userinfo, bare",
+		err:      fmt.Errorf("%w: %q", helpers.ErrSignatureSourceUserinfo, "https://hub.example/sig.asc"),
+		wantCode: ExitUsage,
+	},
+	{
+		name:     "signature source userinfo, aggregated",
+		err:      aggregatedBehindInstallFailure(helpers.ErrSignatureSourceUserinfo),
+		wantCode: ExitInstall,
+	},
+	{
 		name:     "keyring unreadable, bare",
 		err:      fmt.Errorf("%w: ctx", helpers.ErrKeyringUnreadable),
 		wantCode: ExitUsage,
@@ -1439,7 +1453,7 @@ var signatureExitCases = []exitCase{
 // exitClasses below its isInstallError entry. Exactly one row fails - the
 // aggregated verdict, which is the whole reason that entry sits where it does:
 //
-//	exitcode_test.go:1449: FromError(signature verification failed, aggregated) = 5, want 10
+//	exitcode_test.go:1463: FromError(signature verification failed, aggregated) = 5, want 10
 func TestSignatureExitClassification(t *testing.T) {
 	t.Parallel()
 	for _, tt := range signatureExitCases {

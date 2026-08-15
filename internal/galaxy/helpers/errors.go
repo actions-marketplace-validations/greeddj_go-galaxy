@@ -325,15 +325,16 @@ var (
 	// context.Canceled instead, never as ErrReadStalled.
 	//
 	// It deliberately does NOT wrap its cause with %w, and this is a rule, not
-	// a note about one call site: a sentinel this program raises to describe
-	// why work ended must never leave a context sentinel reachable through
-	// errors.Is. The watchdog aborts a stall by canceling its own derived
-	// context to unblock the stuck read, so the cause is context.Canceled; left
-	// wrapped with %w it would steal this failure's exit-code classification,
-	// because exitcode.FromError checks context.Canceled ahead of every other
-	// class and would report a hostile or degraded server as a caught Ctrl-C.
-	// The cause is rendered with %v instead, so it stays diagnosable without
-	// being matchable.
+	// a note about one call site: this sentinel names a condition a remote peer
+	// drove rather than a caller's own cancellation, so it must not leave
+	// context.Canceled reachable through errors.Is - see cmd/go-galaxy/exitcode's
+	// isCanceled for the argument and for the exception it states. The watchdog
+	// aborts a stall by canceling its own derived context to unblock the stuck
+	// read, so the cause is context.Canceled; left wrapped with %w it would steal
+	// this failure's exit-code classification, because exitcode.FromError checks
+	// context.Canceled ahead of every other class and would report a hostile or
+	// degraded server as a caught Ctrl-C. The cause is rendered with %v instead,
+	// so it stays diagnosable without being matchable.
 	ErrReadStalled = errors.New("network read stalled")
 	// ErrArtifactDownloadDeadline indicates one artifact's acquisition exceeded
 	// ArtifactDownloadDeadline: the whole-transfer ceiling the read-inactivity
@@ -344,10 +345,13 @@ var (
 	//
 	// It deliberately does NOT wrap its cause with %w. The cause is
 	// context.DeadlineExceeded, or - when the watchdog's own derived-context
-	// cancel raced the deadline - context.Canceled, and either one left in the
-	// error tree would steal this failure's exit-code classification:
-	// exitcode.FromError checks context.Canceled first and would report a
-	// hostile server as ExitInterrupt, i.e. as a Ctrl-C. The cause is rendered
+	// cancel raced the deadline - context.Canceled, and it is the second of
+	// those a %w would let steal this failure's exit-code classification:
+	// exitcode.FromError checks context.Canceled ahead of every other class and
+	// would report a hostile server as ExitInterrupt, i.e. as a Ctrl-C. The
+	// first would cost nothing, since isTransportError matches it to the class
+	// this sentinel already carries - but one rendering rule for one cause
+	// beats a rule that has to ask which cause it got. The cause is rendered
 	// into the message with %v instead, so it stays diagnosable without being
 	// matchable.
 	//
@@ -359,14 +363,14 @@ var (
 	// byte-drip response, which the read-inactivity watchdog cannot enforce
 	// since it always makes real progress within every idle window.
 	//
-	// It deliberately does NOT wrap its cause with %w - the rule
-	// ErrReadStalled's own doc comment states and this sentinel follows in
-	// its own words: a sentinel raised to describe why work ended must never
-	// leave a context sentinel reachable through errors.Is, because
-	// exitcode.FromError checks context.Canceled ahead of every other class
-	// and would report a hostile or degraded Galaxy server as a caught
-	// Ctrl-C. The cause is rendered into the message with %v instead, so it
-	// stays diagnosable without being matchable.
+	// It deliberately does NOT wrap its cause with %w, the rule every
+	// deadline sentinel here follows: this is a budget this program imposed
+	// rather than a caller's own cancellation, so leaving context.Canceled
+	// reachable through errors.Is would have exitcode.FromError report a
+	// hostile or degraded Galaxy server as a caught Ctrl-C. The cause is
+	// rendered into the message with %v instead, so it stays diagnosable
+	// without being matchable. The rule is over context.Canceled alone;
+	// cmd/go-galaxy/exitcode's own isCanceled holds the argument.
 	//
 	// It is never retried: the budget is spent, so every remaining attempt
 	// would fail instantly against the same dead context.
@@ -388,13 +392,14 @@ var (
 	// a separate sentinel rather than reusing ErrMetadataFetchDeadline for
 	// both surfaces.
 	//
-	// It deliberately does NOT wrap its cause with %w, for the identical rule
-	// ErrReadStalled's own doc comment states: a sentinel raised to describe
-	// why work ended must never leave a context sentinel reachable through
-	// errors.Is, since exitcode.FromError checks context.Canceled ahead of
-	// every other class and would report a hostile or degraded object store
-	// as a caught Ctrl-C. The cause is rendered into the message with %v
-	// instead, so it stays diagnosable without being matchable.
+	// It deliberately does NOT wrap its cause with %w, the same rule every
+	// deadline sentinel here follows: this is a budget this program imposed
+	// rather than a caller's own cancellation, so leaving context.Canceled
+	// reachable through errors.Is would have exitcode.FromError report a
+	// hostile or degraded object store as a caught Ctrl-C. The cause is
+	// rendered into the message with %v instead, so it stays diagnosable
+	// without being matchable. The rule is over context.Canceled alone;
+	// cmd/go-galaxy/exitcode's own isCanceled holds the argument.
 	//
 	// It is never retried: the budget is spent, so every remaining attempt
 	// would fail instantly against the same dead context.
@@ -634,13 +639,15 @@ var (
 	// byte-drip response, which the read-inactivity watchdog cannot enforce
 	// since such a response makes genuine progress inside every idle window.
 	//
-	// A producer must NOT wrap its cause with %w - the rule ErrReadStalled's
-	// own doc comment states and every deadline sentinel here follows: a
-	// sentinel raised to describe why work ended must never leave a context
-	// sentinel reachable through errors.Is, because exitcode.FromError checks
-	// context.Canceled ahead of every other class and would report a hostile or
+	// A producer must NOT wrap its cause with %w, the rule every deadline
+	// sentinel here follows: this is a budget this program imposed rather than
+	// a caller's own cancellation, so leaving context.Canceled reachable
+	// through errors.Is would have exitcode.FromError report a hostile or
 	// degraded signature host as a caught Ctrl-C. Render the cause with %v
-	// instead, so it stays diagnosable without being matchable.
+	// instead, so it stays diagnosable without being matchable. The rule is
+	// over context.Canceled alone; cmd/go-galaxy/exitcode's own isCanceled
+	// holds the argument, including why ErrSignatureSourceUnavailable above -
+	// which passes a caller's cancellation through unchanged - sits outside it.
 	//
 	// It is never retried: the budget is spent, so every remaining attempt
 	// would fail instantly against the same dead context.
@@ -650,16 +657,42 @@ var (
 	// too slow to finish inside the ceiling, not one that refused or vanished,
 	// and only one of the two is worth reporting as an endpoint that answered.
 	ErrSignatureFetchDeadline = errors.New("collection signature fetch deadline exceeded")
-	// ErrUnsupportedSignatureSource indicates a signature source names a scheme
-	// outside file, http and https, or names no scheme at all. Like
-	// ErrUnsupportedDownloadURLScheme, the value is judged against an
-	// allow-list rather than a blocklist: a blocklist would have to name every
-	// scheme worth refusing and would admit whatever it forgot.
+	// ErrUnsupportedSignatureSource indicates a signature source does not name
+	// something this tool fetches, and it is the whole class of ways a value can
+	// fail to: one url.Parse itself refuses, one with no scheme at all, one
+	// with a scheme outside file, http and https, an opaque URL -
+	// "http:host/sig.asc", which names no authority and no absolute path and
+	// which no request can be composed from - an http or https URL naming no
+	// authority at all ("https:///sig.asc", "https://"), which no request can be
+	// composed from either, a file URL whose authority names some other host,
+	// and a file URL carrying a relative path rather than an absolute one. Like
+	// ErrUnsupportedDownloadURLScheme, the value is judged against an allow-list
+	// rather than a blocklist: a blocklist would have to name every scheme worth
+	// refusing and would admit whatever it forgot.
 	//
 	// It is deliberately NOT ErrSignatureSourceUnavailable: no fetch was
 	// attempted and none failed - the value never named something this tool
 	// fetches - so the remedy is editing the source, never retrying it.
-	ErrUnsupportedSignatureSource = errors.New("signature source scheme is not file, http, or https")
+	ErrUnsupportedSignatureSource = errors.New("signature source is not a fetchable file, http, or https URL")
+	// ErrSignatureSourceUserinfo indicates a signature source URL embeds
+	// userinfo, e.g. "https://user:pass@hub/sig.asc".
+	//
+	// The value decides what authenticates the request as well as where it
+	// goes: net/http sets Basic auth from a URL's userinfo before any transport
+	// runs. A signature source is repository content, so without this refusal a
+	// credential a repository chose would ride on a request an operator's run
+	// makes - and url.URL.String() renders that password back out in plain text
+	// at every sink the value reaches, which is why the refusal must also keep
+	// it out of its own message.
+	//
+	// It is deliberately NOT ErrGalaxyServerURLUserinfo, which is scoped to a
+	// value that SELECTS a server - a configured server URL, or a collection's
+	// source: - and is raised while building the config rather than while
+	// fetching. And it is deliberately NOT ErrUnsupportedSignatureSource: that
+	// one says the value names nothing this tool fetches, while this one names
+	// something perfectly fetchable and carries a credential while doing it, so
+	// the remedy is deleting the credential rather than rewriting the source.
+	ErrSignatureSourceUserinfo = errors.New("signature source url must not contain userinfo")
 	// ErrKeyringUnreadable indicates the configured keyring could not be read
 	// as one: it is absent, it cannot be opened, or its bytes do not parse as
 	// the OpenPGP key material this tool reads.

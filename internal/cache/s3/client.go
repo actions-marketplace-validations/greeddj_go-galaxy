@@ -79,17 +79,20 @@ func newClient(cfg config.S3CacheConfig, httpClient *http.Client) (*Client, erro
 	// than a mutation of httpClient in place. httpClient is the same
 	// *http.Client internal/galaxy/fetch builds and internal/cache.New
 	// threads through as runtime.HTTP for Galaxy metadata fetches and
-	// artifact downloads too - and that client's default (nil) CheckRedirect
-	// is load-bearing there: internal/galaxy/fetch/client_test.go's
+	// artifact downloads too - and that client carries a CheckRedirect of its
+	// own, internal/galaxy/fetch's hook, which FOLLOWS a redirect while
+	// deleting the Referer net/http composed for it and re-imposing the hop
+	// ceiling. That it follows one at all is load-bearing there:
+	// internal/galaxy/fetch/client_test.go's
 	// TestNew_RedirectFromInsecureOriginToSecureOriginUsesSecureTransport and
 	// auth_test.go's TestAuthTransport_RoundTrip_CrossOriginRedirectDropsToken
 	// both drive a real redirect through that exact client and assert on the
-	// outcome. Mutating httpClient.CheckRedirect here would silently
-	// disable redirects for those callers as a side effect of constructing
-	// an S3 client, which is not this function's business to decide. The
-	// copy is a shallow struct copy, so Transport (and Jar, if any) stay
-	// shared with httpClient - the connection pool is unaffected - only the
-	// two http.Client values' CheckRedirect fields diverge.
+	// outcome. Overwriting httpClient.CheckRedirect here would replace that
+	// hook and silently disable redirects for those callers as a side effect
+	// of constructing an S3 client, which is not this function's business to
+	// decide. The copy is a shallow struct copy, so Transport (and Jar, if
+	// any) stay shared with httpClient - the connection pool is unaffected -
+	// only the two http.Client values' CheckRedirect fields diverge.
 	redirectless := *httpClient
 	redirectless.CheckRedirect = refuseRedirect
 	return &Client{cfg: cfg, client: &redirectless, endpointHost: parsed.Host, endpointScheme: parsed.Scheme}, nil
