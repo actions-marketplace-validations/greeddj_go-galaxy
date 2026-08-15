@@ -13,10 +13,11 @@ import (
 	"github.com/klauspost/pgzip"
 )
 
-// errScanLimitReached is scanLimitReader's own verdict. It is a separate value
-// from the sentinel a caller sees purely so the reader, which counts bytes and
-// knows nothing about manifests, does not have to name one; walkError is the
-// single place it becomes helpers.ErrManifestNotFound.
+// errScanLimitReached is the verdict readFromTarGzStream's own limitReader
+// carries. It is a separate value from the sentinel a caller sees purely so the
+// reader, which counts bytes and knows nothing about manifests, does not have
+// to name one; walkError is the single place it becomes
+// helpers.ErrManifestNotFound.
 var errScanLimitReached = errors.New("manifest scan limit reached")
 
 // ReadFromTarGz returns the bytes of the MANIFEST.json a collection artifact
@@ -36,9 +37,17 @@ var errScanLimitReached = errors.New("manifest scan limit reached")
 // own internal/testing/fakegalaxy does the same, so the walk below exists for a
 // hostile or exotic builder rather than for the normal case.
 //
-// Three refusals bound it, and each is a verdict rather than an abandoned
+// Four refusals bound it, and each is a verdict rather than an abandoned
 // search:
 //
+//   - An entry naming itself in more than helpers.ArchiveMaxEntryNameLen bytes
+//     is refused before anything has rendered that name. This walk retains no
+//     name at all, so the cap is not here for the reason the chain check
+//     carries it; it is here because the refusal below quotes one, and
+//     archive/tar accepts a GNU long name of 1,048,575 bytes - a megabyte of
+//     archive-chosen text put on an operator's terminal to report that the
+//     entry carrying it declared too large a size. internal/safeout bounds
+//     which characters reach that terminal, never how many.
 //   - An entry whose header declares more than helpers.ArchiveMaxEntrySize is
 //     refused where its header is read, before a byte of its body is pulled
 //     through the decompressor, exactly as archive.chargeEntrySize refuses one.
@@ -96,7 +105,7 @@ func readFromTarGzStream(r io.Reader) ([]byte, error) {
 		_ = uncompressed.Close()
 	}()
 
-	limited := &scanLimitReader{r: uncompressed, max: helpers.ManifestScanMaxBytes}
+	limited := &limitReader{r: uncompressed, over: errScanLimitReached, max: helpers.ManifestScanMaxBytes}
 	tarReader := tar.NewReader(limited)
 	for {
 		header, err := tarReader.Next()
@@ -106,10 +115,15 @@ func readFromTarGzStream(r io.Reader) ([]byte, error) {
 		if err != nil {
 			return nil, walkError(err)
 		}
-		// Charged before the name is even looked at, so an over-declared entry
-		// is refused whether or not it is the one being searched for.
+		// Measured ahead of the refusal below, the one message this walk
+		// renders an archive-chosen name in.
+		if err := checkEntryNameLength(header.Name); err != nil {
+			return nil, err
+		}
+		// Charged whether or not this is the entry being searched for, since
+		// the walk has to read past every other one to reach it.
 		if header.Size > helpers.ArchiveMaxEntrySize {
-			return nil, fmt.Errorf("%w %s: %d bytes", helpers.ErrArchiveEntryIsTooLarge, header.Name, header.Size)
+			return nil, fmt.Errorf("%w %q: %d bytes", helpers.ErrArchiveEntryIsTooLarge, header.Name, header.Size)
 		}
 		if !topLevelManifest(header) {
 			continue
@@ -175,25 +189,33 @@ func walkError(err error) error {
 	return fmt.Errorf("failed to read the artifact's tar stream: %w", err)
 }
 
-// scanLimitReader counts the bytes read out of an artifact's decompressor and
-// fails once they exceed max, so the walk is bounded by what it actually costs
-// to read rather than by what the archive's headers declare or by how large its
-// compressed body is.
+// limitReader counts the bytes read out of an artifact's decompressor and fails
+// with over once they exceed max, so a pass over an archive is bounded by what
+// it actually costs to read rather than by what the archive's headers declare
+// or by how large its compressed body is.
+//
+// The verdict is a field rather than a constant of this file because a pass
+// over an archive bounds its own thing and has to say so: a scan for one
+// document reports that the document was not presented inside the window, while
+// a pass that reads an artifact to its end reports the same
+// decompressed-stream cap the extractor reports. One reader, a verdict per
+// caller, and no caller has to know another's.
 //
 // It wraps the decompressed side rather than the compressed source for the same
 // reason archive.decompressedLimitReader does: that is where the work being
 // stopped happens, and pgzip reads ahead on its own goroutines regardless.
-type scanLimitReader struct {
-	r   io.Reader
-	err error
-	max int64
-	n   int64
+type limitReader struct {
+	r    io.Reader
+	err  error
+	over error
+	max  int64
+	n    int64
 }
 
-// Read passes bytes through and fails with errScanLimitReached once the
-// cumulative count exceeds max, replacing whatever the decompressor itself
-// returned (its own io.EOF included), since a stream past the ceiling must
-// never be reported as a clean read.
+// Read passes bytes through and fails with over once the cumulative count
+// exceeds max, replacing whatever the decompressor itself returned (its own
+// io.EOF included), since a stream past the ceiling must never be reported as a
+// clean read.
 //
 // The crossing call returns zero and drops the bytes it just read, which
 // io.Reader permits, and that is what produces the refusal rather than merely
@@ -214,7 +236,7 @@ type scanLimitReader struct {
 // Clamping p bounds the overrun to a single byte rather than to a whole read
 // buffer, which is also what makes the byte count the error reports exact. It
 // is not what produces the refusal.
-func (r *scanLimitReader) Read(p []byte) (int, error) {
+func (r *limitReader) Read(p []byte) (int, error) {
 	if r.err != nil {
 		return 0, r.err
 	}
@@ -229,7 +251,7 @@ func (r *scanLimitReader) Read(p []byte) (int, error) {
 	n, err := r.r.Read(p)
 	r.n += int64(n)
 	if r.n > r.max {
-		r.err = fmt.Errorf("%w: read %d bytes, limit is %d bytes", errScanLimitReached, r.n, r.max)
+		r.err = fmt.Errorf("%w: read %d bytes, limit is %d bytes", r.over, r.n, r.max)
 		return 0, r.err
 	}
 	return n, err

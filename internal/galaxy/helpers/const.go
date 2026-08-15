@@ -52,7 +52,7 @@ const (
 	// byte is read, and not what the tar reader is made to consume.
 	ArchiveMaxTotalSize = int64(4 << 30) // 4 GiB per archive
 	// ArchiveMaxDecompressedSize caps the RAW DECOMPRESSED BYTES one archive
-	// may make the extractor pull out of its gzip reader - every byte of the
+	// may make a reader of it pull out of its gzip reader - every byte of the
 	// stream, tar framing and inter-entry padding included, not just the entry
 	// bodies. This is the cap that actually bounds a decompression bomb; the
 	// declared-size budgets above are an earlier, cheaper refusal that a
@@ -82,6 +82,62 @@ const (
 	// sits well above any real collection (typically a few thousand to ~10-20k
 	// files).
 	ArchiveMaxEntryCount = int64(100_000)
+	// ArchiveMaxEntryNameLen caps the bytes of one tar entry's own name, and of
+	// a link entry's target name. It bounds neither disk nor decompressed
+	// bytes, which is why none of the byte caps above covers it: it bounds
+	// what a reader RETAINS. A pass that has to hold every entry's name until
+	// the stream ends - checking an artifact's manifest chain is one, since
+	// FILES.json may sit anywhere in the stream - keeps a key per entry, and
+	// nothing else here says how large one may be.
+	//
+	// Measured, because the headroom is not obvious: archive/tar accepts a GNU
+	// long name of 1,048,575 bytes and refuses one byte more, so an entry name
+	// is a megabyte before this cap exists. 400 such entries make a
+	// 419,841,024-byte tar stream that gzips to 436,798 bytes (961.2x) and
+	// leaves 400.03 MiB of retained keys behind. Extrapolated to
+	// ArchiveMaxDecompressedSize, the only ceiling such a stream ever meets,
+	// 4,092 entries fit: 4.00 GiB retained for 4.26 MiB compressed, with
+	// ArchiveMaxEntryCount never binding at all. The compressed figures are a
+	// property of the Go release's deflate at the time of measurement and drift
+	// with it; the stream length and the retained bytes do not.
+	//
+	// With this cap the composition inverts and ArchiveMaxEntryCount becomes
+	// what binds: retention is at most that many names plus their link targets,
+	// so the worst case is bounded rather than unbounded. Reading that bound off
+	// the two caps alone understates it, and the gap is worth spelling out,
+	// since a running counter over retained bytes is the alternative this
+	// arithmetic is the argument against. A link's target is retained resolved
+	// rather than as declared, and a resolution is a join of the entry's own
+	// directory with the declared target, so it runs to 2,047 bytes: a key on
+	// the cap has a last component of at least one byte and a separator before
+	// it, leaving 1,022 for its directory, joined to a target of 1,024. At
+	// ArchiveMaxEntryCount entries of 1,024-byte keys carrying such targets that
+	// is roughly 307.1 MB of string bytes, half again the 204.8 MB a key and a
+	// target each at the cap would suggest. 1024 is darwin's PATH_MAX, and no
+	// real collection path is within an order of magnitude of it.
+	//
+	// The extractor applies no such cap and needs none, though not because it
+	// retains nothing: archive.extractTarEntries memoizes every confirmed
+	// parent component for the length of an extraction. What bounds that memo
+	// is a mechanism rather than a figure, and deliberately so, since the memo
+	// grows with the depth of each path as well as with the number of them and
+	// no product of two caps describes it. Every string in it names a directory
+	// the kernel accepted and created, because a component is memoized only
+	// once os.Lstat has confirmed it a real directory or MkdirAll has made one.
+	// So the memo cannot outgrow the directory tree on disk, and an extraction
+	// able to fill it has exhausted the filesystem's inodes long before the
+	// process's memory - the transitive inode bound archive.extractTarEntries
+	// already discloses on its own entry counter, seen from the memory side.
+	//
+	// This cap is nonetheless the stricter rule wherever PATH_MAX exceeds it,
+	// and on the release image's linux base it does: measured, a path assembled
+	// from one-byte components survives to 4,094 bytes there and to 1,016 on
+	// darwin, while a 256-byte component is refused on both. So it refuses
+	// names an extraction would have accepted. Erring in that direction is
+	// right, since what this bounds is retention rather than the filesystem,
+	// but it is not the same claim as refusing only what would have failed
+	// anyway.
+	ArchiveMaxEntryNameLen = 1024
 
 	// ArtifactMaxDownloadSize caps the raw (compressed, on-the-wire) bytes
 	// read from an artifact download before it is rejected. It bounds the
@@ -417,6 +473,30 @@ const (
 	// signature covers: the signature authenticates MANIFEST.json, which names
 	// this file's digest, which names every other file's.
 	FilesManifestFileName = "FILES.json"
+	// FilesManifestMaxBytes caps the size the FILES.json entry's tar header may
+	// declare. Every other entry a chain check reads is hashed as it streams
+	// past and then dropped; this one is buffered whole and JSON-decoded, so
+	// its declared size is an allocation rather than a read.
+	//
+	// That allocation is the one job this cap has, and it is a job nothing else
+	// can do: it bounds the make([]byte, size) in
+	// manifest.recordFilesManifest, where the row cap
+	// manifest.walkListingRows applies only begins to act once decoding has
+	// started. ArchiveMaxEntrySize (512 MiB) is otherwise the only thing
+	// bounding it, three orders of magnitude above anything a listing
+	// legitimately needs.
+	//
+	// 32 MiB is a policy choice rather than headroom over a maximum, and the
+	// distinction matters because no such headroom exists: ArchiveMaxEntryCount
+	// rows at ArchiveMaxEntryNameLen-byte names render to 115.7 MB, 3.4x this
+	// cap, so a listing of maximum-length names is refused here rather than
+	// accommodated. The cap sits well above any real listing - a collection of
+	// a few thousand files spells one in a few hundred kilobytes, and even
+	// ArchiveMaxEntryCount rows at the 100-byte names such a collection
+	// actually carries render to roughly 23 MB - and deliberately below what
+	// the accepted maximum could reach. What bounds the row count is the row
+	// cap named above, never this one.
+	FilesManifestMaxBytes = int64(32 << 20) // 32 MiB
 	// ManifestScanMaxBytes caps how far into an artifact's decompressed tar
 	// stream a scan for ManifestFileName may read before giving up with
 	// ErrManifestNotFound. A real collection carries its manifest at the front

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,14 +21,14 @@ import (
 const testManifest = `{"collection_info":{"namespace":"acme","name":"widgets","version":"1.0.0"}}`
 
 // testEntry describes one tar entry for tarStream. declaredSize overrides the
-// size the entry's header announces, which is the only way to build a header
-// declaring more bytes than the archive carries; zero means "the length of
-// content". typeflag defaults to tar.TypeReg, which is not its own zero value.
+// size the entry's header announces, the only way to build a header declaring
+// more bytes than the archive carries; zero means "the length of content".
+// typeflag defaults to tar.TypeReg, and linkname is written verbatim.
 type testEntry struct {
-	name         string
-	content      []byte
-	declaredSize int64
-	typeflag     byte
+	name, linkname string
+	content        []byte
+	declaredSize   int64
+	typeflag       byte
 }
 
 // tarStream renders entries, in order, into a raw tar byte stream.
@@ -40,8 +41,8 @@ type testEntry struct {
 // builder's purpose rather than a failure - it also suppresses the padding
 // Flush would otherwise write, which keeps the stream block-aligned for the
 // entries that follow.
-func tarStream(t *testing.T, entries []testEntry) []byte {
-	t.Helper()
+func tarStream(tb testing.TB, entries []testEntry) []byte {
+	tb.Helper()
 
 	// A fixed stamp, so a fixture's bytes never depend on when it was built.
 	modTime := time.Date(2024, time.January, 1, 0, 0, 0, 0, time.UTC)
@@ -58,13 +59,13 @@ func tarStream(t *testing.T, entries []testEntry) []byte {
 		}
 
 		tw := tar.NewWriter(&buf)
-		header := &tar.Header{Typeflag: typeflag, Name: e.name, Size: size, Mode: 0o644, ModTime: modTime}
+		header := &tar.Header{Typeflag: typeflag, Name: e.name, Linkname: e.linkname, Size: size, Mode: 0o644, ModTime: modTime}
 		if err := tw.WriteHeader(header); err != nil {
-			t.Fatalf("failed to write the tar header for %s: %v", e.name, err)
+			tb.Fatalf("failed to write the tar header for %s: %v", e.name, err)
 		}
 		if len(e.content) > 0 {
 			if _, err := tw.Write(e.content); err != nil {
-				t.Fatalf("failed to write the tar content for %s: %v", e.name, err)
+				tb.Fatalf("failed to write the tar content for %s: %v", e.name, err)
 			}
 		}
 		_ = tw.Flush()
@@ -77,18 +78,18 @@ func tarStream(t *testing.T, entries []testEntry) []byte {
 
 // writeArtifact gzips entries into a file under the test's own temp directory
 // and returns its absolute path, which is the shape ReadFromTarGz takes.
-func writeArtifact(t *testing.T, entries []testEntry) string {
-	t.Helper()
+func writeArtifact(tb testing.TB, entries []testEntry) string {
+	tb.Helper()
 
 	var buf bytes.Buffer
 	gz := pgzip.NewWriter(&buf)
-	if _, err := gz.Write(tarStream(t, entries)); err != nil {
-		t.Fatalf("failed to compress the fixture: %v", err)
+	if _, err := gz.Write(tarStream(tb, entries)); err != nil {
+		tb.Fatalf("failed to compress the fixture: %v", err)
 	}
 	if err := gz.Close(); err != nil {
-		t.Fatalf("failed to close the fixture's gzip writer: %v", err)
+		tb.Fatalf("failed to close the fixture's gzip writer: %v", err)
 	}
-	return writeFile(t, "artifact.tar.gz", buf.Bytes())
+	return writeFile(tb, "artifact.tar.gz", buf.Bytes())
 }
 
 // writePaddedArtifact writes an artifact carrying padBytes of zeros ahead of a
@@ -140,12 +141,12 @@ func writePaddedArtifact(t *testing.T, padBytes int64) string {
 
 // writeFile drops data at name under the test's own temp directory and returns
 // the absolute path.
-func writeFile(t *testing.T, name string, data []byte) string {
-	t.Helper()
+func writeFile(tb testing.TB, name string, data []byte) string {
+	tb.Helper()
 
-	path := filepath.Join(t.TempDir(), name)
+	path := filepath.Join(tb.TempDir(), name)
 	if err := os.WriteFile(path, data, helpers.FileMod); err != nil {
-		t.Fatalf("failed to write the fixture %s: %v", name, err)
+		tb.Fatalf("failed to write the fixture %s: %v", name, err)
 	}
 	return path
 }
@@ -224,7 +225,7 @@ func TestReadFromTarGzRejectsNestedManifest(t *testing.T) {
 	// replaced by path.Base(header.Name), applied through go test -overlay so
 	// no production file is edited - fails here first:
 	//
-	//	read_test.go:234: ReadFromTarGz(nested entry ahead of the real one) = "{\"decoy\":true}", want the top-level manifest (err: <nil>)
+	//	read_test.go:235: ReadFromTarGz(nested entry ahead of the real one) = "{\"decoy\":true}", want the top-level manifest (err: <nil>)
 	control := writeArtifact(t, []testEntry{
 		nested,
 		{name: helpers.ManifestFileName, content: []byte(testManifest)},
@@ -279,7 +280,7 @@ func TestReadFromTarGzRejectsScanOverrun(t *testing.T) {
 	// applied through go test -overlay so no production file is edited - lets
 	// the walk reach that manifest and hand it back:
 	//
-	//	read_test.go:285: ReadFromTarGz(manifest past the scan bound) error = <nil>, want the not-found sentinel
+	//	read_test.go:286: ReadFromTarGz(manifest past the scan bound) error = <nil>, want the not-found sentinel
 	beyond := writePaddedArtifact(t, helpers.ManifestScanMaxBytes+(1<<20))
 	if _, err := ReadFromTarGz(beyond); !errors.Is(err, helpers.ErrManifestNotFound) {
 		t.Fatalf("ReadFromTarGz(manifest past the scan bound) error = %v, want the not-found sentinel", err)
@@ -341,7 +342,7 @@ func TestReadFromTarGzRejectsEmptyManifest(t *testing.T) {
 	// `if size < 0`, applied through go test -overlay so no production file
 	// is edited - fails on that refusal:
 	//
-	//	read_test.go:348: ReadFromTarGz(zero-length manifest) error = <nil>, want the not-found sentinel
+	//	read_test.go:349: ReadFromTarGz(zero-length manifest) error = <nil>, want the not-found sentinel
 	artifact := writeArtifact(t, append(nonManifestEntries(),
 		testEntry{name: helpers.ManifestFileName}))
 	if _, err := ReadFromTarGz(artifact); !errors.Is(err, helpers.ErrManifestNotFound) {
@@ -395,4 +396,214 @@ func TestReadFromTarGzNeverReportsAnEmptyManifest(t *testing.T) {
 	if err == nil || len(got) != 0 {
 		t.Fatalf("ReadFromTarGz(stream ending inside the manifest) = %d bytes, %v, want no bytes and an error", len(got), err)
 	}
+}
+
+func TestReadFromTarGzRefusesAnArtifactItCannotOpen(t *testing.T) {
+	t.Parallel()
+
+	// The path is the run's own rather than anything read out of an archive, so
+	// the failure this reports is an artifact that is not where it was said to
+	// be - evicted from the cache, or never written. The control is the same
+	// fixture at the path it really sits on.
+	artifact := writeArtifact(t, []testEntry{{name: helpers.ManifestFileName, content: []byte(testManifest)}})
+	got, err := ReadFromTarGz(artifact)
+	if err != nil || string(got) != testManifest {
+		t.Fatalf("ReadFromTarGz(the fixture where it sits) = %q, %v, want the manifest", got, err)
+	}
+
+	if _, err := ReadFromTarGz(artifact + ".absent"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ReadFromTarGz(a path carrying no artifact) error = %v, want a missing-file error", err)
+	}
+}
+
+// errTestCeiling stands in for whichever verdict a caller injects, so the test
+// below is about the reader rather than about either sentinel this package
+// hands it.
+var errTestCeiling = errors.New("test ceiling")
+
+// countingReader answers every read with one byte and counts the calls it was
+// handed, which is what tells a reader that stopped touching its source apart
+// from one that merely keeps reporting the same refusal.
+type countingReader struct {
+	reads int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	c.reads++
+	if len(p) == 0 {
+		return 0, nil
+	}
+	p[0] = 'x'
+	return 1, nil
+}
+
+func TestLimitReaderStaysRefusedPastItsCeiling(t *testing.T) {
+	t.Parallel()
+
+	// The source is endless, so nothing but the ceiling can end this. That is
+	// also the positive control: the reads under the ceiling hand a byte back
+	// each, so the refusal is the count crossing rather than the source
+	// running out.
+	//
+	// What the stickiness is worth is visible in the source's call count and
+	// nowhere else. A reader that recomputed the refusal on every call would
+	// report the same verdict and still pull a byte out of the decompressor
+	// for every call it was handed, and bytes out of the decompressor are what
+	// this reader exists to count.
+	//
+	// Dropping it - `if r.err != nil` in limitReader.Read replaced by
+	// `if false && r.err != nil`, applied through go test -overlay so no
+	// production file is edited - fails here:
+	//
+	//	read_test.go:477: limitReader.Read past the ceiling = 0, test ceiling: read 4 bytes, limit is 2 bytes after 4 source reads, want 3
+	source := &countingReader{}
+	limited := &limitReader{r: source, over: errTestCeiling, max: 2}
+	buf := make([]byte, 8)
+
+	for read := range 2 {
+		if n, err := limited.Read(buf); n != 1 || err != nil {
+			t.Fatalf("limitReader.Read under the ceiling = %d, %v on read %d, want one byte and no error", n, err, read)
+		}
+	}
+
+	n, crossing := limited.Read(buf)
+	if n != 0 || !errors.Is(crossing, errTestCeiling) {
+		t.Fatalf("limitReader.Read crossing the ceiling = %d, %v, want no bytes and the injected verdict", n, crossing)
+	}
+	crossed := source.reads
+
+	n, again := limited.Read(buf)
+	if n != 0 || !errors.Is(again, crossing) || source.reads != crossed {
+		t.Fatalf("limitReader.Read past the ceiling = %d, %v after %d source reads, want %d", n, again, source.reads, crossed)
+	}
+}
+
+func TestReadFromTarGzCapsAnEntryNameBeforeAnythingRendersIt(t *testing.T) {
+	t.Parallel()
+
+	// This walk retains no entry name and still has to measure one: the
+	// over-declared-entry refusal quotes the name it refuses, and archive/tar
+	// hands back a GNU long name of up to 1,048,575 bytes, so without the cap a
+	// megabyte of archive-chosen text reaches an operator to report that the
+	// entry carrying it declared too large a size.
+	//
+	// The five rows separate the two rules from each other and from the walk.
+	// The first two accept: the fixture as it stands, then the same fixture
+	// carrying an entry named at exactly the cap, which is the tightest control
+	// available - one byte from the row below it. The third is that name one
+	// byte over. The fourth declares an over-cap size under an ordinary name,
+	// so the size arm is shown reachable and shown to quote what it refuses.
+	// The fifth is that entry with a name past the cap: the name rule answers
+	// first, under its own sentinel and in a message bounded whatever the name.
+	//
+	// Moving the check back - the checkEntryNameLength call in
+	// readFromTarGzStream moved below the size refusal, applied through go test
+	// -overlay so no production file is edited - fails the fifth row on the
+	// message ceiling rather than on the sentinel, which is the whole point:
+	//
+	//	read_test.go:549: readFromTarGzStream(a name past the cap under an over-cap size) message is 200046 bytes, want under 300
+	//
+	// Rendering that name with %s rather than %q, applied the same way, fails
+	// the fourth row instead. A bare name can carry a newline of its own, which
+	// safeout.Clean passes through, so the quoting is what keeps an entry name
+	// from forging a line of an operator's output:
+	//
+	//	read_test.go:549: readFromTarGzStream(an over-cap size under an ordinary name) message does not quote "huge.bin"
+	const (
+		longNameLen         = 200_000
+		oversizeDeclaration = helpers.ArchiveMaxEntrySize + 1
+	)
+	cases := []nameCapCase{
+		{name: "the fixture as it stands"},
+		{name: "a name at the cap", entry: strings.Repeat("a", testEntryNameCap)},
+		{
+			name: "a name one byte over the cap", entry: strings.Repeat("a", testEntryNameCap+1),
+			want: helpers.ErrArchiveEntryNameTooLong,
+		},
+		{
+			name: "an over-cap size under an ordinary name", entry: "huge.bin", size: oversizeDeclaration,
+			want: helpers.ErrArchiveEntryIsTooLarge, quotes: `"huge.bin"`,
+		},
+		{
+			name: "a name past the cap under an over-cap size", size: oversizeDeclaration,
+			entry: strings.Repeat("a", longNameLen), want: helpers.ErrArchiveEntryNameTooLong,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			entries := nonManifestEntries()
+			if tc.entry != "" {
+				entries = append(entries, testEntry{name: tc.entry, declaredSize: tc.size})
+			}
+			entries = append(entries, testEntry{name: helpers.ManifestFileName, content: []byte(testManifest)})
+
+			got, err := artifactStream(t, entries)
+			if tc.want == nil {
+				if err != nil || string(got) != testManifest {
+					t.Fatalf("readFromTarGzStream(%s) = %q, %v, want the manifest", tc.name, got, err)
+				}
+				return
+			}
+			checkNameCapRefusal(t, tc, err)
+		})
+	}
+}
+
+// nameCapCase is one row of the table above: an entry to put ahead of the
+// manifest, and what the walk owes for it. A zero want means the row is one of
+// the accepting ones, and quotes names a fragment the refusal has to render.
+type nameCapCase struct {
+	want   error
+	name   string
+	entry  string
+	quotes string
+	size   int64
+}
+
+// checkNameCapRefusal asserts what one refusing row owes: a message an
+// operator can read, the sentinel it names, and the fragment it has to quote.
+//
+// The message ceiling is checked ahead of the sentinel deliberately, and not
+// because the sentinel needs the help: run with this ceiling disabled - the
+// `n > messageMax` condition below becoming `n > messageMax && false` - the
+// ordering mutation the table above describes still fails the fifth row on the
+// sentinel alone, the size arm raising helpers.ErrArchiveEntryIsTooLarge where
+// that row wants the name one. The order is about what failing on the sentinel
+// COSTS, since that assertion renders err with %v:
+//
+//	read_test.go:549: readFromTarGzStream(a name past the cap under an over-cap size) error = archive entry is too large "aaaa
+//
+// elided after four of the 200,000 a's, which is the whole of what checking the
+// ceiling first keeps out of a failure log.
+func checkNameCapRefusal(t *testing.T, tc nameCapCase, err error) {
+	t.Helper()
+
+	const messageMax = 300
+	if err == nil {
+		t.Fatalf("readFromTarGzStream(%s) error = <nil>, want %v", tc.name, tc.want)
+	}
+	if n := len(err.Error()); n > messageMax {
+		t.Fatalf("readFromTarGzStream(%s) message is %d bytes, want under %d", tc.name, n, messageMax)
+	}
+	if !errors.Is(err, tc.want) {
+		t.Fatalf("readFromTarGzStream(%s) error = %v, want %v", tc.name, err, tc.want)
+	}
+	if tc.quotes != "" && !strings.Contains(err.Error(), tc.quotes) {
+		t.Fatalf("readFromTarGzStream(%s) message does not quote %s", tc.name, tc.quotes)
+	}
+}
+
+// artifactStream runs the walk over a fixture without going through
+// ReadFromTarGz, so an assertion about the length of a refusal measures what
+// the walk renders rather than the artifact path ReadFromTarGz prefixes on.
+func artifactStream(tb testing.TB, entries []testEntry) ([]byte, error) {
+	tb.Helper()
+
+	raw, err := os.ReadFile(writeArtifact(tb, entries))
+	if err != nil {
+		tb.Fatalf("failed to read the fixture back: %v", err)
+	}
+	return readFromTarGzStream(bytes.NewReader(raw))
 }

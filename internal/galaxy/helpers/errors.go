@@ -33,7 +33,7 @@ var (
 	ErrArchivePathContainsSymlinkComponent = errors.New("archive path contains symlink component")
 	// ErrArchiveExceedsMaxSize indicates an archive exceeds the maximum total size.
 	ErrArchiveExceedsMaxSize = errors.New("archive exceeds maximum total size")
-	// ErrArchiveDecompressedTooLarge indicates an archive made the extractor
+	// ErrArchiveDecompressedTooLarge indicates an archive made a reader of it
 	// pull more raw bytes out of its decompressor than ArchiveMaxDecompressedSize
 	// allows. It is a separate sentinel from ErrArchiveExceedsMaxSize on
 	// purpose: that one fires on the sizes an archive's headers DECLARE, this
@@ -54,6 +54,13 @@ var (
 	ErrArchiveEntryIsAbsolutePath = errors.New("archive entry is absolute path")
 	// ErrArchiveEntryHasEmptyName indicates an archive entry has an empty name.
 	ErrArchiveEntryHasEmptyName = errors.New("archive entry has empty name")
+	// ErrArchiveEntryNameTooLong indicates an archive entry declares a name, or
+	// a link target, longer than ArchiveMaxEntryNameLen. It is raised by a
+	// reader that walks an archive without unpacking it, never by the
+	// extractor, whose own retention is bounded by the filesystem instead; see
+	// ArchiveMaxEntryNameLen for what the cap bounds and why a reader that
+	// holds every name until the stream ends needs it.
+	ErrArchiveEntryNameTooLong = errors.New("archive entry name is too long")
 	// ErrArchiveTooManyEntries indicates an archive contains more entries
 	// than ArchiveMaxEntryCount allows.
 	ErrArchiveTooManyEntries = errors.New("archive contains too many entries")
@@ -72,6 +79,12 @@ var (
 	// deliberate: letting the later entry win is what would make a colliding
 	// archive undetectable, since nothing on disk afterwards records that a
 	// path was claimed twice.
+	//
+	// A reader that writes nothing raises it for the fact underneath rather
+	// than for that on-disk consequence: manifest.claim refuses two entries
+	// competing for one archive path, link entries included, so the pass that
+	// verifies a manifest chain and the pass that read the manifest cannot
+	// disagree about which entry a name meant.
 	ErrArchiveDuplicateEntry = errors.New("archive contains a duplicate entry")
 
 	// ErrArtifactNotTarGz indicates downloaded bytes do not have the outer

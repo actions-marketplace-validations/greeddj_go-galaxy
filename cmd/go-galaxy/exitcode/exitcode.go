@@ -357,11 +357,11 @@ func isInstallError(err error) bool {
 // one that names no MANIFEST.json within its scan bound
 // (helpers.ErrManifestNotFound). It is its own predicate rather than a member
 // of isArchiveError because it answers a different question: every sentinel
-// there is raised by the extractor about an archive's contents, while these
-// two are raised outside it about whether there is a collection artifact to
-// speak of. They classify alongside them, and never as a transport failure -
-// the transfer succeeded, and no retry turns an error page into an archive or
-// puts a manifest into one that has none.
+// there is about what an archive holds, while these two are about whether
+// there is a collection artifact to speak of at all. They classify alongside
+// them, and never as a transport failure - the transfer succeeded, and no
+// retry turns an error page into an archive or puts a manifest into one that
+// has none.
 func isArtifactShapeError(err error) bool {
 	return errors.Is(err, helpers.ErrArtifactNotTarGz) ||
 		errors.Is(err, helpers.ErrManifestNotFound)
@@ -378,29 +378,49 @@ func isFileIntegrityError(err error) bool {
 		errors.Is(err, helpers.ErrArtifactCacheNotConfigured)
 }
 
-// isArchiveError reports whether err is an unsafe-archive sentinel.
-// helpers.ErrArchiveTooManyEntries and helpers.ErrArchiveDuplicateEntry are
-// listed here alongside every other archive sentinel for consistency, not
-// because either changes classification: both are raised only from inside
-// the archive extractor, which is reached only from a per-collection install
-// or warm worker (extractCollection's unpack, directly or through the
-// extracted store's ingest, and warmVerifyAndEnsure on the warm path), so
-// both always reach isInstallError already joined behind
-// helpers.ErrInstallationFailed - isFileIntegrityError's match on
-// that headline alone already classifies the tree ExitInstall, via
-// short-circuit evaluation, without isInstallError ever calling into this
-// function for it.
+// isArchiveError reports whether err says a collection artifact's tar stream
+// broke a rule about its own contents: an entry whose path, name length,
+// declared size or count this project refuses, or a decompressed stream past
+// the ceiling. The question is what the archive holds, which is why bytes that
+// are not an archive at all answer isArtifactShapeError instead.
+//
+// Whether a member of this set decides the exit code is a property of the error
+// tree rather than of which sentinel it is. Joined behind
+// helpers.ErrInstallationFailed - what a per-collection install or warm worker
+// produces - the headline already classifies ExitInstall through
+// isFileIntegrityError, and short-circuit evaluation means this function is
+// never consulted for it. Reached bare, this function answers, and it answers
+// with the same class either way. So the set is written for completeness rather
+// than sized to whichever sentinels happen to be reachable unaggregated.
+//
+// Split into two sub-checks purely to stay under the cyclomatic-complexity
+// budget, the same way isInstallError above is; together they still cover the
+// exact same sentinel set.
 func isArchiveError(err error) bool {
+	return isArchiveEntryPathError(err) || isArchiveBudgetError(err)
+}
+
+// isArchiveEntryPathError reports whether err is about what an entry names: a
+// path that escapes, is absolute, is empty, traverses a symlink, or collides
+// with one already seen.
+func isArchiveEntryPathError(err error) bool {
 	return errors.Is(err, helpers.ErrArchivePathContainsSymlinkComponent) ||
-		errors.Is(err, helpers.ErrArchiveExceedsMaxSize) ||
-		errors.Is(err, helpers.ErrArchiveDecompressedTooLarge) ||
-		errors.Is(err, helpers.ErrArchiveEntryHasNegativeSize) ||
-		errors.Is(err, helpers.ErrArchiveEntryIsTooLarge) ||
 		errors.Is(err, helpers.ErrArchiveEntryEscapesDestination) ||
 		errors.Is(err, helpers.ErrArchiveEntryIsAbsolutePath) ||
 		errors.Is(err, helpers.ErrArchiveEntryHasEmptyName) ||
-		errors.Is(err, helpers.ErrArchiveTooManyEntries) ||
 		errors.Is(err, helpers.ErrArchiveDuplicateEntry)
+}
+
+// isArchiveBudgetError reports whether err is about how much an archive costs:
+// a declared size that is negative or past its ceiling, or a decompressed
+// stream, a name length or an entry count past one of the ceilings in helpers.
+func isArchiveBudgetError(err error) bool {
+	return errors.Is(err, helpers.ErrArchiveExceedsMaxSize) ||
+		errors.Is(err, helpers.ErrArchiveDecompressedTooLarge) ||
+		errors.Is(err, helpers.ErrArchiveEntryHasNegativeSize) ||
+		errors.Is(err, helpers.ErrArchiveEntryIsTooLarge) ||
+		errors.Is(err, helpers.ErrArchiveEntryNameTooLong) ||
+		errors.Is(err, helpers.ErrArchiveTooManyEntries)
 }
 
 // isSymlinkError reports whether err is an unsafe-symlink sentinel. This
