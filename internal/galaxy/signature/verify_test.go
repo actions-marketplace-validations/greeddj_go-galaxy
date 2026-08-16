@@ -22,9 +22,9 @@ import (
 // only in the version they declare, so a signature over one is a well-formed
 // signature that does not verify against the other.
 //
-// Every gpg call below additionally carried the flags that suppress prompting
-// on an empty passphrase and nothing else: --batch, --yes, --pinentry-mode
-// loopback, and an empty --passphrase.
+// Every gpg call below, the sixth key's own three included, additionally
+// carried the flags that suppress prompting on an empty passphrase and nothing
+// else: --batch, --yes, --pinentry-mode loopback, and an empty --passphrase.
 //
 // Five keys, all ed25519 and signing-only:
 //
@@ -86,6 +86,22 @@ import (
 //	# sig-a-badbase64.asc: one body character replaced by one that is not base64.
 //	sed '3s/iKkE/iK%E/' sig-a-valid.asc > sig-a-badbase64.asc
 //
+// A sixth key, in a GNUPGHOME of its own, exists for one property none of the
+// five above has: a SIGNING SUBKEY, whose binding signature carries the
+// primary-key-binding signature that cross-certifies it. That cross-signature
+// is an embedded signature subpacket - a whole signature packet body nested
+// inside another one - which is the only shape in this repository that reaches
+// checkSignatureBodyFraming's recursion on real material rather than on bytes a
+// test spelled. Without it, "the recursion refused a hand-built carrier" would
+// be indistinguishable from "the recursion refuses everything it descends into".
+//
+//	gpg --quick-generate-key 'go-galaxy signing subkey test key <subkey@example.invalid>' ed25519 sign never
+//	gpg --quick-add-key <fpr> ed25519 sign never
+//	gpg --export --armor 'subkey@example.invalid' > signing-subkey.asc
+//
+// It is public material like every other export here, it signs nothing, and no
+// verification case uses it: the framing tests are its only consumers.
+//
 // Four blobs are spelled out in this file rather than committed, because no gpg
 // command writes any of them and an empty file in testdata says less than the
 // bytes do: a blob carrying nothing at all, the two empty armor envelopes, and
@@ -96,6 +112,9 @@ const (
 
 	keyringFixture         = "keyring.asc"
 	outsiderKeyringFixture = "keyring-outsider.asc"
+	// subkeyFixture is the export carrying a signing subkey, and so the only
+	// committed fixture holding an embedded signature subpacket.
+	subkeyFixture = "signing-subkey.asc"
 
 	sigValidArmored  = "sig-a-valid.asc"
 	sigValidBinary   = "sig-a-valid.sig"
@@ -159,12 +178,12 @@ var errUnanticipated = errors.New("an error no release of go-crypto has ever ret
 var errGatherFailed = errors.New("a signature source could not be fetched")
 
 // readFixture reads one testdata file whole.
-func readFixture(t *testing.T, name string) []byte {
-	t.Helper()
+func readFixture(tb testing.TB, name string) []byte {
+	tb.Helper()
 
 	data, err := os.ReadFile(fixturePath(name))
 	if err != nil {
-		t.Fatalf("read %s: %v", name, err)
+		tb.Fatalf("read %s: %v", name, err)
 	}
 
 	return data
@@ -324,7 +343,7 @@ func TestClassifyMapsEachFailureToItsStatus(t *testing.T) {
 			// code in the vocabulary that no verdict can carry. Every row
 			// reaching that arm fails, this one with
 			//
-			//	verify_test.go:334: classify(a blob that is not a signature at all) = MISSING_PASSPHRASE, want ERRSIG
+			//	verify_test.go:353: classify(a blob that is not a signature at all) = MISSING_PASSPHRASE, want ERRSIG
 			//
 			// which is the arm's whole job: an error nothing here anticipated
 			// has to land on a status a verdict can carry, or the ignore set
@@ -334,6 +353,92 @@ func TestClassifyMapsEachFailureToItsStatus(t *testing.T) {
 				t.Fatalf("classify(%s) = %s, want %s", tc.name, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestEmptyPacketStreamWouldReportNoPubKey pins the premise errNoSignatureData
+// exists for, against the library rather than in prose.
+//
+// checkOne raises its own verdict for a blob that carries no OpenPGP data
+// because the library answers such a stream with the same error a signature from
+// an unknown key produces - so passing it through would report an empty source
+// as NO_PUBKEY, a status an operator may have configured as ignorable. That is a
+// claim about go-crypto, and a release that answered differently would make the
+// early verdict unnecessary without anything saying so.
+//
+// The control is the same call over a signature that verifies, which returns an
+// entity and a nil error, so the row above it is the empty stream rather than
+// this keyring or this manifest.
+func TestEmptyPacketStreamWouldReportNoPubKey(t *testing.T) {
+	t.Parallel()
+
+	kr := loadTestKeyring(t, keyringFixture)
+	manifest := readFixture(t, manifestAFixture)
+
+	// The binary encoding, since this call takes a packet stream rather than an
+	// armor envelope.
+	signer, err := openpgp.CheckDetachedSignature(kr.entities,
+		bytes.NewReader(manifest), bytes.NewReader(readFixture(t, sigValidBinary)), nil)
+	if err != nil || signer == nil {
+		t.Fatalf("positive control: CheckDetachedSignature(%s) = %v, %v, want an entity and nil", sigValidBinary, signer, err)
+	}
+
+	_, err = openpgp.CheckDetachedSignature(kr.entities, bytes.NewReader(manifest), bytes.NewReader(nil), nil)
+	if got := classify(err); got != StatusNoPubKey {
+		t.Fatalf("CheckDetachedSignature(an empty packet stream) = %v, classified %s, want %s", err, got, StatusNoPubKey)
+	}
+}
+
+// TestCheckOneRefusesAnArmorBlockOfTheWrongKind covers the envelope check
+// between the decode and the packet gate.
+//
+// It takes a blob whose FIRST armor block is not a signature while the bytes
+// behind it hold the signature header, since the header test above the decode is
+// a substring search over the whole blob and the decode reads the first block
+// only - a public key export with a real signature appended is exactly that
+// shape, and it is one a mistaken `cat` produces.
+//
+// The positive control is the same signature on its own, through the same call:
+// it verifies, so the refusal is the block in front of it rather than these
+// bytes.
+func TestCheckOneRefusesAnArmorBlockOfTheWrongKind(t *testing.T) {
+	t.Parallel()
+
+	// The whole message hand-spelled, and apart from the production string it
+	// checks, so that a mutation to that string cannot reshape the expectation
+	// into agreeing with it.
+	const want = "openpgp: invalid argument: expected 'PGP SIGNATURE', got: PGP PUBLIC KEY BLOCK"
+
+	kr := loadTestKeyring(t, keyringFixture)
+	manifest := readFixture(t, manifestAFixture)
+	signature := readFixture(t, sigValidArmored)
+	if _, err := checkOne(manifest, signature, kr); err != nil {
+		t.Fatalf("positive control: checkOne(%s) = %v, want nil", sigValidArmored, err)
+	}
+
+	blob := make([]byte, 0, len(readFixture(t, armoredFixture))+len(signature))
+	blob = append(blob, readFixture(t, armoredFixture)...)
+	blob = append(blob, signature...)
+
+	_, err := checkOne(manifest, blob, kr)
+	// Killing mutation, actually run against this file: delete checkOne's block
+	// type check, so a decoded block of any kind is handed to the packet gate.
+	// This assertion then fails with
+	//
+	//	verify_test.go:435: checkOne(a key block with a signature behind it) = malformed OpenPGP packet framing: a tag 6
+	//	packet has no place in this stream, want "openpgp: invalid argument: expected 'PGP SIGNATURE', got: PGP PUBLIC KEY
+	//	BLOCK"
+	//
+	// which is the gate behind it catching the same file one step later, under a
+	// message that names a packet rather than the block an operator can see.
+	if err == nil || err.Error() != want {
+		t.Fatalf("checkOne(a key block with a signature behind it) = %v, want %q", err, want)
+	}
+	// The status is asked separately, because what an operator's ignore list
+	// covers is decided by it rather than by the message: a well-formed OpenPGP
+	// object of the wrong kind is not a signature that failed.
+	if got := classify(err); got != StatusErrSig {
+		t.Fatalf("classify(a key block with a signature behind it) = %s, want %s", got, StatusErrSig)
 	}
 }
 
@@ -509,7 +614,7 @@ func TestVerifySemanticMatrix(t *testing.T) {
 			// `gathered == 0 ||` term from Policy.verdict's last clause. Only
 			// the count-of-one-with-nothing-gathered row then fails, with
 			//
-			//	verify_test.go:541: Verify(count of one with nothing gathered) passed = false, want true (err: collection
+			//	verify_test.go:646: Verify(count of one with nothing gathered) passed = false, want true (err: collection
 			//	    signature verification failed: fewer valid signatures than required: got 0, need 1)
 			//
 			// which is the frozen parity this reproduces deliberately. The
@@ -521,7 +626,7 @@ func TestVerifySemanticMatrix(t *testing.T) {
 			// Policy.verdict's `if p.Required.Strict && verified == 0` clause.
 			// Both strict zero-blob rows then fail, one of them with
 			//
-			//	verify_test.go:541: Verify(strict count of one with nothing gathered) passed = true, want false (err: <nil>)
+			//	verify_test.go:646: Verify(strict count of one with nothing gathered) passed = true, want false (err: <nil>)
 			//
 			// while the third strict row is untouched: a blob was gathered
 			// there, so the count clause refuses it whatever strict says.
@@ -532,7 +637,7 @@ func TestVerifySemanticMatrix(t *testing.T) {
 			// three replay rows then pass their policy, one of them failing
 			// here with
 			//
-			//	verify_test.go:541: Verify(count of two refuses one signature supplied twice) passed = true, want false (err: <nil>)
+			//	verify_test.go:646: Verify(count of two refuses one signature supplied twice) passed = true, want false (err: <nil>)
 			//
 			// and the two-distinct-signers row beside them is untouched, which
 			// is what separates "replays no longer count" from "a count of two
@@ -550,7 +655,7 @@ func TestVerifySemanticMatrix(t *testing.T) {
 			// walkBlobs' `return walk, nil` in the count-reached arm with
 			// `continue`. Of this test's rows only the second-signer one fails,
 			//
-			//	verify_test.go:560: Verify(count of two stops at the second signer) recorded 1 failures, want 0
+			//	verify_test.go:665: Verify(count of two stops at the second signer) recorded 1 failures, want 0
 			//
 			// while its verdict and its Verified count are both unchanged:
 			// removing the early stop costs a public-key operation and a
@@ -564,7 +669,7 @@ func TestVerifySemanticMatrix(t *testing.T) {
 			// field exists to keep a caller from making. Both rows that pass
 			// with a blob in hand and nothing verified fail, one of them with
 			//
-			//	verify_test.go:572: Verify(all with only an ignored failure) VacuousPass = false, want true
+			//	verify_test.go:677: Verify(all with only an ignored failure) VacuousPass = false, want true
 			//
 			// which is exactly the case an empty blob list cannot reach, and
 			// the whole reason this is a field rather than a caller's guess.

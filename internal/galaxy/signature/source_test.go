@@ -615,6 +615,56 @@ func TestFetchFileRefusesEveryNonRegularShape(t *testing.T) {
 	}
 }
 
+// TestReadFileReportsAReadFailure covers the arm between opening a signature
+// source and holding its bytes.
+//
+// fetchFile refuses every non-regular shape before this function is reached, so
+// the arm is unreachable through the public path and is driven here directly -
+// which an unexported method taking an already-open descriptor makes cheap. A
+// directory is the one read failure a test can stage portably, and it reads as
+// one on darwin and on Linux alike.
+//
+// The regular-file row is the positive control on the same call: the identical
+// fetcher over a real file comes back with its bytes, so the row above it is the
+// descriptor and not a function that fails on everything.
+func TestReadFileReportsAReadFailure(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	fetcher := newTestFetcher(false, helpers.SignatureMaxSize)
+
+	regular, err := os.Open(writeSourceFile(t, dir, sigLeafName, "signature bytes"))
+	if err != nil {
+		t.Fatalf("open the control file: %v", err)
+	}
+	defer func() { _ = regular.Close() }()
+
+	data, err := fetcher.readFile(regular, 0)
+	if err != nil || string(data) != "signature bytes" {
+		t.Fatalf("positive control: readFile(a regular file) = %q, %v, want the file's bytes and nil", data, err)
+	}
+
+	// #nosec G304 -- dir is this test's own t.TempDir; opening it is the whole
+	// point of the row, since a directory is the read failure a test can stage.
+	directory, err := os.Open(dir)
+	if err != nil {
+		t.Fatalf("open the directory: %v", err)
+	}
+	defer func() { _ = directory.Close() }()
+
+	// Killing mutation, actually run against this file: have readFile discard
+	// ReadFrom's error and return the buffer it managed to fill. This assertion
+	// then fails with
+	//
+	//	source_test.go:664: readFile(a directory) = "", <nil>, want a read failure
+	//
+	// which is what the arm exists to prevent: a source reported as read, empty,
+	// with the failure that produced it gone.
+	if data, err = fetcher.readFile(directory, 0); err == nil {
+		t.Fatalf("readFile(a directory) = %q, %v, want a read failure", data, err)
+	}
+}
+
 // TestFetchFileFailuresRenderOneMessage pins the file arm's collapsed
 // vocabulary: four failures an attacker can select between - a path that is
 // absent, one that cannot be opened, one that is not a regular file, and one
@@ -664,7 +714,7 @@ func TestFetchFileFailuresRenderOneMessage(t *testing.T) {
 			// the absent row and the unreadable row alike. The absent one,
 			// quoted as it came:
 			//
-			//	source_test.go:686: absent path renders a message of its own
+			//	source_test.go:736: absent path renders a message of its own
 			//
 			// Both messages go to the log rather than into the assertion: they
 			// carry an OS-chosen temporary path no two runs agree on.
@@ -809,7 +859,7 @@ func TestFetchHTTPURLUnderOfflineIsRefused(t *testing.T) {
 	// is what makes the third one pinnable rather than documentary: the
 	// transport raises the same two sentinels, and only the message differs.
 	//
-	//	source_test.go:822: the offline refusal carries the capability query
+	//	source_test.go:872: the offline refusal carries the capability query
 	_, err = newTestFetcher(true, helpers.SignatureMaxSize).FetchRequirementSource(t.Context(), source)
 	if !errors.Is(err, helpers.ErrOfflineMode) {
 		t.Fatalf("FetchRequirementSource(an http url, offline) error = %v, want the offline sentinel", err)
@@ -974,15 +1024,15 @@ func TestFetchRequirementSourceRefusesAHostlessHTTPURL(t *testing.T) {
 			// test exists for: the value reaches http.Client, and its answer
 			// arrives under the wrong sentinel and the wrong class:
 			//
-			//	source_test.go:988: error = collection signature source unavailable: "https:///sig.asc": http: no Host in request URL
-			//	source_test.go:989: "https:///sig.asc" was not refused as an unsupported source
+			//	source_test.go:1038: error = collection signature source unavailable: "https:///sig.asc": http: no Host in request URL
+			//	source_test.go:1039: "https:///sig.asc" was not refused as an unsupported source
 			//
 			// Dropping helpers.ErrUnsupportedSignatureSource from
 			// exitcode.isSignatureConfigError fails the second assertion
 			// instead, with the first still passing - which is what makes the
 			// class pinnable here rather than merely implied by the sentinel:
 			//
-			//	source_test.go:992: "https:///sig.asc" classified as exit 1, want ExitUsage (2)
+			//	source_test.go:1042: "https:///sig.asc" classified as exit 1, want ExitUsage (2)
 			_, err := newTestFetcher(false, helpers.SignatureMaxSize).FetchRequirementSource(t.Context(), tc.source)
 			if !errors.Is(err, helpers.ErrUnsupportedSignatureSource) {
 				t.Logf("error = %v", err)
@@ -1047,7 +1097,7 @@ func TestFetchFileNamesThePathItOpened(t *testing.T) {
 		// temporary path no two runs agree on, so only the assertion line is
 		// quotable:
 		//
-		//	source_test.go:1053: Blob.Origin names a path other than the one that was opened
+		//	source_test.go:1103: Blob.Origin names a path other than the one that was opened
 		if blob.Origin != "file://"+opened {
 			t.Logf("origin = %q, want %q", blob.Origin, "file://"+opened)
 			t.Fatalf("Blob.Origin names a path other than the one that was opened")
@@ -1063,7 +1113,7 @@ func TestFetchFileNamesThePathItOpened(t *testing.T) {
 		// rather than on the origin, and the same OS-chosen path keeps its own
 		// rendering out of that quote:
 		//
-		//	source_test.go:1074: the message names a path other than the one that was opened
+		//	source_test.go:1124: the message names a path other than the one that was opened
 		_, err := newTestFetcher(false, helpers.SignatureMaxSize).
 			FetchRequirementSource(t.Context(), "file://"+absent+"#b.asc")
 		if !errors.Is(err, helpers.ErrSignatureSourceUnavailable) {

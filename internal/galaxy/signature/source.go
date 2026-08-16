@@ -344,13 +344,13 @@ func (f *Fetcher) readFile(file *os.File, size int64) ([]byte, error) {
 	// it stops, so an ordinary signature is read into one allocation.
 	buf := bytes.NewBuffer(make([]byte, 0, min(max(size, 0), f.limit)+bytes.MinRead))
 	if _, err := buf.ReadFrom(&io.LimitedReader{R: file, N: f.limit + 1}); err != nil {
-		// Documented-uncovered: a read that fails on a regular file this
-		// process has already opened is an OS-level condition with no injection
-		// seam here - a vanished mount or a medium error, neither of which a
-		// unit test can stage portably. What is lost by removing this arm is
-		// that such a failure would be reported as a short blob rather than as
-		// an unavailable source, and the signature check would then fail on
-		// truncated bytes.
+		// Unreachable through fetchFile, which refuses every non-regular shape
+		// before this call, and reachable here: the descriptor is a parameter, so
+		// TestReadFileReportsAReadFailure hands this a directory and gets the
+		// read failure a vanished mount or a medium error would produce. What the
+		// arm is worth is that such a failure is reported as an unavailable
+		// source rather than as a short blob, which would fail the signature
+		// check on truncated bytes instead.
 		return nil, err
 	}
 

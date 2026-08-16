@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ProtonMail/go-crypto/openpgp"
+	"github.com/ProtonMail/go-crypto/openpgp/packet"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 )
 
@@ -224,7 +226,7 @@ func TestLoadKeyringReadsEveryArmorBlock(t *testing.T) {
 	// `openpgp.ReadArmoredKeyRing(bytes.NewReader(data))` it replaced. This
 	// assertion then fails with
 	//
-	//	keyring_test.go:232: LoadKeyring(two-keys.asc) Len() = 1, want 2
+	//	keyring_test.go:234: LoadKeyring(two-keys.asc) Len() = 1, want 2
 	//
 	// and no error is reported alongside it, which is the whole defect: the
 	// second key is gone and nothing says so.
@@ -269,14 +271,21 @@ func TestLoadKeyringRefusesSecretKeyMaterial(t *testing.T) {
 			t.Parallel()
 
 			_, err := LoadKeyring(fixturePath(name))
-			// Killing mutation, actually run against this file: delete
-			// loadKeyring's `if holdsSecretKey(entities)` branch. Both rows
-			// then fail, one of them with
+			// Killing mutation, actually run against this file: delete the
+			// secretKeyPacketTags arm from judgeHeader, so the two secret-key
+			// tags fall through to the allow-list that no longer admits them.
+			// Both rows then keep failing the sentinel below and fail the
+			// message assertion under it instead, one of them with
 			//
-			//	keyring_test.go:281: LoadKeyring(secret.gpg) error = <nil>, want the unreadable sentinel
+			//	keyring_test.go:306: LoadKeyring(secret.gpg) error does not name the problem:
+			//	keyring could not be read: "testdata/secret.gpg": malformed OpenPGP packet framing: a tag 5 packet has
+			//	no place in this stream
 			//
-			// because either encoding parses to a perfectly good entity that
-			// happens to carry a private key.
+			// The branch this paragraph used to name - loadKeyring's own
+			// holdsSecretKey call - no longer kills anything on its own: the walk
+			// refuses both encodings before a packet is parsed, so deleting that
+			// call leaves every row here passing. It stays as a backstop, and
+			// TestHoldsSecretKeyReportsMaterialInEitherPlace is what pins it.
 			if !errors.Is(err, helpers.ErrKeyringUnreadable) {
 				t.Fatalf("LoadKeyring(%s) error = %v, want the unreadable sentinel", name, err)
 			}
@@ -285,8 +294,9 @@ func TestLoadKeyringRefusesSecretKeyMaterial(t *testing.T) {
 			// readEntities' routing test. Only the secret.asc row then fails,
 			// with
 			//
-			//	keyring_test.go:296: LoadKeyring(secret.asc) error does not name the problem:
-			//	    keyring could not be read: "testdata/secret.asc": openpgp: invalid data: tag byte does not have MSB set
+			//	keyring_test.go:306: LoadKeyring(secret.asc) error does not name the problem:
+			//	    keyring could not be read: "testdata/secret.asc": malformed OpenPGP packet framing: 532 bytes are
+			//	    not a packet header this walk can read
 			//
 			// while the assertion above it still passes: the armored secret key
 			// is refused either way, but only the routed one is refused for the
@@ -297,6 +307,169 @@ func TestLoadKeyringRefusesSecretKeyMaterial(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), "--export --armor") {
 				t.Fatalf("LoadKeyring(%s) error does not name the remedy:\n%v", name, err)
+			}
+		})
+	}
+}
+
+// TestHoldsSecretKeyReportsMaterialInEitherPlace pins the backstop no file can
+// reach any more.
+//
+// The packet walk refuses the two secret-key tags before openpgp.ReadKeyRing
+// sees them, so no entity this package builds from a file can carry private
+// material and holdsSecretKey answers false for every one of them. That is what
+// makes a file-driven test impossible and a direct one necessary: it takes
+// hand-built entities to ask the question the function exists to answer, and
+// without them the function could be inverted or emptied with the whole suite
+// still green.
+//
+// The false rows are the positive control, on entities of the same shape: a
+// primary key with no private half and a subkey with none answer false, so a true
+// row is the private material rather than the presence of an entity at all.
+func TestHoldsSecretKeyReportsMaterialInEitherPlace(t *testing.T) {
+	t.Parallel()
+
+	public := &packet.PublicKey{}
+	private := &packet.PrivateKey{}
+
+	for _, tc := range []struct {
+		name     string
+		entities openpgp.EntityList
+		want     bool
+	}{
+		{name: "no entities at all", entities: nil},
+		{name: "a public primary with a public subkey", entities: openpgp.EntityList{{
+			PrimaryKey: public,
+			Subkeys:    []openpgp.Subkey{{PublicKey: public}},
+		}}},
+		{name: "a private primary", entities: openpgp.EntityList{{
+			PrimaryKey: public,
+			PrivateKey: private,
+		}}, want: true},
+		{name: "a public primary with a private subkey", entities: openpgp.EntityList{{
+			PrimaryKey: public,
+			Subkeys:    []openpgp.Subkey{{PublicKey: public}, {PublicKey: public, PrivateKey: private}},
+		}}, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Killing mutation, actually run against this file: delete the subkey
+			// loop from holdsSecretKey, which is the arm gpg's own exports never
+			// reach. Exactly its row fails, with
+			//
+			//	keyring_test.go:366: holdsSecretKey(a public primary with a private subkey) = false, want true
+			//
+			// and nothing else in the package notices, this being the only place
+			// that arm is reached at all.
+			if got := holdsSecretKey(tc.entities); got != tc.want {
+				t.Fatalf("holdsSecretKey(%s) = %t, want %t", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoadKeyringRefusesADirectory covers the read failure between opening the
+// keyring and looking at its bytes.
+//
+// A directory opens like a file and fails on the read, on darwin and on Linux
+// alike, which is the one shape of that failure a test can stage portably - and
+// it is not a contrived one: an operator pointing --keyring at a directory of
+// exported keys is an ordinary mistake. What it pins is that such a failure is
+// reported as a keyring this tool could not read, wrapped rather than rendered,
+// so the cause stays reachable.
+func TestLoadKeyringRefusesADirectory(t *testing.T) {
+	t.Parallel()
+	requirePositiveControl(t)
+
+	dir := filepath.Join(t.TempDir(), "keyring.d")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatalf("make the directory: %v", err)
+	}
+
+	_, err := LoadKeyring(dir)
+	// Killing mutation, actually run against this file: have loadKeyring ignore
+	// io.ReadAll's error and carry on with whatever it read. This assertion then
+	// fails with
+	//
+	//	keyring_test.go:401: LoadKeyring(a directory) = keyring could not be read: "...keyring.d" holds no OpenPGP keys,
+	//	want the read failure to be named
+	//
+	// which is the wrong diagnosis: an unreadable path reported as a readable
+	// file holding nothing.
+	if err == nil || !strings.Contains(err.Error(), "is a directory") {
+		t.Fatalf("LoadKeyring(a directory) = %v, want the read failure to be named", err)
+	}
+	if !errors.Is(err, helpers.ErrKeyringUnreadable) {
+		t.Fatalf("LoadKeyring(a directory) error = %v, want the unreadable sentinel", err)
+	}
+}
+
+// TestArmoredKeyRingRefusesANonFinalBlock pins that a block failing anywhere but
+// last stops the file.
+//
+// readArmoredKeyRing reads every block, and the reason it refuses rather than
+// skips is that using part of a keyring quietly is the failure the whole loader
+// exists to avoid. Nothing else reaches that in-loop refusal: every other case
+// here puts its bad block last, where the error comes from the call after the
+// loop instead.
+//
+// Both rows are the same key export with something in front of it, and the
+// control is that export alone, so a refusal is the leading block rather than
+// the file having two of them.
+func TestArmoredKeyRingRefusesANonFinalBlock(t *testing.T) {
+	t.Parallel()
+
+	armored := readFixture(t, armoredFixture)
+	if _, err := readEntities(armored); err != nil {
+		t.Fatalf("positive control: readEntities(%s) = %v, want nil", armoredFixture, err)
+	}
+
+	// Each leader ends with its own newline, and the block count below is what
+	// says so: a leader glued to the key block's opening line would present one
+	// block rather than two, and the file would then be measuring nothing.
+	for _, tc := range []struct {
+		name   string
+		want   string
+		leader []byte
+	}{
+		{
+			name:   "a signature block ahead of the key block",
+			leader: readFixture(t, sigValidArmored),
+			want:   "openpgp: invalid argument: expected public or private key block, got: PGP SIGNATURE",
+		},
+		{
+			// An opening line with nothing behind it inside its own cut: the
+			// decoder takes the line as a block start, runs out of input looking
+			// for the blank line that ends its header section, and reports the
+			// block it could not read as io.EOF.
+			name:   "an opening line with no block behind it",
+			leader: []byte("-----BEGIN NOT REALLY AN ARMOR BLOCK-----\n"),
+			want:   "openpgp: invalid argument: no armored data found",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			file := make([]byte, 0, len(tc.leader)+len(armored))
+			file = append(file, tc.leader...)
+			file = append(file, armored...)
+			if got := countArmorBlocks(file); got != 2 {
+				t.Fatalf("the fixture presents %d armor blocks, want 2", got)
+			}
+
+			entities, err := readEntities(file)
+			// Killing mutation, actually run against this file: drop the error
+			// arm from readArmoredKeyRing's in-loop readBlock call, so only the
+			// block after the loop can fail the read. Both rows then fail, one of
+			// them with
+			//
+			//	keyring_test.go:472: readEntities(a signature block ahead of the key block) = 1 entities, <nil>, want
+			//	"openpgp: invalid argument: expected public or private key block, got: PGP SIGNATURE"
+			//
+			// which is the loader using the half of the file it liked.
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("readEntities(%s) = %d entities, %v, want %q", tc.name, len(entities), err, tc.want)
 			}
 		})
 	}
@@ -398,7 +571,7 @@ func TestLoadKeyringRejectsEmptyKeyring(t *testing.T) {
 	// Killing mutation, actually run against this file: delete loadKeyring's
 	// `if len(entities) == 0` branch. This assertion then fails with
 	//
-	//	keyring_test.go:406: LoadKeyring(empty.gpg) = nil error, want the unreadable sentinel
+	//	keyring_test.go:579: LoadKeyring(empty.gpg) = nil error, want the unreadable sentinel
 	//
 	// which is the shape the check exists to prevent - a nil error alongside a
 	// keyring holding no keys at all.
@@ -471,7 +644,7 @@ func TestLoadKeyringRefusesFileOverCeiling(t *testing.T) {
 	// Killing mutation, actually run against this file: delete loadKeyring's
 	// `if int64(len(data)) > limit` branch. This assertion then fails with
 	//
-	//	keyring_test.go:478: loadKeyring(padded) error = <nil>, want the unreadable sentinel
+	//	keyring_test.go:651: loadKeyring(padded) error = <nil>, want the unreadable sentinel
 	//
 	// because the truncated read still carries a whole armor block.
 	if !errors.Is(err, helpers.ErrKeyringUnreadable) {
@@ -519,7 +692,7 @@ func TestLooksLikeKeybox(t *testing.T) {
 			// Killing mutation, actually run against this file: set
 			// keyboxMagicOffset to 0. Three rows fail, one of them with
 			//
-			//	keyring_test.go:527: looksLikeKeybox(real keybox fixture) = false, want true
+			//	keyring_test.go:700: looksLikeKeybox(real keybox fixture) = false, want true
 			//
 			// and among them "magic at offset zero" flips to true, which is the
 			// pair that shows the offset is what does the identifying.
@@ -527,5 +700,200 @@ func TestLooksLikeKeybox(t *testing.T) {
 				t.Fatalf("looksLikeKeybox(%s) = %t, want %t", tc.name, got, tc.want)
 			}
 		})
+	}
+}
+
+// gluedBlockCount is how many armor blocks the concatenation case below builds.
+// Two would carry the defect, and the third is what separates "the loader read
+// the first block" from "the loader read one block per opening line it found":
+// with three, a cut fooled once still has to be fooled twice.
+const gluedBlockCount = 3
+
+// TestGluedArmorBlocksAreRefused pins the refusal that keeps reading every
+// block from being a silent read of the first one.
+//
+// Measured on blocks armorEncode writes through armor.Encode: the last byte of
+// a block is the final "-" of its end line, so concatenating two of them puts
+// the second's opening line on the end of the first's last line and the cut
+// sees ONE block start in a file carrying three. Measured before this refusal
+// existed, such a file loaded as 1 entity with a nil error - a trust set
+// silently smaller than the configured one, which is the failure keyringMaxSize's
+// own refusal exists to avoid, arriving by a route neither that ceiling nor the
+// block loop can see.
+//
+// Two positive controls, answering two different objections. two-keys.asc is
+// the shape an operator really builds - two gpg exports catted, each ending
+// with the newline gpg writes - and it still loads as two keys, so the refusal
+// is not concatenation. The same three blocks with a newline between them load
+// as three, so it is not these blocks or the key they carry either.
+func TestGluedArmorBlocksAreRefused(t *testing.T) {
+	t.Parallel()
+
+	requireCattedKeyringStillLoads(t)
+
+	glued, separated := gluedArmorBlocks(t)
+	// The fixture ahead of its verdict, and the defect itself in one number: the
+	// cut finds one opening line in a file that carries three blocks.
+	if got := countArmorBlocks(glued); got != 1 {
+		t.Fatalf("the glued fixture presents %d armor blocks, want 1: it is not the shape this refusal is about", got)
+	}
+
+	dir := t.TempDir()
+	kr, err := LoadKeyring(writeKeyringFile(t, dir, "separated.asc", separated))
+	if err != nil || kr.Len() != gluedBlockCount {
+		t.Fatalf("positive control: LoadKeyring(%d separated blocks) = %v holding %d keys, want nil and %d",
+			gluedBlockCount, err, keyringLen(kr), gluedBlockCount)
+	}
+
+	kr, err = LoadKeyring(writeKeyringFile(t, dir, "glued.asc", glued))
+	// Killing mutation, actually run against this file: delete the
+	// checkArmorBlockStartsAtLineStart call from readArmoredKeyRing. This
+	// assertion then fails with
+	//
+	//	keyring_test.go:758: LoadKeyring(3 glued blocks) = 1 keys, <nil>, want the mid-line refusal
+	//
+	// which is the defect in full: two of the three keys are gone and the load
+	// reports nothing wrong.
+	if !errors.Is(err, errArmorBlockStartMidLine) {
+		t.Fatalf("LoadKeyring(%d glued blocks) = %d keys, %v, want the mid-line refusal",
+			gluedBlockCount, keyringLen(kr), err)
+	}
+	if !errors.Is(err, helpers.ErrKeyringUnreadable) {
+		t.Fatalf("LoadKeyring(%d glued blocks) error = %v, want the unreadable sentinel", gluedBlockCount, err)
+	}
+	// The remedy, which is the whole reason a refusal is worth more here than a
+	// smarter cut: the operator has to separate the exports they concatenated.
+	if !strings.Contains(err.Error(), "separate concatenated key exports with a newline") {
+		t.Fatalf("LoadKeyring(%d glued blocks) error does not name the remedy:\n%v", gluedBlockCount, err)
+	}
+}
+
+// requireCattedKeyringStillLoads is the first of that test's two controls, and
+// the one about the shape rather than about the blocks: two gpg exports catted,
+// each ending with the newline gpg writes, still load as two keys.
+func requireCattedKeyringStillLoads(t *testing.T) {
+	t.Helper()
+
+	kr, err := LoadKeyring(fixturePath(twoKeyFixture))
+	if err != nil || kr.Len() != 2 {
+		t.Fatalf("positive control: LoadKeyring(%s) = %v holding %d keys, want nil and 2",
+			twoKeyFixture, err, keyringLen(kr))
+	}
+}
+
+// gluedArmorBlocks builds gluedBlockCount copies of one armored key export
+// concatenated directly, and the same copies with a newline between them, in
+// that order. The two differ by those newlines and by nothing else, which is
+// what makes the second the control for the first.
+func gluedArmorBlocks(t *testing.T) ([]byte, []byte) {
+	t.Helper()
+
+	block := armorEncode(t, openpgp.PublicKeyType, readFixture(t, binaryFixture))
+	glued := make([]byte, 0, gluedBlockCount*len(block))
+	separated := make([]byte, 0, gluedBlockCount*(len(block)+1))
+	for range gluedBlockCount {
+		glued = append(glued, block...)
+		separated = append(separated, block...)
+		separated = append(separated, '\n')
+	}
+
+	return glued, separated
+}
+
+// writeKeyringFile writes one keyring into dir under leaf and returns its path.
+func writeKeyringFile(t *testing.T, dir, leaf string, data []byte) string {
+	t.Helper()
+
+	path := filepath.Join(dir, leaf)
+	// #nosec G703 -- dir is the caller's own t.TempDir and leaf is a constant at
+	// every call site; no part of the path comes from outside this package.
+	if err := os.WriteFile(path, data, keyringFileMode); err != nil {
+		t.Fatalf("write %s: %v", leaf, err)
+	}
+
+	return path
+}
+
+// keyringLen reports how many keys a keyring holds, and zero for the nil one a
+// refusal returns, so a failure message can name both outcomes in one line.
+func keyringLen(kr *Keyring) int {
+	if kr == nil {
+		return 0
+	}
+
+	return kr.Len()
+}
+
+// TestEveryCommittedFixtureOpensItsArmorAtALineStart is the acceptance half of
+// that refusal, stated over every file testdata holds rather than over the
+// armored ones a hand-written list would have named.
+//
+// The refusal above carries its own controls, so a rule tight enough to turn
+// away ordinary armor does not go unnoticed. What those controls cannot state
+// is the property over the directory: a fixture committed later is inside it
+// with nobody adding it to a list.
+//
+// Two fixtures are named as well as swept, and
+// requireDamagedArmorFixturesOpenAtALineStart holds which two and why.
+func TestEveryCommittedFixtureOpensItsArmorAtALineStart(t *testing.T) {
+	t.Parallel()
+
+	entries, err := os.ReadDir(testdataDir)
+	if err != nil {
+		t.Fatalf("read %s: %v", testdataDir, err)
+	}
+
+	carrying := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		data := readFixture(t, name)
+		if checkErr := checkArmorBlockStartsAtLineStart(data); checkErr != nil {
+			t.Errorf("checkArmorBlockStartsAtLineStart(%s) = %v, want nil", name, checkErr)
+
+			continue
+		}
+		if bytes.Contains(data, []byte(armorBlockStart)) {
+			carrying++
+		}
+	}
+
+	// Without this the sweep passes just as well against a testdata directory
+	// holding no armor at all.
+	if carrying == 0 {
+		t.Fatalf("no committed fixture carries an armor block start, so the sweep measured nothing")
+	}
+	requireDamagedArmorFixturesOpenAtALineStart(t)
+
+	// The positive control for the sweep itself: the check does refuse
+	// something, so "every fixture passed" is not "the check never fires".
+	glued, _ := gluedArmorBlocks(t)
+	if checkErr := checkArmorBlockStartsAtLineStart(glued); !errors.Is(checkErr, errArmorBlockStartMidLine) {
+		t.Fatalf("positive control: checkArmorBlockStartsAtLineStart(glued blocks) = %v, want the mid-line refusal", checkErr)
+	}
+	t.Logf("%d of the %d committed fixtures carry an armor block start, every one of them at a line start", carrying, len(entries))
+}
+
+// requireDamagedArmorFixturesOpenAtALineStart names the two fixtures the sweep
+// above would otherwise cover anonymously.
+//
+// They are the ones whose armor was deliberately damaged, and so the ones a
+// reader would expect this rule to catch. Neither is its shape: sig-a-badarmor.asc
+// has its BODY joined into one line with the opening line untouched, and
+// sig-a-badbase64.asc has one body character replaced. Both still open their
+// armor at the start of a line, and this rule is about nothing else.
+func requireDamagedArmorFixturesOpenAtALineStart(t *testing.T) {
+	t.Helper()
+
+	for _, name := range []string{sigFoldedArmor, sigBadBase64} {
+		data := readFixture(t, name)
+		if !bytes.Contains(data, []byte(armorBlockStart)) {
+			t.Fatalf("%s carries no armor block start, so it is not the fixture this row is about", name)
+		}
+		if checkErr := checkArmorBlockStartsAtLineStart(data); checkErr != nil {
+			t.Errorf("checkArmorBlockStartsAtLineStart(%s) = %v, want nil: its damage is inside the body", name, checkErr)
+		}
 	}
 }

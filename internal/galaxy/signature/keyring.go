@@ -2,6 +2,7 @@ package signature
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -36,7 +37,10 @@ const (
 	// That argument is only worth making because the ceiling is the sole place
 	// a configured key can drop out of the trust set: readArmoredKeyRing reads
 	// every armor block in the file rather than the first, so no key goes
-	// missing merely for being written after another one.
+	// missing merely for being written after another one. What keeps that a
+	// property of the file rather than of how it was assembled is
+	// errArmorBlockStartMidLine, which turns the one concatenation the block cut
+	// cannot see into a refusal instead of a silent short read.
 	//
 	// helpers.NewSizeLimitedReader is the module's own reader for this shape
 	// and is deliberately not used here: it raises helpers.ErrResponseTooLarge,
@@ -59,9 +63,10 @@ const (
 
 	// privateKeyArmorHeader opens an ASCII-armored OpenPGP private key block.
 	// It is a routing needle, never an accepted shape: a file carrying one is
-	// read as armor so that loadKeyring's own secret-material check is what
-	// refuses it, rather than the binary reader failing on base64 text and
-	// reporting a malformed packet an operator cannot act on.
+	// read as armor so that the secret-material refusal is what it earns, rather
+	// than the binary reader failing on base64 text and reporting a malformed
+	// packet an operator cannot act on. What produces that refusal is the packet
+	// walk's own secret-key arm, on the block's decoded bytes.
 	//
 	// #nosec G101 -- this is the public delimiter line that introduces such a
 	// block, not key material: it is the needle that gets a file holding one
@@ -124,6 +129,45 @@ const (
 	armorHeaderMaxSize = 4096
 )
 
+// errArmorBlockStartMidLine is the verdict for a keyring file carrying an armor
+// block's opening prefix somewhere other than the start of a line.
+//
+// The shape it exists for is one concatenation produces, and it is measured
+// rather than argued: a block armor.Encode writes ends on the final "-" of its
+// end line, with no terminator behind it, so `cat a.asc b.asc` puts b's opening
+// line on the end of a's last line. Three such blocks concatenated present ONE
+// opening line to the cut; measured, they load as 1 entity with a nil error
+// where the same three blocks separated by newlines load as 3, and 5000 of them
+// load as 1 and drop 4999 in the same silence. A file gpg wrote is not this
+// shape, since `gpg --export --armor` ends its output with a newline, which is
+// what keeps the committed two-keys.asc loading as two keys.
+// TestGluedArmorBlocksAreRefused is where all of that is a measurement rather
+// than a claim.
+//
+// It is refused rather than cut apart at the second start, and that direction
+// is the point. Teaching the cut to find an opening line mid-line would widen
+// what counts as a block to a shape neither armor.Encode nor gpg writes, and it
+// is the direction that can merge two blocks rather than turn the file away;
+// this one costs a single scan over bytes the size ceiling has already put in
+// memory, and it names the remedy in the message.
+//
+// It is an acceptance change on the keyring path, and disclosed as one: a file
+// carrying that sequence anywhere but at the start of a line stops loading,
+// where before it loaded and silently dropped every key behind the first block.
+// What it costs is availability on a file the loader could not have read
+// correctly anyway.
+//
+// The blob path is left as it is, and the asymmetry is a property of what each
+// kind of file is for rather than an oversight: checkOne decodes the first armor
+// block of a signature blob and reads nothing behind it, so a glued blob
+// verifies its first signature and the remaining bytes reach neither the gate
+// nor the verifier - they are granted nothing, and one blob per source is the
+// model that path is built on. A keyring is the opposite: every block in it is
+// material the operator meant this run to trust, so a block the cut cannot see
+// is a configured key the run silently does not hold. Hence the keyring path
+// refuses what the blob path ignores.
+var errArmorBlockStartMidLine = errors.New("an armored block start does not begin its line")
+
 // Keyring is the OpenPGP key material of one keyring file, together with the
 // path it was read from. Nothing in this package mutates one after LoadKeyring
 // returns it.
@@ -162,7 +206,11 @@ func (k *Keyring) Len() int {
 // An armored file is read whole: every block in it must be key material and
 // every one of them contributes its keys, so the
 // `cat teamA.asc teamB.asc > keyring.asc` an operator builds a multi-key
-// keyring with holds both teams rather than the first.
+// keyring with holds both teams rather than the first. That concatenation has
+// one requirement, and a file failing it is refused with the remedy named
+// rather than read short: each export must end with a newline, so that the next
+// export's opening line begins a line of its own. errArmorBlockStartMidLine
+// holds why a file where one does not is refused rather than cut apart anyway.
 //
 // Only public key material is accepted. A file holding a secret key is refused
 // with helpers.ErrKeyringUnreadable naming the export that would have been
@@ -207,19 +255,48 @@ func loadKeyring(path string, limit int64) (*Keyring, error) {
 
 	entities, err := readEntities(data)
 	if err != nil {
+		if errors.Is(err, errSecretKeyPacket) {
+			return nil, secretKeyMaterialError(path)
+		}
+
 		return nil, fmt.Errorf("%w: %q: %w", helpers.ErrKeyringUnreadable, path, err)
 	}
 	if len(entities) == 0 {
 		return nil, fmt.Errorf("%w: %q holds no OpenPGP keys", helpers.ErrKeyringUnreadable, path)
 	}
 	if holdsSecretKey(entities) {
-		return nil, fmt.Errorf(
-			"%w: %q holds secret key material; verifying needs only the public half, "+
-				"so export that instead: gpg --export --armor > keyring.asc",
-			helpers.ErrKeyringUnreadable, path)
+		// Unreachable from any file, and deliberately kept: readEntities passes
+		// the walk that refuses the two secret-key tags before openpgp.ReadKeyRing
+		// sees them, so no entity built here can carry private material. What is
+		// uncovered is this branch rather than the predicate -
+		// TestHoldsSecretKeyReportsMaterialInEitherPlace drives that directly -
+		// and what its removal would cost is a reader that reached the library
+		// without the walk in front of it having no refusal at all.
+		return nil, secretKeyMaterialError(path)
 	}
 
 	return &Keyring{path: path, entities: entities}, nil
+}
+
+// secretKeyMaterialError is the one refusal a keyring holding secret material
+// earns, wherever that material was noticed.
+//
+// The packet walk refuses the two secret-key tags before anything parses them,
+// and holdsSecretKey stands behind it over entities that did parse; rendering
+// both through one function is what keeps the operator-facing text and the exit
+// class a property of the policy rather than of which check happened to run.
+// Naming the export to make instead is the whole of what the message is for: the
+// file is one an operator did not mean to point a build at, and the remedy is
+// one command.
+//
+// errSecretKeyPacket is rendered into the sentence rather than named beside it,
+// which is what keeps this refusal reachable through errors.Is whichever of the
+// two checks produced it while leaving the operator-facing text one sentence.
+func secretKeyMaterialError(path string) error {
+	return fmt.Errorf(
+		"%w: %q holds %w; verifying needs only the public half, "+
+			"so export that instead: gpg --export --armor > keyring.asc",
+		helpers.ErrKeyringUnreadable, path, errSecretKeyPacket)
 }
 
 // readEntities reads data as key material, choosing the encoding from the bytes
@@ -247,7 +324,7 @@ func readEntities(data []byte) (openpgp.EntityList, error) {
 	if bytes.Contains(data, []byte(publicKeyArmorHeader)) || bytes.Contains(data, []byte(privateKeyArmorHeader)) {
 		return readArmoredKeyRing(data)
 	}
-	if err := checkPacketFraming(data); err != nil {
+	if err := checkPacketFraming(data, keyringProfile()); err != nil {
 		return nil, err
 	}
 
@@ -275,25 +352,46 @@ func readEntities(data []byte) (openpgp.EntityList, error) {
 // A block that is not key material is a refusal, not something skipped:
 // readKeyArmorBlock names the type it found, and skipping would put the loader
 // back in the business of using part of a file quietly. The cut itself errs the
-// same way. isArmorBlockStart recognizes every opening line armor.Decode does,
-// so no real block start is missed and no two blocks are ever merged into one
-// that quietly drops a key; it can additionally start a block at a line the
-// decoder would have skipped as garbage, and the worst that costs is a slice
-// holding nothing the decoder recognizes, which is refused.
+// same way. isArmorBlockStart finds an opening line only at the start of a
+// line, which is where armor.Encode and gpg both write one; it can additionally
+// start a block at a line the decoder would have skipped as garbage, and the
+// worst that costs is a slice holding nothing the decoder recognizes, which is
+// refused.
+//
+// What guarantees that no two blocks are ever merged into one that quietly
+// drops a key is checkArmorBlockStartsAtLineStart rather than that recognizer:
+// a file carrying the opening prefix anywhere but at the start of a line does
+// not load at all. Refusing that shape is what lets the cut stay a line-start
+// test - errArmorBlockStartMidLine holds the measurement and the argument.
+//
+// The packet ceiling is carried across the blocks rather than applied to each,
+// which is the one thing reading a file block by block would otherwise give
+// away: the ceiling is stated over a keyring file, and a per-block count bounds
+// nothing a file cannot buy more of by carrying another block. spent is that
+// carry, and walkPacketFraming's own doc comment holds what a file measured
+// without it did.
 func readArmoredKeyRing(data []byte) (openpgp.EntityList, error) {
+	if err := checkArmorBlockStartsAtLineStart(data); err != nil {
+		return nil, err
+	}
+
 	var entities openpgp.EntityList
 
 	// blockStart is where the block currently being accumulated begins, or -1
-	// before the first opening line has been seen.
+	// before the first opening line has been seen; spent is how much of this
+	// file's own ceiling the blocks already read used, their own
+	// armorBlockPacketCost included.
 	blockStart := -1
+	spent := 0
 	readBlock := func(end int) error {
 		if blockStart < 0 {
 			return nil
 		}
-		block, err := readKeyArmorBlock(data[blockStart:end])
+		block, packets, err := readKeyArmorBlock(data[blockStart:end], spent)
 		if err != nil {
 			return err
 		}
+		spent += packets
 		entities = append(entities, block...)
 
 		return nil
@@ -321,7 +419,19 @@ func readArmoredKeyRing(data []byte) (openpgp.EntityList, error) {
 }
 
 // readKeyArmorBlock decodes one armored block and reads the key material out of
-// it, with the packet framing gate standing between the two steps.
+// it, with the packet framing gate standing between the two steps, and reports
+// what the block cost against the file's packet budget.
+//
+// spent is how much of the ceiling the file's earlier blocks already used, and
+// what this block cost comes back so the caller can keep that sum: the ceiling
+// belongs to the file, and this function sees one block of it.
+//
+// The block itself costs one packet of that budget, charged before the decode
+// rather than after it, and that placement is the whole of what the charge
+// buys: a block decoded and then charged would have already spent the armor
+// decode, an openpgp.ReadKeyRing call and their buffers on a block the budget
+// had no room for. keyringMaxPackets' own doc comment holds what charging it
+// costs a real keyring and what leaving it uncharged cost a hostile one.
 //
 // It stands in for openpgp.ReadArmoredKeyRing, which performs both steps in one
 // call with nothing in between, and reproduces that function's own two refusals
@@ -331,22 +441,31 @@ func readArmoredKeyRing(data []byte) (openpgp.EntityList, error) {
 // ungated decoded stream costs, and note that it costs it here on the
 // operator's own file, which is why this closes with the blob path rather than
 // after it.
-func readKeyArmorBlock(data []byte) (openpgp.EntityList, error) {
-	decoded, blockType, err := decodeArmorBlock(data)
-	if armorDecodeFoundNothing(err) {
-		return nil, pgperrors.InvalidArgumentError("no armored data found")
-	}
-	if err != nil {
-		return nil, err
-	}
-	if blockType != openpgp.PublicKeyType && blockType != openpgp.PrivateKeyType {
-		return nil, pgperrors.InvalidArgumentError("expected public or private key block, got: " + blockType)
-	}
-	if err := checkPacketFraming(decoded); err != nil {
-		return nil, err
+func readKeyArmorBlock(data []byte, spent int) (openpgp.EntityList, int, error) {
+	profile := keyringProfile()
+	spent += armorBlockPacketCost
+	if spent > profile.maxPackets {
+		return nil, 0, armorBlockBudgetError(profile.maxPackets)
 	}
 
-	return openpgp.ReadKeyRing(bytes.NewReader(decoded))
+	decoded, blockType, err := decodeArmorBlock(data)
+	if armorDecodeFoundNothing(err) {
+		return nil, 0, pgperrors.InvalidArgumentError("no armored data found")
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	if blockType != openpgp.PublicKeyType && blockType != openpgp.PrivateKeyType {
+		return nil, 0, pgperrors.InvalidArgumentError("expected public or private key block, got: " + blockType)
+	}
+	packets, err := walkPacketFraming(decoded, profile, spent)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	entities, err := openpgp.ReadKeyRing(bytes.NewReader(decoded))
+
+	return entities, packets + armorBlockPacketCost, err
 }
 
 // nextLine returns the line of data beginning at off, without its terminator,
@@ -358,6 +477,49 @@ func nextLine(data []byte, off int) ([]byte, int) {
 	}
 
 	return data[off:], len(data)
+}
+
+// checkArmorBlockStartsAtLineStart refuses data carrying armorBlockStart
+// anywhere but at the start of a line, which is the one shape the cut above
+// cannot see and therefore the one that silently merges two blocks into one.
+// errArmorBlockStartMidLine holds why that is refused rather than cut apart.
+//
+// What may precede the prefix is what isArmorBlockStart itself accepts before
+// it - whitespace and nothing else - so the two agree on where a block may
+// open. The length test that recognizer also applies is deliberately not
+// repeated here: a line too short to be an opening line is one neither the cut
+// nor armor.Decode opens a block at, so it merges nothing and is left alone.
+//
+// Every occurrence in a line is judged rather than the first alone: two
+// prefixes on one line is precisely the concatenated shape, and the second of
+// them is the one carrying keys nobody would read.
+//
+// One pass over the file, in the bytes loadKeyring has already read: each line
+// is scanned once, and a line carrying a second prefix is refused at it rather
+// than walked further.
+func checkArmorBlockStartsAtLineStart(data []byte) error {
+	needle := []byte(armorBlockStart)
+
+	for off := 0; off < len(data); {
+		line, next := nextLine(data, off)
+		for at := 0; ; {
+			i := bytes.Index(line[at:], needle)
+			if i < 0 {
+				break
+			}
+			i += at
+			if len(bytes.TrimSpace(line[:i])) != 0 {
+				// The offset is this walk's own arithmetic and the prefix is a
+				// package constant, so the message carries no part of the input.
+				return fmt.Errorf("%w: %q at byte %d; separate concatenated key exports with a newline",
+					errArmorBlockStartMidLine, armorBlockStart, off+i)
+			}
+			at = i + len(needle)
+		}
+		off = next
+	}
+
+	return nil
 }
 
 // isArmorBlockStart reports whether line opens an armor block.
@@ -378,19 +540,19 @@ func isArmorBlockStart(line []byte) bool {
 // its primary key or in a subkey.
 //
 // Verification needs public keys and nothing else, so a keyring holding a
-// secret key is refused rather than used: the file is one an operator did not
-// mean to point a build at, and both encodings reach this check - the armored
-// one because privateKeyArmorHeader routes it to the armored reader instead of
-// letting it die as a malformed packet stream. The subkey arm is checked as
-// well as the primary because the policy is about the material present, not
-// about which packet a particular exporter chose to put it in.
+// secret key is refused rather than used. Both arms are checked because the
+// policy is about the material present, not about which packet a particular
+// exporter chose to put it in.
 //
-// That subkey arm is deliberately left uncovered by the tests: gpg writes the
-// primary as a secret key packet in every secret export, `--export-secret-
-// subkeys` included, where the primary becomes a stub rather than a public
-// packet - so reaching the arm needs a hand-assembled packet stream no fixture
-// generator produces. Removing it loses the refusal only for such a file, and
-// the primary arm still covers everything gpg can export.
+// It is a backstop rather than the refusal: no entity reaching it can carry
+// private material today, since the only packets that set those two fields are
+// the ones secretKeyPacketTags refuses before any parse, and every path into
+// openpgp.ReadKeyRing passes that walk. So it can only answer true for an
+// entity built some other way - which is what makes it worth keeping and worth
+// testing directly, as TestHoldsSecretKeyReportsMaterialInEitherPlace does over
+// hand-built entities rather than over a file. Removing it would leave a future
+// reader that reaches the library without the walk in front of it with no
+// refusal at all.
 func holdsSecretKey(entities openpgp.EntityList) bool {
 	for _, entity := range entities {
 		if entity.PrivateKey != nil {

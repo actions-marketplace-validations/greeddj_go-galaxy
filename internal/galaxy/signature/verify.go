@@ -292,9 +292,18 @@ func recordFailure(failures []Failure, origin string, err error, ignore StatusSe
 //
 // A signature that verified while naming no identifiable entity keys on the
 // empty string, so every such signature collapses onto one another rather than
-// each inflating the count. go-crypto returns the verifying entity on success,
-// so this is a fail-safe direction for a shape it does not produce, not a case
-// with a fixture behind it.
+// each inflating the count.
+//
+// That guard is deliberately uncovered, and the reason is the fixture rather
+// than the seam: this function is unexported and takes the entity as a
+// parameter, so a test could hand it a nil one in a line, but reaching it the
+// way a run would means an openpgp.CheckDetachedSignature that returns a nil
+// error and no entity - which no committed material produces and no shape of
+// blob has been found to produce. Removing the guard costs a nil dereference
+// inside a verification walk, on an input this package would then have no
+// verdict for at all; what the empty string buys on top of not panicking is that
+// two such signatures collapse onto one key rather than reading as two distinct
+// signers, which is how a required-count policy would be satisfied by one blob.
 func signerKey(signer *openpgp.Entity) string {
 	if signer == nil || signer.PrimaryKey == nil {
 		return ""
@@ -431,7 +440,7 @@ func checkOne(manifest, blob []byte, kr *Keyring) (*openpgp.Entity, error) {
 	if len(packets) == 0 {
 		return nil, errNoSignatureData
 	}
-	if err := checkPacketFraming(packets); err != nil {
+	if err := checkPacketFraming(packets, signatureBlobProfile()); err != nil {
 		return nil, err
 	}
 
