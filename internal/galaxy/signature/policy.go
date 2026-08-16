@@ -186,7 +186,9 @@ type Policy struct {
 	// Ignore is the set of statuses a failed signature may carry without
 	// counting as a failure.
 	Ignore StatusSet
-	// KeyringPath is the keyring location exactly as configured, unexpanded.
+	// KeyringPath is the keyring location exactly as this package received it;
+	// nothing here expands or resolves it. See NewPolicy for why that belongs
+	// to the caller.
 	KeyringPath string
 	// Required is the parsed required-valid-signature-count spec.
 	Required CountSpec

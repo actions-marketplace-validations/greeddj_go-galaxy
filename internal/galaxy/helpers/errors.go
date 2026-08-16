@@ -745,6 +745,42 @@ var (
 	// typo in the value would read as "this failure is being tolerated" while
 	// the run kept failing on exactly that failure.
 	ErrUnknownSignatureStatusCode = errors.New("unknown signature status code")
+	// ErrInvalidDisableGPGVerify indicates an ANSIBLE_GALAXY_DISABLE_GPG_VERIFY
+	// value that is not one of ansible's recognized boolean spellings
+	// (true/false, yes/no, on/off, 1/0, case-insensitive). The variable is read
+	// by the config layer rather than by the flag itself, because that
+	// vocabulary is wider than the one Go's own bool parser accepts.
+	//
+	// It is a hard error rather than a warned-and-defaulted false, for the same
+	// reason ErrInvalidValidateCerts is: a security-relevant boolean must never
+	// be guessed, and a value ansible itself refuses must not silently work
+	// here. Defaulting it either way is worse than refusing it - false would
+	// leave an operator who meant to switch verification off believing they
+	// had, and true would switch it off for a typo.
+	//
+	// It is a configuration failure, never a verdict: nothing was verified when
+	// this fires, so it classifies with isSignatureConfigError rather than with
+	// the verification sentinels above.
+	ErrInvalidDisableGPGVerify = errors.New("invalid disable_gpg_verify value")
+	// ErrEmptySignatureValue indicates a source explicitly supplied an empty
+	// value for the keyring path or the required-valid-signature-count, both of
+	// which name something rather than switch something.
+	//
+	// Omitting a setting is how an operator asks for its default; supplying it
+	// empty is an expression that failed. The shape this exists for is a CI
+	// block writing a secret into an environment variable, which evaluates to
+	// nothing precisely on a fork's pull request, since that is the run secrets
+	// are withheld from - and the run most in need of verification. Left
+	// unrefused, the empty keyring reads as "verify nothing" and the empty
+	// count silently replaces a configured "+all" with the default of 1.
+	//
+	// It is a refusal rather than a warning for the same reason
+	// ErrInsecureTokenTransport is one: a security-relevant value is never
+	// guessed, and a warning in a CI log is not a control. It covers those two
+	// settings only - an empty disable-gpg-verify reads false and an empty
+	// ignore list tolerates nothing, each a well-defined meaning in the safe
+	// direction, so neither is a failed expression this can recognize.
+	ErrEmptySignatureValue = errors.New("signature setting was supplied empty")
 	// ErrManifestNotFound indicates a collection artifact names no
 	// MANIFEST.json within ManifestScanMaxBytes of the start of its tar stream.
 	// The bound is what makes this a verdict rather than an abandoned search: a

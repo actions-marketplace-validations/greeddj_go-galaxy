@@ -115,11 +115,11 @@ func TestCleanupConfigSurface(t *testing.T) {
 }
 
 // TestCollectionCommandConfigSurface locks in the documented
-// BuildCollectionConfig contract for install/lock/warm/outdated: they all
-// register the identical CollectionFlags+S3Flags union (see install.go,
-// lock.go, warm.go, outdated.go), so one representative run through
-// "install" covers all four. Every collection-level flag set here must
-// round-trip into the matching Config field.
+// BuildCollectionConfig contract for install/lock/warm/outdated: all four
+// register the same CollectionFlags+S3Flags union (see install.go, lock.go,
+// warm.go, outdated.go), which the signature flags are deliberately no part
+// of, so one representative run through "install" covers all four. Every
+// collection-level flag set here must round-trip into its Config field.
 func TestCollectionCommandConfigSurface(t *testing.T) {
 	neutralizeAnsibleDiscovery(t)
 	cacheDir := t.TempDir()

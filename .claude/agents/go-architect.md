@@ -89,7 +89,9 @@ Read `CLAUDE.md` for the full picture; these are the load-bearing ones.
 - **Drop-in `ansible.cfg`** is limited to `[defaults] collections_path`,
   `[galaxy] server`, `[galaxy] server_list`, `[galaxy] cache_dir`, and
   `[galaxy_server.<id>]` (`url`, `token`, `validate_certs`, plus a no-op
-  `api_version: v3`). New keys are scope expansion - flag
+  `api_version: v3`). Ansible's four `[galaxy]` signature settings are
+  deliberately not among them - flags and environment variables only; see
+  `cliflags.SignatureFlags`. New keys are scope expansion - flag
   them.
 
 ## Efficiency bar

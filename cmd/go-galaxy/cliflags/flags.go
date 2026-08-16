@@ -212,6 +212,82 @@ func LockInspectFlags() []cli.Flag {
 	}
 }
 
+// SignatureFlags defines the CLI flags for collection signature verification.
+//
+// It is a separate constructor rather than part of CollectionFlags because not
+// every collection command can honor these: lock and outdated verify nothing,
+// and mounting the flags on them would advertise four settings those commands
+// would silently ignore. A command mounts this set exactly when it verifies.
+//
+// These flags and their environment variables are the whole configuration
+// surface for signature verification: ansible.cfg deliberately configures none
+// of it, even though ansible itself reads all four settings from a [galaxy]
+// section. This program cannot establish whether a discovered ansible.cfg was
+// authored by the operator or by the repository under test, and a setting that
+// can relax a verification check must not come from a file whose author is
+// unknown.
+//
+// Four shapes make that question undecidable here, and the second is the one
+// that reads safe and is not: a repository supplies ./ansible.cfg; a workflow
+// setting ANSIBLE_CONFIG normally names a repository-relative path, so the
+// operator picks the variable while the checkout picks the file; a repository
+// that also supplies the workflow picks both; and on a self-hosted runner a job
+// can leave ~/.ansible.cfg behind for every later job, which outlives the
+// checkout that dropped it.
+//
+// Each proxy for the authorship question leaks somewhere different, which is
+// why none is used. Keying on the discovery slot misses the second shape above.
+// Keying on the resolved path sitting under the working directory misses a
+// symlinked target and a run whose working directory is not the checkout.
+// Keying on file ownership misses the runner case entirely, since the earlier
+// job wrote the file as the same user. An environment variable is not immune to
+// a hostile workflow either, but it is set by whoever configured the run rather
+// than by whatever the checkout happened to contain.
+func SignatureFlags() []cli.Flag {
+	return []cli.Flag{
+		&cli.StringFlag{
+			Name:    "keyring",
+			Usage:   "Path to the OpenPGP keyring collection signatures are verified against; unset means no verification",
+			Sources: cli.EnvVars("GO_GALAXY_KEYRING", "ANSIBLE_GALAXY_GPG_KEYRING"),
+		},
+		&cli.StringFlag{
+			Name: "required-valid-signature-count",
+			Usage: "How many signatures must verify: a non-negative count or 'all', optionally prefixed with '+' " +
+				"to also require that at least one signature verified",
+			Value: galaxyhelpers.DefaultRequiredValidSignatureCount,
+			Sources: cli.EnvVars(
+				"GO_GALAXY_REQUIRED_VALID_SIGNATURE_COUNT",
+				"ANSIBLE_GALAXY_REQUIRED_VALID_SIGNATURE_COUNT",
+			),
+		},
+		&cli.StringSliceFlag{
+			Name:  "ignore-signature-status-code",
+			Usage: "Signature failure status code to tolerate (repeatable), e.g. BADSIG or NO_PUBKEY",
+			// The go-galaxy name is singular and the ansible one plural, and
+			// neither can be made to match the other: the first is derived from
+			// this flag's own name, the second is ansible's own variable.
+			Sources: cli.EnvVars(
+				"GO_GALAXY_IGNORE_SIGNATURE_STATUS_CODE",
+				"ANSIBLE_GALAXY_IGNORE_SIGNATURE_STATUS_CODES",
+			),
+		},
+		&cli.BoolFlag{
+			// ANSIBLE_GALAXY_DISABLE_GPG_VERIFY is deliberately NOT a source
+			// here, and is read in internal/galaxy/config instead, in the
+			// precedence slot directly below this flag. urfave/cli parses a bool
+			// source with Go's own bool grammar, which rejects the yes/no and
+			// on/off spellings ansible accepts - and rejects them by aborting the
+			// command, so an environment already exporting one for ansible would
+			// make every go-galaxy run fail. See resolveDisableGPGVerify
+			// (internal/galaxy/config/signature.go) for the full argument,
+			// including why this is the only one of the four that needs it.
+			Name:    "disable-gpg-verify",
+			Usage:   "Skip signature verification even when a keyring is configured",
+			Sources: cli.EnvVars("GO_GALAXY_DISABLE_GPG_VERIFY"),
+		},
+	}
+}
+
 // S3Flags defines CLI flags for S3 cache configuration.
 func S3Flags() []cli.Flag {
 	return []cli.Flag{

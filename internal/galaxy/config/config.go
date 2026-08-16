@@ -57,8 +57,12 @@ type Config struct {
 	// effectively had.
 	Servers []Server
 	S3Cache S3CacheConfig
-	Timeout time.Duration
-	Workers int
+	// Signature is this run's resolved signature verification surface: the
+	// keyring location, how many signatures must verify, which failure
+	// statuses are tolerated, and whether verification is switched off.
+	Signature SignatureConfig
+	Timeout   time.Duration
+	Workers   int
 	// DownloadWorkers bounds the artifact-download and cache-presence-probe
 	// pool the prefetcher runs, separately from Workers: that pool only waits
 	// on the network, never extracts a tree, so its useful size is not the
@@ -114,7 +118,9 @@ func (c *Config) IsOffline() bool {
 // this path - the collection flags (server, timeout, download-path,
 // requirements-file, ansible-config, workers, download-workers, no-cache,
 // refresh, clear-cache, no-deps, offline, resolution, lock-file, frozen,
-// metrics-file), the S3 cache flags (s3-bucket and friends), and the
+// metrics-file), the signature flags (keyring,
+// required-valid-signature-count, ignore-signature-status-code,
+// disable-gpg-verify), the S3 cache flags (s3-bucket and friends), and the
 // global flags (verbose, quiet, dry-run, cache-dir). A command is not
 // required to register every one of them - cleanup, for example, registers
 // only the S3 flags plus the globals, since it drives its work from the
@@ -125,6 +131,14 @@ func (c *Config) IsOffline() bool {
 // read the matching Config field. Any command wired into this path in the
 // future must register every flag whose Config field it reads, or it will
 // silently observe a zero value instead of an error.
+//
+// The signature flags are the one group whose zero value is not merely unread
+// but unusable: an empty required-valid-signature-count is not a spec any
+// grammar accepts, so applySignatureConfig falls back to
+// helpers.DefaultRequiredValidSignatureCount rather than validating "". That
+// fallback is what lets a command registering none of these flags build a
+// config at all, since this function validates the count for every command
+// regardless of which flags that command declared.
 func BuildCollectionConfig(c *cli.Command) (*Config, error) {
 	cfg := newConfigFromCLI(c)
 	if err := applyTimeout(cfg, c); err != nil {
@@ -153,6 +167,13 @@ func BuildCollectionConfig(c *cli.Command) (*Config, error) {
 		return nil, err
 	}
 	cfg.S3Cache = s3Cfg
+
+	// Last, deliberately: every config error above keeps the precedence it
+	// already had, so which failure a broken configuration reports first does
+	// not change because a signature surface was added behind it.
+	if err := applySignatureConfig(cfg, c); err != nil {
+		return nil, err
+	}
 
 	return cfg, nil
 }

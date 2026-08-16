@@ -472,6 +472,16 @@ const (
 	// any real collection, which carries one or two.
 	MaxSignaturesPerCollection = 64
 
+	// DefaultRequiredValidSignatureCount is the required-valid-signature-count
+	// spec a run uses when no source supplied one. It is both what the flag
+	// advertises as its default and what the config layer falls back to, which
+	// are two different needs rather than one: a command that never registers
+	// the flag reads the Go zero value of an unknown flag name, so the flag's
+	// own Value is unreachable and an empty spec would otherwise reach
+	// signature.ParseCountSpec, which refuses it. The value is ansible's own
+	// default.
+	DefaultRequiredValidSignatureCount = "1"
+
 	// ManifestFileName is the archive-relative name of a collection's manifest,
 	// the one document a collection signature is made over.
 	ManifestFileName = "MANIFEST.json"

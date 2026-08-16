@@ -663,10 +663,11 @@ func isUsageError(err error) bool {
 // this tool fetches, a source URL embedding a credential in its userinfo, a
 // keyring it cannot read or whose container format it does not open, a
 // requirements file declaring signatures with no keyring configured, or a
-// required-count or ignored-status-code value it does not accept. The predicate
-// every member shares is the one every other usage sentinel shares: an operator
-// has to change something - a flag, an environment value, ansible.cfg, or the
-// requirements file - and no retry repairs it.
+// required-count, ignored-status-code, or disable-verification value it does
+// not accept, or one of the two settings that name something supplied as an
+// empty value. The predicate every member shares is the one every other usage
+// sentinel shares: an operator has to change something - a flag, an environment
+// value, ansible.cfg, or the requirements file - and no retry repairs it.
 //
 // helpers.ErrSignatureSourceUserinfo belongs here on that predicate rather than
 // by association with the fetch that raised it: the value is refused before a
@@ -685,7 +686,9 @@ func isSignatureConfigError(err error) bool {
 		errors.Is(err, helpers.ErrKeyringIsKeybox) ||
 		errors.Is(err, helpers.ErrKeyringRequired) ||
 		errors.Is(err, helpers.ErrInvalidSignatureCount) ||
-		errors.Is(err, helpers.ErrUnknownSignatureStatusCode)
+		errors.Is(err, helpers.ErrUnknownSignatureStatusCode) ||
+		errors.Is(err, helpers.ErrInvalidDisableGPGVerify) ||
+		errors.Is(err, helpers.ErrEmptySignatureValue)
 }
 
 // isConfigUsageError reports whether err is a config/environment-level usage

@@ -1400,6 +1400,26 @@ var signatureExitCases = []exitCase{
 		wantCode: ExitInstall,
 	},
 	{
+		name:     "invalid disable_gpg_verify, bare",
+		err:      fmt.Errorf("%w: %q", helpers.ErrInvalidDisableGPGVerify, "maybe"),
+		wantCode: ExitUsage,
+	},
+	{
+		name:     "invalid disable_gpg_verify, aggregated",
+		err:      aggregatedBehindInstallFailure(helpers.ErrInvalidDisableGPGVerify),
+		wantCode: ExitInstall,
+	},
+	{
+		name:     "empty signature value, bare",
+		err:      fmt.Errorf("%w: --keyring is empty", helpers.ErrEmptySignatureValue),
+		wantCode: ExitUsage,
+	},
+	{
+		name:     "empty signature value, aggregated",
+		err:      aggregatedBehindInstallFailure(helpers.ErrEmptySignatureValue),
+		wantCode: ExitInstall,
+	},
+	{
 		name:     "manifest not found, bare",
 		err:      fmt.Errorf("%w: ctx", helpers.ErrManifestNotFound),
 		wantCode: ExitInstall,
@@ -1453,7 +1473,7 @@ var signatureExitCases = []exitCase{
 // exitClasses below its isInstallError entry. Exactly one row fails - the
 // aggregated verdict, which is the whole reason that entry sits where it does:
 //
-//	exitcode_test.go:1463: FromError(signature verification failed, aggregated) = 5, want 10
+//	exitcode_test.go:1483: FromError(signature verification failed, aggregated) = 5, want 10
 func TestSignatureExitClassification(t *testing.T) {
 	t.Parallel()
 	for _, tt := range signatureExitCases {

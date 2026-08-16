@@ -210,6 +210,34 @@ func TestParseAnsibleConfigServerList(t *testing.T) {
 	})
 }
 
+// TestParseAnsibleConfigSignatureKeysAreNotRead pins a decision rather than a
+// behavior: the signature policy is configured from flags and environment
+// variables only, so a [galaxy] section carrying all four of ansible's
+// signature keys parses to nothing at all.
+//
+// The reason is that this program cannot establish who authored a discovered
+// ansible.cfg, and a setting that can relax a verification check must not come
+// from a file whose author is unknown. cliflags.SignatureFlags holds that
+// argument, including why each proxy for the authorship question leaks.
+//
+// Binding absence is what makes this row stronger than a deny-list: it needs
+// no list to keep current, and it fails the moment anyone teaches the parser
+// one of these keys again without answering that question first.
+func TestParseAnsibleConfigSignatureKeysAreNotRead(t *testing.T) {
+	t.Parallel()
+	runParseAnsibleConfigCases(t, []parseAnsibleConfigCase{
+		{
+			name: "every signature key is ignored",
+			input: "[galaxy]\n" +
+				"gpg_keyring = /repo/keys.gpg\n" +
+				"required_valid_signature_count = 0\n" +
+				"ignore_signature_status_codes = BADSIG\n" +
+				"disable_gpg_verify = yes\n",
+			want: ansibleConfig{},
+		},
+	})
+}
+
 // TestParseAnsibleConfigGalaxyServerSections checks that every
 // [galaxy_server.<id>] section is captured in full into GalaxyServers,
 // keyed by the id exactly as written after the dot, with the outer map
