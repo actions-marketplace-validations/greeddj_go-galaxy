@@ -41,7 +41,12 @@ type installPlan struct {
 	collections map[string]collection
 	graph       map[string][]string
 	prefetch    *prefetcher
-	levels      [][]string
+	// verify is this run's signature verification state, nil when the run
+	// verifies nothing. It is resolved from the requirements roots, so it
+	// belongs to the plan rather than to the state initInstall builds before
+	// any requirements file has been read.
+	verify *verifyContext
+	levels [][]string
 }
 
 // stateWork is the work half of a collection command's lifecycle/work split:
@@ -325,6 +330,17 @@ func prepareInstallPlan(
 		return nil, err
 	}
 
+	// Resolved from the roots the requirements file declares, which survive on
+	// prep.AllRoots under --frozen too, since loadRoots runs before
+	// resolveOrLoadLockfile branches. It runs ahead of the prefetcher rather
+	// than beside the install workers so that an unreadable keyring, or
+	// requirements declaring signatures with none configured, fails the run
+	// before a single background download has been scheduled.
+	verify, err := newVerifyContext(cfg, runtime, prep.AllRoots)
+	if err != nil {
+		return nil, err
+	}
+
 	resolved, graph, err := resolveOrLoadLockfile(ctx, cfg, runtime, state, prep)
 	if err != nil {
 		return nil, err
@@ -364,6 +380,7 @@ func prepareInstallPlan(
 		graph:       graph,
 		levels:      levels,
 		prefetch:    prefetch,
+		verify:      verify,
 	}, nil
 }
 

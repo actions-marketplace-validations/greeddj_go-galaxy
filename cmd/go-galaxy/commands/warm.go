@@ -13,6 +13,7 @@ import (
 // CI image bake: subsequent install runs hardlink instantly.
 func Warm() *cli.Command {
 	flags := cliflags.CollectionFlags()
+	flags = append(flags, cliflags.SignatureFlags()...)
 	flags = append(flags, cliflags.S3Flags()...)
 
 	return &cli.Command{

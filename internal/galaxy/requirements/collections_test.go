@@ -2,6 +2,7 @@ package requirements
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -41,7 +42,7 @@ type parseCollectionsAcceptedCase struct {
 // in their own named function below rather than in a closure here, so one row's
 // branches are not counted against the whole table.
 func parseCollectionsAcceptedCases() []parseCollectionsAcceptedCase {
-	return []parseCollectionsAcceptedCase{
+	return append(signatureShapeAcceptedCases(), []parseCollectionsAcceptedCase{
 		{
 			name:   "string list",
 			input:  "- community.general\n- ansible.posix\n",
@@ -106,6 +107,101 @@ func parseCollectionsAcceptedCases() []parseCollectionsAcceptedCase {
 			source: "",
 			check:  checkAcceptedPlainSourceURL,
 		},
+	}...)
+}
+
+// signatureShapeAcceptedCases is the positive control for every signatures:
+// refusal in parseCollectionsRejectedCases: it proves the gate is about SHAPE
+// and about the cap, not about the field being present at all.
+//
+// The four rows are the shapes that carried nothing before checkSignatureSources
+// existed and must keep carrying nothing: an explicit empty list, an absent
+// value, a list of blank strings, and a single string - which is what
+// parseStringList itself accepts and therefore what the shape check has to keep
+// accepting. The fifth is the cap's own boundary, exactly at
+// helpers.MaxSignaturesPerCollection, which must be accepted where one more is
+// refused.
+func signatureShapeAcceptedCases() []parseCollectionsAcceptedCase {
+	return []parseCollectionsAcceptedCase{
+		{
+			name:   "signatures empty list",
+			input:  "- name: ns.name\n  signatures: []\n",
+			source: "https://default",
+			check:  checkAcceptedNoSignatures,
+		},
+		{
+			name:   "signatures absent",
+			input:  "- name: ns.name\n  signatures:\n",
+			source: "https://default",
+			check:  checkAcceptedNoSignatures,
+		},
+		{
+			name:   "signatures list of blanks",
+			input:  "- name: ns.name\n  signatures:\n    - \"\"\n    - \"  \"\n",
+			source: "https://default",
+			check:  checkAcceptedNoSignatures,
+		},
+		{
+			name:   "signatures single string",
+			input:  "- name: ns.name\n  signatures: file:///keys/ns-name.asc\n",
+			source: "https://default",
+			check:  checkAcceptedOneSignature,
+		},
+		{
+			name:   "signatures exactly at the cap",
+			input:  signatureSourcesAtCapInput(),
+			source: "https://default",
+			check:  checkAcceptedSignaturesAtCap,
+		},
+	}
+}
+
+// signatureSourcesAtCapInput builds an entry declaring exactly
+// helpers.MaxSignaturesPerCollection sources, the last value the gate accepts.
+func signatureSourcesAtCapInput() string {
+	var b strings.Builder
+	b.WriteString("- name: ns.name\n  signatures:\n")
+	for i := range helpers.MaxSignaturesPerCollection {
+		fmt.Fprintf(&b, "    - https://sigs.example/%d.asc\n", i)
+	}
+
+	return b.String()
+}
+
+// checkAcceptedNoSignatures asserts a row whose signatures: value contributes
+// nothing at all.
+func checkAcceptedNoSignatures(t *testing.T, collections Collections, _ bool) {
+	t.Helper()
+	if len(collections) != 1 {
+		t.Fatalf("expected 1 collection, got %d", len(collections))
+	}
+	if len(collections[0].Signatures) != 0 {
+		t.Fatalf("expected no signatures, got %v", collections[0].Signatures)
+	}
+}
+
+// checkAcceptedOneSignature asserts the single-string row: the value survives
+// as one source rather than being refused for not being a list.
+func checkAcceptedOneSignature(t *testing.T, collections Collections, _ bool) {
+	t.Helper()
+	if len(collections) != 1 {
+		t.Fatalf("expected 1 collection, got %d", len(collections))
+	}
+	want := []string{"file:///keys/ns-name.asc"}
+	if got := collections[0].Signatures; len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("expected signatures %v, got %v", want, got)
+	}
+}
+
+// checkAcceptedSignaturesAtCap asserts the boundary row: exactly
+// helpers.MaxSignaturesPerCollection sources are kept, none dropped.
+func checkAcceptedSignaturesAtCap(t *testing.T, collections Collections, _ bool) {
+	t.Helper()
+	if len(collections) != 1 {
+		t.Fatalf("expected 1 collection, got %d", len(collections))
+	}
+	if got := len(collections[0].Signatures); got != helpers.MaxSignaturesPerCollection {
+		t.Fatalf("expected %d signatures, got %d", helpers.MaxSignaturesPerCollection, got)
 	}
 }
 
@@ -246,7 +342,7 @@ type parseCollectionsRejectedCase struct {
 // value, both namespace/name conflicts, and the two entry shapes a
 // credential-bearing source: can arrive in.
 func parseCollectionsRejectedCases() []parseCollectionsRejectedCase {
-	return []parseCollectionsRejectedCase{
+	return append([]parseCollectionsRejectedCase{
 		{
 			name:    "unsupported format",
 			input:   "foo: bar\n",
@@ -321,7 +417,127 @@ func parseCollectionsRejectedCases() []parseCollectionsRejectedCase {
 			wantErr:        helpers.ErrGalaxyServerURLUserinfo,
 			mustNotContain: "tok3n-must-not-leak",
 		},
+	}, signatureSourceRejectedCases()...)
+}
+
+// signatureSourceRejectedCases is the signatures: half of the table above,
+// split out for the length budget rather than because it is a separate
+// concern: every row is one way checkSignatureSources refuses a value a
+// requirements file declared.
+func signatureSourceRejectedCases() []parseCollectionsRejectedCase {
+	return append([]parseCollectionsRejectedCase{
+		{
+			// The signatures: field is repository content like source: and,
+			// until checkSignatureSources existed, the only one of this struct's
+			// fields no boundary judged. A source this tool cannot fetch reached
+			// an install worker and failed one collection there, classified as
+			// that collection's failure rather than as the configuration error
+			// it is.
+			name:    "unfetchable signature source rejected",
+			input:   "- name: ns.name\n  signatures:\n    - ftp://sigs.example/ns-name.asc\n",
+			source:  "https://default",
+			wantErr: helpers.ErrUnsupportedSignatureSource,
+		},
+		{
+			// The same shape source: already refuses, one field over, and with
+			// the same obligation: the refusal must not print what it refuses.
+			// Measured before this check existed, in a serialized snapshot
+			// shared across runners:
+			// "signatures":["https://ci-bot:s3cr3t@sig.example/acme-app.asc"].
+			name: "signature source userinfo rejected without echoing it",
+			// #nosec G101 -- test fixture literal, not a real credential
+			input:          "- name: ns.name\n  signatures:\n    - https://bot:tok3n-must-not-leak@sig.example/a.asc\n",
+			source:         "https://default",
+			wantErr:        helpers.ErrSignatureSourceUserinfo,
+			mustNotContain: "tok3n-must-not-leak",
+		},
+		{
+			// Without the shape check, parseStringList's fmt.Sprint arm turns a
+			// mapping into the plausible-looking source "map[]", which nothing
+			// downstream can tell from one an author wrote.
+			name:    "signatures mapping rejected",
+			input:   "- name: ns.name\n  signatures:\n    key: value\n",
+			source:  "https://default",
+			wantErr: helpers.ErrUnsupportedSignatureSource,
+		},
+		{
+			// The same arm one level in: a list carrying a non-string element,
+			// which fmt.Sprint would render as "false" or "0".
+			name:    "signatures list element that is not a string rejected",
+			input:   "- name: ns.name\n  signatures:\n    - false\n",
+			source:  "https://default",
+			wantErr: helpers.ErrUnsupportedSignatureSource,
+		},
+	}, fileSourceRejectedCases()...)
+}
+
+// fileSourceRejectedCases is the file-scheme half of the signatures: table,
+// split out for the length budget. Every row is a file URL that named no local
+// path this tool can read.
+func fileSourceRejectedCases() []parseCollectionsRejectedCase {
+	return []parseCollectionsRejectedCase{
+		{
+			// The five shapes measured accepted at load and refused at fetch
+			// before checkFileSource moved into the shared grammar. Each is a
+			// file URL naming no local path this tool can read; joined behind
+			// helpers.ErrInstallationFailed they exited 5 rather than 2, which
+			// is the exit-class defect this gate exists to close.
+			name:    "file source naming another host",
+			input:   "- name: ns.name\n  signatures:\n    - file://otherhost/abs/sig.asc\n",
+			source:  "https://default",
+			wantErr: helpers.ErrUnsupportedSignatureSource,
+		},
+		{
+			name:    "file source naming an evil host",
+			input:   "- name: ns.name\n  signatures:\n    - file://evil.example/abs/sig.asc\n",
+			source:  "https://default",
+			wantErr: helpers.ErrUnsupportedSignatureSource,
+		},
+		{
+			name:    "bare file scheme",
+			input:   "- name: ns.name\n  signatures:\n    - \"file:\"\n",
+			source:  "https://default",
+			wantErr: helpers.ErrUnsupportedSignatureSource,
+		},
+		{
+			name:    "file scheme with an empty authority and no path",
+			input:   "- name: ns.name\n  signatures:\n    - file://\n",
+			source:  "https://default",
+			wantErr: helpers.ErrUnsupportedSignatureSource,
+		},
+		{
+			name:    "file scheme naming localhost and no path",
+			input:   "- name: ns.name\n  signatures:\n    - file://localhost\n",
+			source:  "https://default",
+			wantErr: helpers.ErrUnsupportedSignatureSource,
+		},
+		{
+			// The starvation defect, made impossible by construction rather
+			// than documented: the gather walks a file's own sources before a
+			// server's, so 200 declared sources against a cap of 64 left every
+			// server-carried signature unreached - measured at 64 requests and
+			// 0 server blobs.
+			name:    "more signature sources than the cap allows",
+			input:   tooManySignatureSourcesInput(),
+			source:  "https://default",
+			wantErr: helpers.ErrTooManySignatureSources,
+		},
 	}
+}
+
+// tooManySignatureSourcesInput builds a requirements entry declaring one more
+// signature source than helpers.MaxSignaturesPerCollection permits. It is
+// generated from the constant rather than spelled out, since the point is the
+// boundary rather than any particular count - and the row below it in
+// parseCollectionsAcceptedCases proves the cap itself is accepted.
+func tooManySignatureSourcesInput() string {
+	var b strings.Builder
+	b.WriteString("- name: ns.name\n  signatures:\n")
+	for i := range helpers.MaxSignaturesPerCollection + 1 {
+		fmt.Fprintf(&b, "    - https://sigs.example/%d.asc\n", i)
+	}
+
+	return b.String()
 }
 
 // TestParseCollectionsNullValue checks that ansible's null-collections-list

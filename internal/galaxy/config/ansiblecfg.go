@@ -3,6 +3,7 @@ package config
 import (
 	"bufio"
 	"io"
+	"slices"
 	"strings"
 )
 
@@ -11,11 +12,39 @@ import (
 // ansible's own configparser-based reader tolerates it, so we strip it too.
 const ansibleBOM = "\uFEFF"
 
+// signatureKeyNames are the four [galaxy] keys ansible reads its signature
+// policy from. This program deliberately reads none of their VALUES (see
+// applySignatureConfig and cliflags.SignatureFlags for why a setting that can
+// relax a verification check must not come from a file whose author this
+// program cannot establish), so the array exists to recognize the names and
+// nothing else.
+//
+// Adding a fifth key ansible learns is one edit here: assignAnsibleValue tests
+// membership in this array and the warning renders it by filtering this same
+// array, so neither has a list of its own to keep current.
+//
+//nolint:gochecknoglobals // a fixed, immutable name table, not mutable shared state.
+var signatureKeyNames = [...]string{
+	"gpg_keyring",
+	"required_valid_signature_count",
+	"ignore_signature_status_codes",
+	"disable_gpg_verify",
+}
+
 // ansibleGalaxyConfig maps the [galaxy] section from ansible.cfg (INI).
 type ansibleGalaxyConfig struct {
 	CacheDir   string
 	Server     string
 	ServerList string
+	// SignatureKeys names the signature keys this file carried, and holds no
+	// value any of them was set to. Recording the NAME and never the value is
+	// the security property rather than an economy: no ansible.cfg-sourced
+	// signature value enters Config at all, so no later change can accidentally
+	// honor one - it would first have to teach the parser to read a value it
+	// currently never stores. What the names buy is the one thing silence costs
+	// an operator: a run that verifies nothing while their keyring sits in
+	// ~/.ansible.cfg gets told which keys were ignored.
+	SignatureKeys []string
 }
 
 // ansibleDefaultsConfig maps the [defaults] section from ansible.cfg (INI).
@@ -27,8 +56,8 @@ type ansibleDefaultsConfig struct {
 // tool understands: [defaults], [galaxy], and any [galaxy_server.<id>].
 type ansibleConfig struct {
 	GalaxyServers map[string]map[string]string
-	Galaxy        ansibleGalaxyConfig
 	Defaults      ansibleDefaultsConfig
+	Galaxy        ansibleGalaxyConfig
 }
 
 // parseAnsibleConfig reads an ansible.cfg (INI-style) file and extracts the
@@ -135,12 +164,34 @@ func assignAnsibleValue(cfg *ansibleConfig, section, key, value string) {
 			cfg.Galaxy.Server = value
 		case "server_list":
 			cfg.Galaxy.ServerList = value
+		default:
+			recordSignatureKey(cfg, key)
 		}
 	default:
 		if id, ok := strings.CutPrefix(section, galaxyServerSectionPrefix); ok {
 			assignGalaxyServerValue(cfg, id, key, value)
 		}
 	}
+}
+
+// recordSignatureKey records that the [galaxy] section named one of ansible's
+// signature keys, so a later warning can say which. The VALUE is not a
+// parameter here, which is what makes "no ansible.cfg-sourced signature value
+// enters Config" a property of this function's signature rather than of its
+// body.
+//
+// A file carrying none of them - the overwhelmingly common case - pays four
+// string comparisons per unrecognized [galaxy] key and allocates nothing, since
+// the slice stays nil. The dedupe is a linear scan because the slice can hold
+// at most four elements, so a repeated key costs a scan of at most three.
+func recordSignatureKey(cfg *ansibleConfig, key string) {
+	if !slices.Contains(signatureKeyNames[:], key) {
+		return
+	}
+	if slices.Contains(cfg.Galaxy.SignatureKeys, key) {
+		return
+	}
+	cfg.Galaxy.SignatureKeys = append(cfg.Galaxy.SignatureKeys, key)
 }
 
 // assignGalaxyServerValue stores key/value into the per-id map for a

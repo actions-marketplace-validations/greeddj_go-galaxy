@@ -48,6 +48,12 @@ type Config struct {
 	// before the output printer exists, so warnings are carried here and
 	// drained later through Infra.WarnConfig.
 	Warnings []string
+	// AnsibleSignatureKeys names the signature keys the discovered ansible.cfg
+	// carried, and never a value any of them was set to - see
+	// ansibleGalaxyConfig.SignatureKeys for why the names alone are recorded.
+	// It is read by the one thing that can act on it, the warning a verifying
+	// command emits once per run through AnsibleSignatureKeysWarning.
+	AnsibleSignatureKeys []string
 	// Servers is the resolved, non-empty list of configured Galaxy
 	// servers, in the precedence and list order documented on
 	// resolveServers. When no server_list is configured it holds exactly
@@ -444,6 +450,7 @@ func applyAnsibleConfig(cfg *Config, c *cli.Command, ansibleConfig ansibleConfig
 	if ansiblePath != "" {
 		cfg.AnsibleConfigPath = ansiblePath
 	}
+	cfg.AnsibleSignatureKeys = ansibleConfig.Galaxy.SignatureKeys
 	cfg.DownloadPath, cfg.AnsibleCollectionsPathUsed = pickConfigValue(c, "download-path", ansibleConfig.Defaults.CollectionsPath)
 	cfg.CacheDir, cfg.AnsibleCacheDirUsed = pickConfigValue(c, "cache-dir", ansibleConfig.Galaxy.CacheDir)
 	serverValue, serverFromEnv := ansibleGalaxyServer(ansibleConfig.Galaxy.Server)

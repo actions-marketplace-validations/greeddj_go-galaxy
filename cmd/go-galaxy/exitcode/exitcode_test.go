@@ -1275,11 +1275,12 @@ func aggregatedBehindInstallFailure(cause error) error {
 // signatureExitCases is TestSignatureExitClassification's table: every
 // signature-family sentinel in both shapes it can reach FromError in - bare,
 // and joined behind the installation-failure headline a per-collection worker
-// aggregates it behind - plus the two shapes that bound the new class from
-// above.
+// aggregates it behind - plus the two shapes that bound the class from above.
 //
-// Read as a specification, the table says one thing: only
-// helpers.ErrSignatureVerificationFailed is the signature class. Every other
+// Read as a specification, the table says one thing: the signature class is
+// helpers.ErrSignatureVerificationFailed and
+// helpers.ErrSignatureAttributionMismatch, the two ways a run ends up unable to
+// attribute an artifact to a publisher it accepts. Every other
 // sentinel here classifies by what actually failed - a wire failure, a
 // configuration value this run cannot use, an artifact's shape, or bytes
 // against a digest - rather than by having been raised while checking a
@@ -1304,6 +1305,31 @@ var signatureExitCases = []exitCase{
 		name:     "signature verification failed, aggregated",
 		err:      aggregatedBehindInstallFailure(helpers.ErrSignatureVerificationFailed),
 		wantCode: ExitSignature,
+	},
+	{
+		// The second member of the signature class: the signatures verified and
+		// vouched for another collection, so the artifact is unattributed for a
+		// different reason than a failed policy - and lands in the same class,
+		// since an operator holds bytes nobody they trust vouched for either way.
+		name:     "signature attribution mismatch, bare",
+		err:      fmt.Errorf("%w: acme.app@1.0.0", helpers.ErrSignatureAttributionMismatch),
+		wantCode: ExitSignature,
+	},
+	{
+		// Aggregated, for the reason the verdict's own aggregated row states:
+		// this is raised inside a per-collection worker, so the joined shape is
+		// the only one that actually occurs.
+		name:     "signature attribution mismatch, aggregated",
+		err:      aggregatedBehindInstallFailure(helpers.ErrSignatureAttributionMismatch),
+		wantCode: ExitSignature,
+	},
+	{
+		// Not a verdict: a requirements file declaring more signature sources
+		// than are ever gathered is a configuration the operator edits, refused
+		// before any signature was looked at.
+		name:     "too many signature sources, bare",
+		err:      fmt.Errorf("%w: 65 distinct sources declared", helpers.ErrTooManySignatureSources),
+		wantCode: ExitUsage,
 	},
 	{
 		name:     "signature source unavailable, bare",
@@ -1473,7 +1499,7 @@ var signatureExitCases = []exitCase{
 // exitClasses below its isInstallError entry. Exactly one row fails - the
 // aggregated verdict, which is the whole reason that entry sits where it does:
 //
-//	exitcode_test.go:1483: FromError(signature verification failed, aggregated) = 5, want 10
+//	exitcode_test.go:1509: FromError(signature verification failed, aggregated) = 5, want 10
 func TestSignatureExitClassification(t *testing.T) {
 	t.Parallel()
 	for _, tt := range signatureExitCases {

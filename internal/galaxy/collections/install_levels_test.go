@@ -55,6 +55,7 @@ func TestInstallLevelsMissingCollectionSurfaces(t *testing.T) {
 		levels,
 		prefetch,
 		root,
+		nil,
 	)
 	if !errors.Is(err, helpers.ErrMissingCollection) {
 		t.Fatalf("err = %v, want errors.Is helpers.ErrMissingCollection", err)
@@ -121,6 +122,7 @@ func TestInstallLevelsJoinsInFlightWorkerOnMissingCollection(t *testing.T) {
 			levels,
 			p,
 			root,
+			nil,
 		)
 		done <- err
 	}()

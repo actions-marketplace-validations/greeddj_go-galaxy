@@ -327,7 +327,7 @@ func (f *prefetchHandoffFixture) runLevels(
 		graph,
 		levels,
 		prefetch,
-		f.root,
+		f.root, nil,
 	)
 	return prefetch, failures, err
 }

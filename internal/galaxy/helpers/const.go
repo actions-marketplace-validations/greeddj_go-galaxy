@@ -439,9 +439,9 @@ const (
 	// It is not configurable, for the same reason the three deadlines above are
 	// not: a knob for a safety ceiling is a knob an operator raises in direct
 	// response to a truncation, which is exactly how the attack this ceiling
-	// defends against succeeds. Should a test need to shrink it, that knob
-	// belongs on Infra beside the other deadlines' own test-only fields and
-	// nowhere else; it must never be wired to a CLI flag, an environment
+	// defends against succeeds. Infra's SignatureFetchDeadline field exists
+	// solely so a test can shrink this value, beside the other deadlines' own
+	// test-only fields; it must never be wired to a CLI flag, an environment
 	// variable, or an ansible.cfg key.
 	SignatureFetchDeadline = 1 * time.Minute
 

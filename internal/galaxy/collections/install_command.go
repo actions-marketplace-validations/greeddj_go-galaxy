@@ -89,10 +89,16 @@ func installWithState(ctx context.Context, cfg *config.Config, runtime *infra.In
 		plan.levels,
 		plan.prefetch,
 		root,
+		plan.verify,
 	)
 	if err != nil {
 		return err
 	}
+
+	// Reported after every worker has joined and before the run's own tail, so
+	// the count is complete and the line sits with the other result-tier lines
+	// rather than among the per-collection ones.
+	plan.verify.reportSkippedUnverified(runtime)
 
 	finalErr := finalizeInstall(ctx, runtime, state.backend, state.store, summary, start)
 	writeRunMetrics(cfg, runtime, "install", start, len(plan.collections), int(summary.count), cfg.Frozen)
@@ -166,8 +172,9 @@ func installLevels(
 	levels [][]string,
 	prefetch *prefetcher,
 	root *os.Root,
+	verify *verifyContext,
 ) (failureSummary, error) {
-	depsCtx := newInstallDeps(cfg, runtime, st, artifacts, extractStore, root, prefetch.cachedArtifacts())
+	depsCtx := newInstallDeps(cfg, runtime, st, artifacts, extractStore, root, prefetch.cachedArtifacts(), verify)
 	var failures failureRecorder
 	for _, level := range levels {
 		if err := runInstallLevel(ctx, depsCtx, collections, graph, level, prefetch, &failures); err != nil {

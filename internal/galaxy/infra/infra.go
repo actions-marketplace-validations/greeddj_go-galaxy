@@ -5,11 +5,12 @@
 // new global or widening an already-wide signature. New always allocates fresh
 // counters, so nothing carries over between two runs in one process.
 //
-// It also carries the artifact-download, metadata-fetch and cache-state
-// budgets as test-only override fields. Read each one through its accessor -
-// ArtifactDeadline, MetadataDeadline, StateDeadline - never the field, so a
-// nil Infra or a non-positive override falls back to the helpers constant by
-// construction rather than by caller convention.
+// It also carries the artifact-download, metadata-fetch, cache-state and
+// signature-fetch budgets as test-only override fields. Read each one through
+// its accessor - ArtifactDeadline, MetadataDeadline, StateDeadline,
+// SignatureDeadline - never the field, so a nil Infra or a non-positive
+// override falls back to the helpers constant by construction rather than by
+// caller convention.
 package infra
 
 import (
@@ -52,6 +53,11 @@ type Infra struct {
 	// nothing wires it to a CLI flag, an environment variable, or an
 	// ansible.cfg key. Read it only through StateDeadline, never directly.
 	StateObjectDeadline time.Duration
+	// SignatureFetchDeadline overrides helpers.SignatureFetchDeadline for this
+	// run. It is test-only, for the identical reason ArtifactDownloadDeadline
+	// is: nothing wires it to a CLI flag, an environment variable, or an
+	// ansible.cfg key. Read it only through SignatureDeadline, never directly.
+	SignatureFetchDeadline time.Duration
 }
 
 // New builds Infra with default helpers for time and temp paths.
@@ -65,6 +71,7 @@ func New(out output.Printer, httpClient *http.Client) *Infra {
 		ArtifactDownloadDeadline: helpers.ArtifactDownloadDeadline,
 		MetadataFetchDeadline:    helpers.MetadataFetchDeadline,
 		StateObjectDeadline:      helpers.StateObjectDeadline,
+		SignatureFetchDeadline:   helpers.SignatureFetchDeadline,
 	}
 }
 
@@ -103,6 +110,18 @@ func (i *Infra) StateDeadline() time.Duration {
 		return helpers.StateObjectDeadline
 	}
 	return i.StateObjectDeadline
+}
+
+// SignatureDeadline returns the per-collection signature-phase budget this run
+// uses: i.SignatureFetchDeadline when it is set to a positive duration, or
+// helpers.SignatureFetchDeadline otherwise. Every call site reads the budget
+// through this method rather than the field directly, mirroring
+// ArtifactDeadline's own structural fallback.
+func (i *Infra) SignatureDeadline() time.Duration {
+	if i == nil || i.SignatureFetchDeadline <= 0 {
+		return helpers.SignatureFetchDeadline
+	}
+	return i.SignatureFetchDeadline
 }
 
 // DebugAnsibleConfig logs which settings were sourced from ansible.cfg, then

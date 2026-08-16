@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
@@ -78,6 +79,40 @@ func applySignatureConfig(cfg *Config, c *cli.Command) error {
 	return validateSignatureConfig(cfg.Signature)
 }
 
+// AnsibleSignatureKeysWarning renders the one warning a discovered ansible.cfg
+// carrying signature keys earns, or "" when it carried none.
+//
+// The keys are named and their values are not, because no value was ever read -
+// see ansibleGalaxyConfig.SignatureKeys. The message says what the run does
+// rather than what the file says, since the file said something this program
+// deliberately did not listen to.
+//
+// It is returned rather than queued on Warnings, which every other warning this
+// package produces uses. That queue is drained by runCollectionCommand for
+// every command, so lock, outdated and cleanup would each emit a line about
+// verification that could never have happened on them; this one belongs to the
+// commands that verify, which is why it is a value their own setup asks for and
+// prints once per run.
+//
+// The order is signatureKeyNames' own rather than the file's: the message reads
+// the same for two files that carry the same keys in a different order.
+func (c *Config) AnsibleSignatureKeysWarning() string {
+	if c == nil || len(c.AnsibleSignatureKeys) == 0 {
+		return ""
+	}
+	named := make([]string, 0, len(signatureKeyNames))
+	for _, key := range signatureKeyNames {
+		if slices.Contains(c.AnsibleSignatureKeys, key) {
+			named = append(named, key)
+		}
+	}
+
+	return fmt.Sprintf(
+		"ansible.cfg %s configures signature verification (%s); go-galaxy reads none of it - "+
+			"configure the keyring and its policy through --keyring and its sibling flags, or their environment variables",
+		c.AnsibleConfigPath, strings.Join(named, ", "))
+}
+
 // emptyRefusingSignatureFlag is one flag whose explicitly supplied empty value
 // is refused, together with the remedy its refusal names.
 type emptyRefusingSignatureFlag struct {
@@ -120,13 +155,14 @@ func checkSuppliedSignatureValues(c *cli.Command) error {
 // falling back to helpers.DefaultRequiredValidSignatureCount when nothing
 // supplied a value at all.
 //
-// That fallback is load-bearing rather than defensive. A command that does not
-// register the flag reads the Go zero value of an unknown flag name - "" - so
-// the flag's own Value never applies to it, and no command registers these
-// flags today. Without the fallback every such run would hand
-// signature.ParseCountSpec an empty spec, which is not a spelling its grammar
-// accepts, and BuildCollectionConfig would fail for every command on every
-// invocation.
+// That fallback is load-bearing rather than defensive, and the predicate it
+// covers is a property of the command rather than a count of them: a command
+// that does not register the flag reads the Go zero value of an unknown flag
+// name - "" - so the flag's own Value never applies to it. Without the
+// fallback, every run of such a command would hand signature.ParseCountSpec an
+// empty spec, which is not a spelling its grammar accepts, and
+// BuildCollectionConfig - which validates the count for every command
+// regardless of what that command declared - would fail on every invocation.
 //
 // It never covers a value some source supplied as empty:
 // checkSuppliedSignatureValues has already refused that shape by the time this

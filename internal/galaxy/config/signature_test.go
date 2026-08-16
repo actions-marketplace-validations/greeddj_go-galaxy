@@ -520,9 +520,9 @@ func TestApplySignatureConfigDisabledWithKeyringWarning(t *testing.T) {
 }
 
 // newFlaglessCmd builds a *cli.Command registering no flags at all, which is
-// what every command looks like to this resolution today: nothing mounts the
-// signature flags yet, so each of them reads the Go zero value of an unknown
-// flag name.
+// what a command that does not verify looks like to this resolution - cleanup,
+// lock and outdated among them: each signature flag reads the Go zero value of
+// an unknown flag name there.
 func newFlaglessCmd(t *testing.T) *cli.Command {
 	t.Helper()
 

@@ -1,6 +1,9 @@
 package helpers
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // WithoutQuery returns raw up to, but not including, its first "?".
 //
@@ -139,4 +142,45 @@ func WithoutUserinfo(raw string) string {
 	}
 
 	return raw[:off] + raw[off+at+1:]
+}
+
+// MessageValueMaxLen bounds one attacker-influenced string before an
+// operator-facing message renders it. Three values are subject to it today: a
+// Galaxy version-metadata href, which becomes a signature blob's origin; the
+// display form of a signature source out of a requirements file; and the
+// identity a collection artifact's own MANIFEST.json declares.
+//
+// None of them is bounded by what such a value can legitimately be - the first
+// only by MetadataMaxSize (16 MiB), the third only by ManifestScanMaxBytes
+// (64 MiB) - so the ceiling is. 512 bytes is roughly three times the longest
+// real value measured: 119 bytes for a galaxy.ansible.com v3 version-detail
+// href, 172 for a Red Hat Automation Hub one carrying a synclist-scoped base
+// path and a long namespace, 66 for this project's own test double. A
+// collection's namespace, name and version are each an order of magnitude
+// shorter again.
+//
+// What the cap removes is the multiplication rather than one long line: an
+// origin is copied onto every blob gathered for a collection and rendered once
+// per non-ignored failure, so an 8 MiB href across a full
+// MaxSignaturesPerCollection set produced a 512.0 MiB error string, measured,
+// rendered at least twice and written to stderr both times, per collection,
+// times the worker count.
+const MessageValueMaxLen = 512
+
+// TruncateForMessage bounds value at MessageValueMaxLen before a message
+// renders it, cutting visibly rather than silently: a value past the ceiling
+// keeps its first MessageValueMaxLen bytes and then says how long it really
+// was, so an operator can tell a long value from a truncated one and a reader
+// of the code cannot mistake this for a silent shortening.
+//
+// The cut is on a byte boundary, which can split a multi-byte rune. That costs
+// nothing where it is used: every caller renders the result with %q, which
+// escapes an invalid byte rather than emitting it, and internal/safeout
+// replaces one with U+FFFD at the printer boundary regardless.
+func TruncateForMessage(value string) string {
+	if len(value) <= MessageValueMaxLen {
+		return value
+	}
+
+	return value[:MessageValueMaxLen] + fmt.Sprintf("... (%d bytes)", len(value))
 }

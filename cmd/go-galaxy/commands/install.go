@@ -16,6 +16,7 @@ import (
 // Install returns the CLI command that installs collections from requirements.
 func Install() *cli.Command {
 	flags := cliflags.CollectionFlags()
+	flags = append(flags, cliflags.SignatureFlags()...)
 	flags = append(flags, cliflags.S3Flags()...)
 
 	return &cli.Command{

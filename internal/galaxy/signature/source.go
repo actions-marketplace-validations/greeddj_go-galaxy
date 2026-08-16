@@ -110,38 +110,77 @@ func newFetcher(timeout time.Duration, offline bool, limit int64) *Fetcher {
 // phase budget and leave every source after it unfetched - so this bounds an
 // attempt, not a share.
 //
-// The credential is kept out of every message below by the CONSTRUCTION of
-// display rather than by the order of the checks: every cut is applied to the
-// raw value before anything has parsed it, so a spelling url.Parse refuses is
-// stripped exactly like one it accepts. The userinfo check still precedes the
-// scheme dispatch, for its own separate and still-true reason: no request is
-// composed for a credentialed value at all, the same order
-// requirements.validateRequirement puts checkSourceUserinfo in.
+// The credential is kept out of every message by the CONSTRUCTION of display
+// rather than by the order of the checks - see parseRequirementSource, which
+// owns both that construction and the whole grammar this method dispatches
+// after. The userinfo refusal it makes still precedes the scheme dispatch here,
+// for its own separate and still-true reason: no request is composed for a
+// credentialed value at all, the same order requirements.validateRequirement
+// puts checkSourceUserinfo in.
 func (f *Fetcher) FetchRequirementSource(ctx context.Context, source string) (Blob, error) {
-	// Every message below, and Blob.Origin itself, names display rather than
-	// source. Three cuts. The query string is where a presigned capability
-	// travels, and a signature source can carry one just as a download URL can.
-	// The userinfo is a credential this method refuses outright and must not
-	// print while refusing. The fragment is the part that never travels at all:
-	// net/http composes a request from the path and the query alone, and
-	// url.Parse splits a fragment off before the Path fetchFile opens, so a
-	// message keeping one would name a location no request reached and no file
-	// was read from - "file:///tmp/a#b.asc" opens /tmp/a. Their order is
-	// immaterial: WithoutUserinfo's authority scan ends at "?" and at "#", and
-	// the other two keep everything before their own delimiter, so no cut can
-	// reach across another's boundary. helpers.WithoutUserinfo's own doc comment
-	// holds what a delimiter sitting INSIDE a userinfo costs, the one residual
-	// all three share.
-	display := helpers.WithoutUserinfo(helpers.WithoutFragment(helpers.WithoutQuery(source)))
+	parsed, display, err := parseRequirementSource(source)
+	if err != nil {
+		return Blob{}, err
+	}
+
+	// Only the three schemes parseRequirementSource accepts reach this point,
+	// which is why there is no default arm: the grammar lives in that one
+	// function so a caller validating a source ahead of time and this fetch can
+	// never disagree about what is fetchable.
+	if parsed.Scheme == fileScheme {
+		return f.fetchFile(parsed, display)
+	}
+
+	return f.fetchHTTP(ctx, source, display)
+}
+
+// ValidateRequirementSource reports whether source is a value
+// FetchRequirementSource could fetch, without fetching anything.
+//
+// It exists for the boundary a requirements file enters through
+// (requirements.checkSignatureSources), so that a source this package would
+// refuse is refused where it was written - as a configuration error naming the
+// file - rather than inside an install worker, where it would arrive as one
+// collection's failure among however many others. The two cannot drift, because
+// this and the fetch answer through the same parseRequirementSource: adding a
+// scheme, or a refusal, changes both at once.
+//
+// It returns exactly the errors the fetch's own refusals return, messages
+// included, and touches nothing: no file is opened and no request is composed.
+func ValidateRequirementSource(source string) error {
+	_, _, err := parseRequirementSource(source)
+
+	return err
+}
+
+// parseRequirementSource applies the whole grammar a signature source has to
+// satisfy and returns the parsed URL alongside the display form every message
+// about it uses.
+//
+// The display form is computed before anything has parsed the value. Three
+// cuts. The query string is where a presigned capability travels, and a
+// signature source can carry one just as a download URL can. The userinfo is a
+// credential this grammar refuses outright and must not print while refusing.
+// The fragment is the part that never travels at all: net/http composes a
+// request from the path and the query alone, and url.Parse splits a fragment
+// off before the Path fetchFile opens, so a message keeping one would name a
+// location no request reached and no file was read from -
+// "file:///tmp/a#b.asc" opens /tmp/a. Their order is immaterial:
+// WithoutUserinfo's authority scan ends at "?" and at "#", and the other two
+// keep everything before their own delimiter, so no cut can reach across
+// another's boundary. helpers.WithoutUserinfo's own doc comment holds what a
+// delimiter sitting INSIDE a userinfo costs, the one residual all three share.
+func parseRequirementSource(source string) (*url.URL, string, error) {
+	display := helpers.TruncateForMessage(helpers.WithoutUserinfo(helpers.WithoutFragment(helpers.WithoutQuery(source))))
 
 	parsed, err := url.Parse(source)
 	if err != nil {
 		// The parse error is deliberately not wrapped in: url.Error renders the
 		// whole value it failed on, query string and userinfo included.
-		return Blob{}, fmt.Errorf("%w: %q could not be parsed as a URL", helpers.ErrUnsupportedSignatureSource, display)
+		return nil, display, fmt.Errorf("%w: %q could not be parsed as a URL", helpers.ErrUnsupportedSignatureSource, display)
 	}
 	if parsed.User != nil {
-		return Blob{}, fmt.Errorf("%w: %q", helpers.ErrSignatureSourceUserinfo, display)
+		return nil, display, fmt.Errorf("%w: %q", helpers.ErrSignatureSourceUserinfo, display)
 	}
 	// Two shapes are refused here rather than left to the scheme switch, which
 	// would pass "http" and "https" straight through to a request that can never
@@ -171,15 +210,14 @@ func (f *Fetcher) FetchRequirementSource(ctx context.Context, source string) (Bl
 	// condition is one half of a wider question, "does this name an absolute
 	// local path".
 	if parsed.Opaque != "" || hostlessHTTP(parsed) {
-		return Blob{}, fmt.Errorf("%w: %q names no host and no absolute path",
+		return nil, display, fmt.Errorf("%w: %q names no host and no absolute path",
 			helpers.ErrUnsupportedSignatureSource, display)
 	}
-
 	switch parsed.Scheme {
 	case fileScheme:
-		return f.fetchFile(parsed, display)
+		return parsed, display, checkFileSource(parsed, display)
 	case httpScheme, httpsScheme:
-		return f.fetchHTTP(ctx, source, display)
+		return parsed, display, nil
 	default:
 		// Everything else lands here, the empty scheme included - so a bare
 		// server_list id, which url.Parse accepts while yielding no scheme, is
@@ -188,8 +226,36 @@ func (f *Fetcher) FetchRequirementSource(ctx context.Context, source string) (Bl
 		// because it names a configured server rather than a location, while
 		// here nothing resolves an id, so a value naming no location names
 		// nothing at all.
-		return Blob{}, fmt.Errorf("%w: %q", helpers.ErrUnsupportedSignatureSource, display)
+		return nil, display, fmt.Errorf("%w: %q", helpers.ErrUnsupportedSignatureSource, display)
 	}
+}
+
+// checkFileSource applies the file scheme's own sub-grammar: which authority a
+// file URL may name, and that it names an absolute path.
+//
+// It lives here, in the grammar every caller shares, rather than only in
+// fetchFile where it used to. Measured before the move, five values were
+// accepted by ValidateRequirementSource and then refused by the fetch:
+// "file://otherhost/abs/sig.asc", "file://evil.example/abs/sig.asc", "file:",
+// "file://" and "file://localhost". A value accepted at load and refused in an
+// install worker arrives joined behind helpers.ErrInstallationFailed and exits
+// as an install failure rather than as the usage error it is - the exact
+// exit-class defect the load-time gate was added to close.
+//
+// fetchFile keeps its own copies of both checks, which its doc comment already
+// calls a backstop: this function guards the boundary, that one guards the
+// operation.
+func checkFileSource(u *url.URL, display string) error {
+	if u.Host != "" && !strings.EqualFold(u.Host, localhostAuthority) {
+		return fmt.Errorf("%w: %q names a host this tool cannot read a file from",
+			helpers.ErrUnsupportedSignatureSource, display)
+	}
+	if u.Opaque != "" || !strings.HasPrefix(u.Path, "/") {
+		return fmt.Errorf("%w: %q does not name an absolute local path",
+			helpers.ErrUnsupportedSignatureSource, display)
+	}
+
+	return nil
 }
 
 // hostlessHTTP reports whether u is an http or https URL naming no authority at
@@ -218,6 +284,16 @@ func hostlessHTTP(u *url.URL) bool {
 // reinterpret as a local path. The relative form ("file:relative/x") is refused
 // too: url.Parse reports it as an Opaque with no Path, and a signature source
 // has no base for it to be relative to.
+//
+// What O_NONBLOCK below buys is bounded, and the bound is worth stating: it
+// keeps the OPEN from blocking on the shape a local writer can plant, and it
+// does nothing for the READ that follows. A regular file on a hung network or
+// FUSE mount blocks in the read itself, which no budget this package or its
+// callers hold can end - a context cannot interrupt a blocking read on a file
+// descriptor - so such a source stalls the phase it sits in for as long as the
+// mount does. That is the residual, and it is accepted: the alternative is
+// reading local files on a goroutine nothing can join, which trades a stalled
+// phase for a leaked one.
 //
 // The open carries syscall.O_NONBLOCK and the regular-file check is made
 // against the descriptor it returned, not against a path stat preceding it.
@@ -371,6 +447,18 @@ func (f *Fetcher) readFile(file *os.File, size int64) ([]byte, error) {
 // response is bytes chosen by whoever answered, so it is never read and never
 // rendered - a signature source is repository content, and an operator's stderr
 // is not a place to print what it managed to make a server return.
+//
+// The disclosure fetchFile's own oracle paragraph does not make, because it
+// reasons about the filesystem alone: this arm is a network-reachability oracle
+// for whoever wrote the requirements file. A signatures: entry is an outbound
+// GET from wherever the install runs, and its outcomes are distinguishable in
+// the operator-facing message - a transport failure, a TLS failure, a status
+// code, and a 200 whose bytes are not a signature all read differently - so a
+// repository can map what its CI runner can reach, internal addresses included.
+// Nothing here narrows the destination: whether this tool should refuse
+// loopback and link-local targets is a decision of its own, and this paragraph
+// is the disclosure it would be made against rather than a claim that the
+// question is settled.
 func (f *Fetcher) fetchHTTP(ctx context.Context, source, display string) (Blob, error) {
 	if f.offline {
 		return Blob{}, fmt.Errorf("%w: %q: %w", helpers.ErrSignatureSourceUnavailable, display, helpers.ErrOfflineMode)

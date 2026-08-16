@@ -12,9 +12,9 @@ import (
 // parseAnsibleConfigCase is one table-driven case shared by the
 // TestParseAnsibleConfig* functions below.
 type parseAnsibleConfigCase struct {
-	want  ansibleConfig
 	name  string
 	input string
+	want  ansibleConfig
 }
 
 // runParseAnsibleConfigCases feeds each case's input through
@@ -213,27 +213,61 @@ func TestParseAnsibleConfigServerList(t *testing.T) {
 // TestParseAnsibleConfigSignatureKeysAreNotRead pins a decision rather than a
 // behavior: the signature policy is configured from flags and environment
 // variables only, so a [galaxy] section carrying all four of ansible's
-// signature keys parses to nothing at all.
+// signature keys contributes their NAMES and not one of their values.
 //
 // The reason is that this program cannot establish who authored a discovered
 // ansible.cfg, and a setting that can relax a verification check must not come
 // from a file whose author is unknown. cliflags.SignatureFlags holds that
 // argument, including why each proxy for the authorship question leaks.
 //
-// Binding absence is what makes this row stronger than a deny-list: it needs
-// no list to keep current, and it fails the moment anyone teaches the parser
-// one of these keys again without answering that question first.
+// Binding absence is what makes this stronger than a deny-list, and recording
+// names sharpens rather than weakens it: the want value below is the whole
+// ansibleConfig, compared structurally, so every value-carrying field of it has
+// to stay zero. It needs no list to keep current, and it fails the moment
+// anyone teaches the parser to store one of these VALUES without answering the
+// authorship question first.
+//
+// The second row is what makes the names a fact about the file rather than
+// about the parser's own table: keys ansible does not define are not recorded,
+// so the first row's four cannot be "every unrecognized [galaxy] key".
+//
+// KILLING MUTATION, run and reverted: recordSignatureKey's membership test
+// (`!slices.Contains(signatureKeyNames[:], key)`) deleted, so every
+// unrecognized [galaxy] key is recorded. The second row fails:
+//
+//	ansiblecfg_test.go:35: parseAnsibleConfig() = {GalaxyServers:map[]
+//	Defaults:{CollectionsPath:} Galaxy:{CacheDir: Server: ServerList:
+//	SignatureKeys:[gpg_keyrings verify_signatures]}}, want {GalaxyServers:map[]
+//	Defaults:{CollectionsPath:} Galaxy:{CacheDir: Server: ServerList:
+//	SignatureKeys:[]}}
 func TestParseAnsibleConfigSignatureKeysAreNotRead(t *testing.T) {
 	t.Parallel()
 	runParseAnsibleConfigCases(t, []parseAnsibleConfigCase{
 		{
-			name: "every signature key is ignored",
+			name: "every signature key is recorded by name and by name alone",
 			input: "[galaxy]\n" +
 				"gpg_keyring = /repo/keys.gpg\n" +
 				"required_valid_signature_count = 0\n" +
 				"ignore_signature_status_codes = BADSIG\n" +
 				"disable_gpg_verify = yes\n",
-			want: ansibleConfig{},
+			want: ansibleConfig{Galaxy: ansibleGalaxyConfig{SignatureKeys: []string{
+				"gpg_keyring",
+				"required_valid_signature_count",
+				"ignore_signature_status_codes",
+				"disable_gpg_verify",
+			}}},
+		},
+		{
+			name:  "a [galaxy] key ansible does not define is not recorded",
+			input: "[galaxy]\ngpg_keyrings = /repo/keys.gpg\nverify_signatures = yes\n",
+			want:  ansibleConfig{},
+		},
+		{
+			name: "a repeated key is recorded once",
+			input: "[galaxy]\n" +
+				"gpg_keyring = /repo/one.gpg\n" +
+				"gpg_keyring = /repo/two.gpg\n",
+			want: ansibleConfig{Galaxy: ansibleGalaxyConfig{SignatureKeys: []string{"gpg_keyring"}}},
 		},
 	})
 }

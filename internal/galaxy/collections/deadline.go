@@ -36,6 +36,12 @@ import (
 // see helpers.ErrArtifactDownloadDeadline's own doc comment for why leaving
 // context.DeadlineExceeded or context.Canceled reachable via errors.Is here
 // would steal this failure's exit-code classification.
+//
+// signatureDeadlineError (verify.go) is this function's sibling for the
+// signature phase, sharing this shape and these two ambient checks while
+// carrying no content-based exclusion of its own; it lives beside the gather it
+// normalizes rather than here, since its argument is about what that gather
+// produces.
 func artifactDeadlineError(parent, dlCtx context.Context, budget time.Duration, err error) error {
 	if err == nil || errors.Is(err, helpers.ErrArtifactDownloadDeadline) {
 		return err

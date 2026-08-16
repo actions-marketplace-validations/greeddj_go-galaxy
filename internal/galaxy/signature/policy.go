@@ -239,5 +239,22 @@ func NewPolicy(keyringPath, requiredCount string, ignoreCodes []string, disabled
 // a configuration that never asked for verification, while Disabled is an
 // operator switching off a configuration that did.
 func (p Policy) Enabled() bool {
-	return p.KeyringPath != "" && !p.Disabled
+	return VerificationEnabled(p.KeyringPath, p.Disabled)
+}
+
+// VerificationEnabled answers Enabled's question over the raw configured
+// values, before any Policy has been built.
+//
+// It exists so that a caller who has to decide whether to build a policy at all
+// - internal/galaxy/collections' newVerifyContext, which must not turn a run
+// that verifies nothing into a refusal over a count spec nothing will read -
+// asks this package rather than copying the predicate. A copy would be a second
+// place to update, and a term added here later would leave it disagreeing in
+// the direction that silently switches verification OFF.
+//
+// Both spellings stay: Enabled is what a holder of a Policy asks, this is what
+// a holder of the two values asks, and the first is written in terms of the
+// second so the two can never answer differently.
+func VerificationEnabled(keyringPath string, disabled bool) bool {
+	return keyringPath != "" && !disabled
 }

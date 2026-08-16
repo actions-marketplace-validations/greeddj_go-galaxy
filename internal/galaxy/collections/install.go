@@ -62,7 +62,27 @@ func installCollection(
 
 	filename := fmt.Sprintf("%s-%s-%s.tar.gz", col.Namespace, col.Name, col.Version)
 
+	// An already-installed collection is skipped whether or not this run
+	// verifies signatures, and that is a decision rather than an oversight: the
+	// gate answers "is this exact artifact already unpacked here", which no
+	// signature policy changes. What it does NOT establish is that anything ever
+	// verified it - nothing on disk records that. recordInstall stores an install
+	// path, an artifact sha and a dependency list, and the extract marker records
+	// a tally; none of them says which policy, or which keyring, the installing
+	// run held, and persisting one would be policy-derived state in a cache this
+	// verifier's own threat model treats as attacker-writable.
+	//
+	// So the skip is silent about verification by construction, and the run says
+	// so instead: recordSkippedUnverified counts these, and installWithState
+	// reports the total once, on the result tier. Without that line, the first
+	// run an operator turns --keyring on over an existing workspace verifies
+	// nothing and says nothing above the transient tier - a silent no-op on
+	// exactly the run made to start verifying. Re-verifying here instead would
+	// mean refetching a tarball this run has no other reason to touch, for every
+	// already-installed collection, on every run; a fresh tree or --clear-cache
+	// is what re-asks the question.
 	if canSkipInstall(target, col, st, runtime.Output) {
+		deps.verify.recordSkippedUnverified()
 		runtime.Output.Printf("⏭️ Skipping install, already installed: %s/%s/%s", col.Namespace, col.Name, col.Version)
 		// installCollection may be handed a prefetched temp on a path that skips the install; release it here rather than
 		// leave it unclaimed until Close. In today's dispatch this branch is not live: a schedulable prefetch task is never
@@ -113,6 +133,14 @@ type installPayload struct {
 	meta        *types.GalaxyCollectionVersionInfo
 	artifact    artifactData
 	artifactSHA string
+	// metaUnavailable records that this collection's version metadata could not
+	// be loaded, so meta is nil for a reason rather than because no caller
+	// pushed one. It exists for the verification step, which gathers a server's
+	// own signatures out of that document: without the distinction, a run that
+	// could not learn whether a collection is signed reports the same line as
+	// one that learned it is not. See resolveMetadata's cache-hit arm, the only
+	// place it is set.
+	metaUnavailable bool
 }
 
 type artifactData struct {
@@ -214,11 +242,7 @@ func prepareInstall(
 	useCache := !cfg.NoCache
 	cacheHit := isCacheHit(ctx, deps, col, forceDownload)
 
-	// Fast path: artifact is already in cache and the caller did not push
-	// metadata. We have everything required to install - namespace/name/version
-	// from col, SHA from a sidecar (local or S3) or, failing that, by hashing
-	// the file - so we can skip the metadata roundtrip entirely.
-	if cacheHit && meta == nil {
+	if servableFromCacheAlone(deps, cacheHit, meta) {
 		runtime.Output.Printf("📦 Using cached %s", filename)
 		payload, err := prepareFromCache(ctx, deps, col)
 		return payload, true, err
@@ -228,6 +252,11 @@ func prepareInstall(
 	if err != nil && !errors.Is(err, helpers.ErrMetadataUnavailable) {
 		return installPayload{}, cacheHit, err
 	}
+	// The tolerated shape, carried rather than dropped: resolveMetadata reports
+	// this only on a cache hit whose metadata load failed, which is exactly the
+	// case where the install proceeds with no metadata at all and the
+	// verification step has to say so rather than report an unsigned collection.
+	metaUnavailable := errors.Is(err, helpers.ErrMetadataUnavailable)
 
 	artifact, err := fetchArtifact(ctx, deps, col, meta, cacheHit, useCache)
 	if err != nil {
@@ -240,7 +269,38 @@ func prepareInstall(
 		}
 		return installPayload{}, cacheHit, err
 	}
-	return installPayload{meta: meta, artifact: artifact, artifactSHA: artifactSHA}, cacheHit, nil
+	return installPayload{
+		meta:            meta,
+		artifact:        artifact,
+		artifactSHA:     artifactSHA,
+		metaUnavailable: metaUnavailable,
+	}, cacheHit, nil
+}
+
+// servableFromCacheAlone reports whether col can be installed from the cached
+// artifact with no metadata roundtrip at all: the artifact is already cached,
+// the caller pushed no metadata, and this run verifies no signatures.
+//
+// The first two terms are the original fast path - namespace, name and version
+// come from col, and the sha comes from a sidecar or from hashing the file, so
+// nothing else is needed. The third is what a verifying run adds: a server's
+// own signatures ride on that version metadata, so skipping the fetch would
+// silently reduce the gathered set to whatever the requirements file named -
+// a collection signed only by its server would then pass vacuously on a cache
+// hit and be verified on a miss.
+//
+// What the third term costs is usually nothing at all: the resolve just ahead
+// of this call already cached the winning version's detail document, through
+// provider.Dependencies -> fetchVersionMetadataCached. A real per-collection
+// request is paid only where no resolve fetched it - --frozen, which resolves
+// from the lockfile, and --no-deps, whose noDepsProvider never calls
+// Dependencies at all.
+//
+// It is a function rather than three terms inline to keep prepareInstall
+// within its cyclomatic complexity budget, the same reason isCacheHit above is
+// one.
+func servableFromCacheAlone(deps installDeps, cacheHit bool, meta *types.GalaxyCollectionVersionInfo) bool {
+	return cacheHit && meta == nil && !deps.verify.enabled()
 }
 
 // verifyAndExtract enforces col's lockfile SHA256 pin (if any) against
@@ -258,6 +318,14 @@ func verifyAndExtract(
 	filename string,
 ) error {
 	if err := verifyPinnedSHA(col, payload.artifactSHA); err != nil {
+		return err
+	}
+	// The order of the two checks is the order of the two questions: the pin
+	// proves these are the bytes the lockfile names, the signature proves who
+	// published them. Both precede any write into the collections tree, so a
+	// collection this run cannot attribute is never extracted where a playbook
+	// would find it.
+	if err := verifyCollectionSignatures(ctx, deps, col, payload); err != nil {
 		return err
 	}
 	extractStart := time.Now()
@@ -362,12 +430,26 @@ func prepareWithRecovery(
 		if payload.artifact.Cleanup != nil {
 			payload.artifact.Cleanup()
 		}
-		if !canRetryCacheHit(deps, fromCache, forceDownload) || isDestinationSideFailure(actionErr) {
+		if !canRetryCacheHit(deps, fromCache, forceDownload) || unrepairableByRefetch(actionErr) {
 			return installPayload{}, actionErr
 		}
 		evictCorruptCachedArtifact(ctx, deps, col, filename, actionErr)
 		forceDownload = true
 	}
+}
+
+// unrepairableByRefetch reports whether an action failure is one no different
+// artifact could fix, which is the whole question prepareWithRecovery's action
+// arm asks before spending its eviction.
+//
+// It is the disjunction of the three predicates below rather than a fourth list
+// of sentinels, so each of them keeps stating one reason in its own terms: the
+// write destination was at fault, the signature material was never in hand, or
+// the verdict was about a blob set an artifact refetch does not change. Reading
+// them through one name is also what keeps prepareWithRecovery's own branching
+// within its complexity budget.
+func unrepairableByRefetch(err error) bool {
+	return isDestinationSideFailure(err) || isSignatureSourceFailure(err) || isBlobSetVerdict(err)
 }
 
 // isDestinationSideFailure reports whether err's cause is the write
@@ -385,6 +467,80 @@ func prepareWithRecovery(
 // deterministic on every affected run rather than a rare accident.
 func isDestinationSideFailure(err error) bool {
 	return errors.Is(err, helpers.ErrCollectionsPathEscape) || errors.Is(err, helpers.ErrUnsafeCollectionIdentifier)
+}
+
+// isSignatureSourceFailure reports whether err's cause is that a signature was
+// never in hand: a source that could not be fetched or read
+// (helpers.ErrSignatureSourceUnavailable), a signature phase that overran its
+// budget (helpers.ErrSignatureFetchDeadline), a value that names nothing this
+// tool fetches (helpers.ErrUnsupportedSignatureSource), or one carrying a
+// credential in its userinfo (helpers.ErrSignatureSourceUserinfo).
+//
+// The last two are refused at load by requirements.checkSignatureSources, so no
+// live path delivers either of them here today: a resolved collection replayed
+// out of the persisted snapshot carries no signature list at all
+// (buildResolvedSnapshot reconstructs namespace, name, version and source, and
+// nothing else), so that boundary does not reach this arm either. They are
+// defensive members, kept because this predicate's question is about what the
+// error says rather than about today's call graph - and stated as defensive
+// rather than dressed up with a path that does not exist.
+//
+// It sits beside isDestinationSideFailure in prepareWithRecovery's action arm,
+// which otherwise evicts and refetches unclassified, and it is kept a separate
+// predicate so that neither doc comment has to describe the other's members.
+// The premise that arm rests on - a different artifact might fix this - does
+// not hold for any of the four: nothing about the tarball on disk decided that
+// a URL the repository chose was unreachable, unfetchable, or credentialed.
+// Evicting anyway would spend a destructive write against shared state (an S3
+// deleteObject) plus a full re-download, per collection, deterministically,
+// with no chance of the retry succeeding - measured at one Delete call and one
+// re-download per affected collection per run before these members were added.
+//
+// Three verdict sentinels stay INSIDE the retry class and one does not, and the
+// rule dividing them is where the failure's inputs come from rather than what
+// the sentinel is called: evict when the failure describes the ARTIFACT'S OWN
+// CONTENT, never for a verdict over a blob set that refetching the artifact
+// cannot change. helpers.ErrSignatureAttributionMismatch,
+// helpers.ErrManifestChainMismatch and helpers.ErrManifestNotFound each read
+// the artifact's bytes and say something about them, which is exactly what a
+// cache-resident artifact swapped by a cache writer produces, so a bounded
+// refetch is the repair. isBlobSetVerdict holds the fourth.
+func isSignatureSourceFailure(err error) bool {
+	return errors.Is(err, helpers.ErrSignatureSourceUnavailable) ||
+		errors.Is(err, helpers.ErrSignatureFetchDeadline) ||
+		errors.Is(err, helpers.ErrUnsupportedSignatureSource) ||
+		errors.Is(err, helpers.ErrSignatureSourceUserinfo)
+}
+
+// isBlobSetVerdict reports whether err is a verdict over the SET OF BLOBS
+// gathered for a collection rather than over the artifact's own content:
+// helpers.ErrSignatureVerificationFailed, which says the signatures in hand did
+// not satisfy the policy.
+//
+// It excludes that sentinel from prepareWithRecovery's evict-and-refetch for
+// the reason isSignatureSourceFailure excludes its own members, and the reason
+// is about the inputs rather than the name. A server's own signatures come from
+// meta.Signatures, and the retry re-reads the same cached metadata, so a single
+// junk entry there produces a deterministic deleteObject against shared cache
+// state plus a full re-download that reaches the identical verdict. That is a
+// destructive write primitive on shared state which a hostile or broken server
+// triggers on every run.
+//
+// Two narrower cuts were considered and rejected. Splitting on the failing
+// blob's origin cannot work: an artifact swapped underneath a good signature
+// makes that signature fail, so the failing blob's origin is a source either
+// way. Evicting only when no requirement-named source is involved is backwards,
+// since it disables the repair precisely in the server-only case where an
+// artifact swap is what a refetch would fix.
+//
+// The residual is disclosed rather than closed: a cache-resident artifact
+// swapped for unsigned or wrongly-signed bytes is no longer repaired
+// automatically. It fails closed, every run, naming the collection, and
+// --clear-cache is the remedy. A fail-closed failure with a named remedy beats
+// handing a hostile server a per-run destructive write against a cache other
+// runners share.
+func isBlobSetVerdict(err error) bool {
+	return errors.Is(err, helpers.ErrSignatureVerificationFailed)
 }
 
 // canRetryCacheHit reports whether prepareWithRecovery may spend its one

@@ -40,6 +40,13 @@ type installDeps struct {
 	// makes any accidental collections-tree call from that path fail closed
 	// rather than by convention.
 	root *os.Root
+	// verify is this run's signature verification state, or nil for a run that
+	// verifies nothing - which is what every call site tests through
+	// verifyContext.enabled(), never by reading this field. It is shared by
+	// every install and warm worker: see verifyContext for why one keyring and
+	// one fetcher per run, read concurrently, is the contract rather than an
+	// economy.
+	verify *verifyContext
 	// presence carries the prefetcher's own scan-time cache-presence hints
 	// (see prefetcher.cachedArtifacts), keyed by artifactKey, so isCacheHit
 	// can skip a redundant repeat of a probe the scan already ran. It is nil
@@ -50,6 +57,13 @@ type installDeps struct {
 	presence map[string]bool
 }
 
+// prefetchDeps deliberately carries no verifyContext. A prefetch worker fills
+// the shared artifact cache and installs nothing, and that cache is policy-free
+// by design: its entries are keyed by artifact, not by which run's keyring
+// would accept them, so a verdict reached here could not be recorded anywhere a
+// later run may read it. Verification belongs to the worker that is about to
+// write a collection into a tree, which is where prepareWithRecovery's action
+// closure runs it.
 type prefetchDeps struct {
 	collectionDeps
 
@@ -79,6 +93,7 @@ func newInstallDeps(
 	extractStore *extracted.Store,
 	root *os.Root,
 	presence map[string]bool,
+	verify *verifyContext,
 ) installDeps {
 	return installDeps{
 		collectionDeps: newCollectionDeps(cfg, runtime, st),
@@ -86,6 +101,7 @@ func newInstallDeps(
 		extractStore:   extractStore,
 		root:           root,
 		presence:       presence,
+		verify:         verify,
 	}
 }
 

@@ -265,8 +265,10 @@ func prefetchOne(
 	// top of handing its temp off to this run's own install worker.
 	// extractStore and root are both nil: this downloadDeps feeds only
 	// downloadCollectionToCache, which never touches the collections tree or
-	// the extracted store, so neither is needed here.
-	downloadDeps := newInstallDeps(deps.cfg, deps.runtime, deps.st, deps.artifacts, nil, nil, nil)
+	// the extracted store, so neither is needed here. The verify context is nil
+	// for the reason stated on prefetchDeps itself: this worker fills a
+	// policy-free shared cache and installs nothing.
+	downloadDeps := newInstallDeps(deps.cfg, deps.runtime, deps.st, deps.artifacts, nil, nil, nil, nil)
 	result, err := downloadCollectionToCache(ctx, downloadDeps, artifactKey(col), col.Source, meta, true)
 	if err != nil {
 		return meta, downloadResult{}, err

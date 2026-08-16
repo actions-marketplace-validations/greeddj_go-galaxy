@@ -623,6 +623,38 @@ var (
 	// different question with a different remedy - most often this run's own
 	// keyring or signature policy rather than the artifact or its server.
 	ErrSignatureVerificationFailed = errors.New("collection signature verification failed")
+	// ErrSignatureAttributionMismatch indicates a signature verified, and the
+	// document it vouches for names a different collection than the one being
+	// installed: MANIFEST.json's collection_info declares a namespace, name or
+	// version that is not the resolved collection's own.
+	//
+	// It is a signature verdict rather than a defect in the material, which is
+	// what keeps it out of all three neighboring sentinels. NOT
+	// ErrSignatureVerificationFailed: every signature checked verified perfectly,
+	// and the policy in force was satisfied - what failed is who the signature
+	// was made about. NOT ErrManifestChainMismatch: the chain from MANIFEST.json
+	// to FILES.json to every file is intact, and it is intact for a real,
+	// coherent collection - just not this one. NOT ErrSHA256Mismatch: the bytes
+	// are exactly the bytes that were named, hashing as promised.
+	//
+	// Without it, a key this run trusts vouching for acme.other@0.0.1 installs
+	// those bytes as acme.app@1.0.0 - a signed downgrade to a known-vulnerable
+	// version, or a signed substitution of one collection for another, reaching
+	// exit 0. The comparison is byte-for-byte on all three components and is
+	// deliberately not normalized: the resolved version already satisfies
+	// IsExactVersion, and a normalizing comparison is the one an attacker aims
+	// at.
+	ErrSignatureAttributionMismatch = errors.New("collection signature vouches for a different collection")
+	// ErrTooManySignatureSources indicates one collection's requirements entry
+	// declares more signature sources than MaxSignaturesPerCollection allows.
+	//
+	// It is refused where the file is read rather than truncated where the blobs
+	// are gathered, because truncation is silent and its cost is not: the gather
+	// walks a requirements file's own sources before a server's, so a file
+	// naming more sources than the cap allows would starve every server-carried
+	// signature of its turn while reporting nothing. The operator's remedy is to
+	// name fewer, which is why this is a usage error rather than a verdict.
+	ErrTooManySignatureSources = errors.New("too many signature sources declared for one collection")
 	// ErrSignatureSourceUnavailable indicates a signature this run was told to
 	// check could not be obtained at all: a network failure fetching it, an
 	// offline-mode refusal, a file:// source that could not be read, or version

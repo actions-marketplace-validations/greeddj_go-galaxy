@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
+	"github.com/greeddj/go-galaxy/internal/galaxy/signature"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -247,6 +248,12 @@ func validateRequirement(req CollectionRequirement, raw any) error {
 	if err := checkSourceUserinfo(req); err != nil {
 		return err
 	}
+	// Second, and ahead of the raw-echoing branch below for the same reason
+	// checkSourceUserinfo is first: a signatures: entry can carry a credential
+	// of its own, and this check refuses one without printing it.
+	if err := checkSignatureSources(req, raw); err != nil {
+		return err
+	}
 	if req.Name == "" {
 		return fmt.Errorf("%w: %v", helpers.ErrInvalidCollectionEntry, raw)
 	}
@@ -260,6 +267,94 @@ func validateRequirement(req CollectionRequirement, raw any) error {
 		return fmt.Errorf("%w %q (only Galaxy API sources are supported)", helpers.ErrUnsupportedCollectionSource, req.Name)
 	}
 	return nil
+}
+
+// checkSignatureSources validates the one repository-authored field of a
+// requirements entry that no other boundary judges: signatures:.
+//
+// Everything it refuses would otherwise be refused, or silently mangled, much
+// later and much worse. A source this tool cannot fetch reaches an install
+// worker and fails one collection among however many, classified as that
+// collection's failure rather than as the configuration error it is. A source
+// carrying userinfo is a credential in repository content, and by then it has
+// been copied into the resolved snapshot - a shared S3 object in a multi-runner
+// cache - where url.URL.String() renders it back in plain text; the refusal
+// here names the value with its userinfo cut off, exactly as the fetch's own
+// would. A value that is not a string at all is turned by parseStringList's
+// fmt.Sprint arm into a plausible-looking source ("map[]", "false", "0") that
+// nothing downstream can tell from one an author wrote. And more DISTINCT
+// sources than helpers.MaxSignaturesPerCollection allows is a list this tool
+// would silently stop reading partway through, which is a worse answer than
+// refusing the file.
+//
+// What that cap does NOT do, stated rather than implied: it does not stop a
+// requirements file from starving the server's own signatures. The gather walks
+// a file's sources before a server's - a property nextBlob promises an operator
+// - so a file naming exactly helpers.MaxSignaturesPerCollection sources against
+// a server offering two consumes the whole budget: measured, 64 blobs from the
+// file and 0 from the server, silently. That is tolerated rather than fixed,
+// because an operator naming that many sources has made their own list
+// authoritative for the collection; reserving a share of the budget for
+// server-carried blobs would be a legitimate change of its own, and one about
+// the gather rather than about this gate.
+//
+// What it does NOT do is re-state the grammar: signature.ValidateRequirementSource
+// answers what a source may be, and the fetch answers through the same
+// function, so a value accepted here cannot be refused there or the reverse.
+//
+// The shape check reads raw rather than req.Signatures, because by the time a
+// requirement carries []string the evidence is gone: parseStringList has
+// already turned whatever was written into strings. Both bearing shapes are
+// accepted - a list of strings, and a single string, which is what
+// parseStringList itself accepts - and the refusal names a Go type rather than
+// a value, since a YAML mapping's contents are repository content this message
+// has no reason to render.
+func checkSignatureSources(req CollectionRequirement, raw any) error {
+	if err := checkSignatureSourceShape(raw); err != nil {
+		return err
+	}
+	if len(req.Signatures) > helpers.MaxSignaturesPerCollection {
+		return fmt.Errorf("%w: %d declared, at most %d are gathered",
+			helpers.ErrTooManySignatureSources, len(req.Signatures), helpers.MaxSignaturesPerCollection)
+	}
+	for _, source := range req.Signatures {
+		if err := signature.ValidateRequirementSource(source); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// checkSignatureSourceShape refuses a signatures: value that is neither a list
+// of strings nor a single string, naming the offending Go type and never its
+// content. An absent key, and a key whose value is nil, are both left alone:
+// declaring nothing is how an entry asks for nothing.
+func checkSignatureSourceShape(raw any) error {
+	item, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	value, ok := item["signatures"]
+	if !ok || value == nil {
+		return nil
+	}
+	switch v := value.(type) {
+	case string:
+		return nil
+	case []any:
+		for _, entry := range v {
+			if _, ok := entry.(string); !ok {
+				return fmt.Errorf("%w: signatures: carries a %T where a source string was expected",
+					helpers.ErrUnsupportedSignatureSource, entry)
+			}
+		}
+
+		return nil
+	default:
+		return fmt.Errorf("%w: signatures: is a %T, not a list of source strings",
+			helpers.ErrUnsupportedSignatureSource, value)
+	}
 }
 
 // checkSourceUserinfo rejects an explicit "source:" that embeds userinfo

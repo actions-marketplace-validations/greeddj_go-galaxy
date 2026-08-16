@@ -46,6 +46,15 @@ func warmWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra
 	if err != nil {
 		return err
 	}
+	// Returned as it came rather than folded into the failure summary below: a
+	// keyring that cannot be read, or requirements declaring signatures with
+	// none configured, is a configuration error this run never started work
+	// under, and joining it behind helpers.ErrInstallationFailed would exit it
+	// as a failed install rather than as the usage error it is.
+	verify, err := newVerifyContext(cfg, runtime, prep.AllRoots)
+	if err != nil {
+		return err
+	}
 	resolved, _, err := resolveOrLoadLockfile(ctx, cfg, runtime, state, prep)
 	if err != nil {
 		return err
@@ -59,7 +68,7 @@ func warmWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra
 		return warmDryRun(ctx, cfg, runtime, state, collections, start)
 	}
 
-	summary := warmCollections(ctx, cfg, runtime, state, collections)
+	summary := warmCollections(ctx, cfg, runtime, state, collections, verify)
 	// Same tail contract as finalizeInstall (see its doc comment): the save is
 	// attempted first but does not short-circuit, writeRunMetrics always runs
 	// regardless of whether it succeeded, and a nonzero collection-failure
@@ -134,6 +143,7 @@ func warmCollections(
 	runtime *infra.Infra,
 	state *installState,
 	collections map[string]collection,
+	verify *verifyContext,
 ) failureSummary {
 	var failures failureRecorder
 	// warm never touches the collections tree at all - it only downloads and
@@ -141,7 +151,7 @@ func warmCollections(
 	// installDeps carries a nil root; newInstallTarget's own nil-root guard
 	// then makes any accidental collections-tree call from this path fail
 	// closed rather than by convention.
-	depsCtx := newInstallDeps(cfg, runtime, state.store, state.backend.Artifacts(), state.extractStore, nil, nil)
+	depsCtx := newInstallDeps(cfg, runtime, state.store, state.backend.Artifacts(), state.extractStore, nil, nil, verify)
 	var wg sync.WaitGroup
 	// max(cfg.Workers, 1): a zero Workers would make sem unbuffered, and the
 	// first send would block forever since no worker has started to drain it
@@ -245,12 +255,20 @@ func recordWarmed(deps installDeps, col collection, artifactSHA string) {
 	deps.st.SetWarmed(col.key(), artifactSHA)
 }
 
-// warmVerifyAndEnsure enforces col's pin (if any) and then populates the
-// extracted store for the artifact, mirroring the install path's verify+extract
-// so a corrupt, drifted, or poisoning cached tarball drives the same bounded
-// evict-and-refetch-once through prepareWithRecovery.
+// warmVerifyAndEnsure enforces col's pin (if any), verifies its signatures, and
+// then populates the extracted store for the artifact, mirroring the install
+// path's verify+extract so a corrupt, drifted, or poisoning cached tarball
+// drives the same bounded evict-and-refetch-once through prepareWithRecovery.
+//
+// The order is verifyAndExtract's own, and for the same reason: the pin proves
+// these are the bytes the lockfile names, the signature proves who published
+// them, and both precede the artifact being materialized anywhere a later
+// install would hardlink from.
 func warmVerifyAndEnsure(ctx context.Context, deps installDeps, col collection, payload installPayload) error {
 	if err := verifyPinnedSHA(col, payload.artifactSHA); err != nil {
+		return err
+	}
+	if err := verifyCollectionSignatures(ctx, deps, col, payload); err != nil {
 		return err
 	}
 	if deps.extractStore == nil {

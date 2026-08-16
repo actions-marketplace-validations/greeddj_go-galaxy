@@ -179,8 +179,10 @@ type NextBlob func() (Blob, bool, error)
 //
 // kr is read and never written, here or anywhere else in this package, so one
 // *Keyring is shared across every worker of a run rather than cloned per
-// worker. That is the contract this function is written to; it is not a claim
-// that a parallel run has been observed under the race detector.
+// worker. That is the contract this function is written to, and it has now been
+// exercised as well as argued: collections.TestVerifyContextIsSafeForConcurrentUse
+// drives concurrent verifications through one shared keyring, policy and
+// fetcher under -race.
 func Verify(manifest []byte, next NextBlob, kr *Keyring, p Policy) (Result, error) {
 	// Fail closed rather than dereference a nil keyring, and fail as the
 	// configuration error it is: a caller asking for verification with no key

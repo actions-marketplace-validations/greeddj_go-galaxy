@@ -316,18 +316,26 @@ func isIntegrityError(err error) bool {
 }
 
 // isSignatureError reports whether err carries one collection's signature
-// verdict: the signatures in hand did not satisfy the policy in force. It
-// matches helpers.ErrSignatureVerificationFailed and nothing else, and that is
-// the whole class rather than a sample of it - every other signature-related
-// sentinel classifies elsewhere, on its own predicate rather than by
-// association. A source that could not be fetched, or a fetch budget that
-// expired, is a wire failure (isSignatureTransportError); a keyring or a
-// policy value this tool refuses is a configuration failure
-// (isSignatureConfigError); an artifact naming no manifest is an
+// verdict: this run could not attribute the artifact to a publisher it was
+// configured to accept. Two sentinels answer that question and the pair is the
+// whole class rather than a sample of it - helpers.ErrSignatureVerificationFailed
+// when the signatures in hand did not satisfy the policy in force, and
+// helpers.ErrSignatureAttributionMismatch when they did and vouched for a
+// different collection than the one being installed. Both leave an operator in
+// the same position, holding bytes nobody they trust vouched for, which is what
+// makes them one exit class.
+//
+// Every other signature-related sentinel classifies elsewhere, on its own
+// predicate rather than by association. A source that could not be fetched, or
+// a fetch budget that expired, is a wire failure (isSignatureTransportError); a
+// keyring or a policy value this tool refuses is a configuration failure
+// (isSignatureConfigError), and so is a requirements entry declaring more
+// sources than the cap allows; an artifact naming no manifest is an
 // artifact-shape failure (isArtifactShapeError); and a broken manifest chain
 // is bytes against a digest (isIntegrityError).
 func isSignatureError(err error) bool {
-	return errors.Is(err, helpers.ErrSignatureVerificationFailed)
+	return errors.Is(err, helpers.ErrSignatureVerificationFailed) ||
+		errors.Is(err, helpers.ErrSignatureAttributionMismatch)
 }
 
 // isLockError reports whether err is a lockfile-related sentinel:
@@ -533,11 +541,12 @@ func isNetworkError(err error) bool {
 // which way each one goes lives on isCanceled.
 //
 // helpers.ErrSignatureFetchDeadline is a budget this program imposed, so
-// whatever comes to raise it must render the context cause with %v and it must
-// never classify ExitInterrupt - a constraint on that future producer rather
-// than an observation about present code, since nothing raises this sentinel
-// yet and the classification below is written to bind the producer instead of
-// describing one.
+// whatever raises it must render the context cause with %v and it must never
+// classify ExitInterrupt. That binds any future producer as well as the one
+// that exists: collections.signatureDeadlineError, which normalizes a spent
+// signature phase into this sentinel and is the third place enforcing that
+// rule, after fetch.watchdogBody.Read with collections.artifactDeadlineError
+// and internal/galaxy/cache's own deadlineError.
 //
 // helpers.ErrSignatureSourceUnavailable carries whatever failed the transfer,
 // and signature.transportCause deliberately keeps a genuine context.Canceled
@@ -664,10 +673,14 @@ func isUsageError(err error) bool {
 // keyring it cannot read or whose container format it does not open, a
 // requirements file declaring signatures with no keyring configured, or a
 // required-count, ignored-status-code, or disable-verification value it does
-// not accept, or one of the two settings that name something supplied as an
-// empty value. The predicate every member shares is the one every other usage
-// sentinel shares: an operator has to change something - a flag, an environment
-// value, ansible.cfg, or the requirements file - and no retry repairs it.
+// not accept, one of the two settings that name something supplied as an empty
+// value, or a requirements entry declaring more signature sources than
+// helpers.MaxSignaturesPerCollection allows. The predicate every member shares is the one every other usage
+// sentinel shares: an operator has to change something - and no retry repairs
+// it. Which places that means is narrower here than for a usage sentinel in
+// general: a flag, an environment value, or the requirements file, never
+// ansible.cfg, since this whole surface is configured from flags and their
+// environment variables alone (see cliflags.SignatureFlags for why).
 //
 // helpers.ErrSignatureSourceUserinfo belongs here on that predicate rather than
 // by association with the fetch that raised it: the value is refused before a
@@ -682,6 +695,7 @@ func isUsageError(err error) bool {
 func isSignatureConfigError(err error) bool {
 	return errors.Is(err, helpers.ErrUnsupportedSignatureSource) ||
 		errors.Is(err, helpers.ErrSignatureSourceUserinfo) ||
+		errors.Is(err, helpers.ErrTooManySignatureSources) ||
 		errors.Is(err, helpers.ErrKeyringUnreadable) ||
 		errors.Is(err, helpers.ErrKeyringIsKeybox) ||
 		errors.Is(err, helpers.ErrKeyringRequired) ||

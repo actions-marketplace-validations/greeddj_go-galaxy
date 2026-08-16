@@ -44,7 +44,7 @@ func newCancelDispatchInstallFixture(
 	cfg := &config.Config{Workers: 1, Offline: true}
 	printer := &capturingPrinter{}
 	runtime := infra.New(printer, http.DefaultClient)
-	deps := newInstallDeps(cfg, runtime, store.New(), nil, nil, nil, nil)
+	deps := newInstallDeps(cfg, runtime, store.New(), nil, nil, nil, nil, nil)
 	collections := map[string]collection{
 		"acme.alpha@1.0.0": {Namespace: "acme", Name: "alpha", Version: "1.0.0"},
 		"acme.beta@1.0.0":  {Namespace: "acme", Name: "beta", Version: "1.0.0"},
@@ -192,7 +192,7 @@ func TestWarmCollectionsStopsDispatchingAfterCancel(t *testing.T) {
 
 		done := make(chan failureSummary, 1)
 		go func() {
-			done <- warmCollections(ctx, cfg, runtime, state, collections)
+			done <- warmCollections(ctx, cfg, runtime, state, collections, nil)
 		}()
 		summary := waitWarmCollections(t, done)
 
@@ -222,7 +222,7 @@ func TestWarmCollectionsStopsDispatchingAfterCancel(t *testing.T) {
 
 		done := make(chan failureSummary, 1)
 		go func() {
-			done <- warmCollections(context.Background(), cfg, runtime, state, collections)
+			done <- warmCollections(context.Background(), cfg, runtime, state, collections, nil)
 		}()
 		summary := waitWarmCollections(t, done)
 

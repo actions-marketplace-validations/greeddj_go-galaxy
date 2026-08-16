@@ -130,3 +130,39 @@ func TestArtifactDeadlineDefaultsToTheConstantAndHonorsAnOverride(t *testing.T) 
 		})
 	}
 }
+
+// TestSignatureDeadlineFallsBackAndHonorsAnOverride pins SignatureDeadline's
+// fallback contract, which is ArtifactDeadline's above: a nil receiver, a
+// zero-value Infra, a freshly constructed one, and an explicitly non-positive
+// override all report helpers.SignatureFetchDeadline, while a positive override
+// is honored verbatim.
+//
+// The nil and zero-value rows are the load-bearing ones:
+// verifyCollectionSignatures reads this budget for every collection it checks,
+// so an Infra a test built by hand must neither panic here nor wrap a zero
+// budget around a gather that would then expire instantly.
+//
+// Written as independent assertions rather than as a table like the one above,
+// so that a change to one accessor cannot be mistaken for a change to both -
+// and each line is reachable whatever the lines before it concluded, since
+// every one of them builds its own receiver.
+func TestSignatureDeadlineFallsBackAndHonorsAnOverride(t *testing.T) {
+	t.Parallel()
+
+	var nilInfra *Infra
+	if got := nilInfra.SignatureDeadline(); got != helpers.SignatureFetchDeadline {
+		t.Errorf("nil Infra: SignatureDeadline() = %s, want %s", got, helpers.SignatureFetchDeadline)
+	}
+	if got := (&Infra{}).SignatureDeadline(); got != helpers.SignatureFetchDeadline {
+		t.Errorf("zero-value Infra: SignatureDeadline() = %s, want %s", got, helpers.SignatureFetchDeadline)
+	}
+	if got := New(&recordingPrinter{}, nil).SignatureDeadline(); got != helpers.SignatureFetchDeadline {
+		t.Errorf("New: SignatureDeadline() = %s, want %s", got, helpers.SignatureFetchDeadline)
+	}
+	if got := (&Infra{SignatureFetchDeadline: -1}).SignatureDeadline(); got != helpers.SignatureFetchDeadline {
+		t.Errorf("negative override: SignatureDeadline() = %s, want %s", got, helpers.SignatureFetchDeadline)
+	}
+	if got := (&Infra{SignatureFetchDeadline: 7 * time.Millisecond}).SignatureDeadline(); got != 7*time.Millisecond {
+		t.Errorf("positive override: SignatureDeadline() = %s, want %s", got, 7*time.Millisecond)
+	}
+}
