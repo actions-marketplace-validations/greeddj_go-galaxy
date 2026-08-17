@@ -285,17 +285,18 @@ func validateRequirement(req CollectionRequirement, raw any) error {
 // internal/galaxy/collections/resolve.go). A value that is not a string at
 // all is turned by parseStringList's fmt.Sprint arm into a plausible-looking
 // source ("map[]", "false", "0") that nothing downstream can tell from one an
-// author wrote. And more DISTINCT
-// sources than helpers.MaxSignaturesPerCollection allows is a list this tool
-// would silently stop reading partway through, which is a worse answer than
-// refusing the file.
+// author wrote. And more sources than helpers.MaxSignaturesPerCollection
+// allows is a list this tool would take only the first 64 of - warned about
+// downstream by gatherLimit, but still not what the file asked for, which
+// is a worse answer than refusing the file outright.
 //
-// What that cap does NOT do, stated rather than implied: it bounds what one
-// entry may DECLARE, never what the gather does once the combined candidate
-// set - this entry's own sources plus whatever the server offers alongside
-// the artifact - exceeds that bound. gatherLimit
-// (internal/galaxy/collections/verify.go) owns that decision and reports it;
-// per the one-home rule, this gate's job ends at load time.
+// helpers.MaxSignaturesPerCollection is one number enforced at two layers,
+// and the two must be read together: this gate bounds what one entry may
+// DECLARE, never what the gather does once the combined candidate set -
+// this entry's own sources plus whatever the server offers alongside the
+// artifact - exceeds that bound. gatherLimit
+// (internal/galaxy/collections/verify.go) owns that second layer and
+// reports it; per the one-home rule, this gate's job ends at load time.
 //
 // What it does NOT do is re-state the grammar: signature.ValidateRequirementSource
 // answers what a source may be, and the fetch answers through the same

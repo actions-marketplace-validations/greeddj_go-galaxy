@@ -108,7 +108,7 @@ func (c *Config) AnsibleSignatureKeysWarning() string {
 	}
 
 	return fmt.Sprintf(
-		"ansible.cfg %s configures signature verification (%s); go-galaxy reads none of it - "+
+		"%s configures signature verification (%s); go-galaxy reads none of it - "+
 			"configure the keyring and its policy through --keyring and its sibling flags, or their environment variables",
 		c.AnsibleConfigPath, strings.Join(named, ", "))
 }

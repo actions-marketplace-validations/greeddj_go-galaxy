@@ -17,6 +17,7 @@ Fast Ansible Galaxy collections installer for CI.
 - [requirements.yml](#requirementsyml)
 - [ansible.cfg](#ansiblecfg)
 - [Galaxy servers and authentication](#galaxy-servers-and-authentication)
+- [Signature verification](#signature-verification)
 - [Notes](#notes)
 - [S3 Cache (optional)](#s3-cache-optional)
 - [Security / Trust model](#security--trust-model)
@@ -128,8 +129,16 @@ has no metrics report), and `summary.md` concatenates every table produced.
 
 Drop-in means the same `requirements.yml`, the same `ansible.cfg` keys and the
 same `ANSIBLE_*` environment variables, for the collections subset above. It
-does not mean identical behavior everywhere: three things differ on purpose,
-and each is called out below rather than left to be discovered in CI.
+does not mean identical behavior everywhere: each deliberate difference is
+called out below rather than left to be discovered in CI.
+
+Signature verification is the one surface where that "same `ansible.cfg` keys
+and the same `ANSIBLE_*` environment variables" sentence splits in two:
+`ansible.cfg`'s four `[galaxy]` signature keys are refused (see [Signature
+verification](#signature-verification) below for why), while all four
+`ANSIBLE_*` environment variables that configure the same settings are
+honored. A reader who only takes away "`ansible.cfg` configures none of it"
+would wrongly conclude the environment names are dead too - they are not.
 
 ### Configuration go-galaxy reads
 
@@ -210,6 +219,34 @@ precedence, and TLS.
   acquisition, described under [install options](#install-options). A transfer
   that does stall reports `network read stalled` and exits `4`, or `5` when it
   fails one collection of an install; it is never reported as an interrupt.
+- **Signature verification runs no external process.** This tool verifies
+  OpenPGP detached signatures in pure Go and executes no `gpg` process at all,
+  so a keyring has to be key material it can read directly - a GnuPG keybox
+  (`.kbx`, the container a default GnuPG installation writes) is refused by
+  name, naming the `gpg --export --armor` command that produces a keyring it
+  can read instead. See [Signature verification](#signature-verification)
+  below.
+- **`--disable-gpg-verify` is honored, and the divergence it creates is made
+  loud rather than silent.** Switching verification off while a keyring is
+  configured can print a warning from two places on the same run: once at
+  startup, naming the configured keyring, and once more - only if some
+  requirements root actually declares `signatures:` - naming the first such
+  collection whose sources will not be checked.
+- **A declared signature source is deduped and ordered per collection, never
+  cached across the whole run.** Within one collection, its own declared
+  sources are gathered in the order `requirements.yml` wrote them, then
+  whatever the server offered alongside the artifact, with duplicate source
+  URIs collapsed inside that one list. Nothing caches a fetched signature
+  blob across collections: two roots naming the same source URI fetch it
+  twice, and a collection recovered through the bounded evict-and-refetch
+  path (see [Signature verification](#signature-verification)) gathers every
+  one of its sources again from scratch.
+- **A collection's archive is checked against its own `FILES.json` listing in
+  both directions, not merely extracted.** Every file, symlink and hardlink
+  entry the archive carries must be listed, and every file `FILES.json` lists
+  must hash to the digest it declares; see [Signature
+  verification](#signature-verification) for the two exemptions this check
+  makes.
 
 Resolution itself is stricter than ansible's: a constraint set with no solution
 is a failure with a proof, not a lenient pick. See [Exit codes](#exit-codes) for
@@ -357,13 +394,19 @@ performs a full install rather than printing help.
 
 ### install options
 
-`warm`, `lock` and `outdated` take this entire set, not just `--dry-run`:
-`install`, `warm`, `lock` and `outdated` each register the identical collection
-flag set plus the S3 flags, on top of the four global options (`--verbose`,
-`--quiet`, `--dry-run`, `--cache-dir`) the root command declares once for every
-subcommand. A flag accepted by a command that has nothing to act on is
-accepted, not rejected - `outdated`, which opens no cache backend, warns on
-stderr about the cache-shaped flags rather than failing (see its entry under
+`warm` takes this entire set, not just `--dry-run`: `install` and `warm` each
+register the identical collection flag set plus the signature-verification
+flags plus the S3 flags. `lock` and `outdated` register the collection flag
+set plus the S3 flags too, but never the signature-verification flags -
+neither command verifies a signature, so mounting those four on them would
+advertise a setting that could never do anything; see [Signature
+verification](#signature-verification) for what each of the four does on the
+two commands that do register them. Every one of the four commands sits on
+top of the four global options (`--verbose`, `--quiet`, `--dry-run`,
+`--cache-dir`) the root command declares once for every subcommand. A flag
+accepted by a command that has nothing to act on is accepted, not rejected -
+`outdated`, which opens no cache backend, warns on stderr about the
+cache-shaped flags rather than failing (see its entry under
 [Commands](#commands)). `cleanup` is the exception and takes only the four
 global options plus the S3 flags, listed separately under
 [cleanup options](#cleanup-options); `hash`, `tree` and `explain` take a
@@ -418,7 +461,7 @@ two-flag set of their own, listed under
   metadata fetch during resolution, an S3 state-object read - exits with the network code (`4`)
   instead. It is never reported as an interrupt.
 
-  Two more ceilings complete this family, both fixed and non-configurable for the identical reason: a
+  Three more ceilings complete this family, all fixed and non-configurable for the identical reason: a
   knob on a safety ceiling is one an operator raises in response to a truncation, which is how the
   attack succeeds. A single Galaxy metadata request - the response, the size-limited body read, and
   every retry attempt and backoff sleep, as one shared budget - carries a fixed 2-minute ceiling: a
@@ -433,6 +476,17 @@ two-flag set of their own, listed under
   S3-backed cache, not just the one that is stalling: these operations run while the backend's
   distributed lock is held, so an unbounded one blocks every other runner against that bucket until it
   gives up waiting for the lock - which is why its budget is tighter than the artifact ceiling above.
+  One collection's whole signature phase - every declared and server-offered source it gathers, with
+  the public-key check interleaved with each one - carries a fixed 1-minute ceiling: an ordinary
+  collection spends it once, and a collection whose manifest chain check, manifest lookup, or
+  attribution check fails against a cache-hit artifact is evicted and refetched exactly once (the same
+  bounded recovery every artifact acquisition gets), whose retry gathers every one of that collection's
+  signature sources again under a second, fresh 1-minute budget - the identical ordinary/failure-path
+  split as the artifact ceiling's own 15-/30-minute one above. A bare policy verdict on its own (the
+  signatures in hand simply did not satisfy the required count) is never retried and so never spends a
+  second budget. This ceiling applies only to a run that verifies signatures at all - see [Signature
+  verification](#signature-verification) below; a run with no keyring configured, or with verification
+  switched off, gathers nothing and pays nothing toward it.
 - `--download-path, -p` (`$GO_GALAXY_COLLECTIONS_PATH`, `$GO_GALAXY_DOWNLOAD_PATH`, `$ANSIBLE_COLLECTIONS_PATH`)
 - `--requirements-file, -r` (`$GO_GALAXY_REQUIREMENTS_FILE`, `$ANSIBLE_GALAXY_REQUIREMENTS_FILE` -
   a go-galaxy extension, not an ansible option)
@@ -477,6 +531,18 @@ two-flag set of their own, listed under
 - `--lock-file` (`$GO_GALAXY_LOCK_FILE`)
 - `--frozen` (`$GO_GALAXY_FROZEN`) - the lockfile is law, enforced differently by each command it applies to. `install`/`warm` resolve FROM the lockfile instead of the network: no version listing, no metadata fetch, just the pinned entries, with each installed or cached artifact's SHA256 verified against its lockfile pin and the run aborted on any mismatch. `lock` cannot resolve from a file it is about to write, so it instead resolves fresh - exactly as an unfrozen `lock` run does, including reusing a cached resolve - and COMPARES the result against the lockfile already on disk, failing the run rather than overwriting the file on any difference; `lock --frozen` is therefore not a network-free path the way install/warm `--frozen` is. See the `lock` command entry above for the comparison's exact contract.
 - `--metrics-file` (`$GO_GALAXY_METRICS_FILE`) - emit JSON run report
+
+Signature verification options (`install` and `warm` only; see [Signature
+verification](#signature-verification) for what each one does):
+
+- `--keyring` (`$GO_GALAXY_KEYRING`, `$ANSIBLE_GALAXY_GPG_KEYRING`) - path to the OpenPGP keyring
+  collection signatures are verified against. Unset (the default) means no verification at all.
+- `--required-valid-signature-count` (`$GO_GALAXY_REQUIRED_VALID_SIGNATURE_COUNT`,
+  `$ANSIBLE_GALAXY_REQUIRED_VALID_SIGNATURE_COUNT`) - defaults to `"1"`.
+- `--ignore-signature-status-code` (`$GO_GALAXY_IGNORE_SIGNATURE_STATUS_CODE`,
+  `$ANSIBLE_GALAXY_IGNORE_SIGNATURE_STATUS_CODES`) - repeatable.
+- `--disable-gpg-verify` (`$GO_GALAXY_DISABLE_GPG_VERIFY`, `$ANSIBLE_GALAXY_DISABLE_GPG_VERIFY`) -
+  skip verification even when a keyring is configured.
 
 S3 cache options (if `--s3-bucket` is set, S3 backend is used):
 
@@ -779,6 +845,236 @@ By contrast, an auth failure (401/403) or an unavailable server exits with the
 network exit code (`4`) instead, since that's a runtime condition to retry or
 investigate, not a configuration mistake.
 
+## Signature verification
+
+`install` and `warm` can verify a collection's detached OpenPGP signatures
+against a keyring before it is extracted. `lock` and `outdated` never verify
+anything - neither of them registers the flags below at all, since neither
+one writes anything into the collections tree for a signature to guard. It
+is off by default and free when off: with no `--keyring` configured,
+nothing is read, no HTTP client for signature sources is built, and nothing
+is gathered.
+
+### Turning it on
+
+| Flag                                          | Environment                                | Ansible environment                             |
+|:----------------------------------------------|:-------------------------------------------|:------------------------------------------------|
+| `--keyring`                                   | `GO_GALAXY_KEYRING`                        | `ANSIBLE_GALAXY_GPG_KEYRING`                    |
+| `--required-valid-signature-count`            | `GO_GALAXY_REQUIRED_VALID_SIGNATURE_COUNT` | `ANSIBLE_GALAXY_REQUIRED_VALID_SIGNATURE_COUNT` |
+| `--ignore-signature-status-code` (repeatable) | `GO_GALAXY_IGNORE_SIGNATURE_STATUS_CODE`   | `ANSIBLE_GALAXY_IGNORE_SIGNATURE_STATUS_CODES`  |
+| `--disable-gpg-verify`                        | `GO_GALAXY_DISABLE_GPG_VERIFY`             | `ANSIBLE_GALAXY_DISABLE_GPG_VERIFY`             |
+
+`--keyring` names an OpenPGP keyring: armored or binary key material this
+tool reads directly, never a GnuPG keybox (`.kbx`, the container a default
+GnuPG installation writes) - a keybox is refused by name, with the
+`gpg --export --armor` command that produces a keyring this tool can read
+included in the refusal. This tool executes no `gpg` process; it verifies
+signatures in pure Go.
+
+**`ansible.cfg`'s four `[galaxy]` signature keys (`gpg_keyring`,
+`required_valid_signature_count`, `ignore_signature_status_codes`,
+`disable_gpg_verify`) are refused, but their `ANSIBLE_*` environment
+variables listed above are honored.** A discovered `ansible.cfg` naming any
+of the four is never read for its value: this program cannot establish
+whether that file was authored by the operator or by the repository under
+test, and a setting that can relax a verification check must not come from a
+file whose author it cannot establish. `install`/`warm` warn about it once
+per run, naming the file and the key names it carried - never their values,
+since none were read; `lock`, `outdated`, `cleanup`, `hash`, `tree` and
+`explain` never emit this warning, since none of them verify anything it
+could apply to.
+
+### Required count and the vacuous pass
+
+`--required-valid-signature-count` (default `"1"`) accepts four spellings: a
+bare non-negative count (`0`, `1`, `2`, ...), the literal `all`, or either
+prefixed with `+`. A bare count or bare `all` is satisfied **vacuously** by an
+empty gather - a collection offering no signatures at all still passes -
+because neither spelling asks for a floor an empty set can fail. Only the `+`
+marker closes that: `+N` additionally requires at least one signature to
+have verified, and `+all` requires the same on top of every checked signature
+verifying. An operator who needs a signature actually required writes `+1`
+or higher.
+
+Two spellings are traps rather than choices. `+0` can never pass, under any
+outcome: it is refused the moment nothing verifies (the strict clause) and
+refused the moment something does (the equality clause), since there is no
+strict form of "require zero" signatures. And `-1` - a spelling that means
+"require every signature" in some ansible documentation - is refused by
+name, naming `all` as the spelling to write instead; ansible's own grammar
+accepts no negative number, so `-1` was never a working spelling to begin
+with.
+
+A run with verification on that gathers nothing to check for a collection -
+because none was declared and the server offered none - still passes, under
+any non-strict spelling including the default, but it is not silent about
+it: it prints one warning naming the collection and the exact strict
+spelling (`+1`, `+2`, ...) that would make that same pass fatal. A
+collection whose every gathered signature failed with a status this run
+tolerates draws the identical warning, but only where it actually passes:
+under `all` or a bare `0`, never under the default or any stricter bare
+count, where a tolerated failure still leaves the required count unmet and
+the run fails instead. A cold API cache under `--offline` produces a
+related but distinctly worded warning: when this run could not even learn
+whether the collection carries signatures at all (no cached version
+metadata, or the server failed to answer), the message says so explicitly
+rather than reading like "this collection carries no signatures" - a run
+that never learned whether a collection is signed has not learned that it
+is unsigned either.
+
+### Ignored status codes
+
+`--ignore-signature-status-code` (repeatable) names a gpg status code this
+run tolerates as a non-fatal signature failure - `BADSIG`, `NO_PUBKEY`, and
+so on. The vocabulary is closed and three-way: eight codes are ones a
+verdict from this tool can actually carry (`BADSIG`, `ERRSIG`, `NO_PUBKEY`,
+`EXPKEYSIG`, `REVKEYSIG`, `EXPSIG`, `NODATA`, `BADARMOR`); two more
+(`KEYEXPIRED`, `KEYREVOKED`) are gpg's other name for two of those eight and
+are accepted as synonyms, so configuring either spelling covers both; and six
+more (`MISSING_PASSPHRASE`, `BAD_PASSPHRASE`, `NO_SECKEY`, `UNEXPECTED`,
+`ERROR`, `FAILURE`) are accepted and inert, since this tool holds no secret
+key material and runs no `gpg` process to report on itself. A value outside
+all sixteen is refused, naming the accepted list. What the one-line
+announcement a verifying run prints at startup does **not** name is which
+codes are ignored - only the keyring path and the required count - and the
+six inert codes are accepted with no warning of their own, since tolerating
+a failure that cannot occur changes nothing either way.
+
+### `signatures:` in requirements.yml
+
+A collection entry may declare `signatures:` as a single source string or a
+list of them:
+
+```yaml
+collections:
+  - name: community.general
+    version: "11.1.0"
+    signatures:
+      - https://galaxy.ansible.com/community/general/signatures/foo.asc
+      - file:///etc/pki/collections/community-general.asc
+```
+
+Each source has to be one of: an absolute `http` or `https` URL, or a
+`file://` URL naming an absolute local path with an empty authority or
+`localhost` only (`file:///etc/...` or `file://localhost/etc/...`). Every
+source is validated where the file is read, before any request is made, as a
+usage error naming the file rather than a per-collection worker failure: a
+value that names nothing fetchable (no scheme, an unsupported scheme, an
+opaque value, an `http`/`https` URL naming no host, or a `file` URL naming
+another host or a relative path), one embedding a credential in its userinfo
+(`https://user:pass@host/sig.asc`), a `signatures:` value that is neither a
+string nor a list of strings, or more than 64 sources declared for one
+collection, each fail the load. A source's own query string is still sent on
+the request - it may be a presigned capability the source needs to be
+fetchable at all - but it is never persisted: it is cut from every source
+before the resolved requirements spec reaches the store, so an `install
+--frozen` run, which never rebuilds that spec, does not silently keep
+re-persisting an old, uncut entry.
+
+Declaring `signatures:` with no keyring configured is a hard error (exit
+`2`) naming the first such collection - the verdict earned by a requirements
+file that asks for verification with nothing configured to verify against.
+`--disable-gpg-verify` changes that: verification explicitly switched off is
+not treated as a missing keyring, so the run proceeds, but it says so loudly
+in up to two places on the same run - once when a keyring is configured and
+the switch disables it anyway, and once more (only if some requirements root
+actually declares `signatures:`) naming the first collection whose declared
+sources will not be checked.
+
+### What a verifying run does differently
+
+- **The pin, then the signature, both before extraction.** For a
+  lockfile-pinned collection, its recorded sha256 is checked first, then its
+  signatures - only once both hold does anything get written into the
+  collections tree, so a collection this run cannot attribute is never
+  extracted where a playbook would find it.
+- **A verifying run cannot take the metadata-free cache-hit fast path.**
+  Normally, an already-cached artifact with no metadata pushed by the
+  resolver installs with no per-collection metadata request at all. A
+  server's own signatures ride on that same version-metadata document, so a
+  verifying run gives up that shortcut: a collection signed only by its
+  server would otherwise pass vacuously on a cache hit and only get checked
+  on a miss. Under `--frozen` or `--no-deps`, where nothing else would have
+  fetched that document, turning on `--keyring` means paying one metadata
+  request per collection that did not exist before.
+- **Nothing about a verification verdict is written anywhere** - not the
+  snapshot, not the extract marker, not the lockfile, not `GALAXY.yml`. This
+  project's trust model already treats the cache as attacker-writable, so a
+  cached "already verified" is exactly the assertion this feature exists to
+  refuse to take on faith. The consequence: an already-installed collection
+  is skipped without being re-verified, the same gate that makes `install`'s
+  "Up to date" line unaffected by verification at all, and the run says so
+  once, on the result tier, naming how many collections were skipped and
+  therefore left unverified this run - the answer to "I turned `--keyring`
+  on over an existing workspace and nothing seemed to happen." `warm`
+  carries no such gate: it re-verifies every collection it touches, cache
+  hits included, so "Already warm" does not carry the same caveat "Up to
+  date" does.
+- **`--offline` warns about a signature source it cannot reach, once per
+  run.** A `file://` source works offline, since it reads local state, but
+  an `http`/`https` one does not; if some requirements root declares a
+  network source, the run warns once, naming the first such root, rather
+  than failing outright - a `file://` source listed first that verifies on
+  its own means a later network source in the same list is never actually
+  reached.
+- **A dry run validates the setup and verifies nothing.** `install --dry-run`
+  and `warm --dry-run` with a keyring configured print a caveat alongside the
+  rest of the preview: the setup (keyring, required count) is echoed, but no
+  signature source is fetched and no artifact's signatures are checked, so
+  the preview's would-fail count never reflects a signature verdict.
+- **The combined candidate set - declared sources plus whatever the server
+  offers - is capped at 64 per collection**, with the declared sources
+  always taking priority. If the combined set exceeds the cap, the run warns
+  naming how many were dropped from the end. This is a different cap from
+  the load-time one above: that one bounds what one requirements entry may
+  *declare*, this one bounds what the *gather* actually reads once the
+  server's own offer is added on top.
+- **A failed verdict's own message renders at most 8 per-signature causes**,
+  plus a footer naming which distinct failure statuses were left out. This
+  bounds only the message: every cause stays reachable through `errors.Is`
+  for exit-code purposes, and the cap is not a claim about how many
+  signatures were checked - it is the count of distinct failure statuses a
+  verdict from this tool can carry, so a message at the cap can still show
+  every shape the vocabulary has.
+- **A refused collection can still leave its artifact cached and its
+  extracted tree populated**, since both are populated before the signature
+  verdict is reached. This is the largest of a few disclosed residuals: the
+  extracted store is content-addressed, so this is harmless there (an entry
+  is only ever reachable by naming the sha of the bytes it holds), but the
+  artifact cache slot is named by server and filename rather than by
+  content, so a rejected artifact can occupy a name a later run's cache
+  lookup serves without contacting the origin again - the same run repeating
+  the check reaches the same refusal, and `--frozen` re-hashes against the
+  lockfile pin regardless. A signature *verdict* on its own (the signatures
+  in hand did not satisfy the policy) does not evict the cached artifact,
+  since refetching would only re-read the same signatures again; a broken
+  manifest chain, a missing `MANIFEST.json`, or a signature that vouches for
+  a different collection all do evict and retry once.
+
+### Manifest chain check
+
+Once at least one signature verifies, the artifact is checked against
+`MANIFEST.json` in both directions: every file, symlink and hardlink entry
+the archive carries must be listed in `FILES.json` (a directory entry is
+exempt from this side, since the check only ever records regular files,
+symlinks and hardlinks even though extraction still creates it), and every
+file `FILES.json` lists must hash to the digest it declares.
+`MANIFEST.json` and `FILES.json` are both allowed to go unlisted by
+`FILES.json` itself - a listing naming the documents that name it is a
+convention, not a guarantee - but the exemption is asymmetric: a
+`FILES.json` row naming itself with `ftype: file` is simply skipped, while a
+`MANIFEST.json` row listed with a digest is checked like any other file and
+can only ever fail, because the manifest's own bytes carry the listing's
+digest, so no listing can name the manifest's digest without predicting
+bytes that depend on it.
+
+The signed manifest's declared `namespace`, `name` and `version` are also
+checked against the collection this run actually resolved - a signature
+that verifies but names a different collection (a downgrade, a substitution)
+fails the same way a manifest whose identity cannot be read unambiguously
+does (two conflicting spellings of the same JSON key, for instance). See
+[Exit codes](#exit-codes) for how both classify.
+
 ## Notes
 
 - Non-Galaxy sources (git/url/file/dir) are not supported.
@@ -875,6 +1171,90 @@ to itself. See "Exit codes" below for the exact messages to grep for.
   cacheable metadata sha, so a poisoned download URL or sha causes the install to fail
   closed instead of installing attacker content. Use `--frozen` with a committed
   lockfile in CI as the robust mitigation against a compromised cache.
+- **Signature verification (see [Signature verification](#signature-verification))
+  trusts the configured keyring a priori; it binds neither a key to a namespace nor
+  ships any publisher's key.** No key is bound to any namespace: any key in the
+  keyring may vouch for any collection. What IS bound is the collection identity
+  inside the signed document itself - once a signature verifies, the manifest's
+  declared namespace, name and version are checked against the collection this run
+  actually resolved, so a key this run trusts cannot vouch for one collection while
+  a different one gets installed under its name.
+- **The default signature policy passes when nothing was gathered to check - but
+  it is not silent about it.** A bare count (or bare `all`) is satisfied
+  vacuously by an empty signature list; go-galaxy warns about it anyway, once per
+  affected collection, naming the exact strict spelling (`+1`, `+2`, ...) that
+  would make that same pass fatal. Bare `all` alone does not close the vacuous
+  pass either - only the `+` marker does.
+- **Tolerating a failure status is likewise not a silent defusal, with two
+  precise exceptions.** When a tolerated status defuses every gathered
+  signature and nothing is left verified, that is the same vacuous pass above
+  and is warned the same way - but only under `all` or a bare `0`, the two
+  spellings where that shape actually passes; under the default or any
+  stricter bare count, a tolerated failure still leaves the required count
+  unmet and the run fails instead. What genuinely is silent: the one-line
+  announcement a verifying run prints names the keyring and the required count,
+  never the tolerated-status list, and the six status codes this tool accepts
+  but can never actually produce (it holds no secret key material and runs no
+  `gpg` process) are tolerated with no warning of their own.
+- **An already-installed collection is skipped without being re-verified - and
+  the run reports it.** `install`'s ordinary skip logic for an already-settled
+  collection runs ahead of signature verification, so the first run with
+  `--keyring` turned on over an existing workspace verifies nothing; it says so
+  once, on the result tier, naming how many collections were left unverified.
+  `warm` carries no equivalent skip and re-verifies every collection it
+  touches, cache hits included.
+- **Nothing about a verification verdict is ever persisted - to the snapshot,
+  the extract marker, the lockfile, or `GALAXY.yml` - which is the trust model
+  working as intended rather than a gap.** This project's threat model already
+  treats the cache as attacker-writable, so a cached "already verified" is
+  exactly the kind of assertion signature verification exists to refuse to
+  take on faith.
+- **Revocation is only as fresh as the keyring file on disk.** There is no
+  keyserver lookup and no network revocation check; a key revoked upstream
+  after the keyring was last updated on disk still verifies.
+- **A signature covers file content, not archive metadata.** The manifest
+  chain check (see [Signature verification](#signature-verification)) records
+  a name-to-content-sha256 mapping; file modes, ownership, modification times,
+  and the tar stream's own framing are all outside what a signature can be
+  said to cover, as is any archive entry of a type the chain check does not
+  record (only regular files, symlinks and hardlinks are).
+- **A `requirements.yml` `signatures:` entry drives an outbound request this
+  run would not otherwise make, and what one outcome discloses is broader than
+  reachable-or-not.** No destination class is refused - loopback, link-local
+  (including a cloud metadata service's own address), and unique-local
+  addresses are all fetched exactly like any other - and a failed connection
+  attempt's own message can include the resolved address and address family,
+  the port, the connect error, and, on a TLS mismatch, the certificate's own
+  list of valid names; redirects are followed too. This is a disclosed
+  reachability oracle for whoever can edit the repository's
+  `requirements.yml`, not a closed one, on the same grounds go-galaxy already
+  accepts for a discovered `ansible.cfg`'s own `[galaxy] server`/`server_list`/
+  `url` values.
+- **A `file://` signature source reads a repository-chosen local path, and a
+  failed read collapses into one message - but a read that succeeds can still
+  disclose more than that message would suggest.** An absent path, an
+  unreadable one, a non-regular file, and one too large to read all render
+  identically; a file that opens and reads, though, is then handed to the same
+  verification walk as any other signature, whose own failure messages can
+  render the file's remaining byte count and other content-derived details.
+  This is disclosed rather than bounded.
+- **Converting a GnuPG keybox to a keyring this tool can read is the
+  operator's own step**, not something go-galaxy does automatically - a
+  `.kbx` file is refused by name, with the export command to run instead.
+- **Under `--offline` with a cold API cache, a verifying run can learn nothing
+  about whether a collection is signed at all - and it says so distinctly.** A
+  collection installed this way is not silently reported as unsigned; the
+  vacuous-pass warning it prints names the metadata as unavailable rather than
+  reading like "no signatures found".
+- **`--frozen` and `--no-deps` normally skip a per-collection metadata request
+  for an already-cached artifact; a verifying run cannot.** A server's own
+  signatures live in that same version-metadata document, so turning on
+  `--keyring` under either flag reintroduces a metadata request per collection
+  that would otherwise have been skipped.
+- **Signature verification covers the artifact a collection resolved to,
+  never the dependency graph that led there.** A collection's dependencies are
+  always taken from the Galaxy API's own dependency map for the resolved
+  version, never from the signed manifest's own `dependencies` field.
 - **A cache must not be shared between principals holding different Galaxy
   credentials.** A local cache directory or an S3 bucket is not scoped to a
   credential: cached API responses, resolved versions, dependency graphs, and
@@ -1152,7 +1532,7 @@ collide:
 |    7 | Artifact-integrity failure (content does not authenticate against its naming sha256, or the digest is malformed)                                                                                                                                                                                                                                                                                                                                                  |
 |    8 | Cache contention (the cache lock is held elsewhere, the S3 lock's wait ceiling elapsed after this run observed another holder, or a lock this run did hold was taken away by another holder mid-run)                                                                                                                                                                                                                                                              |
 |    9 | Persisted cache state is corrupt or oversized and must be discarded (a project registry that fails to decode, a state object that exceeds its size ceiling, or - local backend only - a Bolt snapshot file that fails one of its own corruption checks)                                                                                                                                                                                                           |
-|   10 | Signature verification failure (a collection's signatures did not satisfy the policy in force - fewer valid than required, or a failure under an `all` policy). The artifact's own bytes are a separate question and stay exit `7`                                                                                                                                                                                                                                |
+|   10 | Signature verification failure - this run failed to attribute a collection's artifact to a publisher it was configured to accept: either its signatures did not satisfy the policy in force (fewer valid than required, or a failure under an `all` policy), or they did and vouched for a different collection, or its manifest's declared identity could not be read unambiguously. The artifact's own bytes are a separate question and stay exit `7`          |
 |  129 | Interrupted (a caught SIGHUP)                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 |  130 | Interrupted (a caught SIGINT, or the caller's own context canceled)                                                                                                                                                                                                                                                                                                                                                                                               |
 |  143 | Interrupted (a caught SIGTERM)                                                                                                                                                                                                                                                                                                                                                                                                                                    |
@@ -1193,10 +1573,23 @@ canceled GitHub Actions job all send it rather than SIGINT, so `143` is the
 code a cancellation usually shows up as. SIGQUIT is deliberately left
 unhandled, which keeps Go's default goroutine dump available for diagnosing a
 hung run. The same holds for
-the metadata and cache-state ceilings above: grep the run's output for
-`galaxy metadata fetch deadline exceeded` or `cache state object deadline
-exceeded` to tell one of these deadlines apart from a genuine interrupt or
-from any other network failure sharing exit code `4`.
+the metadata, cache-state and signature-fetch ceilings above: grep the run's
+output for `galaxy metadata fetch deadline exceeded`, `cache state object
+deadline exceeded`, or `collection signature fetch deadline exceeded` to tell
+one of these deadlines apart from a genuine interrupt or from any other
+network failure sharing exit code `4`.
+
+One signature-related failure is a deliberate exception to that rule rather
+than a fourth deadline: a signature source that could not be fetched or read
+(reported as `collection signature source unavailable`, distinct from the
+deadline message above) keeps a genuine Ctrl-C reachable, so an operator
+interrupting a run mid-fetch of a signature source still exits
+`130`/`143`/`129` as an interrupt, not `4` as a network failure. That is the
+one place in this whole family where the underlying transport error is
+allowed to carry the caller's own cancellation through unchanged, because
+unlike the four deadlines above, this failure already reports every other
+network cause faithfully - a stall here is the deadline sentinel's own job,
+not this one's - so there is nothing for a real Ctrl-C to be confused with.
 
 Exit codes `2`, `4`, and `8` each fold in more than one cache-backend
 condition too, distinguishable the same way - grep the run's output for the
@@ -1241,22 +1634,32 @@ since the snapshot itself is not damaged, only unreadable by this particular
 binary, and discarding it would destroy a shared cache other, newer runners
 still depend on.
 
-Exit `10` means a collection's signatures did not satisfy the policy in force,
-not that its content is wrong: an artifact can hash exactly as its digest says
-and still exit `10`, because nothing this run was configured to trust vouched
-for it. That is what makes it a class of its own rather than part of exit `7` -
-the remedy is usually this run's own keyring or its required-signature-count
-policy, not the artifact or the server that served it. Every other
-signature-related failure classifies by what actually failed rather than by the
-phase it was found in: a keyring that cannot be read, a keyring in a container
-format this tool cannot open, `signatures:` declared with no keyring
-configured, an unaccepted required-count or ignored-status-code value, and a
-signature source this tool would never fetch all exit `2`. That last class is
-about the source's own spelling rather than about reaching it: a value naming
-nothing fetchable (no scheme, a scheme outside `file`, `http` and `https`, an
-`http`/`https` URL naming no host such as `https:///sig.asc`, or a `file` URL
-naming another host or a relative path), or one embedding a credential in its
-userinfo (`https://user:pass@hub/sig.asc`), is refused before any request is
+Exit `10` means this run failed to attribute a collection's artifact to a
+publisher it was configured to accept, not that its content is wrong: an
+artifact can hash exactly as its digest says and still exit `10`. That
+failure to attribute can happen in either direction - the signatures in hand
+did not satisfy the policy in force, or they satisfied it and vouched for a
+different collection than the one being installed (MANIFEST.json's own
+namespace, name and version disagreeing with what was resolved, or a
+manifest whose identity cannot be read unambiguously at all, such as two
+conflicting spellings of the same JSON key) - and both share the same class
+rather than part of exit `7`, because both leave an operator holding bytes
+nobody they trust vouched for. The remedy is usually this run's own keyring
+or its required-signature-count policy, not the artifact or the server that
+served it. Every other signature-related failure classifies by what actually
+failed rather than by the phase it was found in: a keyring that cannot be
+read, a keyring in a container format this tool cannot open, `signatures:`
+declared with no keyring configured, an unaccepted required-count,
+ignored-status-code, or disable-verification value, an explicitly supplied
+but empty `--keyring` or `--required-valid-signature-count`, a requirements
+entry declaring more signature sources than this tool gathers for one
+collection (64), and a signature source this tool would never fetch all exit
+`2`. That last class is about the source's own spelling rather than about
+reaching it: a value naming nothing fetchable (no scheme, a scheme outside
+`file`, `http` and `https`, an `http`/`https` URL naming no host such as
+`https:///sig.asc`, or a `file` URL naming another host or a relative path),
+or one embedding a credential in its userinfo
+(`https://user:pass@hub/sig.asc`), is refused before any request is
 composed, and the remedy is editing the entry in `requirements.yml`. A source
 this tool would have fetched and could not obtain - a network failure, an
 unreadable `file://` path, an offline-mode refusal - or a signature phase that

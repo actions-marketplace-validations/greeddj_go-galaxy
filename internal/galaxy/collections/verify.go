@@ -981,7 +981,7 @@ func serverBlobOrigin(meta *types.GalaxyCollectionVersionInfo) string {
 // may normalize an error that already carries the sentinel without doubling it.
 //
 // The cause is rendered with %v, deliberately never %w. Three places enforce
-// that rule for the four deadline-and-stall sentinels this project raises, and
+// that rule for the five deadline-and-stall sentinels this project raises, and
 // this is the third: internal/galaxy/fetch's watchdogBody.Read together with
 // artifactDeadlineError (internal/galaxy/collections/deadline.go),
 // internal/galaxy/cache's deadlineError for the metadata and state-object
