@@ -10,16 +10,16 @@ package collections
 // so each of them stays green if the verify context never reaches the workers
 // at all. These are the tests that fail when the wiring is cut.
 //
-// The refusing row uses a source that cannot verify rather than one that can,
-// which is what keeps the fake server usable here: a failed verdict never
-// reaches the manifest chain walk, and the artifacts fakegalaxy generates carry
-// no FILES.json for a chain walk to succeed against. A chain walk on a
-// command-level SUCCESS path is therefore left uncovered, deliberately and
-// narrowly: it is the same shared verifyCollectionSignatures the install-side
-// tests already walk a real chain through (TestVerifyFailsOnChainMismatch and
-// TestWarmVerifiesSignatures' own positive control), over an artifact this
-// package builds itself. What that leaves untested is fakegalaxy's archive
-// shape, not this project's verification path.
+// The refusing row uses a source that cannot verify rather than one that can, which is what keeps this
+// file narrow: a failed verdict never reaches the manifest chain walk, so nothing here depends on
+// fakegalaxy's artifacts carrying a FILES.json a chain walk could succeed against - that stays true of
+// every row below, unchanged. A command-level SUCCESS path installing a validly signed collection has
+// its own home instead: verify_signed_e2e_test.go proves that a real command install verifies and
+// accepts an artifact walked all the way through MANIFEST.json, FILES.json, and the one file it lists,
+// over the identical shared verifyCollectionSignatures this file's own refusing rows already reach - the
+// proof this file cannot make on its own, since a refusing row's verdict is settled before the chain
+// walk is ever reached. This file's job stays the wiring proof: that a real command reaches
+// verifyCollectionSignatures at all, not what a successful verification over a real chain looks like.
 //
 // The same real-command-over-a-fake-server shape also carries this file's second
 // concern: what a preview says about verification without exercising it

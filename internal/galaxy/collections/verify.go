@@ -397,21 +397,23 @@ func (vc *verifyContext) enabled() bool {
 // second attempt gathers every requirement source again under a fresh budget,
 // since nothing about a gathered blob is cached between attempts.
 //
-// Two residuals are disclosed rather than closed, and the first is the larger
-// of the two. The artifact cache and the extracted store are both populated
-// BEFORE this verdict is reached - on a fresh download with an extracted store
-// configured, streamDownloadAndExtract promotes the content-addressable tree
-// during the download itself - so a refused collection leaves both populated
-// while nothing is installed. For the extracted store that is benign: it is
-// content-addressed, so its entry is reachable only by naming the sha of the
-// bytes it holds. The artifact cache is NOT - helpers.ArtifactKey is a
-// server fingerprint plus the escaped filename, and internal/galaxy/cache's own
-// cachekeys.go records that content-addressing it was considered and rejected -
-// so what stays behind is attacker-chosen bytes occupying the NAME a later run
-// looks up, and that run serves them from cache without contacting the origin.
-// What bounds it is that the same run verifies again from the same trust
-// boundary and reaches the same refusal, and that --frozen re-hashes against
-// the lockfile pin; what it costs is a cache slot no verdict evicts.
+// Three residuals are disclosed rather than closed, and the first is the
+// largest of the three. The artifact cache and the extracted store are both
+// populated BEFORE this verdict is reached - on a fresh download with an
+// extracted store configured, streamDownloadAndExtract promotes the
+// content-addressable tree during the download itself - so a refused
+// collection leaves both populated while nothing is installed. For the
+// extracted store that is benign: it is content-addressed, so its entry is
+// reachable only by naming the sha of the bytes it holds. The artifact
+// cache is NOT - helpers.ArtifactKey is a server fingerprint plus the
+// escaped filename, and internal/galaxy/helpers/cachekeys.go records that
+// content-addressing it was considered and rejected - so what stays
+// behind is attacker-chosen bytes occupying the NAME a later run looks up,
+// and that run serves them from cache without contacting the origin. What
+// bounds it is that the same run verifies again from the same trust
+// boundary and reaches the same refusal, and that --frozen re-hashes
+// against the lockfile pin; what it costs is a cache slot no verdict
+// evicts.
 //
 // The second: a file:// source is read even once the budget below has expired,
 // because Fetcher.fetchFile observes no context by design; what that costs is

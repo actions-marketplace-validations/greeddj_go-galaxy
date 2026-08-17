@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"math"
@@ -14,11 +15,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/archive"
+	"github.com/greeddj/go-galaxy/internal/galaxy/manifest"
 	"github.com/psvmcc/hub/pkg/types"
 )
 
@@ -1176,4 +1180,187 @@ func TestParseDigitsAndQueryInt(t *testing.T) {
 			t.Errorf("parseQueryInt = %d, want 7", got)
 		}
 	})
+}
+
+// TestManifestJSONMatchesArtifactAndVerifiesChain proves ManifestJSON hands
+// back the exact bytes the downloaded artifact carries - which is what makes
+// it safe for a caller to sign: a signature over ManifestJSON's return value
+// is a signature over the artifact this server actually serves, not over
+// some other document a caller constructed by hand - and that the artifact's
+// own chain, from that MANIFEST.json down to the one file it lists, verifies
+// end to end.
+func TestManifestJSONMatchesArtifactAndVerifiesChain(t *testing.T) {
+	t.Parallel()
+	s := New(t)
+	s.AddVersion("ns", "name", "1.0.0", nil)
+
+	resp := doGet(t, s.Client(), s.URL()+"/download/ns-name-1.0.0.tar.gz")
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read artifact body: %v", err)
+	}
+
+	tarPath := filepath.Join(t.TempDir(), "artifact.tar.gz")
+	if err := os.WriteFile(tarPath, body, 0o600); err != nil {
+		t.Fatalf("write artifact to disk: %v", err)
+	}
+
+	fromArchive, err := manifest.ReadFromTarGz(tarPath)
+	if err != nil {
+		t.Fatalf("manifest.ReadFromTarGz() error = %v, want nil", err)
+	}
+	fromServer := s.ManifestJSON("ns", "name", "1.0.0")
+	if !bytes.Equal(fromArchive, fromServer) {
+		t.Fatalf("ManifestJSON() = %s, want the archive's own MANIFEST.json bytes %s", fromServer, fromArchive)
+	}
+
+	if err := manifest.VerifyChain(context.Background(), tarPath, fromServer); err != nil {
+		t.Fatalf("manifest.VerifyChain() = %v, want nil", err)
+	}
+
+	if got := s.ManifestJSON("ns", "unknown", "1.0.0"); got != nil {
+		t.Errorf("ManifestJSON() for an unregistered collection = %v, want nil", got)
+	}
+	if got := s.ManifestJSON("ns", "name", "9.9.9"); got != nil {
+		t.Errorf("ManifestJSON() for an unregistered version = %v, want nil", got)
+	}
+}
+
+// TestSignVersionAddsSignatureToVersionDetail pins SignVersion's own wire
+// contract: the blob it is given lands under signatures[0].signature in a
+// later fetch of that version's detail - the shape
+// internal/galaxy/collections' serverSignatureBlobs reads a server's own
+// signatures under.
+//
+// The second version is the positive control on the same server: it is
+// registered but never handed to SignVersion, and its own detail must carry
+// no signatures at all, which is what shows the first assertion is reading a
+// value SignVersion actually set rather than a field this wire shape always
+// carries.
+func TestSignVersionAddsSignatureToVersionDetail(t *testing.T) {
+	t.Parallel()
+	s := New(t)
+	s.AddVersion("ns", "name", "1.0.0", nil)
+	s.AddVersion("ns", "name", "2.0.0", nil)
+
+	blob := []byte("-----BEGIN PGP SIGNATURE-----\nfixture\n-----END PGP SIGNATURE-----")
+	s.SignVersion(t, "ns", "name", "1.0.0", blob)
+
+	var signed types.GalaxyCollectionVersionInfo
+	status := getJSON(t, s.Client(), s.URL()+"/api/v3/collections/ns/name/versions/1.0.0/", &signed)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want %d", status, http.StatusOK)
+	}
+	list, ok := signed.Signatures.([]any)
+	if !ok || len(list) != 1 {
+		t.Fatalf("signed version Signatures = %#v, want a one-element list", signed.Signatures)
+	}
+	row, ok := list[0].(map[string]any)
+	if !ok {
+		t.Fatalf("signed version Signatures[0] = %#v, want a JSON object", list[0])
+	}
+	if got, _ := row["signature"].(string); got != string(blob) {
+		t.Errorf("Signatures[0][%q] = %q, want %q", "signature", got, blob)
+	}
+
+	var unsigned types.GalaxyCollectionVersionInfo
+	status = getJSON(t, s.Client(), s.URL()+"/api/v3/collections/ns/name/versions/2.0.0/", &unsigned)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want %d", status, http.StatusOK)
+	}
+	if unsigned.Signatures != nil {
+		t.Errorf("unsigned version Signatures = %#v, want nil (SignVersion was never called for it)", unsigned.Signatures)
+	}
+}
+
+// stubTB is a minimal testing.TB double, used only to prove SignVersion's own
+// two misuse guards fire tb.Fatalf rather than falling through to an
+// unattributed nil-pointer panic. It embeds a nil testing.TB rather than a
+// real *testing.T: SignVersion calls only Helper and Fatalf on the tb it is
+// given, and stubTB overrides both itself, so the embedded interface's own
+// unexported method - present purely to satisfy testing.TB at compile time -
+// is never actually invoked on the nil value it holds.
+//
+// Fatalf itself has to stop the calling goroutine, not merely record a
+// message: SignVersion's own body, like a real *testing.T caller's, is
+// written assuming a Fatalf call never returns. Verified with a go test
+// -overlay copy of this file whose Fatalf records fatalMsg and returns
+// instead of calling runtime.Goexit, run against
+// TestSignVersionRefusesAnUnregisteredCollection: the goroutine SignVersion
+// runs on crashes instead of completing, and fatalMsg is never read by the
+// caller:
+//
+//	panic: runtime error: invalid memory address or nil pointer dereference
+//
+// with the stack naming (*Server).SignVersion and callSignVersion's own
+// goroutine literal - the nil-pointer dereference the first misuse guard
+// exists to prevent, reached because the stub let Fatalf return instead of
+// stopping the goroutine. runtime.Goexit is what testing.T.Fatalf itself
+// uses for exactly this property (through FailNow), and it still runs every
+// deferred call in the goroutine on the way out - including SignVersion's
+// own deferred s.mu.Unlock - so callers below drive it from a background
+// goroutine and read fatalMsg only after that goroutine has ended.
+type stubTB struct {
+	testing.TB
+
+	fatalMsg string
+}
+
+func (s *stubTB) Helper() {}
+
+func (s *stubTB) Fatalf(format string, args ...any) {
+	s.fatalMsg = fmt.Sprintf(format, args...)
+	runtime.Goexit()
+}
+
+// callSignVersion runs SignVersion against stub on its own goroutine and
+// waits for it to end, so stub.Fatalf's own runtime.Goexit terminates only
+// that goroutine rather than the test's.
+func callSignVersion(s *Server, stub *stubTB, namespace, name, version string) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.SignVersion(stub, namespace, name, version, []byte("fixture"))
+	}()
+	<-done
+}
+
+// TestSignVersionRefusesAnUnregisteredCollection pins SignVersion's first
+// misuse guard: a namespace/name AddVersion never registered at all is
+// reported through tb.Fatalf, naming that identity, rather than reached as a
+// nil-pointer dereference one line further down, on the nil *fakeCollection
+// the failed lookup yields.
+func TestSignVersionRefusesAnUnregisteredCollection(t *testing.T) {
+	t.Parallel()
+	s := New(t)
+	s.AddVersion("acme", "app", "1.0.0", nil)
+
+	stub := &stubTB{}
+	callSignVersion(s, stub, "ghost", "collection", "1.0.0")
+
+	if !strings.Contains(stub.fatalMsg, "ghost.collection") ||
+		!strings.Contains(stub.fatalMsg, "was never registered with AddVersion") {
+		t.Fatalf("Fatalf message = %q, want it to report ghost.collection as never registered", stub.fatalMsg)
+	}
+}
+
+// TestSignVersionRefusesAnUnregisteredVersion pins SignVersion's second
+// misuse guard, on a server that registers only one version: a namespace and
+// name that ARE registered but a version that is not is reported through
+// tb.Fatalf, naming the full ns.name@version identity, rather than reached
+// further down as a nil-pointer dereference on entry.info, via the nil
+// *fakeVersionEntry the failed lookup yields.
+func TestSignVersionRefusesAnUnregisteredVersion(t *testing.T) {
+	t.Parallel()
+	s := New(t)
+	s.AddVersion("acme", "app", "1.0.0", nil)
+
+	stub := &stubTB{}
+	callSignVersion(s, stub, "acme", "app", "9.9.9")
+
+	if !strings.Contains(stub.fatalMsg, "acme.app@9.9.9") ||
+		!strings.Contains(stub.fatalMsg, "was never registered with AddVersion") {
+		t.Fatalf("Fatalf message = %q, want it to report acme.app@9.9.9 as never registered", stub.fatalMsg)
+	}
 }

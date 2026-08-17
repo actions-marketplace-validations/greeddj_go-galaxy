@@ -69,6 +69,41 @@ const decimalBase = 10
 // was built in.
 const tarFileMode = 0o644
 
+// Names and values a generated artifact's chain-of-trust documents carry.
+// These are spelled out locally, as plain values, rather than imported from
+// internal/galaxy/helpers or internal/galaxy/manifest: a double that took
+// these from the code under test could not catch that code changing them -
+// a rename or a retyped value on either side would rename or retype both,
+// so no test would fail even though the wire shape had drifted from what a
+// real Galaxy server sends. The manifest half carries a second reason on
+// top of the first: internal/galaxy/manifest is also the reader this
+// package's own generated FILES.json and MANIFEST.json exist to be checked
+// against (manifest.VerifyChain, both in production and in
+// TestManifestJSONMatchesArtifactAndVerifiesChain), so this double must not
+// take its shape from the very reader it feeds - doing so would let a
+// defect in that reader and a defect in this generator cancel each other
+// out instead of one catching the other. MANIFEST.json's own name - the one
+// this pair already had before FILES.json existed - was already handled the
+// same way, as the bare literal buildArtifact writes.
+const (
+	// filesManifestFileName is the archive-relative name of the per-file
+	// digest listing a generated artifact carries, and the name
+	// MANIFEST.json's own pointer names.
+	filesManifestFileName = "FILES.json"
+	// filesEntryTypeFile is the ftype FILES.json gives a row whose digest
+	// describes a regular file's content, matching what
+	// manifest.VerifyChain reads that field for.
+	filesEntryTypeFile = "file"
+	// chksumTypeSHA256 is the one checksum algorithm named in both
+	// FILES.json's own rows and MANIFEST.json's pointer at FILES.json.
+	chksumTypeSHA256 = "sha256"
+	// signatureFieldKey is the one JSON key SignVersion's own signature
+	// entry carries, matching the key
+	// internal/galaxy/collections.serverSignatureField reads a server's
+	// version-metadata signatures under.
+	signatureFieldKey = "signature"
+)
+
 // These are fixed points in time, computed once rather than per response;
 // they must be var since time.Date and time.Time.Format are not constant
 // expressions. Never time.Now, so every byte this package produces - and
@@ -125,14 +160,23 @@ type fakeCollection struct {
 }
 
 // fakeVersionEntry is one registered collection version: its absolute
-// version-detail URL (also reused by the versions-list Data entries) and
-// its premarshaled version-detail body, which never changes once built
-// since it does not depend on sibling versions.
+// version-detail URL (also reused by the versions-list Data entries), the
+// MANIFEST.json bytes its generated artifact carries (returned by
+// ManifestJSON, so a test that wants to sign them never has to download the
+// artifact and re-run manifest.ReadFromTarGz just to recover bytes this
+// package already built), the version-detail document itself - retained
+// rather than only its marshaled form, so SignVersion can mutate its
+// Signatures field - and its premarshaled detail body. info and detailBody
+// are kept in step by every call that changes either: AddVersion sets both
+// once, and SignVersion re-marshals detailBody from info immediately after
+// mutating info's own Signatures field.
 type fakeVersionEntry struct {
-	version    string
-	href       string
-	sha256     string
-	detailBody []byte
+	info         *types.GalaxyCollectionVersionInfo
+	version      string
+	href         string
+	sha256       string
+	detailBody   []byte
+	manifestJSON []byte
 }
 
 // fakeArtifact is one registered download: its tarball bytes plus the
@@ -335,7 +379,7 @@ func (s *Server) Client() *http.Client {
 // since highest_version tracks whichever registered version currently
 // sorts highest.
 func (s *Server) AddVersion(namespace, name, version string, deps map[string]string) Version {
-	data, sum := buildArtifact(namespace, name, version, deps)
+	data, sum, manifestJSON := buildArtifact(namespace, name, version, deps)
 	filename := fmt.Sprintf("%s-%s-%s.tar.gz", namespace, name, version)
 	// urlBase carries the base path prefix (empty unless NewAtBasePath was
 	// used with one), and collectionsBase adds this server's API root on top
@@ -346,7 +390,8 @@ func (s *Server) AddVersion(namespace, name, version string, deps map[string]str
 	collectionsBase := urlBase + s.apiRootPrefix
 	href := fmt.Sprintf("%s/collections/%s/%s/versions/%s/", collectionsBase, namespace, name, version)
 	downloadURL := fmt.Sprintf("%s/download/%s", urlBase, filename)
-	detailBody := buildVersionDetailBody(namespace, name, version, href, downloadURL, filename, sum, len(data), deps)
+	info := buildVersionDetailBody(namespace, name, version, href, downloadURL, filename, sum, len(data), deps)
+	detailBody := marshalVersionDetail(info)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -361,13 +406,79 @@ func (s *Server) AddVersion(namespace, name, version string, deps map[string]str
 		}
 		s.collections[key] = col
 	}
-	col.versions[version] = &fakeVersionEntry{version: version, href: href, sha256: sum, detailBody: detailBody}
+	col.versions[version] = &fakeVersionEntry{
+		version: version, href: href, sha256: sum, detailBody: detailBody, manifestJSON: manifestJSON, info: info,
+	}
 	col.sortedVersions = sortedVersionKeys(col.versions)
 	recomputeRootBody(col, collectionsBase)
 
 	s.artifacts[filename] = fakeArtifact{namespace: namespace, name: name, data: data}
 
 	return Version{Namespace: namespace, Name: name, Version: version, SHA256: sum}
+}
+
+// ManifestJSON returns a copy of the MANIFEST.json bytes the artifact
+// AddVersion generated for namespace/name/version carries, or nil if that
+// version was never registered. Signing those bytes directly - rather than a
+// signature over some other document a caller constructs by hand - is what
+// makes the signature verifiable against the artifact this server actually
+// serves.
+//
+// The returned slice is a copy, made via slices.Clone: a caller may not
+// retain a reference into this server's own state.
+func (s *Server) ManifestJSON(namespace, name, version string) []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	col, ok := s.collections[collectionKey(namespace, name)]
+	if !ok {
+		return nil
+	}
+	entry, ok := col.versions[version]
+	if !ok {
+		return nil
+	}
+	return slices.Clone(entry.manifestJSON)
+}
+
+// SignVersion appends signature to the version-detail signatures list of a
+// version AddVersion already registered, so a later fetch of that version's
+// detail carries it under signatures[i].signature - the wire shape
+// serverSignatureBlobs (internal/galaxy/collections) reads a server's own
+// signatures under.
+//
+// It must be called after AddVersion, and cannot usefully be called before
+// it: a signature is made over the MANIFEST.json bytes of the artifact
+// AddVersion generates, which the caller can only recover afterward, through
+// a separate call to ManifestJSON.
+//
+// tb is testing.TB, not a panic, matching New's own choice: a caller naming
+// a namespace/name/version this server never registered is a typo in the
+// caller's own test, and tb.Helper() plus tb.Fatalf attributes the failure
+// to that caller's line rather than to an unattributed panic here.
+func (s *Server) SignVersion(tb testing.TB, namespace, name, version string, signature []byte) {
+	tb.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	col, ok := s.collections[collectionKey(namespace, name)]
+	if !ok {
+		tb.Fatalf("fakegalaxy: SignVersion: %s.%s was never registered with AddVersion", namespace, name)
+	}
+	entry, ok := col.versions[version]
+	if !ok {
+		tb.Fatalf("fakegalaxy: SignVersion: %s.%s@%s was never registered with AddVersion", namespace, name, version)
+	}
+
+	// entry.info.Signatures is only ever written here, so the one type it can
+	// already hold is the one this function itself assigns - a type-assert
+	// failure therefore means "not signed yet" (a nil interface), not a
+	// foreign shape. Appended into existing and reassigned to it before the
+	// field write, rather than assigned to the field directly, since the
+	// field's own static type (any) differs from what append returns.
+	existing, _ := entry.info.Signatures.([]map[string]string)
+	existing = append(existing, map[string]string{signatureFieldKey: string(signature)})
+	entry.info.Signatures = existing
+	entry.detailBody = marshalVersionDetail(entry.info)
 }
 
 // Fail arms a fault rule: the next requests to ep matching namespace/name
@@ -1064,18 +1175,25 @@ func recomputeRootBody(col *fakeCollection, collectionsBase string) {
 	col.rootBody = body
 }
 
-// buildVersionDetailBody premarshals the version-detail JSON body once at
+// buildVersionDetailBody builds the version-detail document once at
 // registration time: unlike the root metadata's highest_version, one
 // version's detail never depends on its siblings, so it is built exactly
-// once and served verbatim afterward. Dependencies are set on both
-// metadata.dependencies - the field the loader's extractDependencies reads
-// first - and manifest.collection_info.dependencies, mirroring the
-// MANIFEST.json bundled in the artifact itself.
+// once and served, marshaled through marshalVersionDetail, verbatim
+// afterward - until SignVersion mutates its Signatures field and
+// re-marshals it. Dependencies are set on both metadata.dependencies - the
+// field the loader's extractDependencies reads first - and
+// manifest.collection_info.dependencies, mirroring the MANIFEST.json
+// bundled in the artifact itself.
+//
+// It returns the document itself rather than its marshaled bytes, since
+// SignVersion needs the live value to mutate: buildManifestJSON and
+// buildFilesJSON, by contrast, are read once and discarded, so they stay
+// bytes-in-bytes-out.
 func buildVersionDetailBody(
 	namespace, name, version, href, downloadURL, filename, sha string,
 	size int,
 	deps map[string]string,
-) []byte {
+) *types.GalaxyCollectionVersionInfo {
 	var info types.GalaxyCollectionVersionInfo
 	info.Version = version
 	info.Href = href
@@ -1091,25 +1209,42 @@ func buildVersionDetailBody(
 	info.Manifest.CollectionInfo.Version = version
 	info.Manifest.CollectionInfo.Dependencies = deps
 
-	body, err := json.Marshal(&info)
+	return &info
+}
+
+// marshalVersionDetail renders info as the JSON body handleVersionDetail
+// serves. It is the single place that marshal happens - called once by
+// AddVersion at registration time and again by SignVersion whenever it
+// mutates info's Signatures field - keeping a version's live document and
+// its served bytes in step by every call that changes either.
+func marshalVersionDetail(info *types.GalaxyCollectionVersionInfo) []byte {
+	body, err := json.Marshal(info)
 	if err != nil {
-		// info is built entirely from strings, an int64, and a
-		// map[string]string; marshaling it cannot fail.
+		// info is built entirely from strings, an int64, a
+		// map[string]string, and (once SignVersion has run) a
+		// []map[string]string; marshaling it cannot fail.
 		panic(fmt.Sprintf("fakegalaxy: marshal version detail: %v", err))
 	}
 	return body
 }
 
-// buildArtifact produces a deterministic tar.gz artifact for one
-// collection version: a MANIFEST.json describing the collection - the
-// same shape a real ansible-galaxy build produces, and the shape
-// archive.ExtractTarGzStream expects - plus one small regular file, so a
-// real extractor can unpack it like any other Galaxy artifact. It returns
-// the gzip bytes and their sha256 (hex), which callers use as the
-// artifact's content hash rather than ever hardcoding one.
-func buildArtifact(namespace, name, version string, deps map[string]string) ([]byte, string) {
-	manifest := buildManifestJSON(namespace, name, version, deps)
+// buildArtifact produces a deterministic tar.gz artifact for one collection
+// version, in the shape a real ansible-galaxy build produces and
+// archive.ExtractTarGzStream expects: a MANIFEST.json naming FILES.json's
+// own digest, the FILES.json it names, and the one file FILES.json lists,
+// README.md. The chain is closed rather than merely present - FILES.json's
+// listed digest for README.md is that file's real digest, and MANIFEST.json's
+// own pointer names FILES.json's real digest - so manifest.VerifyChain
+// accepts this artifact end to end, and a detached signature made over its
+// MANIFEST.json can be verified all the way down to the one file it vouches
+// for. It returns the gzip bytes, their sha256 (hex, which callers use as
+// the artifact's content hash rather than ever hardcoding one), and the raw
+// MANIFEST.json bytes the artifact carries (also available afterward
+// through Server.ManifestJSON, once the version is registered).
+func buildArtifact(namespace, name, version string, deps map[string]string) ([]byte, string, []byte) {
 	readme := []byte("# " + namespace + "." + name + "\n")
+	filesJSON := buildFilesJSON(readme)
+	manifest := buildManifestJSON(namespace, name, version, deps, sha256Hex(filesJSON))
 
 	// strings.Builder is used as the in-memory sink for gzip/tar output:
 	// its Write accepts arbitrary bytes (Go strings are not required to be
@@ -1119,7 +1254,11 @@ func buildArtifact(namespace, name, version string, deps map[string]string) ([]b
 	gz := gzip.NewWriter(&sink)
 	tw := tar.NewWriter(gz)
 
+	// MANIFEST.json stays the first entry, matching what
+	// manifest.ReadFromTarGz's own doc comment says a real
+	// `ansible-galaxy collection build` (and this package) always produce.
 	writeTarFile(tw, "MANIFEST.json", manifest)
+	writeTarFile(tw, filesManifestFileName, filesJSON)
 	writeTarFile(tw, "README.md", readme)
 
 	// Both writers target an in-memory strings.Builder sink that never
@@ -1130,8 +1269,7 @@ func buildArtifact(namespace, name, version string, deps map[string]string) ([]b
 	_ = gz.Close()
 
 	built := []byte(sink.String())
-	sum := sha256.Sum256(built)
-	return built, hex.EncodeToString(sum[:])
+	return built, sha256Hex(built), manifest
 }
 
 // writeTarFile appends one regular file entry to tw with a fixed mode,
@@ -1152,20 +1290,99 @@ func writeTarFile(tw *tar.Writer, name string, content []byte) {
 
 // buildManifestJSON renders the MANIFEST.json bundled inside a generated
 // artifact, reusing the vendored manifest type so its wire shape matches
-// exactly what archive/collections code parses from a real one.
-func buildManifestJSON(namespace, name, version string, deps map[string]string) []byte {
+// exactly what archive/collections code parses from a real one. filesSHA is
+// the sha256 hex digest of the FILES.json this same artifact carries,
+// recorded under file_manifest_file so manifest.VerifyChain's own pointer
+// check accepts it.
+func buildManifestJSON(namespace, name, version string, deps map[string]string, filesSHA string) []byte {
 	var manifest types.GalaxyCollectionVersionInfoManifest
 	manifest.Format = 1
 	manifest.CollectionInfo.Namespace = namespace
 	manifest.CollectionInfo.Name = name
 	manifest.CollectionInfo.Version = version
 	manifest.CollectionInfo.Dependencies = deps
+	manifest.FileManifestFile.Name = filesManifestFileName
+	manifest.FileManifestFile.Ftype = filesEntryTypeFile
+	manifest.FileManifestFile.Format = 1
+	manifest.FileManifestFile.ChksumType = chksumTypeSHA256
+	manifest.FileManifestFile.ChksumSha256 = filesSHA
 
 	body, err := json.Marshal(&manifest)
 	if err != nil {
-		// manifest is built entirely from strings, an int, and a
-		// map[string]string; marshaling it cannot fail.
+		// manifest is built entirely from strings and an int; marshaling it
+		// cannot fail.
 		panic(fmt.Sprintf("fakegalaxy: marshal MANIFEST.json: %v", err))
 	}
 	return body
+}
+
+// appendRow grows *target by one zero-valued element and returns a pointer
+// to it, so a caller can set that element's fields without ever having to
+// spell out the slice's own element type as a Go composite literal - see
+// buildFilesJSON's own doc comment for why that matters here specifically.
+// T is inferred from target's own type at every call site, never named
+// explicitly.
+//
+// The returned pointer aliases target's backing array and is invalidated by
+// the next append to *target; both call sites below are safe because each
+// row is fully populated before the next appendRow call.
+func appendRow[T any](target *[]T) *T {
+	*target = append(*target, *new(T))
+	return &(*target)[len(*target)-1]
+}
+
+// buildFilesJSON renders the FILES.json a generated artifact carries: a row
+// naming the collection root (".", a directory, no digest - the shape a real
+// `ansible-galaxy collection build` also emits for it) and one row for the
+// single regular file the artifact bundles, README.md, whose chksum_sha256
+// is readme's own real digest. It reuses the vendored manifest type because
+// that type describes the document a real Galaxy publishes, field names and
+// all - not what the production reader parses it into: manifest.VerifyChain
+// deliberately declares its own local, narrower filesEntry type instead of
+// this one; see manifest.chainPointer's own doc comment
+// (internal/galaxy/manifest/chain.go) for why.
+//
+// Each row is grown through appendRow rather than a `[]struct{...}` literal
+// respelling types.GalaxyCollectionVersionInfoFiles.Files' own anonymous
+// element type: doing so would have to match that type's field order
+// exactly to stay assignable to it, which is also the one thing go tool
+// fieldalignment would want reordered - a conflict this package cannot
+// resolve on its own, since the vendored field order is not this package's
+// to change. Left as a literal, `just fix` would turn that conflict into a
+// build failure rather than a lint warning: fieldalignment -fix reorders
+// this package's own files (./... covers them) but never vendor/, so a
+// reordered local literal would no longer match the untouched vendored
+// field order it has to satisfy, and the assignment would stop compiling.
+// appendRow sidesteps all of it: the element type is inferred from
+// files.Files itself, so no such literal ever appears in this file's
+// source.
+func buildFilesJSON(readme []byte) []byte {
+	var files types.GalaxyCollectionVersionInfoFiles
+	files.Format = 1
+
+	dir := appendRow(&files.Files)
+	dir.Name = "."
+	dir.Ftype = "dir"
+
+	readmeRow := appendRow(&files.Files)
+	readmeRow.Name = "README.md"
+	readmeRow.Ftype = filesEntryTypeFile
+	readmeRow.ChksumType = chksumTypeSHA256
+	readmeRow.ChksumSha256 = sha256Hex(readme)
+
+	body, err := json.Marshal(&files)
+	if err != nil {
+		// files is built entirely from strings, an int, and a sha256 hex
+		// string; marshaling it cannot fail.
+		panic(fmt.Sprintf("fakegalaxy: marshal FILES.json: %v", err))
+	}
+	return body
+}
+
+// sha256Hex returns data's sha256 digest as lowercase hex, the shape both
+// FILES.json's own per-file digests and MANIFEST.json's pointer at
+// FILES.json use.
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }

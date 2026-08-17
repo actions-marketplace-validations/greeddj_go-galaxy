@@ -299,31 +299,70 @@ func TestWarmVerifiesSignatures(t *testing.T) {
 	})
 }
 
-// TestSignatureVerdictAggregatesToTheSignatureExitClass carries a REAL verdict
-// - the error verifyCollectionSignatures itself builds, collection key and all
-// - through the aggregation a per-collection worker performs, and asserts the
-// exit code an operator's CI branches on.
+// TestSignatureVerdictAggregatesToTheSignatureExitClass carries two REAL
+// verdicts - the errors verifyCollectionSignatures itself builds, collection
+// key and all - through the aggregation a per-collection worker performs, and
+// asserts the exit code an operator's CI branches on.
 //
 // cmd/go-galaxy/exitcode's own signatureExitCases already pins the ordering
-// with a bare sentinel; what this adds is that the shape this package actually
-// produces survives it, so a future wrap here that hid the sentinel behind
-// something errors.Is cannot walk would fail where the synthetic row could not.
+// for both shapes, with a bare sentinel and with a synthetically aggregated
+// one (aggregatedBehindInstallFailure(helpers.ErrManifestChainMismatch),
+// which never leaves the production wrap shape); what the two subtests below
+// add is that the shape this package actually produces survives aggregation
+// too, so a future wrap here that hid a sentinel behind something errors.Is
+// cannot walk would fail where a synthetic row could not.
 func TestSignatureVerdictAggregatesToTheSignatureExitClass(t *testing.T) {
 	t.Parallel()
-	tarPath, _ := buildSignedArtifact(t, false)
-	fx := newVerifyFixture(t, writeTestKeyring(t), "1", nil)
 
-	meta := serverSignatureMeta(signTestBytes(t, []byte("a document this artifact does not carry")))
-	err := verifyCollectionSignatures(context.Background(), fx.deps, testSignedCollection, verifyPayload(meta, tarPath))
-	if err == nil {
-		t.Fatal("verifyCollectionSignatures() = nil, want a verification verdict")
-	}
+	t.Run("a failed signature verdict aggregates to the signature exit class", func(t *testing.T) {
+		t.Parallel()
+		tarPath, _ := buildSignedArtifact(t, false)
+		fx := newVerifyFixture(t, writeTestKeyring(t), "1", nil)
 
-	var failures failureRecorder
-	failures.record(err)
-	if got := exitcode.FromError(failures.summary().installError()); got != exitcode.ExitSignature {
-		t.Fatalf("exit code = %d, want %d", got, exitcode.ExitSignature)
-	}
+		meta := serverSignatureMeta(signTestBytes(t, []byte("a document this artifact does not carry")))
+		err := verifyCollectionSignatures(context.Background(), fx.deps, testSignedCollection, verifyPayload(meta, tarPath))
+		if err == nil {
+			t.Fatal("verifyCollectionSignatures() = nil, want a verification verdict")
+		}
+
+		var failures failureRecorder
+		failures.record(err)
+		if got := exitcode.FromError(failures.summary().installError()); got != exitcode.ExitSignature {
+			t.Fatalf("exit code = %d, want %d", got, exitcode.ExitSignature)
+		}
+	})
+
+	// The chain-mismatch verdict is doubly wrapped by the time it reaches
+	// aggregation, and that shape is the point of this subtest: verify.go's
+	// own chain check wraps manifest.VerifyChain's error with its own
+	// "%s: %w" (naming col.key()), and VerifyChain itself already wrapped its
+	// inner helpers.ErrManifestChainMismatch with a "%s: %w" of its own
+	// (naming the artifact path) before that. Measured: exitcode.FromError on
+	// the bare verifyCollectionSignatures error is ExitIntegrity (7), and it
+	// stays 7 once wrapped through failureSummary.installError's own
+	// headline - which is the claim, since isIntegrityError sits ahead of
+	// isSignatureError and isInstallError in exitcode's own ordered table, so
+	// a doubly-wrapped chain mismatch must never be mistaken for either.
+	t.Run("a chain-mismatch verdict aggregates to the integrity exit class", func(t *testing.T) {
+		t.Parallel()
+		tarPath, manifestJSON := buildSignedArtifact(t, true)
+		fx := newVerifyFixture(t, writeTestKeyring(t), "1", nil)
+
+		meta := serverSignatureMeta(signTestBytes(t, manifestJSON))
+		err := verifyCollectionSignatures(context.Background(), fx.deps, testSignedCollection, verifyPayload(meta, tarPath))
+		if !errors.Is(err, helpers.ErrManifestChainMismatch) {
+			t.Fatalf("verifyCollectionSignatures() = %v, want errors.Is helpers.ErrManifestChainMismatch", err)
+		}
+		if got := exitcode.FromError(err); got != exitcode.ExitIntegrity {
+			t.Fatalf("bare exit code = %d, want %d", got, exitcode.ExitIntegrity)
+		}
+
+		var failures failureRecorder
+		failures.record(err)
+		if got := exitcode.FromError(failures.summary().installError()); got != exitcode.ExitIntegrity {
+			t.Fatalf("aggregated exit code = %d, want %d", got, exitcode.ExitIntegrity)
+		}
+	})
 }
 
 // TestSignatureFetchDeadlineFiresOnAStalledSource proves the budget is really
@@ -423,7 +462,7 @@ func TestVerifyContextIsSafeForConcurrentUse(t *testing.T) {
 // KILLING MUTATION, run and reverted: isBlobSetVerdict dropped from
 // unrepairableByRefetch's disjunction. The first row fails:
 //
-//	verify_pipeline_test.go:440: Delete calls = 1, want 0: a verdict over the gathered blobs is not the artifact's fault
+//	verify_pipeline_test.go:479: Delete calls = 1, want 0: a verdict over the gathered blobs is not the artifact's fault
 func TestSignatureVerdictDoesNotEvictTheArtifact(t *testing.T) {
 	t.Parallel()
 
