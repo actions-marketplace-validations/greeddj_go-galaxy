@@ -653,10 +653,18 @@ func armorBlockBudgetError(maxPackets int) error {
 // this walk cannot follow, and then the tag.
 //
 // remaining is how many bytes of the stream are left, which is what the
-// unreadable arm reports; it is this walk's own arithmetic, so the message
-// carries no part of the input. Both readers mask a tag to at most six bits, so
-// it too renders as a number below 64 and can carry no character able to forge a
-// line or drive a terminal.
+// unreadable arm reports; it is this walk's own arithmetic over the input's
+// LENGTH, never a copy of the input's own bytes, so the message can carry no
+// character an attacker chose - it can neither forge an extra printed line
+// nor drive a terminal. That is a claim about injection, not about
+// disclosure: remaining is still a fact ABOUT the input, and for a blob whose
+// framing this walk cannot read at all it is exactly the blob's own length -
+// source.go's fetchFile doc comment states what a caller reading local
+// content this program did not author can already infer from a number of
+// that shape. Both readers mask a tag to at most six bits, so it too renders
+// as a number below 64 and can carry no character able to forge a line or
+// drive a terminal - the tag has no comparable disclosure to caveat, since
+// six bits of framing say nothing about a blob's size or content.
 //
 // The order of the arms is the whole content of this function and is pinned by
 // TestUnboundedFramingIsJudgedBeforeTheTag. A framing this walk cannot bound is
@@ -805,8 +813,14 @@ func driveParser(rd *bytes.Reader, segment []byte, tag int) error {
 	rd.Reset(segment)
 	_, _ = packet.Read(rd)
 	if unread := rd.Len(); unread != 0 {
-		// Both the tag and the counts are this walk's own numbers, so the
-		// message carries no part of the input and needs no sanitizing.
+		// Both the tag and the counts are numbers this walk computed from the
+		// input's own SHAPE, never a copy of its bytes, so the message carries
+		// no character an attacker chose and needs no sanitizing on that
+		// account. That is an injection claim, not a disclosure one: unread
+		// and len(segment) still say something about the packet this walk
+		// refused - source.go's fetchFile doc comment states the wider version
+		// of what a number derived from local content can tell a repository
+		// that chose the path.
 		return fmt.Errorf("%w: the parser left %d of a tag %d packet's %d bytes unread",
 			errMalformedSignaturePacket, unread, tag, len(segment))
 	}

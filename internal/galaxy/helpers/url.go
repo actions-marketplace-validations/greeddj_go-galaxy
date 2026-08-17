@@ -152,7 +152,7 @@ func WithoutUserinfo(raw string) string {
 //
 // None of them is bounded by what such a value can legitimately be - the first
 // only by MetadataMaxSize (16 MiB), the third only by ManifestScanMaxBytes
-// (64 MiB) - so the ceiling is. 512 bytes is roughly three times the longest
+// (64 MiB) - so the ceiling is 512 bytes, roughly three times the longest
 // real value measured: 119 bytes for a galaxy.ansible.com v3 version-detail
 // href, 172 for a Red Hat Automation Hub one carrying a synclist-scoped base
 // path and a long namespace, 66 for this project's own test double. A
@@ -163,8 +163,18 @@ func WithoutUserinfo(raw string) string {
 // origin is copied onto every blob gathered for a collection and rendered once
 // per non-ignored failure, so an 8 MiB href across a full
 // MaxSignaturesPerCollection set produced a 512.0 MiB error string, measured,
-// rendered at least twice and written to stderr both times, per collection,
-// times the worker count.
+// materialized twice per collection - the collection-key wrap
+// verifyCollectionSignatures builds and the worker's own "Failed: ..." line -
+// and written to stderr once, times the worker count.
+//
+// A third materialization site sits ahead of both of those and outside this
+// package entirely: signature.verificationError builds every non-ignored
+// failure's own cause with fmt.Errorf before signature.maxRenderedFailures
+// ever gets a chance to bound a render, and fmt.Errorf renders its string
+// immediately rather than lazily - so that construction is paid at the
+// UNCAPPED size regardless of how many of those causes a negative verdict's
+// message goes on to show, or whether anything ever renders the message at
+// all. signature.maxRenderedFailures' own doc comment holds the measurement.
 const MessageValueMaxLen = 512
 
 // TruncateForMessage bounds value at MessageValueMaxLen before a message

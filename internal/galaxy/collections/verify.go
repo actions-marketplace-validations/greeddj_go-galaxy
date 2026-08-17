@@ -347,7 +347,7 @@ func verifyCollectionSignatures(ctx context.Context, deps installDeps, col colle
 	sigCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
-	result, err := signature.Verify(manifestBytes, vc.nextBlob(sigCtx, col, payload.meta), vc.keyring, vc.policy)
+	result, err := signature.Verify(manifestBytes, vc.nextBlob(sigCtx, deps.runtime, col, payload.meta), vc.keyring, vc.policy)
 	if err != nil {
 		return fmt.Errorf("%s: %w", col.key(), signatureDeadlineError(ctx, sigCtx, budget, err))
 	}
@@ -638,14 +638,22 @@ func strictSpelling(spec signature.CountSpec) string {
 // entry instead of putting every gathered blob back in memory. What it saves is
 // a public-key operation and a cap slot: signature.Verify already counts
 // distinct KEYS, so a repeated blob could never have inflated a required count.
+//
+// gatherLimit is where helpers.MaxSignaturesPerCollection is applied to the
+// combined candidate set - the requirements file's own sources plus offered,
+// the full pre-truncation count serverSignatureBlobs returns alongside its
+// already-capped blob slice - and a gather the cap actually truncated is
+// reported; see that function's own doc comment for why a truncation is a
+// warning rather than a reserved share of the budget.
 func (vc *verifyContext) nextBlob(
 	ctx context.Context,
+	runtime *infra.Infra,
 	col collection,
 	meta *types.GalaxyCollectionVersionInfo,
 ) signature.NextBlob {
 	sources := vc.sources[requirementKey(col)]
-	server := serverSignatureBlobs(meta)
-	limit := min(len(sources)+len(server), helpers.MaxSignaturesPerCollection)
+	server, offered := serverSignatureBlobs(meta)
+	limit := gatherLimit(runtime, col, len(sources), offered)
 
 	var (
 		next int
@@ -670,6 +678,71 @@ func (vc *verifyContext) nextBlob(
 
 		return signature.Blob{}, false, nil
 	}
+}
+
+// gatherLimit caps one collection's combined candidate set - the requirements
+// file's own declared sources plus whatever the server offered alongside the
+// artifact - at helpers.MaxSignaturesPerCollection, and warns when that cap
+// actually cut the gather short.
+//
+// The gather's own order already encodes a trust ordering - the operator's
+// declared sources come first, a server's supplement comes second, exactly as
+// nextBlob's own doc comment promises - so the budget must never be taken
+// FROM the authoritative side to guarantee the supplementary one a share.
+// Reserving one would do exactly that: it would either silently truncate the
+// operator's own declared list, which is the file this run was told to trust
+// first, or force checkSignatureSources' own load-time ceiling down below
+// helpers.MaxSignaturesPerCollection, turning a requirements file that is
+// legal today into one that is not, purely so a Galaxy server - a documented
+// trust boundary of this project, not a party this run owes a guaranteed
+// share to - is guaranteed one.
+//
+// Reservation would not remove the silent truncation either; it would only
+// move it. A reserved share still drops whatever exceeds it, and reserving
+// one adds a second underived number to reason about alongside the cap
+// itself, for no truncation actually closed.
+//
+// The security-shaped consequence of a starved gather - a policy satisfied
+// while nothing that mattered was ever verified - is already reported for
+// EVERY route to it, not only this one: signature.Result.VacuousPass and
+// warnVacuousPass cover a starved gather exactly as they cover an empty one
+// or one whose every blob failed with a tolerated status. What this function
+// owes the operator on top of that is narrower and specific to here: the fact
+// that the cap itself, rather than the policy, is what stopped the gather
+// before every candidate already in hand was taken.
+//
+// sources is the caller's own count of a requirements entry's declared
+// sources, never truncated by anything in this package. offered is
+// serverSignatureBlobs' second return: the number of shape-valid candidates a
+// server offered, counted before that function's own copy was capped at
+// helpers.MaxSignaturesPerCollection. The two are combined here at their true,
+// pre-truncation size, which is what serverSignatureBlobs' own doc comment
+// means by leaving the truncation decision to this function: a server list
+// alone crossing the cap has to be observable from offered even though the
+// server slice gatherOne indexes into is already capped.
+//
+// That asymmetry - limit is computed from a pre-truncation count while the
+// slice gatherOne reads server candidates from is a post-truncation one - is
+// worth an index-safety argument rather than a shape a reader takes on faith.
+// gatherOne's maximum server index is limit-1-len(sources). When
+// offered <= helpers.MaxSignaturesPerCollection, serverSignatureBlobs never
+// truncated, so len(server) == offered and limit <= sources+offered =
+// sources+len(server). When offered > helpers.MaxSignaturesPerCollection,
+// serverSignatureBlobs' own guard truncated at the cap, so
+// len(server) == helpers.MaxSignaturesPerCollection and
+// limit <= helpers.MaxSignaturesPerCollection = len(server). Both cases give
+// limit <= len(sources)+len(server), which is exactly the bound gatherOne's
+// index needs: no out-of-range read is reachable either way.
+func gatherLimit(runtime *infra.Infra, col collection, sources, offered int) int {
+	limit := min(sources+offered, helpers.MaxSignaturesPerCollection)
+	if dropped := sources + offered - limit; dropped > 0 {
+		runtime.Output.Warnf(
+			"%s: %d signature candidates exceed the limit of %d (%d declared, %d offered by the server); "+
+				"the last %d were not gathered, and declared sources always come first",
+			col.key(), sources+offered, helpers.MaxSignaturesPerCollection, sources, offered, dropped)
+	}
+
+	return limit
 }
 
 // gatherOne produces the i-th blob of the concatenated gather: a requirement's
@@ -703,34 +776,45 @@ func (vc *verifyContext) gatherOne(
 // blob over helpers.SignatureMaxSize is dropped the same way, which is the same
 // ceiling Fetcher applies to a source it fetches.
 //
-// The list is capped at helpers.MaxSignaturesPerCollection entries here as well
-// as by the gather, so a metadata document naming thousands of signatures has
-// at most that many of them copied rather than all of them. Its bytes are
-// already resident either way: meta holds the decoded document.
+// The copied slice is bounded at helpers.MaxSignaturesPerCollection entries;
+// the offered count returned alongside it deliberately is not. The make
+// capacity below and the len(blobs) < helpers.MaxSignaturesPerCollection guard
+// around the append together keep at most that many blobs ever materialized,
+// whatever the list's own length, while offered counts every shape-valid entry
+// regardless of whether it was copied. That split matters because gatherLimit
+// combines this count with a requirements entry's own declared sources and
+// needs the true, pre-truncation number to decide whether the combined set
+// actually exceeded the cap: a caller handed a post-truncation count instead
+// could never observe a server list alone crossing it, since that count would
+// already read as "at most 64" no matter how many the server actually offered.
+// Measured at the MetadataMaxSize ceiling (932,062 entries, in an
+// already-resident 324.4 MiB decoded document): the capped copy is 1,048 B
+// against the 42.7 MiB an uncapped one would be, with at most 64 blobs ever
+// indexed regardless of how many are offered; the counting walk itself costs
+// 25.2 ms against 10.3 us for an early break that stops counting at the cap,
+// allocations unchanged at 65.
 //
 // Origin names the server's own metadata document rather than any part of the
 // blob, since a Failure reports it back verbatim and what an operator needs
 // there is which source produced the signature.
 //
-// It returns no error and allocates nothing for the overwhelmingly common
+// It returns (nil, 0) and allocates nothing for the overwhelmingly common
 // shapes - a nil meta, or a server that sent no signatures - because it is a
 // shape filter rather than a validator: what a gathered blob is worth is
 // signature.Verify's verdict, not this function's.
-func serverSignatureBlobs(meta *types.GalaxyCollectionVersionInfo) []signature.Blob {
+func serverSignatureBlobs(meta *types.GalaxyCollectionVersionInfo) ([]signature.Blob, int) {
 	if meta == nil {
-		return nil
+		return nil, 0
 	}
 	list, ok := meta.Signatures.([]any)
 	if !ok || len(list) == 0 {
-		return nil
+		return nil, 0
 	}
 
 	origin := serverBlobOrigin(meta)
+	offered := 0
 	blobs := make([]signature.Blob, 0, min(len(list), helpers.MaxSignaturesPerCollection))
 	for _, entry := range list {
-		if len(blobs) == helpers.MaxSignaturesPerCollection {
-			break
-		}
 		row, ok := entry.(map[string]any)
 		if !ok {
 			continue
@@ -739,10 +823,13 @@ func serverSignatureBlobs(meta *types.GalaxyCollectionVersionInfo) []signature.B
 		if !ok || value == "" || int64(len(value)) > helpers.SignatureMaxSize {
 			continue
 		}
-		blobs = append(blobs, signature.Blob{Origin: origin, Data: []byte(value)})
+		offered++
+		if len(blobs) < helpers.MaxSignaturesPerCollection {
+			blobs = append(blobs, signature.Blob{Origin: origin, Data: []byte(value)})
+		}
 	}
 
-	return blobs
+	return blobs, offered
 }
 
 // serverBlobOrigin names where a server-carried signature came from: the
@@ -755,10 +842,11 @@ func serverSignatureBlobs(meta *types.GalaxyCollectionVersionInfo) []signature.B
 // collection, and signature.verificationError renders it with %q once per
 // non-ignored failure - so an 8 MiB href across a full
 // helpers.MaxSignaturesPerCollection set produced a 512.0 MiB error string,
-// measured, rendered at least twice and written to stderr both times, per
-// collection, times cfg.Workers. Bounding it once, where the value enters this
-// program's own vocabulary, is what keeps every consumer of Blob.Origin out of
-// that multiplication.
+// measured, materialized twice per collection - the collection-key wrap this
+// file's own verifyCollectionSignatures builds and the worker's own
+// "Failed: ..." line - and written to stderr once, times cfg.Workers.
+// Bounding it once, where the value enters this program's own vocabulary, is
+// what keeps every consumer of Blob.Origin out of that multiplication.
 func serverBlobOrigin(meta *types.GalaxyCollectionVersionInfo) string {
 	if meta.Href != "" {
 		return helpers.TruncateForMessage(meta.Href)

@@ -512,11 +512,12 @@ func fileSourceRejectedCases() []parseCollectionsRejectedCase {
 			wantErr: helpers.ErrUnsupportedSignatureSource,
 		},
 		{
-			// The starvation defect, made impossible by construction rather
-			// than documented: the gather walks a file's own sources before a
-			// server's, so 200 declared sources against a cap of 64 left every
-			// server-carried signature unreached - measured at 64 requests and
-			// 0 server blobs.
+			// This row pins the cap on what one entry may DECLARE, and only
+			// that: gatherLimit (internal/galaxy/collections/verify.go) is the
+			// separate, later boundary that decides what a gather does once
+			// the combined candidate set - this entry's own sources plus
+			// whatever the server offers - exceeds MaxSignaturesPerCollection,
+			// and reports it.
 			name:    "more signature sources than the cap allows",
 			input:   tooManySignatureSourcesInput(),
 			source:  "https://default",

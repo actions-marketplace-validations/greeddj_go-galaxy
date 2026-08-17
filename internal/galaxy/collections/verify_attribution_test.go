@@ -152,7 +152,7 @@ func TestServerBlobOriginIsBounded(t *testing.T) {
 
 	long := &types.GalaxyCollectionVersionInfo{Href: "https://sigs.example/" + strings.Repeat("p", 64<<10)}
 	long.Signatures = []any{map[string]any{"signature": "-----BEGIN PGP SIGNATURE-----\nx\n-----END PGP SIGNATURE-----"}}
-	blobs := serverSignatureBlobs(long)
+	blobs, _ := serverSignatureBlobs(long)
 	if len(blobs) != 1 {
 		t.Fatalf("serverSignatureBlobs() returned %d blobs, want 1", len(blobs))
 	}
@@ -166,7 +166,7 @@ func TestServerBlobOriginIsBounded(t *testing.T) {
 	href := "https://galaxy.example/api/v3/collections/acme/app/versions/1.0.0/"
 	short := &types.GalaxyCollectionVersionInfo{Href: href}
 	short.Signatures = long.Signatures
-	if got := serverSignatureBlobs(short); len(got) != 1 || got[0].Origin != href {
+	if got, _ := serverSignatureBlobs(short); len(got) != 1 || got[0].Origin != href {
 		t.Fatalf("serverSignatureBlobs() origin = %v, want the href unchanged", got)
 	}
 }

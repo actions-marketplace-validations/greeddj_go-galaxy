@@ -3,6 +3,7 @@ package signature
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -343,7 +344,7 @@ func TestClassifyMapsEachFailureToItsStatus(t *testing.T) {
 			// code in the vocabulary that no verdict can carry. Every row
 			// reaching that arm fails, this one with
 			//
-			//	verify_test.go:353: classify(a blob that is not a signature at all) = MISSING_PASSPHRASE, want ERRSIG
+			//	verify_test.go:354: classify(a blob that is not a signature at all) = MISSING_PASSPHRASE, want ERRSIG
 			//
 			// which is the arm's whole job: an error nothing here anticipated
 			// has to land on a status a verdict can carry, or the ignore set
@@ -425,7 +426,7 @@ func TestCheckOneRefusesAnArmorBlockOfTheWrongKind(t *testing.T) {
 	// type check, so a decoded block of any kind is handed to the packet gate.
 	// This assertion then fails with
 	//
-	//	verify_test.go:435: checkOne(a key block with a signature behind it) = malformed OpenPGP packet framing: a tag 6
+	//	verify_test.go:436: checkOne(a key block with a signature behind it) = malformed OpenPGP packet framing: a tag 6
 	//	packet has no place in this stream, want "openpgp: invalid argument: expected 'PGP SIGNATURE', got: PGP PUBLIC KEY
 	//	BLOCK"
 	//
@@ -614,7 +615,7 @@ func TestVerifySemanticMatrix(t *testing.T) {
 			// `gathered == 0 ||` term from Policy.verdict's last clause. Only
 			// the count-of-one-with-nothing-gathered row then fails, with
 			//
-			//	verify_test.go:646: Verify(count of one with nothing gathered) passed = false, want true (err: collection
+			//	verify_test.go:647: Verify(count of one with nothing gathered) passed = false, want true (err: collection
 			//	    signature verification failed: fewer valid signatures than required: got 0, need 1)
 			//
 			// which is the frozen parity this reproduces deliberately. The
@@ -626,7 +627,7 @@ func TestVerifySemanticMatrix(t *testing.T) {
 			// Policy.verdict's `if p.Required.Strict && verified == 0` clause.
 			// Both strict zero-blob rows then fail, one of them with
 			//
-			//	verify_test.go:646: Verify(strict count of one with nothing gathered) passed = true, want false (err: <nil>)
+			//	verify_test.go:647: Verify(strict count of one with nothing gathered) passed = true, want false (err: <nil>)
 			//
 			// while the third strict row is untouched: a blob was gathered
 			// there, so the count clause refuses it whatever strict says.
@@ -637,7 +638,7 @@ func TestVerifySemanticMatrix(t *testing.T) {
 			// three replay rows then pass their policy, one of them failing
 			// here with
 			//
-			//	verify_test.go:646: Verify(count of two refuses one signature supplied twice) passed = true, want false (err: <nil>)
+			//	verify_test.go:647: Verify(count of two refuses one signature supplied twice) passed = true, want false (err: <nil>)
 			//
 			// and the two-distinct-signers row beside them is untouched, which
 			// is what separates "replays no longer count" from "a count of two
@@ -655,7 +656,7 @@ func TestVerifySemanticMatrix(t *testing.T) {
 			// walkBlobs' `return walk, nil` in the count-reached arm with
 			// `continue`. Of this test's rows only the second-signer one fails,
 			//
-			//	verify_test.go:665: Verify(count of two stops at the second signer) recorded 1 failures, want 0
+			//	verify_test.go:666: Verify(count of two stops at the second signer) recorded 1 failures, want 0
 			//
 			// while its verdict and its Verified count are both unchanged:
 			// removing the early stop costs a public-key operation and a
@@ -669,7 +670,7 @@ func TestVerifySemanticMatrix(t *testing.T) {
 			// field exists to keep a caller from making. Both rows that pass
 			// with a blob in hand and nothing verified fail, one of them with
 			//
-			//	verify_test.go:677: Verify(all with only an ignored failure) VacuousPass = false, want true
+			//	verify_test.go:678: Verify(all with only an ignored failure) VacuousPass = false, want true
 			//
 			// which is exactly the case an empty blob list cannot reach, and
 			// the whole reason this is a field rather than a caller's guess.
@@ -891,12 +892,27 @@ func TestVerifyIsDeterministicAcrossRuns(t *testing.T) {
 //
 // The unrecognized-error row is what the guarantee rests on, since it is the
 // only input whose status is chosen rather than mapped.
+//
+// The count assertion ahead of the loop keeps maxRenderedFailures pinned
+// beside the vocabulary it is derived from, in the one place that vocabulary
+// is already enumerated, so a ninth producible status added here without
+// moving that constant fails on the spot instead of only silently widening
+// what a render-capped message can no longer promise to exhibit every shape
+// of.
 func TestClassifyNeverAnswersOutsideTheVocabulary(t *testing.T) {
 	t.Parallel()
 
 	producible := map[Status]struct{}{
 		StatusBadSig: {}, StatusErrSig: {}, StatusNoPubKey: {}, StatusExpKeySig: {},
 		StatusRevKeySig: {}, StatusExpSig: {}, StatusNoData: {}, StatusBadArmor: {},
+	}
+	// KILLING MUTATION, run and reverted: maxRenderedFailures changed from 8
+	// to 7 in verify.go. This assertion then fails with
+	//
+	//	verify_test.go:914: len(producible) = 8, want maxRenderedFailures (7): the render cap is derived from this vocabulary's size
+	if len(producible) != maxRenderedFailures {
+		t.Fatalf("len(producible) = %d, want maxRenderedFailures (%d): the render cap is derived from this vocabulary's size",
+			len(producible), maxRenderedFailures)
 	}
 
 	errs := []error{
@@ -1060,4 +1076,236 @@ func TestVerifySurfacesAGatherErrorWhereItSits(t *testing.T) {
 	if result.Verified != 0 {
 		t.Fatalf("Verify with a source failing at once Verified = %d, want 0", result.Verified)
 	}
+}
+
+// errRenderCapSentinel is the failure buildRenderCapFailures always gives to
+// the LAST failure it builds, so a positive errors.Is result over a produced
+// error can prove that cause stayed reachable even when the message that
+// carries it left it unrendered.
+var errRenderCapSentinel = errors.New("verify_test: a cause past the render cap")
+
+// errGenericRenderCapCause is Err for every failure buildRenderCapFailures
+// builds except the last one: a single fixed value is enough, since only the
+// last failure's own Err is ever asked about by errors.Is.
+var errGenericRenderCapCause = errors.New("verify_test: a signature that failed to verify")
+
+// buildRenderCapFailures builds n Failure values, each with its own origin so
+// a render cap can be observed by which origins made it into a message.
+//
+// n is a literal at every call site below rather than maxRenderedFailures
+// itself, so a future change to that constant cannot silently move the
+// fixture in lockstep with the cap it exists to probe - see the mutation
+// fixture note on TestVerificationErrorBoundsWhatItRendersAndNotWhatItMatches.
+func buildRenderCapFailures(n int) []Failure {
+	failures := make([]Failure, n)
+	for i := range failures {
+		failures[i] = Failure{Origin: fmt.Sprintf("origin-%d", i), Status: StatusBadSig, Err: errGenericRenderCapCause}
+	}
+	failures[n-1].Err = errRenderCapSentinel
+
+	return failures
+}
+
+// TestVerificationErrorBoundsWhatItRendersAndNotWhatItMatches pins
+// verdictError's whole point: maxRenderedFailures bounds the negative
+// verdict's own MESSAGE, and nothing else - every cause, rendered or not,
+// stays reachable through errors.Is.
+//
+// The fixture counts below (9 and 8) are hand-spelled rather than built from
+// maxRenderedFailures, on purpose: a fixture derived from the same constant
+// the cap uses would move with it under a mutation and could never observe
+// the cap changing at all.
+func TestVerificationErrorBoundsWhatItRendersAndNotWhatItMatches(t *testing.T) {
+	t.Parallel()
+
+	policy := testPolicy(t, "1", nil)
+
+	t.Run("past the cap", func(t *testing.T) {
+		t.Parallel()
+
+		failures := buildRenderCapFailures(9)
+		err := verificationError(policy, 0, failures)
+		lastOrigin := failures[len(failures)-1].Origin
+
+		// KILLING MUTATION, run and reverted: verdictError.Error's `shown :=
+		// min(len(e.causes), maxRenderedFailures+1)` replaced with `shown :=
+		// len(e.causes)`, so the message renders every cause and the cap does
+		// nothing. This assertion then fails with
+		//
+		//	verify_test.go:1141: verificationError() rendered the origin past the cap (origin-8):
+		//	collection signature verification failed: fewer valid signatures than required: got 0, need 1
+		//	BADSIG from "origin-0": verify_test: a signature that failed to verify
+		//	...
+		//	BADSIG from "origin-8": verify_test: a cause past the render cap
+		if strings.Contains(err.Error(), lastOrigin) {
+			t.Fatalf("verificationError() rendered the origin past the cap (%s):\n%v", lastOrigin, err)
+		}
+
+		const wantFooter = "showing the first 8 of 9 signature failures"
+		if !strings.Contains(err.Error(), wantFooter) {
+			t.Fatalf("verificationError() does not carry %q:\n%v", wantFooter, err)
+		}
+
+		// KILLING MUTATION, run and reverted: verdictError.Unwrap changed to
+		// `return e.causes[:min(len(e.causes), maxRenderedFailures+1)]` - the
+		// rejected design where the render cap also bounds what errors.Is can
+		// reach. This assertion then fails with
+		//
+		//	verify_test.go:1160: verificationError() does not reach the cause past the render cap through errors.Is:
+		//	collection signature verification failed: fewer valid signatures than required: got 0, need 1
+		//	BADSIG from "origin-0": verify_test: a signature that failed to verify
+		//	...
+		//	showing the first 8 of 9 signature failures; 1 not shown, carrying: BADSIG
+		if !errors.Is(err, errRenderCapSentinel) {
+			t.Fatalf("verificationError() does not reach the cause past the render cap through errors.Is:\n%v", err)
+		}
+		if !errors.Is(err, helpers.ErrSignatureVerificationFailed) {
+			t.Fatalf("verificationError() does not reach helpers.ErrSignatureVerificationFailed:\n%v", err)
+		}
+	})
+
+	// The positive control on the same fixture builder: exactly at the cap,
+	// nothing is hidden and no footer is rendered, which is what proves the
+	// row above withheld its ninth origin because of the cap rather than
+	// because this builder cannot produce a message rendering everything it
+	// is handed.
+	t.Run("at the cap", func(t *testing.T) {
+		t.Parallel()
+
+		failures := buildRenderCapFailures(8)
+		err := verificationError(policy, 0, failures)
+
+		// KILLING MUTATION, run and reverted: maxRenderedFailures changed
+		// from 8 to 1 in verify.go. This row's own fixture still builds 8
+		// failures - the count is hand-spelled, not derived from the mutated
+		// constant - so the message now hides 7 of them, and this assertion
+		// fails on the first origin it does not find, with
+		//
+		//	verify_test.go:1190: verificationError() at the cap does not render origin origin-1:
+		//	collection signature verification failed: fewer valid signatures than required: got 0, need 1
+		//	BADSIG from "origin-0": verify_test: a signature that failed to verify
+		//	showing the first 1 of 8 signature failures; 7 not shown, carrying: BADSIG
+		for _, failure := range failures {
+			if !strings.Contains(err.Error(), failure.Origin) {
+				t.Fatalf("verificationError() at the cap does not render origin %s:\n%v", failure.Origin, err)
+			}
+		}
+		if strings.Contains(err.Error(), "showing the first") {
+			t.Fatalf("verificationError() at the cap rendered a footer, though nothing was hidden:\n%v", err)
+		}
+	})
+
+	// The eight decoys ahead of a BADSIG is the shape a security audit
+	// reproduced: eight file sources signed by a key outside the keyring,
+	// classifying NO_PUBKEY, ahead of a signature classifying BADSIG - the
+	// strongest evidence available that an artifact's bytes are not what was
+	// signed. The render cap fills on the eight decoys and never reaches the
+	// ninth cause, so the footer is the one place that fact can still reach
+	// an operator who only has the message - Result is dropped on this error
+	// path, see verifyCollectionSignatures' own doc comment. The body is a
+	// standalone function rather than an inline closure, which is what keeps
+	// this test's own cyclomatic complexity under the shared limit.
+	t.Run("footer names a status the cap hid, not one it rendered", func(t *testing.T) {
+		t.Parallel()
+		checkFooterNamesAHiddenStatus(t, policy)
+	})
+}
+
+// checkFooterNamesAHiddenStatus is
+// TestVerificationErrorBoundsWhatItRendersAndNotWhatItMatches' third
+// subtest, pulled out into its own function rather than an inline closure so
+// that function's own cyclomatic complexity stays under the shared limit; it
+// deliberately calls no t.Helper(), so a failing assertion below is reported
+// at its own line rather than at the t.Run call site above, which is what
+// every quoted mutation output below pins.
+//
+//nolint:thelper // deliberately no t.Helper(): see the paragraph above.
+func checkFooterNamesAHiddenStatus(t *testing.T, policy Policy) {
+	statuses := append(repeatedStatuses(StatusNoPubKey, 8), StatusBadSig)
+	failures := buildStatusFailures(statuses)
+	hiddenOrigin := failures[len(failures)-1].Origin
+
+	err := verificationError(policy, 0, failures)
+	lines := strings.Split(err.Error(), "\n")
+	footer := lines[len(lines)-1]
+
+	// KILLING MUTATION, actually run against this file: hiddenStatuses'
+	// body replaced with `return nil`, so a negative verdict never learns
+	// which statuses its own render cap withheld. This assertion then
+	// fails with
+	//
+	//	verify_test.go:1239: footer does not name the hidden status BADSIG: "showing the first 8 of 9 signature failures"
+	if !strings.Contains(footer, string(StatusBadSig)) {
+		t.Fatalf("footer does not name the hidden status BADSIG: %q", footer)
+	}
+	// KILLING MUTATION, actually run against this file: hiddenStatuses'
+	// `failures[maxRenderedFailures:]` replaced with `failures`, so it
+	// walks every failure rather than only the ones the cap withheld.
+	// This assertion then fails with
+	//
+	//	verify_test.go:1249: footer names a status that was actually rendered: "showing the first 8 of 9 signature
+	//	    failures; 1 not shown, carrying: NO_PUBKEY, BADSIG"
+	if strings.Contains(footer, string(StatusNoPubKey)) {
+		t.Fatalf("footer names a status that was actually rendered: %q", footer)
+	}
+
+	const wantFooterPrefix = "showing the first 8 of 9 signature failures"
+	if !strings.Contains(footer, wantFooterPrefix) {
+		t.Fatalf("footer does not carry %q: %q", wantFooterPrefix, footer)
+	}
+	if strings.Contains(err.Error(), hiddenOrigin) {
+		t.Fatalf("verificationError() rendered the hidden failure's own origin (%s):\n%v", hiddenOrigin, err)
+	}
+
+	// The positive control on the same builder: a fixture carrying no
+	// BADSIG at all still names its own hidden status, which is what
+	// shows the refusal above is BADSIG being kept out specifically,
+	// rather than the footer never naming a status at all.
+	controlErr := verificationError(policy, 0, buildStatusFailures(repeatedStatuses(StatusNoPubKey, 9)))
+	controlLines := strings.Split(controlErr.Error(), "\n")
+	controlFooter := controlLines[len(controlLines)-1]
+	if !strings.Contains(controlFooter, string(StatusNoPubKey)) {
+		t.Fatalf("control footer does not name NO_PUBKEY: %q", controlFooter)
+	}
+	if strings.Contains(controlFooter, string(StatusBadSig)) {
+		t.Fatalf("control footer names a status this fixture never carried: %q", controlFooter)
+	}
+
+	// KILLING MUTATION, actually run against this file: hiddenStatuses'
+	// `slices.Contains` dedupe guard removed, so a status shared by more
+	// than one hidden failure is named once per failure instead of once
+	// for the status. This assertion then fails with
+	//
+	//	verify_test.go:1286: footer names BADSIG 2 times, want exactly 1 (the dedupe): "showing the first 8 of 10
+	//	    signature failures; 2 not shown, carrying: BADSIG, BADSIG"
+	dupStatuses := append(repeatedStatuses(StatusNoPubKey, 8), StatusBadSig, StatusBadSig)
+	dupErr := verificationError(policy, 0, buildStatusFailures(dupStatuses))
+	dupLines := strings.Split(dupErr.Error(), "\n")
+	dupFooter := dupLines[len(dupLines)-1]
+	if got := strings.Count(dupFooter, string(StatusBadSig)); got != 1 {
+		t.Fatalf("footer names BADSIG %d times, want exactly 1 (the dedupe): %q", got, dupFooter)
+	}
+}
+
+// repeatedStatuses returns n copies of status, for composing a
+// buildStatusFailures fixture out of one run of a status followed by another.
+func repeatedStatuses(status Status, n int) []Status {
+	statuses := make([]Status, n)
+	for i := range statuses {
+		statuses[i] = status
+	}
+
+	return statuses
+}
+
+// buildStatusFailures builds one Failure per element of statuses, each with
+// its own origin, so a render cap's footer can be observed by which STATUSES
+// - not only which origins - made it past the cap.
+func buildStatusFailures(statuses []Status) []Failure {
+	failures := make([]Failure, len(statuses))
+	for i, status := range statuses {
+		failures[i] = Failure{Origin: fmt.Sprintf("origin-%d", i), Status: status, Err: errGenericRenderCapCause}
+	}
+
+	return failures
 }

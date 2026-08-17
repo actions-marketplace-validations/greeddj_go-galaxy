@@ -287,16 +287,12 @@ func validateRequirement(req CollectionRequirement, raw any) error {
 // would silently stop reading partway through, which is a worse answer than
 // refusing the file.
 //
-// What that cap does NOT do, stated rather than implied: it does not stop a
-// requirements file from starving the server's own signatures. The gather walks
-// a file's sources before a server's - a property nextBlob promises an operator
-// - so a file naming exactly helpers.MaxSignaturesPerCollection sources against
-// a server offering two consumes the whole budget: measured, 64 blobs from the
-// file and 0 from the server, silently. That is tolerated rather than fixed,
-// because an operator naming that many sources has made their own list
-// authoritative for the collection; reserving a share of the budget for
-// server-carried blobs would be a legitimate change of its own, and one about
-// the gather rather than about this gate.
+// What that cap does NOT do, stated rather than implied: it bounds what one
+// entry may DECLARE, never what the gather does once the combined candidate
+// set - this entry's own sources plus whatever the server offers alongside
+// the artifact - exceeds that bound. gatherLimit
+// (internal/galaxy/collections/verify.go) owns that decision and reports it;
+// per the one-home rule, this gate's job ends at load time.
 //
 // What it does NOT do is re-state the grammar: signature.ValidateRequirementSource
 // answers what a source may be, and the fetch answers through the same

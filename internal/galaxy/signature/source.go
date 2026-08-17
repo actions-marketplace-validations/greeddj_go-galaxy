@@ -309,37 +309,85 @@ func hostlessHTTP(u *url.URL) bool {
 // cleanup's own manifest scan states the blocking-open property for the same
 // reason, one layer away.
 //
-// Every failure below renders one message, which is a decision about what a CI
-// log may be used for. This arm reads a local path selected by repository
-// content, so each outcome an operator can tell apart is an oracle a repository
-// can query about the machine running the install: four distinguishable
-// answers (absent, unreadable, not a regular file, too large) are a filesystem
-// probe. One bit is intrinsic to the message and is the accepted floor: reading
-// the file is the whole operation, so a repository can always learn whether a
-// path was readable as a signature. The message still names the path, so an
-// operator reproduces the distinction with one ls -l; nothing else about the
-// path survives into the message. The http arm deliberately keeps its own
+// Every failure of the READ below - the open, the stat, or the size check -
+// renders exactly one message, which is a decision about what a CI log may be
+// used for: absent, unreadable, not a regular file, and too large are one
+// observation rather than four. The message still names the path, so an
+// operator reproduces the distinction with one ls -l. That collapse bounds
+// only this function's own failure arm; it says nothing about what a read
+// that SUCCEEDS goes on to make this program say, which the next two
+// paragraphs state in full. The http arm deliberately keeps its own
 // vocabulary - a status code, an offline refusal, a certificate failure, a
 // cancellation - none of which is an oracle about this machine's filesystem.
 //
-// The message is where that floor holds; how long the call takes is not. The
-// conditions collapsed here were measured apart on wall clock - an absent path
-// at 2.7us, a permission-denied one at 10.7us, a directory at 12.1us, a 64 MiB
-// file at 195us - so an observer able to time this one call recovers more than
-// the one bit. The gap is accepted: none of it reaches the message a CI log
-// keeps, and it does not survive the phase this call sits in, where up to
+// A read that succeeds is not where a repository-selected path stops being
+// able to make this program talk about the machine it ran on. The bytes go
+// on to signature.Verify, whose packet-framing walk in framing.go renders a
+// verdict that is a function of the file's own content rather than merely of
+// whether it opened: judgeHeader's unreadable-header arm renders the exact
+// remaining byte count, which for a file that is not a packet stream is the
+// whole file size; and the same walk's other arms render a first-byte tag
+// class (judgeHeader's own tag arm), a declared-versus-present body length
+// pair (judgePacket), and a parser's own unread-byte count (driveParser) -
+// each a fact about this specific file's bytes, not a number this package
+// invented. maxRenderedFailures bounds how many such verdicts one
+// collection's own verification message renders to 8, per collection, per
+// run; nothing bounds what a repository can still learn across collections
+// or runs by naming a different path each time.
+//
+// That framing detail is disclosed rather than bounded, on three grounds.
+// First, a bound would have to cover the whole framing vocabulary rather than
+// one site - judgeHeader's unreadable-header size, its secret-key arm, its
+// tag arm, judgePacket's declared-versus-present pair, and driveParser's
+// unread-versus-total pair are each their own distinguishable answer about a
+// local file - and a partial bound would leave the claim this comment makes
+// both false and harder to state precisely than leaving every arm alone.
+// Second, no two-way split covers every mechanism for closing it. One
+// teaches framing.go where its bytes came from - collapsing the layer split
+// this package is built on, framing.go judging bytes and source.go fetching
+// them without either knowing the other's business. Another drops the cause
+// from the error tree at verificationError, which is precisely the coupling
+// verdictError's own doc comment forbids in the other direction. A further
+// mechanism satisfies neither: redacting a failure's rendered message inside
+// verificationError, keyed on the failure's own Origin scheme, leaves
+// framing.go untouched and keeps the cause wrapped with %w, so errors.Is and
+// exitcode.FromError stay unaffected - what it costs instead is the verdict
+// renderer itself learning about source provenance, and the operator losing
+// the diagnostic the Third ground below argues is worth keeping.
+// Third, closing it would only narrow the oracle rather than close it: the
+// status class a failure classifies as would still survive any such bound,
+// so the floor still would not be one bit - the identical conclusion
+// fetchHTTP's own doc comment reaches about refusing a loopback or
+// link-local destination - and it would cost the operator the one
+// diagnostic a server-carried or http-fetched blob's own failure still gets
+// to keep.
+//
+// fetchHTTP's own remedy - a destination allow-list enforced at the dial,
+// argued on that method's doc comment - has no purchase on this arm: a
+// file:// source dials nothing, so there is no connection for an allow-list
+// to gate.
+//
+// The message is where the read-failure collapse above holds; how long the
+// call takes is not. The four conditions it collapses were measured apart on
+// wall clock - an absent path at 2.7us, a permission-denied one at 10.7us, a
+// directory at 12.1us, a 64 MiB file at 195us - so an observer able to time
+// this one call recovers a distinction the failure message alone does not
+// make. The gap is accepted: none of it reaches the message a CI log keeps,
+// and it does not survive the phase this call sits in, where up to
 // helpers.MaxSignaturesPerCollection sources are gathered under a
 // network-latency budget no microsecond-scale difference is separable from.
 // Padding the arm to a fixed duration would tax every ordinary run to deny a
 // channel that narrow.
 //
 // The residual this accepts, stated rather than closed: repository content
-// selects an absolute local path and this process reads it. The observable is
-// the one bit above, the message names the path an operator can check, and it
-// is strictly weaker than a repository-content-driven WRITE this project
-// already accepts - ansible.cfg discovery lets the same repository redirect
-// [defaults] collections_path and [galaxy] cache_dir, which CLAUDE.md rules is
-// containment relative to a configured path rather than a vulnerability.
+// selects an absolute local path and this process reads it, and what a
+// repository can learn from that spans both the collapsed read-failure
+// message above and the content-dependent verification verdict beside it.
+// Both are strictly weaker than a repository-content-driven WRITE this
+// project already accepts - ansible.cfg discovery lets the same repository
+// redirect [defaults] collections_path and [galaxy] cache_dir, which
+// CLAUDE.md rules is containment relative to a configured path rather than a
+// vulnerability.
 //
 // A file source works under --offline. It is local state, exactly like the
 // cache: nothing about reading it needs the network to be reachable.
@@ -449,16 +497,95 @@ func (f *Fetcher) readFile(file *os.File, size int64) ([]byte, error) {
 // is not a place to print what it managed to make a server return.
 //
 // The disclosure fetchFile's own oracle paragraph does not make, because it
-// reasons about the filesystem alone: this arm is a network-reachability oracle
-// for whoever wrote the requirements file. A signatures: entry is an outbound
-// GET from wherever the install runs, and its outcomes are distinguishable in
-// the operator-facing message - a transport failure, a TLS failure, a status
-// code, and a 200 whose bytes are not a signature all read differently - so a
-// repository can map what its CI runner can reach, internal addresses included.
-// Nothing here narrows the destination: whether this tool should refuse
-// loopback and link-local targets is a decision of its own, and this paragraph
-// is the disclosure it would be made against rather than a claim that the
-// question is settled.
+// reasons about the filesystem alone: this arm is a network-reachability
+// oracle for whoever wrote the requirements file. A signatures: entry is an
+// outbound GET from wherever the install runs, and what one outcome discloses
+// is a predicate rather than a fixed list of shapes: an outcome carries
+// whatever net/http put inside the *url.Error a failed request returns,
+// because transportCause (below) hands back that inner error verbatim rather
+// than the *url.Error's own rendering. What that measurably includes: the
+// resolved address, its family, the port, and the connect errno - "dial tcp
+// 127.0.0.1:54825: connect: connection refused", and a name that resolves to
+// an IPv6 address rendering as "dial tcp [::1]:...: ..." - so a hostname in a
+// signatures: entry reads back as this runner's own DNS resolver answered
+// it, not merely as reachable or not; a TLS hostname mismatch as its own
+// shape, rendering as "tls: failed to verify certificate: x509: certificate
+// is valid for <the certificate's own DNS names>, not <the name requested>" -
+// measured through a real client round trip, which is what puts the
+// certificate's own SAN list, not merely the fact that verification failed,
+// into an operator-facing message; "net/http: timeout awaiting response
+// headers" as its own distinguishable outcome, separating a destination that
+// accepted the connection and then stalled from one that refused it
+// outright; and an over-ceiling body as a third, later outcome of its own,
+// through helpers.ErrResponseTooLarge, once a response has actually been
+// read rather than merely dialed. No address class is refused: a loopback,
+// link-local, or unique-local destination is fetched exactly like any other.
+//
+// Redirects are FOLLOWED, not refused: fetch.checkRedirect bounds the hop
+// count and deletes the Referer header net/http would otherwise compose for
+// the hop, but it does not refuse the hop itself. So a failing hop's own dial
+// text names the redirect TARGET's resolved address, while display - and
+// every message this method builds around it - still names only the
+// originally declared URL. That is why the remedy sentence below reads
+// "enforced at the dial" rather than "enforced on the declared value": an
+// allow-list checked only against the URL a signatures: entry names is
+// walked past by a single redirect to an address that value never mentioned.
+//
+// That is a decision, not an omission, and it rests on three grounds. First,
+// refusing one would not close the oracle above, only move it: a signature
+// source is not the only destination repository content selects, and it is
+// not the only one left unrefused - a discovered ./ansible.cfg is repository
+// content too, and every destination it can configure ([galaxy] server,
+// server_list, and a [galaxy_server.<id>]'s own url) is requested without a
+// refusal of its own, and the last of those can carry a token in the file
+// itself where a signature source never can. A collection's source: is a
+// second example: it is requested even when it matches no configured Galaxy
+// server, which warnUnmatchedSource
+// (internal/galaxy/collections/server_candidates.go) warns about and proceeds
+// with, recording there that a refusing mode is a flag surface nothing has
+// asked for. Second, no predicate separates the two cases a refusal would have
+// to tell apart: an operator's own hub on a private range is a legitimate
+// signature host, and nothing distinguishes it from a probe, since both are a
+// URL in a file the repository authors. A loopback/link-local refusal alone
+// would still close something real - a service bound to loopback is reachable
+// from nowhere else, and link-local covers 169.254.169.254, the address a
+// cloud runner's metadata service answers on - but it narrows the oracle
+// rather than closing it: the identical probe still runs against any RFC 1918
+// address, and the same refusal's false positive lands on a legitimate
+// private-range hub exactly as a broader one's would. Third, the check could
+// only ever be enforced where the address is known, which is the dial and not
+// the parse - a name resolving to a private address, and a name that
+// re-resolves between the check and the connection, are both invisible to
+// url.Parse - which puts it inside the shared client builder in
+// internal/galaxy/fetch, where a control leaking onto the credential-bearing
+// client built there would refuse every --server naming a private host: a
+// worse failure than the one it closes.
+//
+// What would change the answer is a property, not a narrower version of this
+// check: a refusal binding every repository-authored destination this program
+// requests - a source:, a signature source, and whatever is added next -
+// expressed as an operator-configured allow-list of origins rather than a
+// blocklist of address ranges, and enforced at the dial. Until such a thing
+// exists the residual stays exactly what it already was above: the
+// reachability oracle, kept rather than closed.
+//
+// fetch.TestNewUnauthenticatedAttachesNoAuthorization
+// (internal/galaxy/fetch/client_test.go) pins exactly what it can prove: the
+// DESTINATION receives no credential of this program's own, wherever a
+// signatures: entry points it. That is narrower than "no credential ever
+// travels on this client's requests" and deliberately so: fetch.newClient's
+// own newTransport sets Proxy: http.ProxyFromEnvironment, so an operator
+// whose ambient HTTP_PROXY or HTTPS_PROXY carries userinfo has net/http
+// attach a Proxy-Authorization header of net/http's own composing - measured,
+// a proxy URL carrying userinfo makes a real *http.Transport send exactly
+// that header, Basic-encoded, to the configured proxy. That credential
+// travels to the PROXY the operator configured, never to the destination a
+// signature source names, and it is not a credential this program ever read
+// or chose. The TLS half is closed by construction rather than pinned by a
+// test that never checks it - fetch.NewUnauthenticated's own doc comment
+// holds that argument: insecureOriginSet(nil) is empty, so dispatch.insecure
+// stays nil and every request goes to the fully-verified transport
+// regardless of origin.
 func (f *Fetcher) fetchHTTP(ctx context.Context, source, display string) (Blob, error) {
 	if f.offline {
 		return Blob{}, fmt.Errorf("%w: %q: %w", helpers.ErrSignatureSourceUnavailable, display, helpers.ErrOfflineMode)

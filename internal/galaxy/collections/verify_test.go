@@ -669,9 +669,15 @@ func TestServerSignatureBlobsIgnoresForeignShapes(t *testing.T) {
 		map[string]any{"signature": "-----BEGIN PGP SIGNATURE-----\nreal enough\n-----END PGP SIGNATURE-----"},
 	}}
 
-	blobs := serverSignatureBlobs(meta)
+	blobs, offered := serverSignatureBlobs(meta)
 	if len(blobs) != 1 {
 		t.Fatalf("serverSignatureBlobs() returned %d blobs, want 1 (only the recognized shape)", len(blobs))
+	}
+	// offered counts entries that pass the shape filter, not the raw list
+	// length: six entries were offered and only one is shape-valid, so this
+	// must read 1, never 6.
+	if offered != 1 {
+		t.Fatalf("serverSignatureBlobs() offered = %d, want 1 (shape-valid entries, not the raw list length of 6)", offered)
 	}
 	if !strings.Contains(string(blobs[0].Data), "real enough") {
 		t.Fatalf("serverSignatureBlobs() returned %q, want the recognized entry's own bytes", blobs[0].Data)
@@ -679,11 +685,11 @@ func TestServerSignatureBlobsIgnoresForeignShapes(t *testing.T) {
 	if blobs[0].Origin == "" {
 		t.Fatal("serverSignatureBlobs() returned a blob with no origin")
 	}
-	if got := serverSignatureBlobs(nil); got != nil {
-		t.Fatalf("serverSignatureBlobs(nil) = %v, want nil", got)
+	if got, offered := serverSignatureBlobs(nil); got != nil || offered != 0 {
+		t.Fatalf("serverSignatureBlobs(nil) = %v, offered %d, want nil, 0", got, offered)
 	}
-	if got := serverSignatureBlobs(&types.GalaxyCollectionVersionInfo{}); got != nil {
-		t.Fatalf("serverSignatureBlobs(no signatures) = %v, want nil", got)
+	if got, offered := serverSignatureBlobs(&types.GalaxyCollectionVersionInfo{}); got != nil || offered != 0 {
+		t.Fatalf("serverSignatureBlobs(no signatures) = %v, offered %d, want nil, 0", got, offered)
 	}
 }
 
@@ -724,7 +730,7 @@ func TestVerifyContextSourcesAreDedupedInFileOrder(t *testing.T) {
 // strictSpelling, which is what the function looked like before the zero case
 // was noticed:
 //
-//	verify_test.go:745: strictSpelling(count 0) = "+0", want "+1"
+//	verify_test.go:751: strictSpelling(count 0) = "+0", want "+1"
 func TestVacuousPassAdviceCanActuallyPass(t *testing.T) {
 	t.Parallel()
 
@@ -765,5 +771,242 @@ func TestVacuousPassUnderCountZeroAdvisesAWritableSpelling(t *testing.T) {
 	}
 	if fx.printer.hasWarnContaining(`"+0"`) {
 		t.Fatalf("the vacuous-pass warning advises %q, which fails under every outcome; warns=%v", "+0", fx.printer.warns)
+	}
+}
+
+// buildDistinctFileSources writes n temp files with distinct bytes -
+// "candidate-<i>" each - and returns their file:// sources, so the sha dedupe
+// nextBlob applies never collapses two of them into one gathered candidate.
+func buildDistinctFileSources(t *testing.T, n int) []string {
+	t.Helper()
+	dir := t.TempDir()
+	sources := make([]string, n)
+	for i := range sources {
+		path := filepath.Join(dir, fmt.Sprintf("sig-%d.asc", i))
+		mustWriteFile(t, path, fmt.Appendf(nil, "candidate-%d", i))
+		sources[i] = "file://" + path
+	}
+
+	return sources
+}
+
+// buildDistinctServerBlobs returns n server-carried signature blobs, each with
+// distinct bytes - "server-blob-<i>" - so a row naming a large offered count
+// does not collapse under nextBlob's own sha dedupe: two identical blobs would
+// count as one gathered candidate, understating how many the server side
+// alone contributed.
+func buildDistinctServerBlobs(n int) [][]byte {
+	blobs := make([][]byte, n)
+	for i := range blobs {
+		blobs[i] = fmt.Appendf(nil, "server-blob-%d", i)
+	}
+
+	return blobs
+}
+
+// drainGather pulls every blob next offers to exhaustion, sorting each one
+// into a file-sourced or a server-sourced count by comparing its Origin
+// against the known set of file:// sources this test built. That split is
+// exactly the two sides of the gather, since gatherOne draws a requirement's
+// own sources before a server's.
+func drainGather(t *testing.T, next signature.NextBlob, fileSources []string) (int, int) {
+	t.Helper()
+	known := make(map[string]struct{}, len(fileSources))
+	for _, source := range fileSources {
+		known[source] = struct{}{}
+	}
+	fileCount, serverCount := 0, 0
+	for {
+		blob, ok, err := next()
+		if err != nil {
+			t.Fatalf("nextBlob() pull error = %v, want nil", err)
+		}
+		if !ok {
+			return fileCount, serverCount
+		}
+		if _, isFile := known[blob.Origin]; isFile {
+			fileCount++
+		} else {
+			serverCount++
+		}
+	}
+}
+
+// gatherLimitRow is one row of gatherLimitRows: a declared-and-offered pair
+// gatherLimit sees, and what its verdict must be.
+type gatherLimitRow struct {
+	name            string
+	wantWarnSubstr  string
+	declared        int
+	offered         int
+	wantWarns       int
+	wantFileCount   int
+	wantServerCount int
+}
+
+// gatherLimitRows is TestGatherWarnsWhenTheCapTruncatesTheCandidateSet's own
+// table, split out so the test function itself stays a fixture plus an
+// assertion rather than growing with every row.
+//
+// The first three rows hold the server side at 2 throughout, which is well
+// under the cap on its own, so every one of them keeps offered <= cap and the
+// pre-truncation count serverSignatureBlobs returns agrees with the
+// post-truncation length of the blob slice it also returns. That is exactly
+// why a table shaped like those three rows alone could never have caught
+// gatherLimit being handed the post-truncation length instead of the true
+// offered count: with the server side under the cap the two numbers are
+// identical, so a defect that only shows once they diverge is structurally
+// unreachable from a fixture that never lets the server side alone cross the
+// cap. The four rows after them do exactly that: each pushes offered past 64
+// on its own, with declared sources at 0 or 10, so a caller reading the
+// post-truncation slice length instead of offered would report 64 candidates
+// where the true count is 65 to 210 - which is why every warning's own
+// arithmetic, not merely whether one fired, is asserted on every row.
+//
+//nolint:gochecknoglobals // a fixed table consumed by one test, not mutable shared state.
+var gatherLimitRows = []gatherLimitRow{
+	{
+		name: "64 declared, 2 offered", declared: 64, offered: 2, wantWarns: 1,
+		wantWarnSubstr: "66 signature candidates exceed the limit of 64 (64 declared, 2 offered by the server); " +
+			"the last 2 were not gathered",
+		wantFileCount: 64, wantServerCount: 0,
+	},
+	{
+		name: "63 declared, 2 offered", declared: 63, offered: 2, wantWarns: 1,
+		wantWarnSubstr: "65 signature candidates exceed the limit of 64 (63 declared, 2 offered by the server); " +
+			"the last 1 were not gathered",
+		wantFileCount: 63, wantServerCount: 1,
+	},
+	// The positive control on the same fixture builder: one candidate
+	// under the point where the cap starts truncating, both server blobs
+	// are gathered and no warning fires at all - which is what shows the
+	// harness above is capable of a silent, complete gather rather than
+	// one that just happens never to reach the check.
+	{name: "62 declared, 2 offered", declared: 62, offered: 2, wantWarns: 0, wantFileCount: 62, wantServerCount: 2},
+	// The four rows below push the SERVER side itself past the cap,
+	// which none of the three rows above can: with the server side fixed
+	// at 2, offered never crosses the cap on its own.
+	{
+		name: "0 declared, 200 offered", declared: 0, offered: 200, wantWarns: 1,
+		wantWarnSubstr: "200 signature candidates exceed the limit of 64 (0 declared, 200 offered by the server); " +
+			"the last 136 were not gathered",
+		wantFileCount: 0, wantServerCount: 64,
+	},
+	{
+		name: "0 declared, 65 offered", declared: 0, offered: 65, wantWarns: 1,
+		wantWarnSubstr: "the last 1 were not gathered",
+		wantFileCount:  0, wantServerCount: 64,
+	},
+	{
+		name: "10 declared, 200 offered", declared: 10, offered: 200, wantWarns: 1,
+		wantWarnSubstr: "210 signature candidates exceed the limit of 64 (10 declared, 200 offered by the server); " +
+			"the last 146 were not gathered",
+		wantFileCount: 10, wantServerCount: 54,
+	},
+	// The boundary control on the divergent side, the counterpart of the
+	// "62 declared" control above: the server alone fills the cap
+	// exactly and nothing is dropped, which is what shows the three rows
+	// above it are the cap actually truncating rather than a large
+	// server side warning unconditionally.
+	{name: "0 declared, 64 offered", declared: 0, offered: 64, wantWarns: 0, wantFileCount: 0, wantServerCount: 64},
+}
+
+// TestGatherWarnsWhenTheCapTruncatesTheCandidateSet pins gatherLimit's own
+// decision: a combined candidate set - a requirements entry's own declared
+// sources plus whatever the server offers alongside the artifact - past
+// helpers.MaxSignaturesPerCollection is warned about, once, naming what was
+// withheld, rather than silently dropped or refused outright. gatherLimitRows'
+// own doc comment holds why the table is shaped the way it is.
+func TestGatherWarnsWhenTheCapTruncatesTheCandidateSet(t *testing.T) {
+	t.Parallel()
+
+	for _, row := range gatherLimitRows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+
+			sources := buildDistinctFileSources(t, row.declared)
+			fx := newVerifyFixture(t, writeTestKeyring(t), "1", sources)
+			meta := serverSignatureMeta(buildDistinctServerBlobs(row.offered)...)
+
+			next := fx.deps.verify.nextBlob(context.Background(), fx.deps.runtime, testSignedCollection, meta)
+			fileCount, serverCount := drainGather(t, next, sources)
+
+			if fileCount != row.wantFileCount {
+				t.Fatalf("gathered %d file candidates, want %d", fileCount, row.wantFileCount)
+			}
+			if serverCount != row.wantServerCount {
+				t.Fatalf("gathered %d server candidates, want %d", serverCount, row.wantServerCount)
+			}
+			// KILLING MUTATION, run and reverted: gatherLimit's whole
+			// `if dropped := ...; dropped > 0 { ... }` block deleted, so
+			// nothing is ever warned about. Every row wanting a warning then
+			// fails, one of them with
+			//
+			//	verify_test.go:1005: warns = [], want exactly 1
+			//
+			// while the two boundary controls survive untouched, since
+			// neither ever expected a warning either.
+			//
+			// KILLING MUTATION, run and reverted: gatherLimit's predicate
+			// narrowed to `sources >= helpers.MaxSignaturesPerCollection`,
+			// the premise checkSignatureSources' own doc comment used to
+			// state before this function existed. Only the rows whose
+			// declared count alone stays under the cap - "63 declared, 2
+			// offered", "0 declared, 200 offered", "0 declared, 65 offered"
+			// and "10 declared, 200 offered" - then fail, one of them with
+			//
+			//	verify_test.go:1005: warns = [], want exactly 1
+			//
+			// while every row already past the threshold on declared sources
+			// alone, and both boundary controls, are untouched: it is the
+			// rows whose truncation comes from the server side, not the
+			// declared one, that tell the correct predicate apart from the
+			// one stated above.
+			//
+			// KILLING MUTATION, run and reverted: gatherLimit's predicate
+			// widened to `dropped >= 0`, so it fires even when nothing was
+			// actually dropped. Only the two boundary controls then fail,
+			// one of them with
+			//
+			//	verify_test.go:1005: warns = [acme.app@1.0.0: 64 signature candidates exceed the limit of 64 ...], want exactly 0
+			//
+			// which is what proves them controls: the identical fixture
+			// shape the rows around them pass now catches a warning that
+			// should never have fired.
+			//
+			// KILLING MUTATION, run and reverted: serverSignatureBlobs' own
+			// second return changed from `offered` to `len(blobs)` - the
+			// live defect this table exists to catch, handing gatherLimit a
+			// post-truncation count again. The two rows whose server side
+			// alone crosses the cap with no declared sources then fail with
+			// no warning at all, one of them with
+			//
+			//	verify_test.go:1005: warns = [], want exactly 1
+			//
+			// and the "10 declared, 200 offered" row still warns once -
+			// dropped is still positive there - but on the wrong arithmetic,
+			// failing its own substring check instead:
+			//
+			//	verify_test.go:1008: warns do not name "210 signature candidates exceed the limit of 64 (10
+			//	    declared, 200 offered by the server); the last 146 were not gathered": [acme.app@1.0.0: 74
+			//	    signature candidates exceed the limit of 64 (10 declared, 64 offered by the server); the last
+			//	    10 were not gathered, and declared sources always come first]
+			//
+			// while the three rows whose server side never approaches the
+			// cap, and the boundary control at exactly 64 offered, are all
+			// unaffected: none of them is where offered and len(blobs) ever
+			// disagreed. A sibling mutation - offered++ kept but the early
+			// break at the cap restored instead of the len(blobs) < cap
+			// guard - was checked separately and produces byte-identical
+			// failures to this one on every row, since the break stops
+			// counting at exactly the same point the guard stops appending;
+			// it earns no separate entry here for that reason.
+			if len(fx.printer.warns) != row.wantWarns {
+				t.Fatalf("warns = %v, want exactly %d", fx.printer.warns, row.wantWarns)
+			}
+			if row.wantWarnSubstr != "" && !fx.printer.hasWarnContaining(row.wantWarnSubstr) {
+				t.Fatalf("warns do not name %q: %v", row.wantWarnSubstr, fx.printer.warns)
+			}
+		})
 	}
 }

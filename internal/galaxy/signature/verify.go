@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/ProtonMail/go-crypto/openpgp/armor"
@@ -349,9 +350,255 @@ func (p Policy) verdict(verified, failed, gathered int) bool {
 	return gathered == 0 || verified == p.Required.Count
 }
 
+// maxRenderedFailures bounds how many per-signature causes a negative
+// verdict's own MESSAGE renders. It does not bound how many signatures this
+// run checked, and it does not bound how many causes stay reachable through
+// errors.Is once the message has been built - verdictError.Unwrap returns
+// every cause regardless; see that type's own doc comment for why the two
+// must not be the same knob.
+//
+// The number is derived rather than picked: it is the count of distinct
+// statuses a verdict can carry - the eight status.go declares in its first
+// const group - which is the count of distinct remedies a failure set can
+// point an operator at, so a message at the cap can still exhibit every shape
+// the vocabulary has. It cannot claim the converse: causes render in the
+// pull's own order, so a message at the cap is not guaranteed to show every
+// status actually present in a failure set, only that it could.
+//
+// It completes a bound the item side already had and the count side never
+// did, phrased as count x per-item. helpers.MessageValueMaxLen already bounds
+// the item - Blob.Origin, at both of its producers, serverBlobOrigin's href
+// and parseRequirementSource's display form - and a bound on one item is not
+// a bound on a message built from many of them. That framing is a bound on
+// the rendered MESSAGE alone - what reaches stderr, and what a %w wrap
+// re-materializes when this error crosses another layer - and not on what
+// the process allocates to build the error in the first place; the two
+// measured paragraphs below the table give each its own figure rather than
+// one number standing in for both. The count is the gather's to pick, not
+// this package's: whoever supplied the blob list chooses it - a requirements
+// file's author, up to the load-time ceiling checkSignatureSources enforces,
+// or a Galaxy server / a persisted snapshot, through serverSignatureBlobs.
+// Measured for a single collection's whole gather - the verdict headline plus
+// every one of MaxSignaturesPerCollection (64) non-ignored failures, one line
+// per failure, as an uncapped render would - on the fixture that produces
+// these three rows exactly: verdictReason under a required count of 1 with 0
+// verified (the 93 B headline), and per cause a NO_PUBKEY failure whose Err
+// is pgperrors.ErrUnknownIssuer, whose status and error text sum to the 50
+// bytes all three rows imply. That sum is not unique to this pair: BADARMOR
+// (8) plus a base64.CorruptInputError at an eight-digit offset - "illegal
+// base64 data at input byte 10000000" (42 B) - sums to the identical 50, and
+// classify routes it to StatusBadArmor too; ERRSIG (6) plus any 44-byte
+// error text sums to 50 as well, through classify's own default arm, which
+// accepts text this package never chooses at all. What actually generates
+// the table below, and what a reader needs to re-derive it, is the
+// arithmetic rather than a uniqueness claim: a cause renders as status +
+// " from " + %q(origin) + ": " + err text, so per cause is 60 B plus the
+// origin's rendered length - 50 B for this pair's status+text, 10 B for the
+// fixed punctuation - which is exactly 179/591/2,127 B at 119/531/2,067
+// rendered origin bytes. Among the six pairs whose text this package fixes
+// rather than a library choosing it, the measured status+text sums are
+// NODATA 44, NO_PUBKEY 50, REVKEYSIG 47, EXPKEYSIG 29, EXPSIG 32,
+// BADARMOR/ArmorCorrupt 44; NO_PUBKEY is the only one of those six landing
+// on 50, but BADSIG and ERRSIG both carry library-chosen text with no fixed
+// sum at all, and BADARMOR carries a second, variable-offset shape - the
+// base64 arm above - beside its fixed ArmorCorrupt one, so no uniqueness
+// claim survives the whole eight-status vocabulary. The realistic row's href
+// length is the galaxy.ansible.com v3 figure
+// helpers.MessageValueMaxLen's own doc already records:
+//
+//	realistic (119 B href): 179 B per cause, 11,613 B at 64 causes
+//	at the MessageValueMaxLen ceiling (531 B): 591 B per cause, 37,981 B at 64
+//	that ceiling in control bytes, which %q escapes fourfold: 2,127 B per cause, 136,285 B at 64
+//
+// How many times a value at this scale is materialized, and where each
+// materialization lands, is helpers.MessageValueMaxLen's own doc comment to
+// state; that doc now names a third site the two paragraphs below measure.
+//
+// verificationError builds every one of those 64 causes with fmt.Errorf
+// before this constant gets any say, and fmt.Errorf renders its string
+// immediately rather than lazily, so a negative verdict pays for the whole
+// uncapped table above the moment Verify returns it - whether or not anything
+// ever calls Error(). That cost is the table's own figures minus the 64
+// newline separators strings.Join would add across the table's 65 parts (the
+// headline plus 64 causes), measured on the same three rows at 11,549 B,
+// 37,917 B and 136,221 B. maxRenderedFailures does not bound any of it: the
+// constant governs what Error() joins afterward, never what construction
+// already allocated before Error() is ever reached.
+//
+// What Error() actually emits for that same fixture - the headline, the
+// eight rendered causes, and the footer together - is smaller again, and this
+// is the figure that reaches stderr and that a %w wrap re-materializes:
+// 1,613 B, 4,909 B and 17,197 B on the same three rows. Each includes the
+// footer's own hidden-status addition; Error()'s and hiddenStatuses' own doc
+// comments hold the argument for what that addition is and why it stops
+// short of recovering an origin.
+//
+// What the cap withholds is chosen by whoever supplied the blob list, not by
+// this constant. The gather's own order decides which non-ignored failures
+// occupy the render's first maxRenderedFailures slots, and a repeated line -
+// a failure set whose causes share one origin and one status, which is what a
+// server offering a long list of one bad signature produces - consumes a
+// slot exactly like a distinct one costs. Measured on a fixture built for it:
+// eight decoy sources, each declaring its own origin, each classifying
+// NO_PUBKEY, ahead of a ninth failure classifying BADSIG, fill the whole
+// render with the eight decoys and never reach the ninth - whatever remedy
+// that ninth failure alone would have pointed an operator at.
+//
+// A renderer keyed on the distinct (status, origin) pair, in place of the
+// gather's own order, was considered and rejected on that same fixture: the
+// eight decoys carry eight DISTINCT pairs, one origin apiece, so deduping on
+// the pair changes nothing about which lines fill the budget - it still
+// renders the same eight NO_PUBKEY lines and still never reaches the BADSIG
+// behind them. hiddenStatuses is the shape that actually answers what a
+// pair-keyed renderer could not: rather than changing which causes occupy the
+// render's slots, Error()'s own footer separately names the distinct statuses
+// among what those slots excluded, so a status buried behind a wall of
+// decoys still reaches the message even though the decoys' own lines still
+// fill the budget. What it deliberately does not recover is the origin of a
+// hidden failure: an origin is an unbounded, input-chosen value, and putting
+// one back into the footer is exactly what this cap exists to keep out of a
+// negative verdict's message.
+const maxRenderedFailures = 8
+
+// verdictError is the error a negative Verify verdict returns: a headline
+// naming which clause of Policy.verdict fired, followed by every non-ignored
+// Failure the walk recorded, bounded at render time by maxRenderedFailures.
+//
+// Every cause stays reachable through errors.Is and only the rendering is
+// bounded, because a constant that governs how much is printed must not
+// govern what an error matches. Dropping the unrendered causes would make
+// errors.Is - and therefore exitcode.FromError, which is a pure function of
+// the error tree - depend on a cause's position in a list this program does
+// not own: a Galaxy server, a persisted snapshot and a requirements file all
+// choose that order. Presentation would then be part of the error's
+// identity, and changing a message-length constant would move an exit code.
+//
+// This is what separates it from the install side's own aggregate, which
+// renders none of its causes: there, each cause was already printed to
+// stderr in real time by the worker that hit it, while nothing prints
+// Result.Failures - verifyCollectionSignatures drops the Result on the error
+// path - so these causes are rendered because the message is the only place
+// they appear.
+//
+// The construction invariant every constructor of this type has to hold, in
+// full: causes is non-empty, carries no nil element, and its index 0 is the
+// headline - never a per-signature failure. verificationError is the sole
+// constructor and establishes all three. Nothing here checks any of them at
+// construction or render time, so a second constructor that violates one
+// breaks silently rather than loudly, and each violation's cost is its own
+// shape: an empty causes renders Error() as the empty string, since shown is
+// then 0 and strings.Join of no parts is ""; a nil element panics inside
+// Error(), since the loop calls cause.Error() on it directly; and an index 0
+// that is not the headline makes the footer's len(e.causes)-1 count one
+// failure too FEW, since that arithmetic assumes the first slot is spent on
+// something that is not itself a Failure. Measured against ten failure
+// causes with no headline: Error() renders nine failure lines - one more
+// than the footer's own claim - and a footer reading "showing the first 8
+// of 9 signature failures; 1 not shown, carrying: BADSIG" against a true
+// total of ten failures, while notShown itself stays correct at 1. The
+// defect is quiet below ten causes: at nine or fewer with no headline,
+// notShown is 0 and no footer fires at all, so nothing about the miscount
+// is ever visible.
+//
+// hidden holds the distinct statuses, in first-seen order, that a failure
+// past the render cap carries - see hiddenStatuses, verificationError's own
+// producer of it. It is nil whenever nothing was hidden, and Error()'s footer
+// branch already guards on that before reading it.
+type verdictError struct {
+	causes []error
+	hidden []Status
+}
+
+// Error renders the headline and up to maxRenderedFailures of the failures
+// behind it, one line per failure, joined by "\n". A strings.Contains
+// assertion against this message still finds a cause the cap keeps rendered;
+// one matching a cause the cap excludes - the (maxRenderedFailures+1)-th
+// failure or later - is exactly what stops matching, since Unwrap still
+// returns that cause but Error no longer renders it.
+//
+// shown reserves the headline's own slot: causes[0] is always the headline
+// verificationError built, so maxRenderedFailures+1 is the render budget for
+// "the headline plus that many failures", never "that many causes total".
+//
+// The footer, when it fires, names two things about what it withheld rather
+// than only how many: the count of failures not shown, and - through
+// e.hidden, when it is non-empty - the distinct statuses among them. That
+// second part exists because a status is what an operator's ignore list and
+// remedy are keyed on, and the render order is the gather's order rather than
+// a ranking by severity: a wall of decoys sharing one tolerated status can
+// fill every rendered slot and push the one failure carrying the strongest
+// evidence - a BADSIG among eight NO_PUBKEY - past the cap with nothing in
+// the visible lines saying so. Naming its status in the footer is what
+// recovers that fact without recovering the failure's own origin, which stays
+// out of the footer deliberately - see hiddenStatuses' own doc comment for
+// why.
+func (e *verdictError) Error() string {
+	shown := min(len(e.causes), maxRenderedFailures+1) // the headline occupies the first slot
+	parts := make([]string, 0, shown+1)
+	for _, cause := range e.causes[:shown] {
+		parts = append(parts, cause.Error())
+	}
+	if notShown := len(e.causes) - shown; notShown > 0 {
+		footer := fmt.Sprintf("showing the first %d of %d signature failures", maxRenderedFailures, len(e.causes)-1)
+		if len(e.hidden) > 0 {
+			names := make([]string, len(e.hidden))
+			for i, status := range e.hidden {
+				names[i] = string(status)
+			}
+			footer += fmt.Sprintf("; %d not shown, carrying: %s", notShown, strings.Join(names, ", "))
+		}
+		parts = append(parts, footer)
+	}
+
+	return strings.Join(parts, "\n")
+}
+
+// Unwrap returns every cause, rendered or not, which is what lets errors.Is
+// keep reaching a cause the message itself left out. No copy: the standard
+// library's own errors.Join makes the identical choice on its *joinError -
+// its Unwrap also returns its backing slice directly. What keeps that safe
+// here is not a guarantee this type enforces against a caller it does not
+// control - a caller holding the returned slice could still write through it
+// - but a fact about this package's own callers instead: causes is built once
+// by verificationError and nothing in this package retains a reference to it
+// or writes through one afterward.
+func (e *verdictError) Unwrap() []error {
+	return e.causes
+}
+
+// hiddenStatuses returns the distinct statuses, in first-seen order, carried
+// by the failures a negative verdict's own message does not render - those at
+// and past index maxRenderedFailures, the same boundary Error()'s own shown
+// computation draws. It returns nil whenever nothing is hidden, which is the
+// common case and costs nothing: a collection whose gather produced at most
+// maxRenderedFailures non-ignored failures is the ordinary run.
+//
+// The dedupe is what keeps the footer naming a shape rather than a count: a
+// gather dominated by many failures of one status past the cap would
+// otherwise repeat that status once per hidden failure, drowning a rarer one
+// among them exactly as the render cap itself drowns a rarer FAILURE among
+// many rendered ones. slices.Contains over at most eight distinct statuses is
+// cheap enough that a map buys nothing here.
+func hiddenStatuses(failures []Failure) []Status {
+	if len(failures) <= maxRenderedFailures {
+		return nil
+	}
+	var hidden []Status
+	for _, failure := range failures[maxRenderedFailures:] {
+		if !slices.Contains(hidden, failure.Status) {
+			hidden = append(hidden, failure.Status)
+		}
+	}
+
+	return hidden
+}
+
 // verificationError builds the failure a negative verdict returns: a headline
 // naming which clause of Policy.verdict fired, with every non-ignored Failure
-// joined behind it so errors.Is still reaches each underlying cause.
+// joined behind it into a *verdictError - see that type's own doc comment for
+// why the join it performs is what still lets errors.Is reach each underlying
+// cause, and for the construction invariant this function alone is
+// responsible for establishing.
 //
 // Each cause is rendered with its origin and status rather than passed through
 // bare, because the library's own message names neither: "openpgp: invalid
@@ -365,7 +612,7 @@ func verificationError(p Policy, verified int, failures []Failure) error {
 		causes = append(causes, fmt.Errorf("%s from %q: %w", failures[i].Status, failures[i].Origin, failures[i].Err))
 	}
 
-	return errors.Join(causes...)
+	return &verdictError{causes: causes, hidden: hiddenStatuses(failures)}
 }
 
 // verdictReason names the clause of Policy.verdict that refused the run. Its

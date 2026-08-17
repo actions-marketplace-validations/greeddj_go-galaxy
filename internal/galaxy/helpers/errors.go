@@ -648,12 +648,19 @@ var (
 	// ErrTooManySignatureSources indicates one collection's requirements entry
 	// declares more signature sources than MaxSignaturesPerCollection allows.
 	//
-	// It is refused where the file is read rather than truncated where the blobs
-	// are gathered, because truncation is silent and its cost is not: the gather
-	// walks a requirements file's own sources before a server's, so a file
-	// naming more sources than the cap allows would starve every server-carried
-	// signature of its turn while reporting nothing. The operator's remedy is to
-	// name fewer, which is why this is a usage error rather than a verdict.
+	// It is refused where the file is read rather than left for the gather to
+	// discover the cap later, because a declared list over the cap is the
+	// operator's own mistake, and this is the one place it is still a
+	// load-time usage error rather than something an install worker would
+	// otherwise discover mid-run and only degrade into a warning. The message
+	// itself names neither the file nor the offending collection, only the
+	// count - "65 declared, at most 64 are gathered" for a requirements entry
+	// naming one source too many, nothing more. A combined candidate set that
+	// exceeds the cap for a reason this entry alone did not cause - a server
+	// also offering signatures on top of an already-large declared list - is
+	// a different case with a different remedy, and gatherLimit
+	// (internal/galaxy/collections/verify.go) is where that one is decided
+	// and reported instead.
 	ErrTooManySignatureSources = errors.New("too many signature sources declared for one collection")
 	// ErrSignatureSourceUnavailable indicates a signature this run was told to
 	// check could not be obtained at all: a network failure fetching it, an
