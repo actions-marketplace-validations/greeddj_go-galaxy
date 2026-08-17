@@ -153,7 +153,30 @@ func fetchAndStore(
 	return json.Unmarshal(body, out)
 }
 
-// newAPICacheEntry builds a cache entry from response data.
+// newAPICacheEntry builds a cache entry from response data. Body is stored
+// verbatim - byte for byte what the server sent, with no cut applied
+// anywhere in this package.
+//
+// For a version-detail document, that body includes download_url, which on
+// an object-storage-backed Galaxy NG or Automation Hub deployment is a
+// presigned URL whose query string is a time-limited bearer capability (see
+// helpers.WithoutQuery's own doc comment for what that means). It is stored
+// uncut here, unlike GALAXY.yml's own copy of the same value
+// (buildGalaxyYAML, internal/galaxy/collections/galaxy_info.go): that
+// sidecar is written for an operator to read, while this entry is read back
+// and its URL is fetched by this program itself - cutting it here would turn
+// every cache-served download into a 403 against a presign that no longer
+// names anything.
+//
+// The exposure window this leaves is bounded by the presign's own expiry,
+// not by anything this program controls: neither the entry's own TTL nor
+// helpers.CacheEntryMaxAge, both of which govern how long the entry survives
+// in the persisted snapshot rather than how long the URL inside it stays
+// live. A principal who can read the shared cache - the trust boundary
+// Backend.LoadStore/LoadProjectRegistry document - gets a working capability
+// only while the presign it names is still live, and gets a fresh one every
+// time this entry is refreshed, exactly the capability a legitimate fetch
+// through this cache would use regardless.
 func newAPICacheEntry(url string, body []byte, etag, lastModified string, ttl time.Duration) store.APICacheEntry {
 	return store.APICacheEntry{
 		URL:          url,

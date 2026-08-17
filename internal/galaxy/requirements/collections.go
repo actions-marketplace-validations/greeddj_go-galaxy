@@ -277,12 +277,15 @@ func validateRequirement(req CollectionRequirement, raw any) error {
 // worker and fails one collection among however many, classified as that
 // collection's failure rather than as the configuration error it is. A source
 // carrying userinfo is a credential in repository content, and by then it has
-// been copied into the resolved snapshot - a shared S3 object in a multi-runner
-// cache - where url.URL.String() renders it back in plain text; the refusal
-// here names the value with its userinfo cut off, exactly as the fetch's own
-// would. A value that is not a string at all is turned by parseStringList's
-// fmt.Sprint arm into a plausible-looking source ("map[]", "false", "0") that
-// nothing downstream can tell from one an author wrote. And more DISTINCT
+// been copied into the resolved snapshot - a shared S3 object in a
+// multi-runner cache - where url.URL.String() renders it back in plain text;
+// the refusal here names the value with its userinfo cut off, exactly as the
+// fetch's own would. A source's query reaches that same snapshot too, but is
+// cut rather than refused (normalizeSignatures,
+// internal/galaxy/collections/resolve.go). A value that is not a string at
+// all is turned by parseStringList's fmt.Sprint arm into a plausible-looking
+// source ("map[]", "false", "0") that nothing downstream can tell from one an
+// author wrote. And more DISTINCT
 // sources than helpers.MaxSignaturesPerCollection allows is a list this tool
 // would silently stop reading partway through, which is a worse answer than
 // refusing the file.

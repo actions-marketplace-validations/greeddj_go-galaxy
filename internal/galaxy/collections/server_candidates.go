@@ -291,6 +291,30 @@ func joinCandidateURLs(candidates []rootMetaCandidate) string {
 // stays first since it is galaxy.ansible.com's shape and therefore the
 // overwhelmingly common case: the fallback candidates only cost anything
 // when the first probe 404s.
+//
+// A base carrying a query string is not cut here, unlike the values
+// helpers.WithoutQuery protects elsewhere in this program - it is
+// neutralized by an accident of string concatenation instead, not by a
+// designed refusal. add(trimmed + "/api/v3") turns
+// "https://hub.example.com/api/automation-hub?tok=SECRET" into
+// "https://hub.example.com/api/automation-hub?tok=SECRET/api/v3", and once
+// that string becomes a request URL its "?" starts the query component, so
+// the appended API-root-plus-collection suffix lands entirely inside the
+// query string rather than the path: net/url parses that value to path
+// "/api/automation-hub", query "tok=SECRET/api/v3" - a real endpoint on a
+// real server, just not the API root this function meant to name, and
+// reached with the capability riding along inside the request's own query
+// string. Only a base whose own path is empty or "/" collapses every
+// candidate to a request for the bare path "/" instead. Either way, no
+// candidate this function derives for a query-bearing base names the API
+// root it was built to name, so the walk exhausts every candidate exactly
+// as if none had ever matched. That is a property of how this function
+// joins strings today, not a guarantee: a future change to URL construction
+// here - building with net/url instead of fmt.Sprintf, say - could make a
+// query-bearing source: a viable configuration, and the capability inside
+// it would then reach the requirements, resolved and installed snapshot
+// buckets, the committed lockfile, and warnUnmatchedSource's own warning
+// line, with nothing cutting it at any of those sinks.
 func apiRootCandidates(base string) []string {
 	trimmed := normalizeServerBase(base)
 	if trimmed == "" {

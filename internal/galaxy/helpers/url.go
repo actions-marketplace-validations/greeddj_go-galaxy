@@ -12,13 +12,18 @@ import (
 // deployment backs its artifacts with object storage and answers with a
 // presigned download URL, whose query string is a time-limited capability:
 // anyone holding that exact URL can fetch the artifact without credentials. So
-// every sink that outlives the request itself takes the stripped form -
-// GALAXY.yml is the caller this argument was first written for, since it is
-// written into the collections tree, which routinely outlives the run and gets
-// uploaded wholesale as a CI artifact, handing that capability to everyone who
-// can read the build's output. The scheme, host and path are kept, since they
-// are the informational part - where this thing actually came from - and carry
-// no capability on their own.
+// a value meant only to be read or compared, never fetched again by this
+// program, takes the stripped form - GALAXY.yml is the caller this argument
+// was first written for, since it is written into the collections tree, which
+// routinely outlives the run and gets uploaded wholesale as a CI artifact,
+// handing that capability to everyone who can read the build's output. A sink
+// that instead replays the value as a live request is the deliberate
+// exception: the API cache's own cached response body is read back and
+// refetched by this program itself, so newAPICacheEntry
+// (internal/galaxy/cache/api_cache.go) keeps it whole and states why. The
+// scheme, host and path are kept regardless, since they are the informational
+// part - where this thing actually came from - and carry no capability on
+// their own.
 //
 // The cut is textual rather than a url.Parse round trip precisely because it
 // cannot fail: the first literal "?" always begins the query, so a URL this

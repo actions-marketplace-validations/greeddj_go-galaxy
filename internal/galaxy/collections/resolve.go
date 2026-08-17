@@ -478,6 +478,106 @@ func collectionVersionsURL(col collection) string {
 }
 
 // normalizeSignatures trims, sorts, and filters signatures.
+//
+// The query of each source is also cut, via helpers.WithoutQuery - the same
+// cut and the same reason it makes for GALAXY.yml: a signature source is
+// repository content that may name a presigned download URL, whose query
+// string is a time-limited capability, and the requirement spec this feeds is
+// persisted both to the requirements Bolt bucket and to the S3 backend's
+// snapshot object, shared across runners.
+//
+// The cut is free because of what this function's callers are, stated as a
+// predicate rather than a list: every consumer of a normalized spec is a spec
+// comparison or a spec hash, never a fetch - a run's own live sources are
+// read from requirementSources(roots) instead, upstream of this function
+// entirely and untouched by it. What it gives up: two sources differing only
+// in their query now compare equal, so a query-only edit to a source no
+// longer counts as a root change, and the prior resolve snapshot is replayed
+// rather than re-resolved. That costs nothing, because a signature source
+// plays no part in version resolution, and verification still reads the
+// live, unstripped source.
+//
+// This cut has to run here, at the producer, even though a second one
+// catches everything on the way out: store.snapshotData's own persist-side
+// backstop (copyRequirementsCutQuery, internal/galaxy/store/snapshot.go)
+// strips the identical query from every Requirements entry on every save.
+// Dropping this cut and trusting that backstop alone would leave the live
+// reqSpec this function feeds - and therefore reqHash, the hash
+// requirementsSignatureFromSpec computes over it - carrying the query, while
+// the persisted spec the backstop wrote is stripped. tryIncrementalResolve's
+// own self-consistency check recomputes its hash from that persisted,
+// stripped spec (via RequirementsSnapshot, never the live reqSpec) and
+// compares it against the persisted hash, itself computed unstripped: the
+// two would never agree again, for any requirement set naming a
+// query-bearing signature source, on any run, for as long as the drop
+// stood. Nothing fails outright - the whole-snapshot replay
+// (loadResolvedFromSnapshot) is unaffected, since it compares the live hash
+// against the persisted one directly rather than through the persisted
+// spec, and a full resolve still succeeds whenever the incremental path
+// declines - so the only casualty would be the incremental path itself,
+// dying silently with no error to notice it by.
+//
+// No schema bump follows from this: the field's shape is unchanged. The
+// stored hash and the stored spec are not always written together, though,
+// which is what makes "one binary writes both" unsafe to assume:
+// recordResolution is the only call that writes them in lockstep
+// (SetMetaRequirements immediately followed by SetRequirements), while the
+// persist-side backstop above rewrites the persisted spec on every dirty
+// save regardless of whether recordResolution ran this particular run.
+// install --frozen is the shape that reaches this today:
+// resolveOrLoadLockfile's lockfile branch never calls recordResolution at
+// all, yet a frozen install still dirties the store (SetInstalled) and
+// still saves - so a spec an older, pre-cut binary once persisted
+// unstripped is rewritten stripped by the backstop, while
+// Meta.RequirementsHash, computed by that older binary over the unstripped
+// value, survives the save completely untouched. Two binaries end up
+// having written the two fields, not one, and the run that later reads
+// them back hits the identical mismatch the upgrade direction below
+// describes - not a third direction, just another way to arrive at the
+// same one - and pays the identical one-time cost: a single full resolve,
+// never a failure, after which recordResolutionIfNeeded rewrites both
+// fields back into agreement. What a mixed-version cache does next -
+// upgrade or downgrade - is where the two directions genuinely split, and
+// they are not symmetric; stating them as one property, as an earlier
+// version of this comment did, is exactly the mistake a reader must not
+// repeat.
+//
+// Upgrade - an older binary with no cut persisted a spec with an unstripped
+// query, and this binary reads it back. The stored hash was computed over
+// the unstripped value; this binary's own normalizeSignatures strips it
+// before recomputing, so the two disagree - over the whole requirement set
+// rather than one root at a time, since a single sha256 sum covers every
+// root's line - and both snapshotMatchesRequirements (loadResolvedFromSnapshot)
+// and tryIncrementalResolve's own identical self-consistency check fail on
+// that disagreement. A full resolve follows, once, and recordResolutionIfNeeded
+// then rewrites both the spec and the hash in this binary's stripped form.
+// Independently of whether that resolve even runs, the persist-side
+// backstop strips the value on the way out regardless - the backstop for a
+// spec this function's own cut never touched because nothing in this run
+// rebuilt it; snapshotData's own doc comment
+// (internal/galaxy/store/snapshot.go) states the one residual that
+// survives it.
+//
+// Downgrade - a store this binary persisted stripped, later read by an older
+// binary - is not the mirror of the above. The asymmetry is a property of
+// the old binary rather than of any state: it applies no cut at all, so
+// trimming and sorting an already-stripped value is a no-op, its recomputed
+// hash equals the persisted one, and the self-check that catches the upgrade
+// direction passes here instead. The root then reads as changed by
+// splitRootsByChange - a hash match plays no part in what that function
+// compares - and provided at least one other root in the run is still
+// unchanged (tryIncrementalResolve's own precondition; with none, it falls
+// back to a full resolve exactly like the upgrade direction), the old binary
+// takes the targeted incremental path instead: it resolves only the changed
+// root fresh over the network, and recordResolution's SetRequirements still
+// rewrites the WHOLE persisted spec - every root, not only the changed one -
+// in this old binary's own uncut form, restoring the query wherever
+// requirements.yml still declares one. A mixed fleet whose requirements
+// declare a query-bearing signature source therefore pays a resolve on
+// every run that follows a run by the other binary, upgrade or downgrade
+// alike, since each one's own write invalidates the hash the other
+// computes. Nothing on this side of the cut can close the downgrade
+// direction: the fix belongs to the binary that still lacks it.
 func normalizeSignatures(signatures []string) []string {
 	if len(signatures) == 0 {
 		return nil
@@ -488,7 +588,7 @@ func normalizeSignatures(signatures []string) []string {
 		if trimmed == "" {
 			continue
 		}
-		out = append(out, trimmed)
+		out = append(out, helpers.WithoutQuery(trimmed))
 	}
 	if len(out) == 0 {
 		return nil

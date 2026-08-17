@@ -85,6 +85,17 @@ func writeGalaxyInfo(target installTarget, cfg *config.Config, col collection, m
 // only the informational fields col has no equivalent for: the download and
 // version URLs (with any capability-bearing query string stripped, see
 // helpers.WithoutQuery) and the signatures Galaxy attached to this version.
+//
+// The parenthetical above covers only the download and version URLs, not the
+// signatures value alongside them in that same sentence: meta.Signatures is
+// copied through untyped and uncut, exactly as the server sent it. No cut is
+// available for it the way WithoutQuery is for a URL, because the field is
+// `any` - a JSON shape the server picks, not this program - and walking an
+// arbitrary decoded tree to rewrite every string inside it would be a
+// sanitizer whose coverage depends on guessing that shape right; a partial
+// one would read as a guarantee this comment cannot make. Whether that value
+// can itself carry something worth stripping is a question this comment does
+// not answer, only discloses.
 func buildGalaxyYAML(cfg *config.Config, col collection, meta *types.GalaxyCollectionVersionInfo) GalaxyYAML {
 	g := GalaxyYAML{
 		FormatVer: "1.0.0",

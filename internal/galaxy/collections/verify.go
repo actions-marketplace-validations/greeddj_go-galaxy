@@ -144,18 +144,12 @@ func newVerifyContext(cfg *config.Config, runtime *infra.Infra, roots []collecti
 	if err != nil {
 		return nil, err
 	}
-	// A configuration echo rather than a claim about work done, and it says
-	// which of the two it is: a dry run reads and validates the keyring here and
-	// then verifies no collection at all, since classifyDryRun has no
-	// verification branch and downloads nothing to verify. Announcing
-	// verification on such a run would be an operator-facing false impression in
-	// the very commit that turns the feature on.
-	state := "on"
-	if cfg.DryRun {
-		state = "configured, and exercised by nothing on a dry run"
-	}
-	runtime.Output.PersistentPrintf("🔏 Signature verification %s: keyring %s, required count %s",
-		state, keyring.Path(), cfg.Signature.RequiredCount)
+	announceVerification(cfg, runtime, keyring)
+	// Warned after the announcement above, and only once verification is known
+	// to be on: a run that verifies nothing fetches nothing, so a warning about
+	// what --offline would refuse to fetch would be noise on every ordinary
+	// unverified run.
+	warnOfflineSignatureSources(cfg, runtime, roots)
 
 	return &verifyContext{
 		keyring: keyring,
@@ -163,6 +157,113 @@ func newVerifyContext(cfg *config.Config, runtime *infra.Infra, roots []collecti
 		sources: requirementSources(roots),
 		policy:  policy,
 	}, nil
+}
+
+// announceVerification tells the operator, once per run, what this run's
+// signature verification state is - a keyring and a required count - on the
+// tier and in the spelling its severity earns.
+//
+// One line rather than two: the fact this states - that this run's
+// verification state exists, and that a dry run's own preview validates the
+// setup and verifies no collection - has one home, and this function is it,
+// rather than a real-run line here and a separate dry-run caveat somewhere
+// else that could drift from it.
+//
+// The tier moves with cfg.DryRun, and each spelling earns its own tier rather
+// than sharing one. On a real run this is a configuration echo of work that
+// WILL happen - reportSkippedUnverified's own rubric for the result tier: a
+// fact about this run, not a defect in it - so PersistentPrintf. On a dry run
+// it is a caveat qualifying a report nobody asked to see twice: the same kind
+// of thing warnIfFrozenOffline (dryrun.go) already is, so it goes where that
+// one does too - Warnf, stderr, surviving --quiet, printed alongside
+// dryRunBanner rather than split from it the way a PersistentPrintf spelling
+// would be by `go-galaxy install --dry-run > preview.log`.
+//
+// The message's own claim - that no signature source is fetched and no
+// artifact's signatures are checked - holds by construction rather than by
+// convention: classifyDryRun, the function that builds a dry run's whole report,
+// has no verification branch of its own and downloads nothing to verify, so
+// there is no path left by which a preview could reach a signature source in the
+// first place.
+//
+// The caveat disclaims the whole report's would-fail COUNT, not the
+// would-act half of it, and that scope is deliberate rather than an
+// oversight. installCollection's own canSkipInstall gate means a real
+// install's "Up to date" verdict never claimed anything about verification in
+// the first place: an already-installed collection is skipped before
+// verifyCollectionSignatures is ever reached (install.go). warm carries no
+// such gate at all - warmOne runs prepareWithRecovery with
+// warmVerifyAndEnsure for every collection, cache hits included - so "Already
+// warm" is unfaithful about verification in exactly the way "Up to date" is
+// not. A caveat scoped to "collections that would be acted on" would
+// therefore be false for warm, and one scoped to "every collection this
+// report names" would be false for install's own settled rows; scoping it to
+// the would-fail COUNT alone is exactly true for both.
+func announceVerification(cfg *config.Config, runtime *infra.Infra, keyring *signature.Keyring) {
+	if cfg.DryRun {
+		runtime.Output.Warnf(
+			"signature verification is configured and this preview validates the setup and verifies no collection: "+
+				"keyring %s, required count %s; no signature source is fetched and no artifact's signatures are checked, "+
+				"so the would-fail count covers no signature verdict",
+			keyring.Path(), cfg.Signature.RequiredCount)
+
+		return
+	}
+	runtime.Output.PersistentPrintf("🔏 Signature verification on: keyring %s, required count %s",
+		keyring.Path(), cfg.Signature.RequiredCount)
+}
+
+// warnOfflineSignatureSources warns, once per run, when cfg.Offline is set and
+// some requirements root declares a signature source that
+// signature.SourceRequiresNetwork says this run cannot fetch offline. It
+// names the first such root through requirementKey - deliberately not the
+// source URI itself, which the next person adding detail to this message
+// will reach for and must not - so the operator sees a concrete place to act
+// rather than only learning that one exists somewhere.
+//
+// It fires on a real run exactly as it does on a preview, and that is the
+// whole reason it lives here rather than behind a dry-run-only probe: the
+// fact it states - a collection whose gather reaches this source fails
+// offline - is equally true of both, and newVerifyContext is the one funnel
+// both install and warm pass through before either ever schedules a worker.
+//
+// A warning rather than a per-collection would-fail verdict, because the
+// certain set is narrower than the warned one. nextBlob's first pull is
+// always sources[0] (gatherOne), and walkBlobs (signature/verify.go)
+// evaluates its early stop only after a successful next() plus checkOne, so a
+// FIRST declared source needing the network is an unconditional failure for
+// any collection whose gather runs - but a file:// source listed first that
+// verifies on its own means a later http(s) source in the same list is never
+// fetched at all. A verdict over the warned set would be a false failure for
+// exactly that shape; a verdict over the certain set (sources[0] alone) would
+// encode a list-position rule no operator reading a report can see. A warning
+// over the superset costs one line and traps nobody either way.
+//
+// A warning rather than the refusal runWarm makes for --no-cache
+// (helpers.ErrWarmCacheDisabled), because that combination is unworkable by
+// construction - warm's entire product is cache state, so --no-cache leaves
+// it nothing to produce - while this one is not: an install --offline run
+// whose collections are all already installed skips verification entirely
+// (canSkipInstall) and succeeds without ever reaching a source this warns
+// about.
+func warnOfflineSignatureSources(cfg *config.Config, runtime *infra.Infra, roots []collection) {
+	if !cfg.Offline {
+		return
+	}
+	for _, root := range roots {
+		for _, source := range root.Signatures {
+			if !signature.SourceRequiresNetwork(source) {
+				continue
+			}
+			runtime.Output.Warnf(
+				"--offline: %s declares a signature source that must be fetched over the network, which offline mode "+
+					"refuses; a collection whose gather reaches one fails rather than installing unverified - "+
+					"use a file:// source, or drop --offline",
+				requirementKey(root))
+
+			return
+		}
+	}
 }
 
 // verificationOffError decides what a run whose policy is not enabled owes the

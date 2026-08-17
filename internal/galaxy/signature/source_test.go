@@ -1090,7 +1090,7 @@ func TestFetchFileNamesThePathItOpened(t *testing.T) {
 		}
 
 		// Dropping helpers.WithoutFragment from the display composition in
-		// FetchRequirementSource, applied through go test -overlay so no
+		// parseRequirementSource, applied through go test -overlay so no
 		// production file is edited, fails this subtest here and the one below
 		// on its own message assertion. The rendered values go to the log
 		// rather than into either message, since each carries an OS-chosen
@@ -1124,4 +1124,55 @@ func TestFetchFileNamesThePathItOpened(t *testing.T) {
 			t.Fatalf("the message names a path other than the one that was opened")
 		}
 	})
+}
+
+// TestSourceRequiresNetwork pins SourceRequiresNetwork's predicate against
+// samples drawn from its two sibling tables, plus one case neither carries.
+// The four file rows and the http row are exactly
+// TestFetchRequirementSourceAcceptsEveryFetchableSpelling's own five, the
+// LocalHost spelling included, so the case-insensitive host compare that
+// keeps it a file source rather than a network one is pinned here too; four
+// more rows are a representative slice of what
+// TestFetchRequirementSourceRefusesEveryUnfetchableShape refuses. The https
+// row is drawn from neither: the accepting sibling carries only an http case,
+// so this one is added on its own to prove the predicate answers true for
+// both network schemes rather than only the one that table happens to
+// exercise.
+//
+// The http and https rows are the positive control: an accepted source is not
+// automatically a network one (the four file rows right above them prove
+// that on the identical fixture file), so a row this function answers true on
+// is what shows the predicate can say yes at all, rather than one that merely
+// never says no.
+func TestSourceRequiresNetwork(t *testing.T) {
+	t.Parallel()
+
+	path := writeSourceFile(t, t.TempDir(), sigLeafName, sourceBlobBody)
+	srv, _ := newSourceServer(t, sourceBlobBody)
+
+	cases := []struct {
+		name   string
+		source string
+		want   bool
+	}{
+		{name: "file url with an empty authority", source: "file://" + path, want: false},
+		{name: "file url naming localhost", source: "file://localhost" + path, want: false},
+		{name: "file url naming LocalHost", source: "file://LocalHost" + path, want: false},
+		{name: "file url with a single slash", source: "file:" + path, want: false},
+		{name: "http url", source: srv.URL + "/" + sigLeafName, want: true},
+		{name: "https url naming a host", source: "https://example.invalid/" + sigLeafName, want: true},
+		{name: "ftp scheme", source: "ftp://h/x", want: false},
+		{name: "empty", source: "", want: false},
+		{name: "file url naming a foreign host", source: "file://evil.example/x", want: false},
+		{name: "unparseable url", source: "http://%zz/x", want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := SourceRequiresNetwork(tc.source); got != tc.want {
+				t.Fatalf("SourceRequiresNetwork(%q) = %v, want %v", tc.source, got, tc.want)
+			}
+		})
+	}
 }

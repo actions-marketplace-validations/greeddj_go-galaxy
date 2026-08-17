@@ -153,6 +153,33 @@ func ValidateRequirementSource(source string) error {
 	return err
 }
 
+// SourceRequiresNetwork reports whether FetchRequirementSource would dispatch
+// source to fetchHTTP - the one arm that refuses outright under an offline
+// Fetcher, rather than to fetchFile, which reads local state and works under
+// --offline regardless.
+//
+// It is written in terms of parseRequirementSource, exactly as
+// ValidateRequirementSource is just above, so the grammar keeps one home: a
+// scheme parseRequirementSource learns to accept, or to refuse, changes what
+// both functions answer at once, never one without the other.
+//
+// A source parseRequirementSource refuses answers false here as well as
+// there: a value nothing here would ever fetch cannot be said to require the
+// network to fetch it. Every source parseRequirementSource accepts answers
+// true here except the file scheme, mirroring FetchRequirementSource's own
+// dispatch above rather than restating its scheme list: fetchFile is the one
+// arm that never dials anything, so it is the one exclusion, and a scheme
+// parseRequirementSource later learns to accept falls to fetchHTTP - and
+// therefore answers true here - without a second edit.
+func SourceRequiresNetwork(source string) bool {
+	parsed, _, err := parseRequirementSource(source)
+	if err != nil {
+		return false
+	}
+
+	return parsed.Scheme != fileScheme
+}
+
 // parseRequirementSource applies the whole grammar a signature source has to
 // satisfy and returns the parsed URL alongside the display form every message
 // about it uses.
@@ -386,7 +413,7 @@ func hostlessHTTP(u *url.URL) bool {
 // Both are strictly weaker than a repository-content-driven WRITE this
 // project already accepts - ansible.cfg discovery lets the same repository
 // redirect [defaults] collections_path and [galaxy] cache_dir, which
-// CLAUDE.md rules is containment relative to a configured path rather than a
+// CLAUDE.md rules as containment relative to a configured path rather than a
 // vulnerability.
 //
 // A file source works under --offline. It is local state, exactly like the
@@ -489,7 +516,7 @@ func (f *Fetcher) readFile(file *os.File, size int64) ([]byte, error) {
 // reasons, and the second is the one that would not be rediscovered: composing
 // a request that cannot go anywhere is pointless work, and offlineTransport's
 // own message formats req.URL, so letting the request reach it would print the
-// value with the query string display exists to cut off.
+// value with the query string that display exists to cut off.
 //
 // A non-200 is named by its status code and by nothing else. The body of such a
 // response is bytes chosen by whoever answered, so it is never read and never

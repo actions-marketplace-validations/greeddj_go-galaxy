@@ -8,10 +8,10 @@
 // Store guards its own maps with an internal RWMutex, so callers go through
 // the methods rather than reading or writing a field across goroutines.
 // Persisting goes through snapshotData, the single copy path where age
-// eviction and the meta stamps are applied, so both backends inherit one set
-// of retention rules; helpers.StoreSnapshotSchemaVersion decides what a binary
-// will read back, and ValidateSchema refuses anything newer than it
-// understands.
+// eviction, a signature source's query cut, and the meta stamps are applied,
+// so both backends inherit one set of retention and redaction rules;
+// helpers.StoreSnapshotSchemaVersion decides what a binary will read back,
+// and ValidateSchema refuses anything newer than it understands.
 package store
 
 import (
@@ -807,15 +807,31 @@ func (w retentionWindow) isStale(stampedAt time.Time) bool {
 	return stampedAt.Before(w.oldest) || stampedAt.After(w.newest)
 }
 
-// snapshotData builds a snapshot payload from the store. Entries in
-// APICache, DepsCache, and Versions that were last written before the
-// CacheEntryMaxAge retention window are dropped from the payload: both
-// persist entrypoints (local Bolt Save and the S3 MarshalSnapshot) build
-// their payload through this method, so the age bound applies to both
-// without either caller having to know about it. The live maps themselves
-// are never pruned, only this RLock-protected copy - a still-warm entry
-// stays available for reads until it is naturally overwritten or the store
-// process restarts and reloads the (now-pruned) persisted snapshot.
+// snapshotData builds a snapshot payload from the store, applying two
+// transformations neither persist entrypoint has to know about on its own:
+// both the local Bolt Save and the S3 MarshalSnapshot build their payload
+// through this one method, so both bounds apply to both without either
+// caller repeating them.
+//
+// First, entries in APICache, DepsCache, and Versions that were last written
+// before the CacheEntryMaxAge retention window are dropped from the payload.
+// The live maps themselves are never pruned, only this RLock-protected copy
+// - a still-warm entry stays available for reads until it is naturally
+// overwritten or the store process restarts and reloads the (now-pruned)
+// persisted snapshot.
+//
+// Second, every Requirements entry's Signatures sources have their query cut
+// on the way out, via copyRequirementsCutQuery/signaturesWithoutQuery below.
+// See normalizeSignatures' own doc comment
+// (internal/galaxy/collections/resolve.go) for why a signature source's
+// query must never reach persisted state, and for the mixed-fleet
+// consequences of the two binaries either side of this cut disagreeing about
+// it. The residual here is a predicate, not a gap: a run that persists
+// nothing does not strip, for the identical reason cache.WithCleanSaveSkip's
+// own doc comment (internal/galaxy/cache/dirtyskip.go) gives for the age
+// eviction just above - this method's cut runs only inside a call this
+// decorator lets through, and a call it skips carries no bytes to strip in
+// the first place.
 func (s *Store) snapshotData() snapshotData {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -883,7 +899,7 @@ func (s *Store) snapshotData() snapshotData {
 		copy(clone, deps)
 		data.Graph[key] = clone
 	}
-	maps.Copy(data.Requirements, s.Requirements)
+	copyRequirementsCutQuery(data.Requirements, s.Requirements)
 	maps.Copy(data.Resolved, s.Resolved)
 	for key, entry := range s.Versions {
 		if window.isStale(entry.FetchedAt) {
@@ -896,6 +912,78 @@ func (s *Store) snapshotData() snapshotData {
 	copyFreshWarmed(data.Warmed, s.Warmed, warmedWindow)
 
 	return data
+}
+
+// copyRequirementsCutQuery copies every entry from src into dst, cutting each
+// entry's Signatures sources down to their query-free form via
+// signaturesWithoutQuery. It exists so the persisted spec can never carry a
+// query a run's own producer-side cut (normalizeSignatures,
+// internal/galaxy/collections/resolve.go) failed to strip before an entry
+// reached the store. The shape that reaches this in production is a
+// snapshot predating this cut, loaded by a run that never rebuilds the
+// spec: install --frozen takes resolveOrLoadLockfile's lockfile branch,
+// which never calls buildRequirementsSpec/recordResolution - the only path
+// that ever runs a signature source through normalizeSignatures' own query
+// cut - so an entry an older binary, from before this cut existed, once
+// wrote unstripped, or any entry set directly
+// onto the map bypassing SetRequirements (the shape a test seeds when it
+// cannot depend on an older binary having run first), survives untouched
+// until this backstop runs; see normalizeSignatures' own doc comment for
+// why the persist-side cut has to exist at all rather than trusting every
+// write path to have already applied it.
+//
+// It is factored out of snapshotData, rather than inlined there as a loop
+// like the other buckets above, to keep snapshotData under its cyclomatic
+// complexity budget: inlining this helper's own loop there alone raises
+// snapshotData's complexity from 8 to 9, inlining copyFreshWarmed's below
+// alone raises it to 10, and inlining both at once raises it to 11 - the
+// only one of those three shapes that breaches cyclop's default limit of
+// 10 (measured with the pinned golangci-lint release; .golangci.yml sets no
+// cyclop override, and loadMeta/saveMeta already sit at exactly 10 and
+// pass). The caller holds the store's read lock for the duration of the
+// call.
+func copyRequirementsCutQuery(dst, src map[string]RequirementSpec) {
+	for key, entry := range src {
+		entry.Signatures = signaturesWithoutQuery(entry.Signatures)
+		dst[key] = entry
+	}
+}
+
+// signaturesWithoutQuery returns sources with every entry's query cut via
+// helpers.WithoutQuery, or sources itself unchanged when no entry's cut form
+// differs from its own - the common case, since a run's own producer-side
+// cut normally already stripped every source before it ever reached the
+// store. Only a genuine hit allocates: the scan finds the first element
+// WithoutQuery would change, and only then is one slice built, copying the
+// untouched prefix verbatim and cutting the remainder.
+//
+// Returning sources itself on the no-hit path preserves the exact aliasing
+// the maps.Copy this function replaced already had for this field, rather
+// than introducing new aliasing: the caller holds only the store's read
+// lock, so the returned slice must never be written through, and nothing
+// here does. The one path that could, Store.SetRequirements, never mutates
+// an existing backing array in place - it always replaces the whole map with
+// freshly cloned per-entry Signatures slices (see its own doc comment) - so
+// an alias handed out from here can never be observed changing under a
+// concurrent reader.
+func signaturesWithoutQuery(sources []string) []string {
+	cut := -1
+	for i, source := range sources {
+		if helpers.WithoutQuery(source) != source {
+			cut = i
+			break
+		}
+	}
+	if cut < 0 {
+		return sources
+	}
+
+	out := make([]string, len(sources))
+	copy(out, sources[:cut])
+	for i := cut; i < len(sources); i++ {
+		out[i] = helpers.WithoutQuery(sources[i])
+	}
+	return out
 }
 
 // copyFreshWarmed copies every entry from src into dst that falls inside
