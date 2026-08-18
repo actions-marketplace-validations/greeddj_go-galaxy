@@ -393,6 +393,41 @@ func discoverAnsibleConfigPath() (string, []string) {
 // cwdCandidate returns the current-directory ansible.cfg candidate, or ""
 // plus a warning when the current directory is world-writable.
 //
+// The warning names the CANDIDATE it dropped rather than the file, and that
+// distinction is load-bearing rather than pedantic. This check is scoped to
+// the ./ansible.cfg candidate alone, because it lives in the function that
+// produces that one candidate; every other candidate discoverAnsibleConfigPath
+// assembles is appended untouched. So a relative $ANSIBLE_CONFIG=ansible.cfg
+// resolves against this same working directory and loads the very file whose
+// candidate was dropped. Where the env candidate sits in the list has nothing
+// to do with it: it would escape this check appended first, last, or not at
+// all.
+//
+// That the exemption is intended rather than an oversight is grounded in this
+// repository rather than inferred: README instructs an operator whose
+// workspace is world-writable to name the file through --ansible-config or
+// $ANSIBLE_CONFIG, which is that path being prescribed rather than merely
+// tolerated. Whether ansible's own find_ini_config_file scopes its check the
+// same way is a parity question this file does not answer - the paragraphs
+// here claim parity for the exception itself, not for its edges.
+//
+// What would be wrong, then, is not the behavior but a warning asserting the
+// file is ignored in a run that in fact loaded it. The text states what was
+// dropped, that discovery continues, and that an explicitly named path still
+// reaches the file - which the operator who wants the strict reading needs in
+// order to close that door, by unsetting the variable or tightening the mode,
+// as much as the one who wants to use it.
+//
+// Disclosed residual: the message states the rule, never the outcome, because
+// it is composed here - before discoverAnsibleConfigPath's candidate loop has
+// run, and so before anything is known about which candidate wins. An
+// operator whose $ANSIBLE_CONFIG arrived ambiently from a CI image therefore
+// reads a conditional clause and is never told the planted file was in fact
+// loaded; the winning path surfaces only through Infra.DebugAnsibleConfig, at
+// debug level. Making the message outcome-aware would move its ownership to
+// discoverAnsibleConfigPath, which is a wider change than repairing a text
+// that lied.
+//
 // What such a directory costs is concrete: a config this process obeys sets
 // collections_path (the root the install tree is written under), cache_dir
 // (the root internal/galaxy/extracted removes entries beneath), and the
@@ -428,7 +463,9 @@ func cwdCandidate() (string, string) {
 		return cwdAnsibleCfgName, ""
 	}
 	return "", fmt.Sprintf(
-		"the current directory %q is world-writable; ignoring ./ansible.cfg as a configuration source",
+		"the current directory %q is world-writable; dropping ./ansible.cfg from the discovery search path - "+
+			"discovery continues with its remaining candidates, and a path named explicitly by $ANSIBLE_CONFIG, "+
+			"--ansible-config or $GO_GALAXY_ANSIBLE_CONFIG is still read, even one resolving to that same file",
 		cwd,
 	)
 }
@@ -436,8 +473,10 @@ func cwdCandidate() (string, string) {
 // fileExists reports whether path can be stat'd successfully. path is
 // read-only here (existence check only, never opened or written), and it
 // only ever comes from this file's own fixed candidate list (cwd, home,
-// /etc/ansible) or from a user-supplied env var/flag value that is later
-// opened the same way any explicit --ansible-config path already is.
+// /etc/ansible) or from $ANSIBLE_CONFIG, which is later opened the same way
+// any explicit --ansible-config path already is. A flag value never reaches
+// here at all: --ansible-config and $GO_GALAXY_ANSIBLE_CONFIG are handled by
+// loadAnsibleConfigFromCLI's own branch, which returns before discovery runs.
 func fileExists(path string) bool {
 	// #nosec G703 -- path is the user's own ansible.cfg location (a fixed
 	// candidate or a value they set via env/flag); this is a read-only

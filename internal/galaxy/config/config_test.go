@@ -803,6 +803,7 @@ func TestLoadAnsibleConfigFromCLIDiscovery(t *testing.T) {
 
 	t.Run("world-writable cwd is skipped with a warning", subtestWorldWritableCwdSkipped)
 	t.Run("non-world-writable cwd is discovered", subtestNonWorldWritableCwdDiscovered)
+	t.Run("world-writable cwd: a relative ANSIBLE_CONFIG still reads that file", subtestWorldWritableCwdEnvPathStillRead)
 
 	t.Run("nothing found in cwd or ANSIBLE_CONFIG: falls through cleanly", func(t *testing.T) {
 		// ANSIBLE_CONFIG points at a missing file and the cwd has no
@@ -887,6 +888,60 @@ func subtestNonWorldWritableCwdDiscovered(t *testing.T) {
 	}
 }
 
+// subtestWorldWritableCwdEnvPathStillRead pins that the world-writable
+// warning discloses the escape hatch rather than stopping at what it
+// dropped. It pins only that half: a regression keeping the old "ignoring
+// ./ansible.cfg" wording while appending a mention of $ANSIBLE_CONFIG would
+// satisfy every assertion here. Pinning the absence of that wording was
+// considered and rejected, because warningMentions exists precisely so this
+// file does not own wording it has no reason to own.
+//
+// The fixture is built identically to subtestWorldWritableCwdSkipped's - a
+// fresh t.TempDir holding the same planted file at the same 0o777 mode -
+// and differs in one input: $ANSIBLE_CONFIG names that file relatively
+// instead of naming a missing one. The check discoverAnsibleConfigPath
+// applies is scoped to the cwd candidate alone (see cwdCandidate), so the
+// env candidate reaches the same file untouched and the run loads it.
+//
+// gotPath cannot discriminate between the two candidates here, and that is
+// what makes the warning assertion load-bearing rather than decorative:
+// $ANSIBLE_CONFIG is set to the relative "ansible.cfg", so the winning path
+// is byte-identical to cwdAnsibleCfgName whichever candidate produced it.
+// The sibling subtest is what covers the direction this one structurally
+// cannot see - a regression that warns while KEEPING the cwd candidate
+// fails there and passes here.
+//
+// Killing mutation, run: restoring cwdCandidate's former warning text ("the
+// current directory %q is world-writable; ignoring ./ansible.cfg as a
+// configuration source") leaves this subtest's first two assertions passing -
+// the file still loads, and the text still names the directory as
+// world-writable - and fails the third, at config_test.go:941:
+//
+//	warnings = [the current directory "/var/folders/..." is world-writable;
+//	ignoring ./ansible.cfg as a configuration source], want one naming
+//	$ANSIBLE_CONFIG as a path still read
+func subtestWorldWritableCwdEnvPathStillRead(t *testing.T) {
+	dir := t.TempDir()
+	writeAnsibleCfg(t, filepath.Join(dir, "ansible.cfg"), "https://cwd.example")
+	chmodDir(t, dir, 0o777)
+	t.Chdir(dir)
+	// Relative on purpose. An absolute path into the same directory would
+	// reach the same file, but the relative form makes that identity
+	// self-evident without the assertion depending on a temp path, and it is
+	// the form cwdAnsibleCfgName documents as resolving at open time.
+	t.Setenv("ANSIBLE_CONFIG", "ansible.cfg")
+
+	c := newAnsibleConfigCmd(t, nil)
+	cfg, gotPath, warnings, err := loadAnsibleConfigFromCLI(c)
+	assertAnsibleConfigLoaded(t, cfg, gotPath, err, "ansible.cfg", "https://cwd.example")
+	if !warningMentions(warnings, "world-writable", dir) {
+		t.Fatalf("warnings = %v, want one naming %q as world-writable", warnings, dir)
+	}
+	if !warningMentions(warnings, "$ANSIBLE_CONFIG") {
+		t.Fatalf("warnings = %v, want one naming $ANSIBLE_CONFIG as a path still read", warnings)
+	}
+}
+
 // warningMentions reports whether any warning contains every one of parts.
 // Matching by fragment rather than by the whole line keeps the test from
 // pinning wording it has no reason to own, while still requiring the warning
@@ -959,11 +1014,11 @@ func assertDiscoveryFallsThroughCleanly(t *testing.T, gotPath string, err error)
 // ini value over the env one (returning ini whenever it is non-empty). Two
 // rows fail - the first, on the precedence itself:
 //
-//	config_test.go:975: Server = "https://ini.example", want "https://env.example"
+//	config_test.go:1030: Server = "https://ini.example", want "https://env.example"
 //
 // and the third, because a non-empty ini value shadows the empty-env case too:
 //
-//	config_test.go:1000: Server = "https://ini.example", want the flag default "https://default.example"
+//	config_test.go:1055: Server = "https://ini.example", want the flag default "https://default.example"
 func TestAnsibleGalaxyServerEnv(t *testing.T) {
 	const envServer = "https://env.example"
 
