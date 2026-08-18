@@ -1178,8 +1178,10 @@ func attemptDownloadToCache(
 	// the server declared none, so without this an error page can reach a
 	// shared cache slot and every later consumer opens it before failing. The
 	// probe runs whether or not useCache is set, so the arm has one rule
-	// rather than two; its cost is one open and a gzip header read against a
-	// full artifact download.
+	// rather than two; its cost against a full artifact download is one open
+	// and a gzip header read for a real artifact, bounded in the worst case by
+	// helpers.ArchiveProbeMaxBytes of decompressed bytes for one that buries
+	// its first tar header behind a meta-header chain.
 	if err := archive.ProbeTarGz(tmpPath); err != nil {
 		cleanupIfNeeded(cleanup)
 		return downloadResult{}, err

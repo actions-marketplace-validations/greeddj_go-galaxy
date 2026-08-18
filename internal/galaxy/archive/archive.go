@@ -8,7 +8,11 @@
 // are named by sentinel, so a failing extraction says which rule stopped it.
 // The context is checked on every read taken out of the decompressor, so a
 // canceled unpack stops at the next read rather than at the end of the
-// archive.
+// archive - a property of where the check sits rather than a promise about
+// when it fires, since nothing bounds how long one read may take: measured,
+// one 80 MB gzip member whose deflate stream is nothing but zero-length
+// stored blocks produces no output at all, and an unpack of it canceled at
+// 20 ms ran the whole stream out and returned 229 ms later, reporting nil.
 //
 // ProbeTarGz answers the cheaper question of whether a file is even shaped
 // like a gzipped tar, for a caller holding bytes nothing else has looked at,
@@ -65,9 +69,9 @@ import (
 // padded to 2 MiB fails with "archive/tar: header field too long", which is
 // archive/tar's own ceiling on a single special file. That ceiling bounds
 // each such header and not how many of them an archive may chain (see
-// chargeEntrySize), so how far this walk reads is the archive's choice at
-// either sizing; what one block changes is the buffer it reads through, not
-// the distance.
+// chargeEntrySize), so how far this walk reads is the archive's choice up to
+// helpers.ArchiveProbeMaxBytes at either sizing; what one block changes is the
+// buffer it reads through, not the distance.
 //
 // probeGzipBlockSize may not be 512 or less: pgzip.NewReaderN coerces any such
 // value back to its own 1 MiB default (gunzip.go's "Account for too small
@@ -89,7 +93,9 @@ const (
 //
 // ctx bounds the unpack: it is checked on every read taken out of the
 // decompressor, so a canceled or expired context stops the extraction at the
-// next read rather than at the end of the archive. The error it produces
+// next read rather than at the end of the archive - which bounds where the
+// check sits and not how long one read may take, the qualifier this
+// package's own doc comment measures. The error a fired check produces
 // keeps context.Canceled reachable through errors.Is, deliberately - unlike
 // the sentinels that describe why work ended on their own, this one really
 // does mean the caller stopped it, and the run must exit as interrupted.
@@ -148,7 +154,7 @@ func extractTarGzStream(ctx context.Context, r io.Reader, dstDir string, maxDeco
 	// be. It wraps the decompressed side, not the compressed source, because
 	// that is where the work being stopped actually happens - pgzip reads
 	// ahead on its own goroutines regardless.
-	limited := &decompressedLimitReader{r: uncompressedStream, max: maxDecompressed}
+	limited := &decompressedLimitReader{r: uncompressedStream, over: helpers.ErrArchiveDecompressedTooLarge, max: maxDecompressed}
 	tarReader := tar.NewReader(&contextReader{ctx: ctx, r: limited})
 	return extractTarEntries(tarReader, dstDir, helpers.ArchiveMaxEntryCount)
 }
@@ -187,18 +193,34 @@ func (c *contextReader) Read(p []byte) (int, error) {
 // on the crossing call, a sticky error, a clamped p - and keeping them the
 // same is deliberate: two size caps in one program that disagree about what a
 // crossing read returns is a trap for whoever reads only one of them.
+//
+// The verdict is a field rather than a constant of this file because a pass
+// over an archive bounds its own thing and has to say so: the extractor
+// reports the decompressed-stream cap it read an artifact to its end against,
+// while ProbeTarGz reports that no tar header was presented inside the window
+// it looked in. One reader, a verdict per caller, and no caller has to know
+// another's - the same shape manifest.limitReader carries for the same reason.
+//
+// Neither this type nor contextReader may grow a Seek method: archive/tar's
+// discard type-asserts io.Seeker on the reader it was handed and, when that
+// succeeds, skips a body without those bytes ever passing through Read, which
+// defeats this counter and the cancellation check alike. Measured over two
+// Next calls past a 1 MiB body, 1,049,600 bytes reach Read through a plain
+// io.Reader against 1,025 through an io.ReadSeeker. The claim is about
+// io.Seeker only; no other interface has been measured to do this here, and
+// naming one would be a guess.
 type decompressedLimitReader struct {
-	r   io.Reader
-	err error
-	max int64
-	n   int64
+	r    io.Reader
+	err  error
+	over error
+	max  int64
+	n    int64
 }
 
-// Read passes bytes through and fails with
-// helpers.ErrArchiveDecompressedTooLarge once the cumulative count exceeds
-// max, replacing whatever the decompressor itself returned (its own io.EOF
-// included), since a stream past the ceiling must never be reported as a
-// clean read.
+// Read passes bytes through and fails with over once the cumulative count
+// exceeds max, replacing whatever the decompressor itself returned (its own
+// io.EOF included), since a stream past the ceiling must never be reported as
+// a clean read.
 //
 // The crossing call returns zero and drops the bytes it just read, which
 // io.Reader permits. Returning them instead is what makes the refusal
@@ -234,7 +256,7 @@ func (r *decompressedLimitReader) Read(p []byte) (int, error) {
 	n, err := r.r.Read(p)
 	r.n += int64(n)
 	if r.n > r.max {
-		r.err = fmt.Errorf("%w: read %d bytes, limit is %d bytes", helpers.ErrArchiveDecompressedTooLarge, r.n, r.max)
+		r.err = fmt.Errorf("%w: read %d bytes, limit is %d bytes", r.over, r.n, r.max)
 		return 0, r.err
 	}
 	return n, err
@@ -573,11 +595,14 @@ func extractHardlink(dstDir, targetPath string, header *tar.Header, verifiedDirs
 
 // ProbeTarGz reports whether the file at path carries the outer shape of a
 // collection artifact: gzip on the outside, with a tar stream beginning
-// inside it. It stops at the first decompressed tar header - one
-// tar.Reader.Next call - and how far the decompressor has run ahead of that
-// point is decided by its own block budget (see probeGzipBlockSize) rather
-// than by this function, since pgzip fills its blocks on a goroutine of its
-// own. Nothing is unpacked and nothing is written to disk.
+// inside it. It stops at the first tar header tar.Reader.Next hands back, and
+// how far it reads to reach that point is the archive's own choice, up to
+// helpers.ArchiveProbeMaxBytes. One Next call is not one header block: Next
+// consumes an 'x', 'L' or 'K' meta header and continues its own loop without
+// returning anything, so the chain ahead of the first ordinary header is as
+// long as the archive cares to make it, and past that bound the walk stops
+// with helpers.ErrArtifactTarHeaderNotFound. Nothing is unpacked and nothing
+// is written to disk.
 //
 // An archive with no entries is accepted: Next reporting io.EOF describes a
 // well-formed empty tar, not a malformed one, and refusing it would make this
@@ -594,6 +619,35 @@ func extractHardlink(dstDir, targetPath string, header *tar.Header, verifiedDirs
 // what the extractor accepts, and never was: the extractor reads the whole
 // stream and refuses on entry-count, size and path rules this walk never
 // reaches.
+//
+// The bound above is on the bytes this walk pulls OUT of the decompressor, so
+// what it bounds is the meta-header amplification and not this probe in
+// general. A gzip stream whose members produce no output never reaches that
+// counter, there being nothing to count: pgzip starts the next member by
+// recursing inside its own Read, so enough empty members exhaust the goroutine
+// stack rather than this budget. Reproduced at 4,000,000 empty members, about
+// 92 MB on the wire, ending in an unrecoverable "fatal error: stack overflow".
+// That is a separate defect, untested and unfixed, which this cap neither
+// addresses nor bounds - stated here rather than left for a reader to infer
+// from a bound that does not cover it.
+//
+// It is disclosed here rather than located here. The recursion is pgzip's, so
+// it reaches every reader that package opens over artifact bytes: this probe,
+// ExtractTarGzStream - which is the arm a real install takes, through
+// extracted.Store.IngestReader, and the one that reads a whole artifact rather
+// than the front of one - and the two the signature path opens in
+// internal/galaxy/manifest. Sizing this reader differently does not narrow it,
+// because what recurses is the member loop rather than the buffer.
+//
+// Two properties of that ending are worth naming, both measured against a
+// program dying of the same fatal error, because neither is what a reader
+// would assume of a crash. A Go fatal error runs no deferred function, so a
+// run holding the S3 backend's distributed lock never executes its release:
+// the lock object survives to its TTL and locks out every runner sharing the
+// bucket until it expires. And the process exits with status 2, which
+// cmd/go-galaxy/exitcode also spends on ExitUsage, so a CI reading exit codes
+// is told an operator misconfigured the run where a hostile artifact killed
+// the process instead.
 //
 // Truncation is not caught, at any sizing. pgzip turns a truncated read that
 // still produced bytes into a short block carrying no error at all (gunzip.go
@@ -633,7 +687,15 @@ func ProbeTarGz(path string) error {
 		_ = gz.Close()
 	}()
 
-	if _, err := tar.NewReader(gz).Next(); err != nil && !errors.Is(err, io.EOF) {
+	limited := &decompressedLimitReader{r: gz, over: helpers.ErrArtifactTarHeaderNotFound, max: helpers.ArchiveProbeMaxBytes}
+	if _, err := tar.NewReader(limited).Next(); err != nil && !errors.Is(err, io.EOF) {
+		// A crossing of the scan bound is its own headline rather than a
+		// gzip-or-tar verdict: the stream is both, and saying otherwise would
+		// send an operator looking for an error page inside an artifact that
+		// does hold a tar stream (see helpers.ErrArtifactTarHeaderNotFound).
+		if errors.Is(err, helpers.ErrArtifactTarHeaderNotFound) {
+			return fmt.Errorf("%w: %s", helpers.ErrArtifactTarHeaderNotFound, path)
+		}
 		return fmt.Errorf("%w: %s: %w", helpers.ErrArtifactNotTarGz, path, err)
 	}
 	return nil

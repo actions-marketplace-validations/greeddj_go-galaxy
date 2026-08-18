@@ -138,6 +138,114 @@ const (
 	// but it is not the same claim as refusing only what would have failed
 	// anyway.
 	ArchiveMaxEntryNameLen = 1024
+	// ArchiveProbeMaxBytes caps how far into an artifact's decompressed tar
+	// stream archive.ProbeTarGz may read before it gives up with
+	// ErrArtifactTarHeaderNotFound. It bounds the one shape that turns a single
+	// tar.Reader.Next call into unbounded work inside archive/tar: archive/tar
+	// consumes an 'x' (PAX extended), 'L' (GNU long name) or 'K' (GNU long
+	// link) header inside Next() and continues its own loop without ever
+	// returning one, so "one Next call" bounds nothing by itself and the chain
+	// ahead of the first ordinary header is as long as the archive cares to
+	// make it. Work beneath archive/tar is a different question this counter
+	// answers nothing about - archive.ProbeTarGz's own doc comment names the
+	// decompressor shape this cap neither addresses nor bounds.
+	//
+	// It counts bytes taken OUT of the decompressor, the same side
+	// ArchiveMaxDecompressedSize and ManifestScanMaxBytes are enforced on and
+	// for the same reason: a limit placed on the compressed body instead is not
+	// a limit at all, since one compressed kilobyte of near-identical 512-byte
+	// headers yields orders of magnitude more tar stream.
+	//
+	// That chain's length is the only thing archive/tar leaves unbounded on the
+	// way to the first header it returns. Every OTHER read it performs getting
+	// there is bounded by archive/tar itself, and by the same 1 MiB it allows
+	// one special file: a meta header's body (measured on an 'x' body and on an
+	// 'L' body alike - 1,048,576 bytes walk through, 1,048,577 fails with
+	// "archive/tar: header field too long") and a sparse map of either kind
+	// ("archive/tar: sparse map too long"), with a header block's own 512 bytes
+	// far beneath either. That is stated as a property of every such read rather
+	// than as a list of the functions performing them deliberately: a reading
+	// path this comment does not name is then covered by the sentence instead of
+	// missed by the list. Every archive/tar figure and message this comment
+	// states was measured on go1.26.6, the toolchain go.mod pins, so a bump to
+	// that directive re-opens all of them at once.
+	//
+	// At most four of those reads can precede that first header - one body for
+	// each of the three chainable kinds, plus at most one sparse map, since
+	// handleSparseFile takes exactly one of its two branches on the returned
+	// header's own typeflag and the two map kinds therefore never sum. Measured:
+	// an archive declaring both at once is read to 4,195,840 bytes, the old-GNU
+	// figure by itself rather than anything approaching a sum.
+	//
+	// That count is an input to the floor rather than an observation beside it:
+	// the derivation below is four terms, and a fourth chainable meta kind, or
+	// a second read taken before the returned header, makes it five. What fails
+	// then is the floor rather than the ceiling - the probe refuses an archive
+	// archive/tar itself accepts, with ErrArtifactTarHeaderNotFound, which
+	// isLateTerminalDownloadError makes terminal for retry, so such a run fails
+	// rather than degrades. Raising the cap does not close that, and the
+	// arithmetic below is why: a fifth term lands on 5,245,440, the very figure
+	// this comment names further down as the redundant fourth meta body this
+	// value was chosen to refuse, so clearing the hypothetical means admitting
+	// that redundancy. And since a term is 512 bytes more than a power of two,
+	// no round cap ever clears an integral number of terms - 6 MiB carries the
+	// identical residual one term up, six of them reaching 6,294,528 against
+	// its 6,291,456. The residual is scale-invariant, a property of the
+	// arrangement rather than of this value. No test closes it either, and none
+	// can: a fixture cannot contain a header kind archive/tar has not yet
+	// defined. What a future implementer owes this constant instead is a
+	// re-derivation whenever the toolchain's archive/tar changes shape.
+	//
+	// The figure the value has to clear is therefore
+	// 3 * (512 + 1 MiB) + 512 + 1 MiB = 4,196,352, and that figure is derived. A
+	// meta iteration costs at most 512 + 1 MiB: its header block, its body, and
+	// that body's padding, which is read at the top of the next iteration and
+	// satisfies B + blockPadding(B) <= 1 MiB for every B <= 1 MiB. The header
+	// the walk finally returns costs its own block plus the largest sparse map
+	// archive/tar will read for it.
+	//
+	// Measured, that derivation is reached rather than merely approached, and
+	// the witness is a composite of an 'L', a 'K' and an 'x' header each
+	// carrying a 1,048,576-byte body, followed by an ordinary header whose data
+	// section holds a 2,048-block PAX 1.0 sparse map (GNU.sparse.major=1,
+	// GNU.sparse.minor=0): archive/tar accepts it after pulling exactly
+	// 4,196,352 bytes, and refuses the same composite with a 2,049-block map.
+	// The old-GNU map lands 512 bytes short of that, its extension blocks
+	// counting against the same 1 MiB alongside the 'S' header block that
+	// carries the map's first four fragments - 2,047 extension blocks accepted,
+	// 2,048 refused, putting that composite at 4,195,840. 5 MiB clears the
+	// derived ceiling by 1,046,528 bytes, which is not one more term of
+	// anything: a meta iteration is 1,049,088, and no round cap could be an
+	// integral number of them, a term being 512 bytes more than a power of two.
+	//
+	// Three kinds rather than four - TypeXGlobalHeader is the other member of
+	// the 'x' family, and Next returns it rather than continuing past it, so it
+	// ends a walk instead of extending one. Measured, a chain terminated by one
+	// carrying a 1 MiB body is accepted at that same 4,196,352, its body
+	// standing exactly where the sparse map stood.
+	//
+	// Three BODIES rather than three headers, and for the chain that is what
+	// makes this cap a refusal of redundancy rather than of expressiveness: Next
+	// ASSIGNS each kind's value rather than merging it - `paxHdrs, err =
+	// parsePAX(tr)` and `gnuLongName = p.parseString(realname)` - so a second
+	// 'x' discards the first's records whole and a second 'L' discards the
+	// first's name (measured on the witness composite above: a fourth meta
+	// header with no body puts it at 4,196,864, and one carrying a 1 MiB body
+	// puts it at 5,245,440, past this cap - and neither carries a record or a
+	// name the first three did not). The argument stops at the chain and must
+	// not be read onto the sparse map, which is information-carrying right up to
+	// archive/tar's own ceiling: measured, a maximal old-GNU map describes
+	// 42,991 fragments - four in the header block and 21 in each of its 2,047
+	// extension blocks - and a violation planted in the last of those slots is
+	// refused, so every one of them really is parsed.
+	//
+	// Real prologues sit three orders of magnitude below all of it. Measured
+	// against Python 3.14.6's tarfile at its default PAX format, and attributed
+	// to that writer rather than to `ansible-galaxy collection build`, which was
+	// not itself measured: an ordinary artifact's first entry carries a
+	// 1,024-byte prologue, and one whose name runs to ArchiveMaxEntryNameLen
+	// carries 2,048.
+	ArchiveProbeMaxBytes = int64(5 << 20) // 5 MiB
 
 	// ArtifactMaxDownloadSize caps the raw (compressed, on-the-wire) bytes
 	// read from an artifact download before it is rejected. It bounds the

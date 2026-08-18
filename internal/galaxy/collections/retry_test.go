@@ -47,6 +47,7 @@ func TestDownloadRetryable(t *testing.T) {
 	// guard stays tested even if a future call site reintroduces %w somewhere.
 	stalledSynthetic := fmt.Errorf("%w: no data for %s: %w", helpers.ErrReadStalled, time.Second, context.Canceled)
 	shaMismatch := fmt.Errorf("%w: aaaa != bbbb", helpers.ErrSHA256Mismatch)
+	noTarHeader := fmt.Errorf("%w: /tmp/a", helpers.ErrArtifactTarHeaderNotFound)
 
 	cases := []struct {
 		err  error
@@ -65,6 +66,17 @@ func TestDownloadRetryable(t *testing.T) {
 		{name: "raw context.DeadlineExceeded is not retryable", err: context.DeadlineExceeded, want: false},
 		{name: "sha256 mismatch after a complete read is terminal", err: shaMismatch, want: false},
 		{name: "an oversized artifact download is never retried", err: helpers.ErrResponseTooLarge, want: false},
+		{
+			// Deliberately NOT the shape production builds, for the reason
+			// stalledSynthetic above is not either: it pins the guard rather
+			// than the path. attemptDownloadToCache returns this refusal bare,
+			// which the default-deny fallthrough would answer anyway; carried
+			// on a retryable status it is this arm that answers, since
+			// isRetryableAttemptError below would otherwise retry on it.
+			name: "a shape-probe refusal carried on a retryable status is still terminal",
+			err:  &downloadAttemptError{err: noTarHeader, status: http.StatusServiceUnavailable},
+			want: false,
+		},
 		{
 			// This case is DELIBERATELY a non-killing regression pin, exactly
 			// like the ErrResponseTooLarge case above: helpers.ErrArtifactDownloadDeadline

@@ -442,17 +442,21 @@ func isInstallError(err error) bool {
 
 // isArtifactShapeError reports whether err says what arrived does not have the
 // outer shape of a collection artifact: it is not a gzip-compressed tar at all
-// (helpers.ErrArtifactNotTarGz, from the download path's shape probe), or it is
-// one that names no MANIFEST.json within its scan bound
+// (helpers.ErrArtifactNotTarGz, from the download path's shape probe), it is
+// one whose tar stream presented no header at all inside that same probe's
+// scan bound (helpers.ErrArtifactTarHeaderNotFound, an archive that spends its
+// whole prologue on meta headers rather than reaching an entry), or it is one
+// that names no MANIFEST.json within its own scan bound
 // (helpers.ErrManifestNotFound). It is its own predicate rather than a member
 // of isArchiveError because it answers a different question: every sentinel
-// there is about what an archive holds, while these two are about whether
+// there is about what an archive holds, while these three are about whether
 // there is a collection artifact to speak of at all. They classify alongside
 // them, and never as a transport failure - the transfer succeeded, and no
-// retry turns an error page into an archive or puts a manifest into one that
-// has none.
+// retry turns an error page into an archive, shortens a prologue, or puts a
+// manifest into an archive that has none.
 func isArtifactShapeError(err error) bool {
 	return errors.Is(err, helpers.ErrArtifactNotTarGz) ||
+		errors.Is(err, helpers.ErrArtifactTarHeaderNotFound) ||
 		errors.Is(err, helpers.ErrManifestNotFound)
 }
 

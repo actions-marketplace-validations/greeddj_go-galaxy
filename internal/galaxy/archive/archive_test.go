@@ -1454,7 +1454,7 @@ func TestDecompressedLimitReaderRefusesThroughReadFull(t *testing.T) {
 		request = 512
 		limit   = int64(request - 1)
 	)
-	lim := &decompressedLimitReader{r: bytes.NewReader(make([]byte, 4<<10)), max: limit}
+	lim := &decompressedLimitReader{r: bytes.NewReader(make([]byte, 4<<10)), over: helpers.ErrArchiveDecompressedTooLarge, max: limit}
 
 	_, err := io.ReadFull(lim, make([]byte, request))
 	// Killing mutation: return the crossing read's bytes alongside the
@@ -1488,7 +1488,7 @@ func TestDecompressedLimitReaderRefusesThroughCopyN(t *testing.T) {
 	t.Parallel()
 
 	const limit = int64(10)
-	lim := &decompressedLimitReader{r: bytes.NewReader(make([]byte, 4<<10)), max: limit}
+	lim := &decompressedLimitReader{r: bytes.NewReader(make([]byte, 4<<10)), over: helpers.ErrArchiveDecompressedTooLarge, max: limit}
 
 	_, err := io.CopyN(io.Discard, lim, limit+1)
 	// Killing mutation: the same one the io.ReadFull test above describes -
@@ -1523,7 +1523,7 @@ func TestDecompressedLimitReaderRefusalIsSticky(t *testing.T) {
 		afterReads = 5
 	)
 	counter := &countingReader{r: bytes.NewReader(make([]byte, 4<<10))}
-	lim := &decompressedLimitReader{r: counter, max: limit}
+	lim := &decompressedLimitReader{r: counter, over: helpers.ErrArchiveDecompressedTooLarge, max: limit}
 
 	buf := make([]byte, 64)
 	if _, err := lim.Read(buf); !errors.Is(err, helpers.ErrArchiveDecompressedTooLarge) {
@@ -1564,7 +1564,7 @@ func TestDecompressedLimitReaderClampsOverrunToOneByte(t *testing.T) {
 		limit   = int64(1024)
 		request = 32 << 10
 	)
-	lim := &decompressedLimitReader{r: bytes.NewReader(make([]byte, 64<<10)), max: limit}
+	lim := &decompressedLimitReader{r: bytes.NewReader(make([]byte, 64<<10)), over: helpers.ErrArchiveDecompressedTooLarge, max: limit}
 
 	if _, err := lim.Read(make([]byte, request)); !errors.Is(err, helpers.ErrArchiveDecompressedTooLarge) {
 		t.Fatalf("expected %v, got %v", helpers.ErrArchiveDecompressedTooLarge, err)
@@ -1599,7 +1599,7 @@ func TestDecompressedLimitReaderClampSurvivesExtremeMax(t *testing.T) {
 		t.Parallel()
 
 		const payload = "hello"
-		lim := &decompressedLimitReader{r: bytes.NewReader([]byte(payload)), max: math.MaxInt64}
+		lim := &decompressedLimitReader{r: bytes.NewReader([]byte(payload)), over: helpers.ErrArchiveDecompressedTooLarge, max: math.MaxInt64}
 		// Killing mutation: write the clamp as `if int64(len(p)) > remaining+1`
 		// instead of `if remaining < int64(len(p))`. The two pick out the same
 		// reslices - the single case they disagree on is the one where
@@ -1621,7 +1621,7 @@ func TestDecompressedLimitReaderClampSurvivesExtremeMax(t *testing.T) {
 		t.Parallel()
 
 		const limit = int64(-1024)
-		lim := &decompressedLimitReader{r: bytes.NewReader(make([]byte, 64)), max: limit}
+		lim := &decompressedLimitReader{r: bytes.NewReader(make([]byte, 64)), over: helpers.ErrArchiveDecompressedTooLarge, max: limit}
 		// Killing mutation: drop Read's clamp to zero, computing remaining as
 		// `r.max - r.n` instead of `max(r.max-r.n, 0)`. remaining is then this
 		// max itself, the clamp below reslices p to remaining+1, and the read
@@ -1650,7 +1650,7 @@ func TestDecompressedLimitReaderClampAcceptsEmptyInputs(t *testing.T) {
 	t.Run("zero-length buffer reads nothing", func(t *testing.T) {
 		t.Parallel()
 
-		lim := &decompressedLimitReader{r: bytes.NewReader([]byte("hello")), max: 1024}
+		lim := &decompressedLimitReader{r: bytes.NewReader([]byte("hello")), over: helpers.ErrArchiveDecompressedTooLarge, max: 1024}
 		n, err := lim.Read(nil)
 		if n != 0 || err != nil {
 			t.Fatalf("read = (%d, %v), want (0, <nil>)", n, err)
@@ -1660,7 +1660,7 @@ func TestDecompressedLimitReaderClampAcceptsEmptyInputs(t *testing.T) {
 	t.Run("zero max over an empty stream reports EOF", func(t *testing.T) {
 		t.Parallel()
 
-		lim := &decompressedLimitReader{r: bytes.NewReader(nil), max: 0}
+		lim := &decompressedLimitReader{r: bytes.NewReader(nil), over: helpers.ErrArchiveDecompressedTooLarge, max: 0}
 		n, err := lim.Read(make([]byte, 16))
 		if n != 0 || !errors.Is(err, io.EOF) {
 			t.Fatalf("read = (%d, %v), want (0, %v)", n, err, io.EOF)
@@ -1968,5 +1968,189 @@ func TestExtractTarGzStreamExtractsFullyWithoutCancellation(t *testing.T) {
 	}
 	if len(written) != 32 {
 		t.Fatalf("extraction wrote %d entries, want all 32", len(written))
+	}
+}
+
+// buildProbePaxPrologueArchive renders count PAX extended ('x') headers, each
+// carrying record as its body, followed by one ordinary regular-file entry and
+// the two zero blocks that end a tar stream. A nil record leaves every header
+// zero-body, so a chain of them costs nothing but its own 512-byte framing and
+// archive/tar's 1 MiB ceiling on a meta-header body never comes into it.
+//
+// The 'x' block is assembled by hand for the reason buildMetaHeaderChainArchive
+// above gives for its 'K' block: tar.Writer refuses this typeflag outright
+// ("cannot manually encode TypeXHeader, TypeGNULongName, or TypeGNULongLink
+// headers"), 'x' being a meta header archive/tar produces and consumes inside
+// Next() on its own. The trailing entry goes through tar.Writer into the same
+// gzip stream, so what the probe finally reaches - or fails to reach - is an
+// ordinary header rather than a second hand-built one.
+func buildProbePaxPrologueArchive(t *testing.T, count int, record []byte) []byte {
+	t.Helper()
+
+	// paxPrologueModTime stamps the fixture so it never depends on wall-clock
+	// time.
+	paxPrologueModTime := time.Date(2024, time.January, 1, 0, 0, 0, 0, time.UTC)
+
+	blk := make([]byte, tarBlockSize)
+	copy(blk[0:100], "PaxHeaders.0/README.md")           // name, as a real writer spells it
+	putTarOctal(blk[100:108], 0o644)                     // mode
+	putTarOctal(blk[108:116], 0)                         // uid
+	putTarOctal(blk[116:124], 0)                         // gid
+	putTarOctal(blk[124:136], int64(len(record)))        // size: the record body, if any
+	putTarOctal(blk[136:148], paxPrologueModTime.Unix()) // mtime
+	blk[156] = tar.TypeXHeader                           // typeflag
+	copy(blk[257:263], "ustar\x00")                      // POSIX magic
+	copy(blk[263:265], "00")                             // POSIX version
+	sealTarBlock(blk)
+
+	// A tar body is padded out to a whole block; a zero-length one needs none.
+	padding := make([]byte, (tarBlockSize-len(record)%tarBlockSize)%tarBlockSize)
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	for range count {
+		for _, chunk := range [][]byte{blk, record, padding} {
+			if _, err := gz.Write(chunk); err != nil {
+				t.Fatalf("failed to write pax meta header: %v", err)
+			}
+		}
+	}
+	tw := tar.NewWriter(gz)
+	header := &tar.Header{Name: "README.md", Size: 1, Mode: 0o644, ModTime: paxPrologueModTime}
+	if err := tw.WriteHeader(header); err != nil {
+		t.Fatalf("failed to write the trailing entry's header: %v", err)
+	}
+	if _, err := tw.Write([]byte("x")); err != nil {
+		t.Fatalf("failed to write the trailing entry: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("failed to close tar writer: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("failed to close gzip writer: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// probeArchiveBytes writes archiveBytes to a file of its own and returns what
+// ProbeTarGz makes of it, since the probe takes a path rather than a reader.
+func probeArchiveBytes(t *testing.T, archiveBytes []byte) error {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "artifact.tar.gz")
+	if err := os.WriteFile(path, archiveBytes, 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	return ProbeTarGz(path)
+}
+
+// TestProbeTarGzRefusesAnUnboundedMetaHeaderChain drives the probe's scan
+// bound with the shape that made "one tar.Reader.Next call" bound nothing:
+// 'x' headers, which Next consumes and continues past without ever returning
+// one, so the walk ahead of the first ordinary header runs as far as the
+// archive chooses. Nothing else in this package can see such an archive - the
+// entry counter never counts one of these and chargeEntrySize never charges
+// one - so the sentinel asserted here is also an assertion about which rule
+// refused it.
+//
+// 10,240 is hand-spelled rather than computed from
+// helpers.ArchiveProbeMaxBytes. Derived, the chain would follow that constant
+// wherever it went and could never fail the test it exists for, a doubled cap
+// simply doubling the fixture. Spelled out, it is 5,243,392 bytes of framing
+// against a 5,242,880-byte bound, and a cap that moves leaves it behind. It is
+// also the shortest chain the bound refuses, so this row and its positive
+// control below straddle the edge with nothing in between.
+//
+// TestProbeTarGzAcceptsAChainInsideTheBound is the positive control, built by
+// the identical builder: without it, "the probe refused" would be
+// indistinguishable from "this hand-built 'x' block is unreadable here".
+func TestProbeTarGzRefusesAnUnboundedMetaHeaderChain(t *testing.T) {
+	t.Parallel()
+
+	const chainHeaders = 10240
+
+	err := probeArchiveBytes(t, buildProbePaxPrologueArchive(t, chainHeaders, nil))
+	// Killing mutation: unwrap the decompressor in ProbeTarGz - delete the
+	// `limited := &decompressedLimitReader{...}` line and hand gz straight to
+	// tar.NewReader (deleting only the wrap leaves `limited` unused, which
+	// does not compile). This assertion then fails with
+	//
+	//	archive_test.go:2083: 10240-header chain: ProbeTarGz = <nil>, want artifact presents no tar header within the shape probe's scan bound
+	//
+	// a bare nil: with the walk uncounted the probe reads the whole chain and
+	// reports the ordinary header waiting behind it.
+	if !errors.Is(err, helpers.ErrArtifactTarHeaderNotFound) {
+		t.Fatalf("%d-header chain: ProbeTarGz = %v, want %v", chainHeaders, err, helpers.ErrArtifactTarHeaderNotFound)
+	}
+	// Killing mutation: delete ProbeTarGz's own `errors.Is` arm for this
+	// sentinel, letting a crossing fall through to the ErrArtifactNotTarGz
+	// wrap below it. The assertion above still passes, the sentinel remaining
+	// reachable underneath that wrap; this one then fails with
+	//
+	//	archive_test.go:2096: 10240-header chain: the refusal also reads as downloaded artifact is not a gzip-compressed tar archive
+	//
+	// which is the dishonest headline this arm exists to keep off the wire: an
+	// operator told the bytes are not a tar.gz goes looking for an error page
+	// inside an artifact that holds a tar stream.
+	if errors.Is(err, helpers.ErrArtifactNotTarGz) {
+		t.Fatalf("%d-header chain: the refusal also reads as %v", chainHeaders, helpers.ErrArtifactNotTarGz)
+	}
+}
+
+// TestProbeTarGzAcceptsAChainInsideTheBound is the positive control named on
+// the refusal above: the same builder and the same hand-built block, one
+// header shorter, accepted.
+//
+// 10,239 is the longest chain that fits, and the arithmetic is worth spelling
+// out because it lands one below what the bound divided by a block suggests:
+// the walk reads all 10,239 meta headers AND the ordinary header it finally
+// returns, so it pulls 10,240 blocks - exactly helpers.ArchiveProbeMaxBytes -
+// out of the decompressor. Measured against this builder, 10,239 is accepted
+// and 10,240 refused. It is hand-spelled for the reason given above, and this
+// row is deliberately at the edge rather than comfortably inside it: a
+// positive control one header from the refusal is also what pins that
+// off-by-one.
+func TestProbeTarGzAcceptsAChainInsideTheBound(t *testing.T) {
+	t.Parallel()
+
+	const chainHeaders = 10239
+
+	if err := probeArchiveBytes(t, buildProbePaxPrologueArchive(t, chainHeaders, nil)); err != nil {
+		t.Fatalf("ProbeTarGz over a %d-header chain = %v, want nil", chainHeaders, err)
+	}
+}
+
+// TestProbeTarGzAcceptsARealPaxPrologue guards the direction a scan bound is
+// easiest to get wrong in: the refusal above says nothing about whether an
+// ordinary PAX artifact still passes. One 'x' header carrying a 1,024-byte
+// path record, then the ordinary header that record renames: a 1,536-byte
+// prologue, and 2,048 bytes for the probe to walk once it pulls that header.
+// Python 3.14.6's tarfile at its default PAX format brackets that prologue
+// rather than matching it - 1,024 bytes for an ordinary entry, 2,048 for one
+// whose name runs to helpers.ArchiveMaxEntryNameLen, whose 1,063-byte body
+// spends 1,035 on the path record and 28 on an mtime one. Those figures are
+// measured against that writer and attributed to it; `ansible-galaxy
+// collection build` was not itself measured.
+//
+// The record is spelled at the length a PAX record really takes on the wire -
+// "<total> path=<name>\n", the total counting its own digits - rather than
+// assembled from a name of some convenient length, so the fixture is what a
+// writer emits rather than something only this test would produce.
+func TestProbeTarGzAcceptsARealPaxPrologue(t *testing.T) {
+	t.Parallel()
+
+	const (
+		recordLen = 1024
+		nameLen   = recordLen - len("1024 path=\n")
+	)
+	record := fmt.Sprintf("%d path=%s\n", recordLen, strings.Repeat("n", nameLen))
+	// A fixture guard rather than a pin: it catches a later edit of recordLen
+	// whose digit count no longer matches the literal measured above.
+	if len(record) != recordLen {
+		t.Fatalf("fixture record is %d bytes, want %d", len(record), recordLen)
+	}
+
+	if err := probeArchiveBytes(t, buildProbePaxPrologueArchive(t, 1, []byte(record))); err != nil {
+		t.Fatalf("ProbeTarGz over a real PAX prologue = %v, want nil", err)
 	}
 }

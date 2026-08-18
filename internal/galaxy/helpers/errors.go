@@ -94,6 +94,31 @@ var (
 	// the kind of thing worth putting into a shared cache slot.
 	ErrArtifactNotTarGz = errors.New("downloaded artifact is not a gzip-compressed tar archive")
 
+	// ErrArtifactTarHeaderNotFound indicates an artifact's decompressed tar
+	// stream presented no header within ArchiveProbeMaxBytes of its start, so
+	// the shape probe stopped rather than reading as far as the archive wanted
+	// it to.
+	//
+	// It is deliberately NOT ErrArtifactNotTarGz. That one says the bytes are
+	// not a gzip-compressed tar; here they are - valid gzip carrying valid tar
+	// framing, in a chain of meta headers archive/tar consumes inside Next()
+	// without ever returning one - so reporting it would be a false statement,
+	// sending an operator to look for an error page inside an artifact that
+	// does hold a tar stream.
+	//
+	// It is deliberately NOT ErrArchiveDecompressedTooLarge either, for the
+	// reason that sentinel's own doc comment gives for standing apart from
+	// ErrArchiveExceedsMaxSize: each names one cap, and pinning which gate
+	// fired is what tells a reader of a failing test which rule did the work.
+	// That one is the extractor's ceiling on a whole stream; this is the
+	// probe's bound on a look at an archive's head.
+	//
+	// A well-formed empty tar is unaffected: its trailer sits inside the bound,
+	// tar.Reader.Next reports io.EOF, and the probe accepts it.
+	// ErrManifestNotFound is the semantic precedent - a document that was not
+	// presented within a window, rather than an archive that is malformed.
+	ErrArtifactTarHeaderNotFound = errors.New("artifact presents no tar header within the shape probe's scan bound")
+
 	// ErrHardlinkTargetIsEmpty indicates a hardlink target is empty.
 	ErrHardlinkTargetIsEmpty = errors.New("hardlink target is empty")
 	// ErrFileIsEmpty indicates a file is empty.

@@ -7,7 +7,9 @@ package archive
 // runtime. It gates exactly one function in one file, and it lives apart from
 // archive_test.go so that go/ast, go/parser, go/token and slices stay out of
 // that file's import block, where four added lines would shift every line
-// number its comments cite.
+// number its comments cite. Its own block is not stdlib-only - the budget
+// gate at the end of this file reads a helpers constant - so an edit to it
+// shifts this file's own citations, which are re-run rather than renumbered.
 
 import (
 	"go/ast"
@@ -15,6 +17,8 @@ import (
 	"go/token"
 	"slices"
 	"testing"
+
+	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 )
 
 // findFuncDecl returns the top-level function named name declared in file, or
@@ -116,13 +120,13 @@ func argSpelling(expr ast.Expr) string {
 // Killing mutations, both run. Reverting the constructor to
 // pgzip.NewReader(file) fails this test with
 //
-//	probe_decompressor_test.go:145: ProbeTarGz builds its decompressor with [NewReader], want exactly [NewReaderN]
+//	probe_decompressor_test.go:149: ProbeTarGz builds its decompressor with [NewReader], want exactly [NewReaderN]
 //
 // and restoring the old reservation through the new constructor, as
 // pgzip.NewReaderN(file, 1<<20, 4), passes that first assertion and fails the
 // second with
 //
-//	probe_decompressor_test.go:148: ProbeTarGz sizes its decompressor with [expression 4], want [probeGzipBlockSize probeGzipBlocks]
+//	probe_decompressor_test.go:152: ProbeTarGz sizes its decompressor with [expression 4], want [probeGzipBlockSize probeGzipBlocks]
 func TestProbeTarGzUsesTheProbeSizedDecompressor(t *testing.T) {
 	t.Parallel()
 
@@ -169,15 +173,15 @@ func TestProbeTarGzUsesTheProbeSizedDecompressor(t *testing.T) {
 //
 // Killing mutations, all three run. probeGzipBlockSize = 512:
 //
-//	probe_decompressor_test.go:186: probeGzipBlockSize = 512, want above 512: pgzip.NewReaderN coerces anything smaller to 1 MiB
+//	probe_decompressor_test.go:190: probeGzipBlockSize = 512, want above 512: pgzip.NewReaderN coerces anything smaller to 1 MiB
 //
 // probeGzipBlocks = 0:
 //
-//	probe_decompressor_test.go:190: probeGzipBlocks = 0, want at least 1
+//	probe_decompressor_test.go:194: probeGzipBlocks = 0, want at least 1
 //
 // probeGzipBlockSize = 1 << 20 with probeGzipBlocks = 4:
 //
-//	probe_decompressor_test.go:193: the probe reserves 4194304 bytes per reader, want at most 262144
+//	probe_decompressor_test.go:197: the probe reserves 4194304 bytes per reader, want at most 262144
 func TestProbeGzipSizingStaysWithinItsBudget(t *testing.T) {
 	t.Parallel()
 
@@ -191,5 +195,56 @@ func TestProbeGzipSizingStaysWithinItsBudget(t *testing.T) {
 	}
 	if blockSize*blocks > 256<<10 {
 		t.Fatalf("the probe reserves %d bytes per reader, want at most %d", blockSize*blocks, 256<<10)
+	}
+}
+
+// TestArchiveProbeMaxBytesClearsTheMetaHeaderCeiling bounds
+// helpers.ArchiveProbeMaxBytes from both sides, the way the sizing gate above
+// bounds the probe's two decompressor constants: a floor no legitimate
+// prologue may be refused under, and a ceiling that keeps the bound from
+// becoming one in name only.
+//
+// The floor, 4,196,352, is how far archive/tar can be made to read before it
+// returns its first header while every byte of that reading still says
+// something: a 512-byte header block plus a maximal 1 MiB body for each of the
+// three chainable meta kinds ('x', 'L', 'K'), then the 512-byte header the
+// walk returns plus the largest sparse map archive/tar will read for it. Below
+// that the probe would refuse an archive whose prologue carries what no
+// shorter one could - see helpers.ArchiveProbeMaxBytes for the derivation, for
+// the composite measured to reach it exactly, and for why the redundancy
+// argument that bounds the meta chain at three bodies stops there and does not
+// reach the sparse map.
+//
+// Both numbers are hand-spelled rather than derived from the constant they
+// check, for the reason the sizing gate above gives: an expectation computed
+// from the value under test moves with every mutation of that value and can
+// never fail one. The ceiling is a ceiling with room in it rather than today's
+// value, so a considered re-sizing inside the same order of magnitude does not
+// have to edit this test to stay green.
+//
+// Each assertion is independently reachable, which a chain of t.Fatalf calls
+// does not give for free: 2 << 20 fails the first outright, while 32 << 20
+// satisfies the first and fails the second.
+//
+// Killing mutations, both run. helpers.ArchiveProbeMaxBytes = int64(2 << 20):
+//
+//	probe_decompressor_test.go:244: ArchiveProbeMaxBytes = 2097152, want at least 4196352
+//
+// helpers.ArchiveProbeMaxBytes = int64(32 << 20):
+//
+//	probe_decompressor_test.go:247: the probe reads up to 33554432 bytes before refusing, want at most 16777216
+func TestArchiveProbeMaxBytesClearsTheMetaHeaderCeiling(t *testing.T) {
+	t.Parallel()
+
+	const (
+		metaHeaderCeiling = int64(4_196_352)
+		probeBudget       = int64(16 << 20)
+	)
+	if helpers.ArchiveProbeMaxBytes < metaHeaderCeiling {
+		t.Fatalf("ArchiveProbeMaxBytes = %d, want at least %d", helpers.ArchiveProbeMaxBytes, metaHeaderCeiling)
+	}
+	if helpers.ArchiveProbeMaxBytes > probeBudget {
+		t.Fatalf("the probe reads up to %d bytes before refusing, want at most %d",
+			helpers.ArchiveProbeMaxBytes, probeBudget)
 	}
 }
