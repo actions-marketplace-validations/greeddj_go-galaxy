@@ -614,9 +614,12 @@ const (
 
 	// DownloadWorkersPerCPU is the per-CPU multiplier DefaultDownloadWorkers
 	// applies before clamping. An artifact download or cache presence probe
-	// waits on the network, not the CPU - a HEAD probe or a streamed GET into
-	// a temp file, never an extraction - so a useful pool size is a multiple
-	// of the permitted CPU count rather than that count itself, unlike
+	// mostly waits on the network rather than on the CPU - a HEAD probe or a
+	// streamed GET into a temp file - and what local work a download worker
+	// does do is a sha256 over every byte it writes to that temp file, with a
+	// shape probe on top of it (archive.ProbeTarGz, whose decompressor is
+	// sized for a probe rather than for an unpack), so a useful pool size is a
+	// multiple of the permitted CPU count rather than that count itself, unlike
 	// cfg.Workers, whose pool extracts a tree per worker and is capped by what
 	// those concurrent extractions cost in memory (see DefaultInstallWorkers).
 	DownloadWorkersPerCPU = 4
@@ -629,6 +632,18 @@ const (
 	// never exceeds half that per-host idle-connection budget, so the
 	// connection pool holds every worker's connection idle between requests
 	// with a factor of two to spare rather than churning new ones.
+	//
+	// This pool's own decompressor claim is bounded separately and is not what
+	// sizes it: a worker here opens one probe-sized reader per download
+	// (archive.ProbeTarGz), so at the default ceilings this pool reserves
+	// 32 * 64 KiB = 2 MiB of gzip block pool today against the 64 MiB
+	// MaxDefaultInstallWorkers is derived from. At the default ceilings and
+	// not in general: --download-workers is settable above this number and
+	// config.BuildCollectionConfig clamps only below 1, so what this constant
+	// bounds is the default rather than the pool. That is what lets this
+	// ceiling be network-derived and that one memory-derived without the two
+	// summing into a number nobody wrote down; see DefaultInstallWorkers for
+	// the sum they do reach.
 	MaxDefaultDownloadWorkers = 32
 
 	// StoreSnapshotSchemaVersion is the current snapshot schema version.
@@ -768,18 +783,54 @@ func FetchRetryPolicy() RetryPolicy {
 // paid so that one stall cannot become the run's critical path.
 //
 // The cap is memory, not throughput, and two constraints meet at its value.
-// The first is a budget of 64 MiB for gzip block pools: every concurrent
-// extraction holds one pgzip reader, and pgzip.NewReader eagerly fills a pool
-// of defaultBlocks (4) buffers of defaultBlockSize (1 MiB) before it reads a
-// byte, so a worker reserves 4 MiB for as long as it is extracting and
-// 64 MiB / 4 MiB is 16 workers. That budget sits below the smaller of the two
-// measured peak-RSS figures for a 100-collection corpus (93.0 MiB
-// frozen+offline, 183.0 MiB s3-warm) and is roughly a third of the larger, so
-// the pools stay a fraction of a real run's whole footprint instead of
-// dominating it; an uncapped one-per-CPU pool on a 64-core node would reserve
-// 64 * 4 MiB = 256 MiB in block pools alone, more than either measured peak
-// in total. The second constraint is that a cap must never remove a measured
-// gain, and ext4 was still improving at 12 workers, so nothing below that is
+// The first is a budget of 64 MiB for gzip block pools, and what that budget
+// governs is this pool: a worker here opens a decompressor per unit of work,
+// and those units are strictly sequential and never nested - a verifying
+// install runs manifest.ReadFromTarGz to completion before
+// manifest.VerifyChain opens a reader of its own, and both are closed before
+// extractCollection unpacks - so a worker holds one reader at a time however
+// many it opens over one collection. Which units they are is deliberately not
+// enumerated: the list is not closed, since under --no-cache this pool takes
+// the artifact-download path itself, shape probe included, with no prefetcher
+// ahead of it. What the budget needs is the bound, and that is the largest
+// single reader, the unpack's: pgzip.NewReader eagerly fills a pool of
+// defaultBlocks (4) buffers of defaultBlockSize (1 MiB) before it reads a
+// byte, so a worker reserves 4 MiB for as long as a unit is running, and
+// 64 MiB / 4 MiB is 16 workers.
+//
+// The artifact-download pool holds a decompressor too, so this budget is not
+// the program's whole claim on one - but that one is sized for a shape probe
+// rather than for an unpack (archive.ProbeTarGz, whose own doc comment holds
+// the argument for the sizing), so at both defaults' ceilings the two pools
+// reserve this 64 MiB plus MaxDefaultDownloadWorkers (32) times the 64 KiB
+// that probe reserves today, or 66 MiB - both figures move with a re-sizing
+// of the probe, which lives in another package and cannot be named here as a
+// symbol. The two pools rather than every decompressor in the program: the S3
+// backend opens one of its own to inflate a state object, at init, before
+// either pool has started. At the default ceilings and not in general:
+// --workers and --download-workers each replace their own default outright,
+// and neither is clamped from above. An uncapped one-per-CPU install pool on
+// a 64-core node would on its own reserve 64 * 4 MiB = 256 MiB in block
+// pools.
+//
+// Beside a real run's footprint: peak RSS over a 100-collection corpus
+// measured 93.0 MiB frozen+offline and 183.0 MiB s3-warm (testing/bench.sh's
+// resource rows). What each row does and does not exercise is worth stating,
+// since neither is evidence of headroom at this ceiling. The frozen+offline
+// row opens no reader at all: the harness warms the extracted store first and
+// then wipes only the install target, so every collection hardlinks through
+// extracted.Store.Ensure rather than unpacking, and --offline downloads
+// nothing. The s3-warm row does extract at this pool's own concurrency, since
+// the harness wipes the local cache directory before it and leaves its
+// extracted store cold, but opens no probe reader: its "Bytes downloaded 0" is
+// a run that took no fresh origin download, the only thing that counter
+// records. What neither row records is the CPU the measuring host permitted,
+// so neither says how many workers ran concurrently. The comparison
+// establishes the budget's scale beside what a real run of this size costs,
+// not what such a run would peak at with 16 workers all holding a reader.
+//
+// The second constraint is that a cap must never remove a measured gain, and
+// ext4 was still improving at 12 workers, so nothing below that is
 // admissible. 16 satisfies both.
 //
 // Disclosed residual: this default encodes no filesystem's metadata-mutation
@@ -810,11 +861,14 @@ func DefaultInstallWorkers(procs int) int {
 // concurrent extractions cost in memory - raising it to this function's own
 // ceiling would mean up to 32 simultaneous extractions on one machine,
 // trading speed for thrashing on a small runner rather than gaining anything.
-// A download or cache-presence-probe worker, by contrast, only waits on the
-// network - a HEAD probe or a streamed GET into a temp file, never an
-// extraction - so its useful pool size tracks outstanding requests rather
-// than CPU at all, and sizing it to the permitted CPU alone would leave a
-// low-core CI runner far below what the network link can sustain. outdated is
+// A download or cache-presence-probe worker, by contrast, mostly waits on the
+// network - a HEAD probe or a streamed GET into a temp file - and what local
+// work it does do is a sha256 over every byte it writes to that temp file,
+// with a shape probe on top of it (archive.ProbeTarGz, whose decompressor is
+// sized for a probe rather than for an unpack), so its useful pool size is
+// still decided by outstanding requests rather than by what that local work
+// costs, and sizing it to the permitted CPU alone would leave a low-core CI
+// runner far below what the network link can sustain. outdated is
 // deliberately left on cfg.Workers rather than gaining this knob too, so the
 // split has exactly one seam.
 func DefaultDownloadWorkers(procs int) int {

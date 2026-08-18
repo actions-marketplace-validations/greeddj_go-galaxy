@@ -95,7 +95,8 @@ func ReadFromTarGz(artifactPath string) ([]byte, error) {
 //
 // It reads with the decompressor the extractor uses rather than a second notion
 // of "gzip", so an artifact this walk accepts is one the extractor would also
-// have opened - the argument archive.ProbeTarGz makes for the identical choice.
+// have opened - the argument archive.ProbeTarGz makes for the same
+// decompressor, though that probe sizes its own smaller.
 func readFromTarGzStream(r io.Reader) ([]byte, error) {
 	uncompressed, err := pgzip.NewReader(r)
 	if err != nil {

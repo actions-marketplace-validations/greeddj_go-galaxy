@@ -1681,11 +1681,12 @@ type probeTarGzCase struct {
 	wantAnyErr bool
 }
 
-// probeTarGzCases enumerates what ProbeTarGz accepts - a real archive, and an
-// archive that is well-formed but holds no entries - alongside the two ways
-// the outer shape can be wrong (not gzip at all, and gzip wrapping something
-// that is not a tar) and the one failure that is about the file rather than
-// its content.
+// probeTarGzCases enumerates what ProbeTarGz accepts - a real archive, an
+// archive whose content outgrows everything the probe's own reader can hold,
+// and an archive that is well-formed but holds no entries - alongside the
+// three ways the outer shape can be wrong (not gzip at all, gzip wrapping
+// something that is not a tar, and a copy cut short of its own first tar
+// header) and the one failure that is about the file rather than its content.
 func probeTarGzCases() []probeTarGzCase {
 	notAnArchive := []byte("<html>404</html>")
 	return []probeTarGzCase{
@@ -1695,6 +1696,72 @@ func probeTarGzCases() []probeTarGzCase {
 				t.Helper()
 				return buildTestArchive(t, []testArchiveEntry{{name: "README.md", content: []byte("x")}})
 			},
+		},
+		{
+			// An acceptance test rather than a positive control: nothing on
+			// this fixture is refused, so there is no refusal here for a
+			// control to stand beside. What it asserts is that an archive far
+			// larger than everything the probe's reader buffers -
+			// probeGzipBlocks blocks of probeGzipBlockSize, 64 KiB today -
+			// still passes, its first entry alone being four times that:
+			// 262,144 raw bytes rendering to a 262,446-byte archive, since
+			// incompressibleBytes leaves deflate nothing to work with. The
+			// second entry is never parsed at all, since ProbeTarGz calls Next
+			// exactly once; it is here so the fixture is an ordinary
+			// multi-entry archive rather than a one-entry special case.
+			//
+			// The 262,144 is hand-spelled rather than computed from the two
+			// constants on purpose. Derived, the fixture would follow whatever
+			// those constants became - probeGzipBlockSize = 512 would shrink it
+			// to 2 KiB - so it would shrink out from under the very question it
+			// exists to ask.
+			//
+			// Neither constant is pinned by this row even so, and both were run
+			// against it. probeGzipBlocks = 4 leaves it passing, because the
+			// probe stops at the first header inside the first block and never
+			// asks for another; probeGzipBlockSize = 512 leaves it passing too,
+			// because pgzip.NewReaderN coerces any value that small back to its
+			// own 1 MiB default, which this fixture is still smaller than. So
+			// the row is documentary for both constants - what bounds them is
+			// probe_decompressor_test.go's own sizing gate - and what this one
+			// pins is the acceptance: whatever the probe buffers, an archive
+			// far larger than that still passes.
+			name: "archive larger than the probe's whole buffer accepted",
+			build: func(t *testing.T) []byte {
+				t.Helper()
+				return buildTestArchive(t, []testArchiveEntry{
+					{name: "big.bin", content: incompressibleBytes(262144)},
+					{name: "README.md", content: []byte("x")},
+				})
+			},
+		},
+		{
+			// The row above, untruncated, is this one's positive control: the
+			// same bytes whole are accepted, so the refusal here is the
+			// truncation and not the fixture.
+			//
+			// What it pins is narrow. These 20 bytes cannot produce the
+			// first 512-byte tar header, so tar.Reader.Next reports
+			// "unexpected EOF" and the probe refuses them - past the gzip
+			// header parse, which they still satisfy, all 10 of that header's
+			// bytes being present. A copy long enough to yield that header is
+			// caught by nothing at all, however much of the archive is
+			// missing behind it, at this sizing and the extractor's alike,
+			// because pgzip turns a truncated read that still produced bytes
+			// into a short block carrying no error. Measured on these same
+			// 262,446 bytes: the shortest copy that passes is 123 bytes at
+			// either sizing - the first header block being mostly zeros, and
+			// so cheap to deflate - and copies of the first 200, 1,024,
+			// 65,536, 131,072 and 262,445 pass too.
+			name: "download truncated before its first tar header refused",
+			build: func(t *testing.T) []byte {
+				t.Helper()
+				return buildTestArchive(t, []testArchiveEntry{
+					{name: "big.bin", content: incompressibleBytes(262144)},
+					{name: "README.md", content: []byte("x")},
+				})[:20]
+			},
+			wantErr: helpers.ErrArtifactNotTarGz,
 		},
 		{
 			// A tar with no entries is well-formed; Next reports io.EOF on the

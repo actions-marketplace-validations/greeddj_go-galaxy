@@ -33,6 +33,58 @@ import (
 	"github.com/klauspost/pgzip"
 )
 
+// The probe's decompressor is sized for the one question ProbeTarGz asks -
+// is there a tar header at the front of this stream - and not for a streaming
+// unpack, so it reserves kilobytes where extractTarGzStream's pgzip.NewReader
+// reserves megabytes.
+//
+// probeGzipBlocks is 1, and what that gives up is all overlap between
+// decompressing and consuming: pgzip's readahead goroutine takes the only
+// buffer there is, fills it, and then parks on an empty pool until the
+// consumer drains that block and hands it back (see gunzip.go's Read
+// returning a block to blockPool). The overlap costs nothing to give up for
+// an archive whose first header is an ordinary one: the probe stops inside
+// that first block - archive/tar pulls one 512-byte header out of it and the
+// walk ends - so a second block would be filled for a read that never comes.
+// Measured on an Apple M3 Pro (darwin/arm64) over a single-entry archive of
+// 5,242,880 raw bytes, deflated by pgzip's own writer at its default level to
+// 5,243,941, one probe per operation: about 31,400 ns/op and 108,800 B/op at
+// one block against about 52,000 ns/op and 175,400 B/op at two, the
+// difference being the second block itself. Both absolute figures belong to
+// that stream rather than to a probe in general, since how the fixture was
+// deflated decides them - the same content through compress/gzip at its own
+// default level renders to a different compressed size and measures about
+// 88,000 ns/op at one block. What carries the argument is the delta between
+// the two sizings, not either number.
+//
+// The one shape that reads further is a chain of extended headers ahead of
+// the first ordinary one, and one block does not stall on it: the consumer
+// drains the block, the readahead goroutine refills it, and the walk goes on
+// with one block held rather than a growing number of them - measured, a PAX
+// path record padded to 900 KiB is walked through and returns nil, and one
+// padded to 2 MiB fails with "archive/tar: header field too long", which is
+// archive/tar's own ceiling on a single special file. That ceiling bounds
+// each such header and not how many of them an archive may chain (see
+// chargeEntrySize), so how far this walk reads is the archive's choice at
+// either sizing; what one block changes is the buffer it reads through, not
+// the distance.
+//
+// probeGzipBlockSize may not be 512 or less: pgzip.NewReaderN coerces any such
+// value back to its own 1 MiB default (gunzip.go's "Account for too small
+// values"), which is the sizing these constants exist to avoid.
+//
+// The size is load-bearing rather than a micro-optimization. This reader is
+// the only decompressor the artifact-download pool ever opens - the prefetcher
+// builds its download deps with a nil extracted store, so that pool reaches
+// this probe and never an ingest - so helpers.MaxDefaultDownloadWorkers times
+// this budget is that pool's whole concurrent-decompressor claim. Sizing it
+// like the extractor's would charge a network-bound pool against the memory
+// budget helpers.MaxDefaultInstallWorkers is derived from.
+const (
+	probeGzipBlockSize = 64 << 10
+	probeGzipBlocks    = 1
+)
+
 // ExtractTarGz extracts a tar.gz archive into dstDir with safety checks.
 //
 // ctx bounds the unpack: it is checked on every read taken out of the
@@ -521,23 +573,48 @@ func extractHardlink(dstDir, targetPath string, header *tar.Header, verifiedDirs
 
 // ProbeTarGz reports whether the file at path carries the outer shape of a
 // collection artifact: gzip on the outside, with a tar stream beginning
-// inside it. It reads the gzip header and only as many compressed bytes as it
-// takes to produce the first decompressed tar header - one tar.Reader.Next
-// call - then stops. Nothing is unpacked and nothing is written to disk.
+// inside it. It stops at the first decompressed tar header - one
+// tar.Reader.Next call - and how far the decompressor has run ahead of that
+// point is decided by its own block budget (see probeGzipBlockSize) rather
+// than by this function, since pgzip fills its blocks on a goroutine of its
+// own. Nothing is unpacked and nothing is written to disk.
 //
 // An archive with no entries is accepted: Next reporting io.EOF describes a
 // well-formed empty tar, not a malformed one, and refusing it would make this
 // probe stricter than the extractor it stands in front of.
 //
-// What it deliberately does not check: that the archive is complete (no byte
-// past the first header is ever read), what the archive contains, or that its
-// bytes match any sha256. Those questions belong to the extractor and to the
-// sha verification that already run on the paths that install an artifact.
-// This is a shape check on the way into a shared cache slot, so a later
-// consumer of that slot does not open it only to find an error page inside.
-// It uses the same decompressor the extractor does, so it accepts exactly
-// what the extractor would accept rather than a second, subtly different
-// notion of "gzip".
+// What it deliberately does not check: that the archive is complete, what the
+// archive contains, or that its bytes match any sha256. Those questions belong
+// to the extractor and to the sha verification that already run on the paths
+// that install an artifact. This is a shape check on the way into a shared
+// cache slot, so a later consumer of that slot does not open it only to find
+// an error page inside. It uses the same decompressor the extractor does,
+// differently sized, so "gzip" here is the extractor's own notion rather than
+// a second, subtly different one - which is not the same as accepting exactly
+// what the extractor accepts, and never was: the extractor reads the whole
+// stream and refuses on entry-count, size and path rules this walk never
+// reaches.
+//
+// Truncation is not caught, at any sizing. pgzip turns a truncated read that
+// still produced bytes into a short block carrying no error at all (gunzip.go
+// in doReadAhead, io.ErrUnexpectedEOF with n > 0), so a copy cut short is
+// refused only when what survives cannot produce the first 512-byte tar
+// header: measured over a 262,446-byte archive, a copy of its first 20 bytes
+// is refused with "unexpected EOF" - reported by tar.Reader.Next, the gzip
+// header parse itself having succeeded - while copies of its first 200, 1,024,
+// 65,536, 131,072 and 262,445 bytes all return nil.
+//
+// A defect further into the stream is noticed only within the first block this
+// reader buffers, which is a narrower window than the extractor's: pgzip
+// discards the data of a block whose fill errored and delivers the error in
+// its place, and this walk ends inside the block it first pulls (see
+// probeGzipBlocks for the one shape that reads past it). Measured against a
+// stream whose stored-block header carries an NLEN that is not ^LEN, a hard
+// "flate: corrupt input": a defect at 32 KiB is refused at both sizings, one
+// at 64 KiB, 200 KiB or 512 KiB is refused at the extractor's 1 MiB blocks and
+// accepted here, and one at 1 MiB is accepted at both. Where that boundary
+// falls is pgzip's block arithmetic rather than a property this probe offers,
+// which is why no test pins it.
 func ProbeTarGz(path string) error {
 	//nolint:gosec // path is an artifact temp file this process just wrote.
 	file, err := os.Open(path)
@@ -548,7 +625,7 @@ func ProbeTarGz(path string) error {
 		_ = file.Close()
 	}()
 
-	gz, err := pgzip.NewReader(file)
+	gz, err := pgzip.NewReaderN(file, probeGzipBlockSize, probeGzipBlocks)
 	if err != nil {
 		return fmt.Errorf("%w: %s: %w", helpers.ErrArtifactNotTarGz, path, err)
 	}
