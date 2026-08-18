@@ -2,10 +2,14 @@ package collections
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/greeddj/go-galaxy/internal/cache/local"
@@ -171,6 +175,242 @@ func TestWarnIfOffServerDownloadHostGuards(t *testing.T) {
 					tt.downloadURL, tt.base, got, tt.wantWarn, printer.warns)
 			}
 		})
+	}
+}
+
+// TestOffServerDownloadHostWarningCutsPresignedQuery proves the warning names
+// where the artifact is coming from without handing that capability to
+// everyone who can read the build log: a presigned download URL's query string
+// is a bearer token for the artifact, and this line goes to stderr in every
+// mode, quiet included.
+//
+// The path assertion is the positive half and is what keeps the cut honest: a
+// warning that had dropped the URL altogether would satisfy the query check
+// and would no longer say which download was off-server.
+//
+// Killing mutation, run: restoring the bare downloadURL in
+// warnIfOffServerDownloadHost's Warnf fails this with
+//
+//	off_server_host_test.go:213: warning line carries the presigned query:
+//	[Downloading https://cdn.other.example/artifact.tar.gz
+//	?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=deadbeefcafe&X-Amz-Expires=600
+//	from origin "https://cdn.other.example:443", which differs from the
+//	configured server origin "https://galaxy.example.com:443"]
+func TestOffServerDownloadHostWarningCutsPresignedQuery(t *testing.T) {
+	t.Parallel()
+
+	const base = "https://galaxy.example.com"
+	const artifact = "https://cdn.other.example/artifact.tar.gz"
+	printer := &capturingPrinter{}
+	runtime := infra.New(printer, http.DefaultClient)
+
+	warnIfOffServerDownloadHost(runtime, base, artifact+presignedQuery)
+
+	if !printer.hasWarnContaining(offHostWarnSubstring) {
+		t.Fatalf("expected an off-server-host warning, got %v", printer.warns)
+	}
+	if printer.hasWarnContaining("X-Amz-Signature") {
+		t.Errorf("warning line carries the presigned query: %v", printer.warns)
+	}
+	if !printer.hasWarnContaining(artifact) {
+		t.Errorf("warning line does not name the download URL it is about: %v", printer.warns)
+	}
+}
+
+// TestDownloadCollectionPrintsNoCapability drives the two halves of the rule
+// in one fixture, because they are only meaningful together: the request must
+// carry the presigned query whole - it is what the object store authenticates
+// the GET by - while the line announcing that request must not.
+//
+// The recorded query is the positive control, and a strong one: it fails if a
+// future cut is applied to the URL the request is built from rather than to
+// the one that is printed, which is exactly the shape that would silently
+// break every presigned download while leaving this test's other half green.
+//
+// Two killing mutations, both run. Restoring the bare collectionURL in
+// downloadCollection's Printf fails
+//
+//	off_server_host_test.go:272: printed line carries the presigned query:
+//	[🌐 Downloading http://127.0.0.1:57653/artifact.tar.gz
+//	?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=deadbeefcafe&X-Amz-Expires=600]
+//
+// - the port is the httptest server's own and differs on every run - and
+// cutting the URL handed to http.NewRequestWithContext instead fails
+//
+//	off_server_host_test.go:269: server saw query "", want the whole presigned
+//	query "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=deadbeefcafe&X-Amz-Expires=600"
+func TestDownloadCollectionPrintsNoCapability(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	var seenQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seenQuery = r.URL.RawQuery
+		mu.Unlock()
+		_, _ = w.Write([]byte("artifact bytes"))
+	}))
+	t.Cleanup(srv.Close)
+
+	printer := &capturingPrinter{}
+	runtime := infra.New(printer, srv.Client())
+	artifact := srv.URL + "/artifact.tar.gz"
+
+	resp, err := downloadCollection(context.Background(), runtime, artifact+presignedQuery)
+	if err != nil {
+		t.Fatalf("downloadCollection: %v", err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	mu.Lock()
+	got := seenQuery
+	mu.Unlock()
+	if want := strings.TrimPrefix(presignedQuery, "?"); got != want {
+		t.Errorf("server saw query %q, want the whole presigned query %q", got, want)
+	}
+	if printer.hasPrintContaining("X-Amz-Signature") {
+		t.Errorf("printed line carries the presigned query: %v", printer.prints)
+	}
+	if !printer.hasPrintContaining(artifact) {
+		t.Errorf("printed line does not name the artifact being downloaded: %v", printer.prints)
+	}
+}
+
+// TestDownloadCollectionErrorNamesNoCapability covers the third site in this
+// function that renders a server-supplied URL, alongside the announcement
+// TestDownloadCollectionPrintsNoCapability covers: the error a non-200
+// answer produces. It is the render most likely to be pasted somewhere
+// public, since it is the one an operator sees when a download fails.
+//
+// The positive half is asserted on the same fixture rather than trusted: the
+// error must still name the host and path, so "carries no capability" is not
+// satisfied by an error that names nothing. The status is asserted too,
+// since it is the other half of what makes the message actionable.
+//
+// Killing mutation, run: restoring the bare collectionURL in that fmt.Errorf
+// fails at off_server_host_test.go:320 with the query reproduced whole - the
+// assertion pins precisely "carries the presigned query", so the query is the
+// one part of this quote that must not be elided:
+//
+//	error text carries the presigned query: download failed:
+//	http://127.0.0.1:52265/artifact.tar.gz?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=deadbeefcafe&X-Amz-Expires=600
+//	(403 Forbidden)
+//
+// The port is the httptest server's own and differs on every run.
+func TestDownloadCollectionErrorNamesNoCapability(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(srv.Close)
+
+	runtime := infra.New(&capturingPrinter{}, srv.Client())
+	artifact := srv.URL + "/artifact.tar.gz"
+
+	resp, err := downloadCollection(context.Background(), runtime, artifact+presignedQuery)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if err == nil {
+		t.Fatalf("downloadCollection() error = nil, want a non-200 failure")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "X-Amz-Signature") {
+		t.Errorf("error text carries the presigned query: %s", msg)
+	}
+	if !strings.Contains(msg, artifact) {
+		t.Errorf("error text does not name the artifact: %s", msg)
+	}
+	if !strings.Contains(msg, "403") {
+		t.Errorf("error text does not name the status: %s", msg)
+	}
+}
+
+// unreachableArtifactHost is a loopback address with a port nothing can be
+// listening on: binding port 1 needs privileges no test run has, so the dial
+// is refused immediately and deterministically, with no ephemeral-port race
+// against another process and no packet leaving the host.
+const unreachableArtifactHost = "https://127.0.0.1:1"
+
+// TestDownloadCollectionTransportErrorNamesNoCapability covers the remaining
+// render in downloadCollection, alongside the announcement and the non-200
+// error the two tests above cover: the error a request that never reached a
+// server produces. A refused dial, a DNS failure and a TLS handshake error all
+// land there, none of them needing a server to answer anything - a wider set
+// of occasions than the non-200 arm just below it in that function has.
+//
+// There is no password assertion, deliberately. net/http composes the
+// *url.Error through its own stripPassword, so the password is already "***"
+// before this code sees it and an assertion on it would pass with the cut
+// removed - documentary, not pinned. What net/http leaves whole is everything
+// else: the username, and the entire presigned query, which on an artifact URL
+// IS the capability. Those two are what the negative checks below pin.
+//
+// The positive checks are what keep the negative ones honest, and each is
+// reachable on its own. The message must still name the host and path, and
+// must still carry the transport cause - compared against the unwrapped
+// *url.Error's own inner error rather than a hardcoded "connection refused",
+// so it asserts the cause survived rather than restating one platform's
+// wording. errors.As must still reach that *url.Error, and downloadRetryable
+// must still answer true, which is the classification this must not move.
+//
+// Two killing mutations, both run. Restoring the bare err in
+// downloadCollection's transport arm fails the two negative checks and leaves
+// every positive one green; the first failure reads:
+//
+//	off_server_host_test.go:398: transport error text carries the presigned query:
+//	Get "https://u:***@127.0.0.1:1/artifact.tar.gz?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=deadbeefcafe&X-Amz-Expires=600":
+//	dial tcp 127.0.0.1:1: connect: connection refused
+//
+// The second labels that same value as carrying the userinfo prefix. Deleting
+// helpers.TransportURLError's Unwrap method fails the reachability check
+// instead, with the rendering left correct:
+//
+//	off_server_host_test.go:392: the transport failure is no longer reachable as
+//	*url.Error, which is what downloadRetryable and exitcode classify through:
+//	Get "https://127.0.0.1:1/artifact.tar.gz": dial tcp 127.0.0.1:1: connect: connection refused
+func TestDownloadCollectionTransportErrorNamesNoCapability(t *testing.T) {
+	t.Parallel()
+
+	printer := &capturingPrinter{}
+	runtime := infra.New(printer, http.DefaultClient)
+	artifact := unreachableArtifactHost + "/artifact.tar.gz"
+	// #nosec G101 -- test fixture literal, not a real credential
+	const userinfo = "u:s3cr3t@"
+	requested := strings.Replace(artifact, "https://", "https://"+userinfo, 1) + presignedQuery
+
+	resp, err := downloadCollection(context.Background(), runtime, requested)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if err == nil {
+		t.Fatalf("downloadCollection(%q) error = nil, want a transport failure", requested)
+	}
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		t.Fatalf("the transport failure is no longer reachable as *url.Error, which is what "+
+			"downloadRetryable and exitcode classify through: %v", err)
+	}
+
+	msg := err.Error()
+	if strings.Contains(msg, "X-Amz-Signature") {
+		t.Errorf("transport error text carries the presigned query: %s", msg)
+	}
+	if strings.Contains(msg, "u:") {
+		t.Errorf("transport error text carries the userinfo prefix %q: %s", "u:", msg)
+	}
+	// Host and path without the scheme, so this stays green under the mutation
+	// below - a real control rather than a fourth assertion the same mutation
+	// happens to kill. The uncut message names them too, just behind "u:***@".
+	if !strings.Contains(msg, "127.0.0.1:1/artifact.tar.gz") {
+		t.Errorf("transport error text does not name the artifact: %s", msg)
+	}
+	if !strings.Contains(msg, urlErr.Err.Error()) {
+		t.Errorf("transport error text does not carry the transport cause %q: %s", urlErr.Err, msg)
+	}
+	if !downloadRetryable(err) {
+		t.Errorf("downloadRetryable(transport failure) = false, want the transport arm unchanged: %v", err)
 	}
 }
 

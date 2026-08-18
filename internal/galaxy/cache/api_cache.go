@@ -290,6 +290,14 @@ func metadataBudget(budget time.Duration) time.Duration {
 // transient failure. The response body is always closed before returning,
 // since every path here either reads it to completion or (on a 304) never
 // needed it in the first place.
+//
+// Three of its failure returns are decided by what a message may name as much
+// as by what went wrong, and each is argued at the site that raises it below:
+// a request net/http refuses to build becomes
+// helpers.ErrMetadataRequestBuildFailed, which names no part of url; a
+// transport failure is re-rendered over url's cut form by
+// helpers.CutTransportURL; and a non-200 response becomes an
+// *HTTPStatusError carrying that same cut form.
 func fetchJSONBodyOnce(
 	ctx context.Context,
 	client *http.Client,
@@ -298,7 +306,13 @@ func fetchJSONBodyOnce(
 ) ([]byte, string, string, bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
-		return nil, "", "", false, err
+		// The build error is dropped rather than returned or wrapped, and no
+		// part of url is rendered in its place: it is a *url.Error naming the
+		// whole raw value, password included, and the population reaching this
+		// arm is exactly the set url.Parse refuses. See
+		// helpers.ErrMetadataRequestBuildFailed, which holds the argument for
+		// naming the failure instead of the value.
+		return nil, "", "", false, helpers.ErrMetadataRequestBuildFailed
 	}
 	if entry != nil {
 		if entry.ETag != "" {
@@ -310,7 +324,20 @@ func fetchJSONBodyOnce(
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, "", "", false, err
+		// helpers.CutTransportURL, not err as it came: net/http masks a
+		// password while composing its *url.Error and leaves everything else,
+		// so a query a Galaxy server declared survives its own redaction whole.
+		// That wrapper holds the rest of the argument. Unwrap keeps this a
+		// rendering change and nothing else, which this path depends on twice:
+		// fetchRetryable reads helpers.ErrReadStalled, the two context
+		// sentinels and *HTTPStatusError out of the tree, and deadlineError
+		// reads the context sentinels, all through errors.Is and errors.As.
+		//
+		// This arm is reached without any server having to answer - a refused
+		// dial, a DNS failure, a TLS handshake error all land here - so it is
+		// the shape a CI meets first when a metadata endpoint is wrong or
+		// unreachable.
+		return nil, "", "", false, helpers.CutTransportURL(url, err)
 	}
 	defer func() {
 		_ = resp.Body.Close()
@@ -320,7 +347,26 @@ func fetchJSONBodyOnce(
 		return nil, resp.Header.Get("ETag"), resp.Header.Get("Last-Modified"), true, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", "", false, &HTTPStatusError{URL: url, Status: resp.Status, Code: resp.StatusCode}
+		// The cut is applied here, where production code builds the only
+		// *HTTPStatusError there is, rather than inside Error(), and what
+		// makes that free is a condition rather than an accident: nothing
+		// reads HTTPStatusError.URL. Every consumer of this type, in this
+		// package and in internal/galaxy/collections alike, routes on Code,
+		// and Status is read only by the type's own Error() - so the field can
+		// hold the cut form at no cost, and a future consumer that renders it
+		// directly cannot reopen a capability the struct no longer carries. A
+		// consumer that genuinely needs the whole URL is the moment to add a
+		// second field, not a reason to keep this one whole.
+		//
+		// Both cuts are composed, not the query one alone that a metadata URL
+		// most often carries: userinfo is unreachable at this site only
+		// because collections.normalizeVersionsURL refuses it upstream, and
+		// nothing enforces that ordering from here.
+		return nil, "", "", false, &HTTPStatusError{
+			URL:    helpers.WithoutCredentials(url),
+			Status: resp.Status,
+			Code:   resp.StatusCode,
+		}
 	}
 
 	body, err := io.ReadAll(helpers.NewSizeLimitedReader(resp.Body, helpers.MetadataMaxSize))
@@ -337,6 +383,10 @@ func fetchJSONBodyOnce(
 
 // HTTPStatusError describes a non-200 HTTP response.
 type HTTPStatusError struct {
+	// URL is the fetched URL with both of its credential-bearing parts
+	// already cut; fetchJSONBodyOnce, the only place production code builds
+	// one of these, holds the argument for cutting there rather than at a
+	// render.
 	URL    string
 	Status string
 	Code   int

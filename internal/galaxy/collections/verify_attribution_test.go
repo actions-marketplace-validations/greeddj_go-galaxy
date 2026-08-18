@@ -171,6 +171,113 @@ func TestServerBlobOriginIsBounded(t *testing.T) {
 	}
 }
 
+// blobOriginSignatures is the one shape-valid signature entry the origin tests
+// below need: what serverSignatureBlobs gathers is irrelevant to them, only
+// that it gathers something, so a blob is produced for its Origin to be read
+// off.
+func blobOriginSignatures() []any {
+	return []any{map[string]any{"signature": "-----BEGIN PGP SIGNATURE-----\nx\n-----END PGP SIGNATURE-----"}}
+}
+
+// originOf drives serverSignatureBlobs over one href and returns the single
+// blob's Origin.
+func originOf(t *testing.T, href string) string {
+	t.Helper()
+	meta := &types.GalaxyCollectionVersionInfo{Href: href}
+	meta.Signatures = blobOriginSignatures()
+	blobs, _ := serverSignatureBlobs(meta)
+	if len(blobs) != 1 {
+		t.Fatalf("serverSignatureBlobs(%q) returned %d blobs, want 1", href, len(blobs))
+	}
+
+	return blobs[0].Origin
+}
+
+// TestServerBlobOriginCutsCredentials pins the other rule this value is
+// subject to, alongside the cap TestServerBlobOriginIsBounded pins. A
+// version-metadata href is a server-supplied URL this run renders rather than
+// requests - it is copied onto every gathered blob and rendered %q by
+// signature.verificationError, once per non-ignored failure - so it goes
+// through helpers.WithoutCredentials before it becomes an Origin. The cut belongs
+// here, at the producer, because internal/galaxy/signature reports Origin back
+// verbatim by contract and must keep doing so.
+//
+// The last check is the positive control: an Origin that had dropped the URL
+// altogether would satisfy the three negative ones and would tell an operator
+// nothing about which source produced the failing signature.
+//
+// Killing mutation, run: restoring the bare meta.Href in serverBlobOrigin
+// fails all four checks - the three negative ones on the value it now renders,
+// and the positive one because an origin with the userinfo spliced back in no
+// longer contains the clean prefix that check looks for. The acceptance half
+// this fixture cannot show lives next door: TestServerBlobOriginIsBounded's
+// second half passes an ordinary href through untouched. The first of the four
+// lines reads:
+//
+//	verify_attribution_test.go:230: blob origin carries the password:
+//	https://u:sup3rsecret@galaxy.example/api/v3/collections/acme/app/versions/1.0.0/?X-Amz-Signature=deadbeefcafe
+//
+// The other three label that same rendered value differently.
+func TestServerBlobOriginCutsCredentials(t *testing.T) {
+	t.Parallel()
+
+	const password = "sup3rsecret"
+	const clean = "https://galaxy.example/api/v3/collections/acme/app/versions/1.0.0/"
+	origin := originOf(t, "https://u:"+password+"@galaxy.example/api/v3/collections/acme/app/versions/1.0.0/"+
+		"?X-Amz-Signature=deadbeefcafe")
+
+	if strings.Contains(origin, password) {
+		t.Errorf("blob origin carries the password: %s", origin)
+	}
+	if strings.Contains(origin, "u:") {
+		t.Errorf("blob origin carries the userinfo prefix %q: %s", "u:", origin)
+	}
+	if strings.Contains(origin, "X-Amz-Signature") {
+		t.Errorf("blob origin carries the presigned query: %s", origin)
+	}
+	if !strings.Contains(origin, clean) {
+		t.Errorf("blob origin does not name the metadata document it came from: %s", origin)
+	}
+}
+
+// TestServerBlobOriginCutsBeforeTruncating proves the composition order
+// serverBlobOrigin documents is load-bearing rather than stylistic, on the one
+// fixture where the two orders disagree: a credential long enough that the
+// "@" ending it falls past helpers.MessageValueMaxLen. Truncating first drops
+// that "@", after which helpers.WithoutUserinfo's authority scan finds no
+// userinfo at all and returns the value untouched - so the rendered Origin
+// would carry the first MessageValueMaxLen bytes of the password.
+//
+// A short credential would not separate the orders: the "@" survives the
+// truncation and either order cuts it. That is why this fixture is built
+// around the cap rather than around a realistic href.
+//
+// Both assertions report a position and a size rather than echoing the origin:
+// the value under test is over half a kilobyte of one repeated byte, so a
+// message quoting it would be unreadable in a test log and unquotable in this
+// comment.
+//
+// Killing mutation, run: swapping the composition in serverBlobOrigin to
+// helpers.WithoutCredentials(helpers.TruncateForMessage(meta.Href)) fails both,
+// the second one included - a value truncated inside its own credential never
+// reaches the host at all:
+//
+//	verify_attribution_test.go:274: blob origin carries the truncated password at byte 10 of 527
+//	verify_attribution_test.go:277: blob origin (527 bytes) does not name the metadata document it came from
+func TestServerBlobOriginCutsBeforeTruncating(t *testing.T) {
+	t.Parallel()
+
+	password := strings.Repeat("s", helpers.MessageValueMaxLen)
+	origin := originOf(t, "https://u:"+password+"@galaxy.example/versions/1.0.0/")
+
+	if at := strings.Index(origin, "ssss"); at >= 0 {
+		t.Errorf("blob origin carries the truncated password at byte %d of %d", at, len(origin))
+	}
+	if !strings.Contains(origin, "https://galaxy.example/versions/1.0.0/") {
+		t.Errorf("blob origin (%d bytes) does not name the metadata document it came from", len(origin))
+	}
+}
+
 // TestMetadataUnavailableIsADifferentLine pins the distinction the operator
 // acts on: "this collection carries no signatures" and "this run could not
 // learn whether it does" are two different facts, and a vacuous pass reports
@@ -273,7 +380,7 @@ var foldingBypassShapes = []foldingBypass{
 // were written to replace (a json.Unmarshal into a collection_info struct with
 // three string fields). Four of the five rows fail; the first reads:
 //
-//	verify_attribution_test.go:290: verifyCollectionSignatures() = <nil>, want errors.Is helpers.ErrSignatureAttributionMismatch
+//	verify_attribution_test.go:397: verifyCollectionSignatures() = <nil>, want errors.Is helpers.ErrSignatureAttributionMismatch
 func TestFoldedIdentityKeysAreRefused(t *testing.T) {
 	t.Parallel()
 

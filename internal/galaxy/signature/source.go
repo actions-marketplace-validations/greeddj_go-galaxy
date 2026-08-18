@@ -184,21 +184,21 @@ func SourceRequiresNetwork(source string) bool {
 // satisfy and returns the parsed URL alongside the display form every message
 // about it uses.
 //
-// The display form is computed before anything has parsed the value. Three
-// cuts. The query string is where a presigned capability travels, and a
-// signature source can carry one just as a download URL can. The userinfo is a
-// credential this grammar refuses outright and must not print while refusing.
-// The fragment is the part that never travels at all: net/http composes a
-// request from the path and the query alone, and url.Parse splits a fragment
-// off before the Path fetchFile opens, so a message keeping one would name a
-// location no request reached and no file was read from -
-// "file:///tmp/a#b.asc" opens /tmp/a. Their order is immaterial:
-// WithoutUserinfo's authority scan ends at "?" and at "#", and the other two
-// keep everything before their own delimiter, so no cut can reach across
-// another's boundary. helpers.WithoutUserinfo's own doc comment holds what a
-// delimiter sitting INSIDE a userinfo costs, the one residual all three share.
+// The display form is helpers.URLForMessage, which holds what each of its cuts
+// removes and why they compose in any order. Two of the three earn their place
+// here for reasons specific to a signature source: the query string is where a
+// presigned capability travels, and a repository-authored source can carry one
+// just as a download URL can, while the userinfo is a credential this grammar
+// refuses outright and must not print while refusing. The third matters here
+// more than at any other caller, because this is the one boundary whose values
+// are not all requested: a fragment splits off before the Path fetchFile opens,
+// so "file:///tmp/a#b.asc" opens /tmp/a, and a message keeping the fragment
+// would name a file nothing read.
+//
+// It is computed before anything has parsed the value, which is what lets the
+// refusal below name a value url.Parse itself rejected.
 func parseRequirementSource(source string) (*url.URL, string, error) {
-	display := helpers.TruncateForMessage(helpers.WithoutUserinfo(helpers.WithoutFragment(helpers.WithoutQuery(source))))
+	display := helpers.URLForMessage(source)
 
 	parsed, err := url.Parse(source)
 	if err != nil {

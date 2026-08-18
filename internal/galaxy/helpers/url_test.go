@@ -219,8 +219,8 @@ func TestTheThreeCutsComposeInAnyOrder(t *testing.T) {
 
 // TestDisplayCutsOnADelimiterInsideUserinfo records the residual
 // WithoutUserinfo discloses as a measured outcome rather than only as prose,
-// and it runs the exact composition signature.FetchRequirementSource renders
-// every one of its messages from.
+// and it runs it through URLForMessage itself - the production composition
+// every refusal in this program renders a URL by - rather than a copy of it.
 //
 // A value whose intended userinfo contains one of the authority delimiters
 // leaves no "@" inside the authority the scan reads, so the cut never fires and
@@ -263,10 +263,20 @@ func TestDisplayCutsOnADelimiterInsideUserinfo(t *testing.T) {
 			// whole credential it then renders (TestWithoutFragment fails too):
 			//
 			//	url_test.go:268: display cuts on "https://user:pa#55w0rd@h/x" = "https://user:pa#55w0rd@h/x", want "https://user:pa"
-			got := WithoutUserinfo(WithoutFragment(WithoutQuery(tc.raw)))
+			got := URLForMessage(tc.raw)
 			if got != tc.want {
 				t.Errorf("display cuts on %q = %q, want %q", tc.raw, got, tc.want)
 			}
 		})
 	}
 }
+
+// WithoutCredentials deliberately has no table of its own, and this note sits
+// where one would have gone. It composes the two cuts above and adds no
+// behavior over them: TestWithoutQuery and TestWithoutUserinfo pin each half,
+// TestTheThreeCutsComposeInAnyOrder pins that composing cuts cannot change
+// what any one of them does, and the single edit a table here could still
+// catch - a body written as a replacement of one cut rather than as a
+// composition of both - is already caught at a sink, by
+// collections.TestBuildGalaxyYAMLStripsUserinfoAndQueryTogether, on a value
+// carrying a presigned query and a credential at once.

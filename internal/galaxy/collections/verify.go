@@ -950,9 +950,16 @@ func serverSignatureBlobs(meta *types.GalaxyCollectionVersionInfo) ([]signature.
 // "Failed: ..." line - and written to stderr once, times cfg.Workers.
 // Bounding it once, where the value enters this program's own vocabulary, is
 // what keeps every consumer of Blob.Origin out of that multiplication.
+//
+// The credential cut is applied at the same place and for the same reason: a
+// version-metadata href is a server-supplied URL this run renders rather than
+// requests, so it goes through helpers.WithoutCredentials like every other such
+// sink. The order is load-bearing - cut, then truncate - since truncating
+// first would leave whatever fits inside the cap, credential included, and the
+// cut would then have nothing to find beyond it.
 func serverBlobOrigin(meta *types.GalaxyCollectionVersionInfo) string {
 	if meta.Href != "" {
-		return helpers.TruncateForMessage(meta.Href)
+		return helpers.TruncateForMessage(helpers.WithoutCredentials(meta.Href))
 	}
 
 	return "galaxy server version metadata"

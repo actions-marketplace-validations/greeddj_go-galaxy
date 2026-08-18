@@ -273,7 +273,23 @@ func (t tlsDispatchTransport) RoundTrip(req *http.Request) (*http.Response, erro
 
 type offlineTransport struct{}
 
-// RoundTrip rejects every request with ErrOfflineMode.
+// RoundTrip rejects every request with ErrOfflineMode, naming the method and
+// the request URL under helpers.WithoutCredentials.
+//
+// The cut belongs here rather than at whatever renders this error, and that is
+// a rule binding every RoundTripper this program installs rather than a
+// property of this one. A transport error is reproduced verbatim by the
+// wrappers that cut a URL further up - helpers.TransportURLError renders its
+// own cut display and then prints the cause beside it - so a transport naming
+// its own req.URL puts back exactly what those wrappers removed. net/http's
+// own masking is no help either: it rewrites the URL of the *url.Error its
+// client composes, never an error a RoundTripper built underneath it, so
+// req.URL.String() here renders userinfo with the password in cleartext and
+// the whole query alongside it.
+//
+// What the cut costs is nothing this message is for: the method, scheme, host
+// and path all survive, which is the whole of what an operator needs to see
+// which request --offline refused.
 func (offlineTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	return nil, fmt.Errorf("%w: %s %s", helpers.ErrOfflineMode, req.Method, req.URL)
+	return nil, fmt.Errorf("%w: %s %s", helpers.ErrOfflineMode, req.Method, helpers.WithoutCredentials(req.URL.String()))
 }

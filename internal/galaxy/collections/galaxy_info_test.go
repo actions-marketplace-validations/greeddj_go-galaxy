@@ -21,6 +21,11 @@ import (
 // the collections tree.
 const presignedQuery = "?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=deadbeefcafe&X-Amz-Expires=600"
 
+// acmeArtifactURL is the credential-free, query-free download URL every test
+// in this file expects to survive a cut, and the base each of them decorates
+// with a query, a userinfo, or both.
+const acmeArtifactURL = "https://objects.example.com/artifacts/acme-widgets-1.0.0.tar.gz"
+
 // newVersionInfo builds the version metadata writeGalaxyInfo consumes, with
 // the given download and version URLs.
 func newVersionInfo(downloadURL, href string) *types.GalaxyCollectionVersionInfo {
@@ -43,14 +48,14 @@ func TestBuildGalaxyYAMLStripsPresignedQuery(t *testing.T) {
 	cfg := &config.Config{Server: "https://hub.example.com/api/automation-hub"}
 	col := collection{Namespace: "acme", Name: "widgets", Version: testVersion100}
 	meta := newVersionInfo(
-		"https://objects.example.com/artifacts/acme-widgets-1.0.0.tar.gz"+presignedQuery,
+		acmeArtifactURL+presignedQuery,
 		"https://hub.example.com/api/automation-hub/v3/collections/acme/widgets/versions/1.0.0/"+presignedQuery,
 	)
 
 	g := buildGalaxyYAML(cfg, col, meta)
 
-	if want := "https://objects.example.com/artifacts/acme-widgets-1.0.0.tar.gz"; g.DownloadURL != want {
-		t.Errorf("download_url = %q, want %q", g.DownloadURL, want)
+	if g.DownloadURL != acmeArtifactURL {
+		t.Errorf("download_url = %q, want %q", g.DownloadURL, acmeArtifactURL)
 	}
 	if want := "https://hub.example.com/api/automation-hub/v3/collections/acme/widgets/versions/1.0.0/"; g.VersionURL != want {
 		t.Errorf("version_url = %q, want %q", g.VersionURL, want)
@@ -80,7 +85,11 @@ func TestBuildGalaxyYAMLKeepsQuerylessURLs(t *testing.T) {
 
 // TestBuildGalaxyYAMLNilMetaUnchanged asserts the artifact-cache-hit fast
 // path, which has no version metadata to strip anything from, still writes
-// a minimal document with the metadata-sourced fields left empty.
+// a minimal document with the metadata-sourced fields left empty. That covers
+// the nil-meta arm of the credential cut as well as the query one: neither URL
+// field is assigned at all on this path, so helpers.WithoutCredentials is never
+// reached and both fields must stay empty rather than pick up a cut form of
+// something.
 func TestBuildGalaxyYAMLNilMetaUnchanged(t *testing.T) {
 	t.Parallel()
 
@@ -100,6 +109,125 @@ func TestBuildGalaxyYAMLNilMetaUnchanged(t *testing.T) {
 	}
 }
 
+// urlPassword is the credential the userinfo tests below smuggle into a
+// server-supplied URL. It is deliberately distinctive, for the same reason
+// token_leak_e2e_test.go's leakToken is: a value that cannot collide with any
+// other byte sequence in a rendered document or a written file makes a
+// substring search for it a real answer rather than a coincidence.
+const urlPassword = "pa55w0rd-must-not-be-persisted"
+
+// TestBuildGalaxyYAMLStripsUserinfo asserts a credential a server embedded in
+// either URL is dropped from the document, while everything that merely says
+// where the artifact came from survives.
+//
+// Each field is asserted against its own userinfo-free twin: the identical
+// value with "u:<password>@" deleted and nothing else changed. That makes the
+// expectation the positive control at the same time - the cut has to produce
+// exactly the URL a server with no credential in it would have sent, not
+// merely a string with the password missing.
+//
+// Killing mutation, run: dropping helpers.WithoutUserinfo from
+// helpers.WithoutCredentials fails both assertions, each rendering the credential
+// it was supposed to have cut:
+//
+//	galaxy_info_test.go:152: download_url =
+//	"https://u:pa55w0rd-must-not-be-persisted@objects.example.com/artifacts/acme-widgets-1.0.0.tar.gz",
+//	want "https://objects.example.com/artifacts/acme-widgets-1.0.0.tar.gz"
+//
+// The version_url line below it renders the same shape against the hub host.
+func TestBuildGalaxyYAMLStripsUserinfo(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{Server: "https://hub.example.com/api/automation-hub"}
+	col := collection{Namespace: "acme", Name: "widgets", Version: testVersion100}
+	const wantVersion = "https://hub.example.com/api/automation-hub/v3/collections/acme/widgets/versions/1.0.0/"
+	meta := newVersionInfo(
+		"https://u:"+urlPassword+"@objects.example.com/artifacts/acme-widgets-1.0.0.tar.gz",
+		"https://u:"+urlPassword+"@hub.example.com/api/automation-hub/v3/collections/acme/widgets/versions/1.0.0/",
+	)
+
+	g := buildGalaxyYAML(cfg, col, meta)
+
+	if g.DownloadURL != acmeArtifactURL {
+		t.Errorf("download_url = %q, want %q", g.DownloadURL, acmeArtifactURL)
+	}
+	if g.VersionURL != wantVersion {
+		t.Errorf("version_url = %q, want %q", g.VersionURL, wantVersion)
+	}
+}
+
+// TestBuildGalaxyYAMLStripsUserinfoAndQueryTogether asserts the two cuts
+// compose on one value carrying both: a presigned download URL that also
+// embeds a credential loses the query AND the userinfo, not whichever cut ran
+// last. This is the shape that catches a cut written as a replacement of the
+// other rather than as a composition of both.
+//
+// Killing mutation, run: making helpers.WithoutCredentials return
+// helpers.WithoutUserinfo(raw) alone fails this with
+//
+//	galaxy_info_test.go:182: download_url =
+//	"https://objects.example.com/artifacts/acme-widgets-1.0.0.tar.gz
+//	?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=deadbeefcafe&X-Amz-Expires=600",
+//	want "https://objects.example.com/artifacts/acme-widgets-1.0.0.tar.gz"
+func TestBuildGalaxyYAMLStripsUserinfoAndQueryTogether(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{Server: "https://hub.example.com/api/automation-hub"}
+	col := collection{Namespace: "acme", Name: "widgets", Version: testVersion100}
+	meta := newVersionInfo("https://u:"+urlPassword+"@objects.example.com/artifacts/acme-widgets-1.0.0.tar.gz"+presignedQuery, "")
+
+	g := buildGalaxyYAML(cfg, col, meta)
+
+	if g.DownloadURL != acmeArtifactURL {
+		t.Errorf("download_url = %q, want %q", g.DownloadURL, acmeArtifactURL)
+	}
+}
+
+// TestWriteGalaxyInfoPersistsNoUserinfo is the end-to-end half of
+// TestBuildGalaxyYAMLStripsUserinfo, modeled on
+// TestWriteGalaxyInfoPersistsNoSignature below and guarding the same sink for
+// the same reason: the bytes that actually land in the collections tree
+// outlive the run and get uploaded wholesale as a CI artifact, so a credential
+// reaching them is disclosed to everyone who can read the build's output.
+//
+// The markers are checked against the file's whole text, not only against the
+// decoded download_url, because a document that carried the credential in some
+// other field would be just as disclosed. The decoded field is then asserted
+// on its own, so "the password is absent" cannot be satisfied by a document
+// that lost the URL entirely.
+func TestWriteGalaxyInfoPersistsNoUserinfo(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	cfg := &config.Config{Server: "https://hub.example.com/api/automation-hub", DownloadPath: root}
+	col := collection{Namespace: "acme", Name: "widgets", Version: testVersion100}
+	meta := newVersionInfo("https://u:"+urlPassword+"@objects.example.com/artifacts/acme-widgets-1.0.0.tar.gz", "")
+	target := newTestInstallTarget(t, cfg, col)
+
+	if err := writeGalaxyInfo(target, cfg, col, meta); err != nil {
+		t.Fatalf("writeGalaxyInfo: %v", err)
+	}
+
+	path := filepath.Join(root, "ansible_collections", "acme.widgets-1.0.0.info", "GALAXY.yml")
+	data, err := os.ReadFile(path) // #nosec G304 -- path is built from this test's own t.TempDir
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	for _, marker := range []string{urlPassword, "u:", "@"} {
+		if strings.Contains(string(data), marker) {
+			t.Errorf("GALAXY.yml contains %q, want the userinfo stripped:\n%s", marker, data)
+		}
+	}
+
+	var g GalaxyYAML
+	if err := yaml.Unmarshal(data, &g); err != nil {
+		t.Fatalf("unmarshal GALAXY.yml: %v", err)
+	}
+	if g.DownloadURL != acmeArtifactURL {
+		t.Errorf("download_url = %q, want %q", g.DownloadURL, acmeArtifactURL)
+	}
+}
+
 // TestWriteGalaxyInfoPersistsNoSignature is the end-to-end guard: the bytes
 // actually landing in the collections tree must not contain any part of the
 // presigned query, since that file routinely outlives the run and is
@@ -110,7 +238,7 @@ func TestWriteGalaxyInfoPersistsNoSignature(t *testing.T) {
 	root := t.TempDir()
 	cfg := &config.Config{Server: "https://hub.example.com/api/automation-hub", DownloadPath: root}
 	col := collection{Namespace: "acme", Name: "widgets", Version: testVersion100}
-	meta := newVersionInfo("https://objects.example.com/artifacts/acme-widgets-1.0.0.tar.gz"+presignedQuery, "")
+	meta := newVersionInfo(acmeArtifactURL+presignedQuery, "")
 	target := newTestInstallTarget(t, cfg, col)
 
 	if err := writeGalaxyInfo(target, cfg, col, meta); err != nil {
@@ -132,8 +260,8 @@ func TestWriteGalaxyInfoPersistsNoSignature(t *testing.T) {
 	if err := yaml.Unmarshal(data, &g); err != nil {
 		t.Fatalf("unmarshal GALAXY.yml: %v", err)
 	}
-	if want := "https://objects.example.com/artifacts/acme-widgets-1.0.0.tar.gz"; g.DownloadURL != want {
-		t.Errorf("download_url = %q, want %q", g.DownloadURL, want)
+	if g.DownloadURL != acmeArtifactURL {
+		t.Errorf("download_url = %q, want %q", g.DownloadURL, acmeArtifactURL)
 	}
 }
 

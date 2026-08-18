@@ -117,6 +117,100 @@ var (
 	// anything it forgot; the allow-list admits exactly what the pipeline
 	// speaks and refuses the rest by default.
 	ErrUnsupportedDownloadURLScheme = errors.New("collection download url scheme is not http or https")
+	// ErrDownloadURLUserinfo indicates a collection's download URL embeds
+	// userinfo, e.g. "https://user:pass@objects.example/a.tar.gz".
+	//
+	// The value decides what authenticates the request as well as where it
+	// goes, and the first half of that is measured rather than recalled: an
+	// *http.Client whose RoundTripper only records what it is handed, given
+	// "https://user:s3cr3t@127.0.0.1/artifact.tar.gz", observed
+	// `Authorization: Basic dXNlcjpzM2NyM3Q=` on the request, with the header
+	// unset before the call - net/http composes Basic auth from a URL's
+	// userinfo before any transport runs. The second half is what that costs
+	// here: fetch.authTransport returns early for a request whose
+	// Authorization header is already set, so a credential a Galaxy server (or
+	// a snapshot replaying one) chose silently replaces the operator's own
+	// configured token on the request that fetches the artifact.
+	//
+	// url.URL.String() renders that password back out in plain text at every
+	// sink the value reaches, which is why the refusal must also keep it out of
+	// its own message.
+	//
+	// It is deliberately NOT ErrGalaxyServerURLUserinfo, which is scoped to a
+	// value that SELECTS a server and is raised while building the config out
+	// of operator-authored input, before any request exists;
+	// ErrSignatureSourceUserinfo above already draws that same distinction for
+	// a value a repository authored, and states it once. And it is deliberately
+	// NOT ErrUnsupportedDownloadURLScheme: that one says the value names
+	// nothing this tool fetches, while this one names something perfectly
+	// fetchable and carries a credential while doing it, so the remedy is
+	// deleting the credential rather than rewriting the URL.
+	ErrDownloadURLUserinfo = errors.New("collection download url must not contain userinfo")
+	// ErrMetadataURLUserinfo indicates a Galaxy metadata URL embeds userinfo:
+	// a server's own versions_url or highest_version.href, or either of them
+	// replayed out of a poisonable cached snapshot, resolved against the base
+	// that served it.
+	//
+	// The two effects are ErrDownloadURLUserinfo's above, unchanged - net/http
+	// composes Basic auth from the userinfo before any transport runs, and
+	// fetch.authTransport then declines to attach the operator's own token -
+	// and that sentinel holds the measurement.
+	//
+	// It is a second sentinel rather than a reuse of that one because the two
+	// name two different fields an operator inspects and edits nothing of:
+	// an artifact's download_url, and the metadata reference the version walk
+	// follows. This project already splits its userinfo sentinels by the
+	// boundary a value enters through rather than by the effect they share -
+	// ErrGalaxyServerURLUserinfo and ErrSignatureSourceUserinfo are the same
+	// split one layer out. Both of these two classify identically all the same;
+	// exitcode.isServerSuppliedURLPolicyError holds that argument.
+	ErrMetadataURLUserinfo = errors.New("galaxy metadata url must not contain userinfo")
+	// ErrMetadataRequestBuildFailed indicates net/http refused to build a
+	// request from a Galaxy metadata URL - a server's own versions_url or
+	// highest_version.href, either replayed out of a poisonable cached
+	// snapshot, or a root-metadata candidate built from a configured server's
+	// base - because url.Parse will not accept the value as a URL at all.
+	//
+	// It names no part of that value, deliberately, and that refusal to render
+	// is the whole reason it exists. The error net/http returns from the
+	// refused build is a *url.Error naming the raw string whole: measured,
+	// http.NewRequest over "https://user:s3cr3t@h:notaport/x?sig=abc" returns
+	// `parse "https://user:s3cr3t@h:notaport/x?sig=abc": invalid port
+	// ":notaport" after host`, with the password in cleartext. net/http masks a
+	// password only when its client composes a transport error, never when
+	// NewRequest refuses to build one.
+	//
+	// Three reasons make this a replacement of that message rather than a cut
+	// of it. The population reaching this sentinel is exactly the values
+	// url.Parse refuses, which is the one place WithoutUserinfo's residual is
+	// least bounded: that function's own doc comment bounds the residual by
+	// arguing url.Parse never reads such a value as carrying userinfo, so the
+	// credential authenticates nothing - a claim about the wire, and no comfort
+	// here, where the refused set is the entire population and the cut would be
+	// doing all the work. What leaks is not this program's rendering but
+	// *url.Error's, so cutting it would mean errors.As-ing that error apart and
+	// rebuilding its message, which is a replacement performed tacitly rather
+	// than a cut. And nothing actionable is lost by dropping it: a refused
+	// build means a server declared something that is not a URL, so there is
+	// nothing for an operator to go edit and those bytes are not what they
+	// need - the run names the collection and the failure instead.
+	//
+	// It is deliberately not an *HTTPStatusError (internal/galaxy/cache), which
+	// leaves collections.tryServerRootMetadata's status routing untouched: no
+	// server answered anything here, so there is no status to route the walk
+	// by. It classifies ExitNetwork through exitcode.isMetadataFetchError, the
+	// class ErrUnsupportedDownloadURLScheme carries there and for the same
+	// reason - metadata that cannot name something this tool can fetch is one
+	// defect class, whether the URL is absent, unusable, or unbuildable. A
+	// sentinel of its own rather than a reuse of a member of that set is what
+	// an operator gains here: ErrMetadataUnavailable, the only member whose
+	// wording would fit, is load-bearing in collections.prepareInstall as the
+	// one tolerated shape a cache hit may proceed on, so reusing it would turn
+	// a metadata URL nobody can request into a silent install from cache; every
+	// other member names a nil metadata value, a download URL, a versions
+	// payload, a deadline, or the `outdated` command's own aggregation
+	// headline.
+	ErrMetadataRequestBuildFailed = errors.New("galaxy metadata url could not be built into a request")
 	// ErrConfigIsNil indicates a nil config was provided.
 	ErrConfigIsNil = errors.New("config is nil")
 	// ErrSHA256Mismatch indicates a checksum mismatch.

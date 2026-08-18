@@ -488,3 +488,114 @@ func TestNew_S3ShapedOriginIsIsolatedFromGalaxyServerConfig(t *testing.T) {
 		t.Fatalf("s3-shaped origin received Authorization = %q, want empty (never configured with a token)", s3Header)
 	}
 }
+
+// offlineFixturePassword is the credential this file's offline fixture
+// smuggles into the URL it refuses. Distinctive on purpose: a substring search
+// for a value that can collide with nothing else in a rendered message is an
+// answer rather than a coincidence.
+const offlineFixturePassword = "pa55w0rd-must-not-be-rendered"
+
+// offlineFixtureHostPath is the part of that fixture an operator reading the
+// refusal actually needs, and the part no cut here removes.
+const offlineFixtureHostPath = "hub.example/api/v3/collections/acme/widgets/"
+
+// offlineFixtureQuery is the capability half of the same fixture: a presigned
+// query is what a message naming a URL must drop even where the URL itself is
+// worth naming.
+const offlineFixtureQuery = "?X-Amz-Signature=deadbeefcafe&X-Amz-Expires=900"
+
+// offlineFixtureURL carries both credential-bearing parts of a URL at once, so
+// one fixture covers both halves of the cut under test.
+const offlineFixtureURL = "https://u:" + offlineFixturePassword + "@" + offlineFixtureHostPath + offlineFixtureQuery
+
+// TestNewOffline_RefusalNamesTheURLWithItsCredentialsCut pins the cut
+// offlineTransport.RoundTrip applies to the URL it names.
+//
+// The assertion is on the transport's own error rather than on the *url.Error
+// http.Client wraps it in, because that inner value is what an operator
+// actually reads. Every re-render on the paths reaching this transport drops
+// net/http's outer message and prints the cause beside a display of its own -
+// helpers.CutTransportURL does that for a metadata or artifact request,
+// signature.transportCause for a signature source - so whatever this transport
+// renders survives every cut applied above it. Asserting on the outer render
+// instead would assert nothing about this code: net/http's own masking
+// rewrites that URL to "u:***@..." with the query left intact, which carries
+// both the userinfo prefix and the presigned query no matter what happens
+// here.
+//
+// The five checks are independent t.Errorf calls rather than a t.Fatalf chain:
+// a message that carries a capability, one that names nothing at all, and one
+// that stopped classifying are three different defects with three different
+// remedies, and a chain would only ever report the first.
+//
+// assertOfflineRefusalNamesACleanURL is the positive control, on this same
+// transport with a URL that has nothing to cut: it proves a refusal does name
+// the URL it refused, so "carries no query" here cannot be satisfied by a
+// message that dropped the URL altogether.
+//
+// KILLING MUTATION, run: rendering req.URL in place of the cut form in
+// offlineTransport.RoundTrip fails three of the five checks - the password,
+// the userinfo prefix and the presigned query. The host-and-path check stays
+// green under it, since the uncut value contains that substring too, which is
+// what makes it a control on the cut rather than a second pin of it, and so
+// does the classification check, since the mutation moves no sentinel. The
+// first failure reads:
+//
+//	client_test.go:565: offline refusal carries the password: offline mode is
+//	enabled, network access is forbidden: GET https://u:pa55w0rd-must-not-be-rendered@hub.example/api/v3/collections/acme/widgets/
+//	?X-Amz-Signature=deadbeefcafe&X-Amz-Expires=900
+//
+// assertOfflineRefusalNamesACleanURL stays green through it as well: a URL
+// with nothing to cut renders identically either way.
+func TestNewOffline_RefusalNamesTheURLWithItsCredentialsCut(t *testing.T) {
+	t.Parallel()
+
+	resp, err := fetch.NewOffline(0).Do(mustGetRequest(t, offlineFixtureURL))
+	if resp != nil {
+		_ = resp.Body.Close()
+		t.Fatal("Do returned a non-nil response, want nil: an offline client must never reach a transport")
+	}
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		t.Fatalf("errors.As(err, &*url.Error) failed on %v, so this fixture never reached the transport", err)
+	}
+	msg := urlErr.Err.Error()
+
+	if strings.Contains(msg, offlineFixturePassword) {
+		t.Errorf("offline refusal carries the password: %s", msg)
+	}
+	if strings.Contains(msg, "u:") {
+		t.Errorf("offline refusal carries the userinfo prefix %q: %s", "u:", msg)
+	}
+	if strings.Contains(msg, "X-Amz-Signature") {
+		t.Errorf("offline refusal carries the presigned query: %s", msg)
+	}
+	if !strings.Contains(msg, offlineFixtureHostPath) {
+		t.Errorf("offline refusal does not name the host and path it refused: %s", msg)
+	}
+	if !errors.Is(err, helpers.ErrOfflineMode) {
+		t.Errorf("offline refusal does not classify as helpers.ErrOfflineMode: %v", err)
+	}
+
+	assertOfflineRefusalNamesACleanURL(t)
+}
+
+// assertOfflineRefusalNamesACleanURL is the control described on
+// TestNewOffline_RefusalNamesTheURLWithItsCredentialsCut: the same transport,
+// handed a URL with nothing to cut, must still name that URL whole.
+func assertOfflineRefusalNamesACleanURL(t *testing.T) {
+	t.Helper()
+
+	clean := "https://" + offlineFixtureHostPath
+	resp, err := fetch.NewOffline(0).Do(mustGetRequest(t, clean))
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		t.Fatalf("control: errors.As(err, &*url.Error) failed on %v", err)
+	}
+	if got := urlErr.Err.Error(); !strings.Contains(got, clean) {
+		t.Errorf("control: a refusal over a credential-free URL does not name it: %s", got)
+	}
+}

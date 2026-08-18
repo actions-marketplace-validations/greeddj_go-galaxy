@@ -46,12 +46,19 @@ type Blob struct {
 	// Origin names where this blob came from - a URL, a file path, or a
 	// server's own signature entry. Nothing here parses or validates it; it is
 	// carried so a Failure can say which source produced it, and it is
-	// reported back verbatim. Fetcher.FetchRequirementSource fills it with the
-	// source it was handed under the cuts helpers makes - the query string
-	// (helpers.WithoutQuery), the userinfo (helpers.WithoutUserinfo) and the
-	// fragment (helpers.WithoutFragment) - so neither a presigned source's
-	// capability nor an embedded credential rides into a message this value is
-	// rendered into, and a file source names the path that was opened.
+	// reported back verbatim.
+	//
+	// Reported back verbatim is why every filler cuts before it fills, and
+	// there are two. Fetcher.FetchRequirementSource fills it with the source it
+	// was handed under three cuts - the query string (helpers.WithoutQuery),
+	// the userinfo (helpers.WithoutUserinfo) and the fragment
+	// (helpers.WithoutFragment) - so a file source names the path that was
+	// opened. collections.serverSignatureBlobs is the other, filling it from
+	// the version-metadata document's own href under helpers.WithoutCredentials
+	// - the first two of those three cuts, named once - and a length cap; the
+	// fragment survives there because nothing was opened for it to have to name
+	// exactly. Between them, neither a presigned source's capability nor an
+	// embedded credential rides into a message this value is rendered into.
 	Origin string
 	// Data is the raw signature, armored or binary. Which of the two it
 	// carries is decided from these bytes, never from Origin.

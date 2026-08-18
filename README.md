@@ -1298,6 +1298,32 @@ to itself. See "Exit codes" below for the exact messages to grep for.
 - An artifact download whose host differs from the configured Galaxy server is warned
   about (a visible signal in CI logs) rather than blocked, so deployments that serve
   downloads from a separate content host or object storage still work.
+- A URL a Galaxy server supplied is refused outright when it embeds a credential in its
+  userinfo (`https://user:pass@objects.example/a.tar.gz`), at both boundaries such a URL
+  enters through: an artifact's download URL, and the metadata references a version walk
+  follows (`versions_url`, `highest_version.href`). Left alone, that credential would
+  replace the token you configured - Go's HTTP client turns URL userinfo into a Basic
+  `Authorization` header before go-galaxy's own transport ever sees the request, and the
+  transport does not overwrite a header that is already set. The refusal never prints the
+  credential: the message names the refused URL with its userinfo and query cut out, and
+  the run exits `5`. The same two cuts are applied to every line go-galaxy prints about
+  such a URL - the lines it logs on the download path, the ones it logs while resolving
+  metadata, and the source it names in a signature-verification failure - and to a URL it
+  writes down for you to read, which is what the `download_url` and `version_url` recorded
+  in `GALAXY.yml` are. A URL go-galaxy stores in order to fetch it again keeps its query,
+  since cutting it would break the fetch that query authenticates: the cached API
+  responses in the snapshot are that case. The request itself always carries the whole
+  URL, for the same reason. A `versions_url` malformed enough that Go's URL parser rejects
+  it is never judged by that guard, and it is never printed either: go-galaxy drops Go's
+  own parse error, which would name the value whole, and reports instead that the metadata
+  URL could not be built into a request, naming no part of it. A request that fails at the
+  transport - a refused connection, a DNS failure, a TLS error - is re-rendered over the
+  same two cuts, because Go's own report of it masks a password but leaves a query the
+  server declared; the failure itself is preserved underneath, so nothing about retries
+  or exit codes changes. Where the request had been redirected, that re-render names the
+  URL go-galaxy asked for rather than the hop that failed, so a presigned redirect target
+  never reaches the log at all - at the cost of the message no longer saying which hop in
+  the chain was unreachable.
 - Pinned (`--frozen`) installs are already immune to a poisoned snapshot: for a
   lockfile-pinned collection, go-galaxy hashes the actually downloaded (or on-disk)
   bytes and compares them to the sha256 recorded in the in-repo lockfile, not to the
@@ -1659,8 +1685,8 @@ collide:
 |    1 | Generic failure (does not match any class below)                                                                                                                                                                                                                                                                                                                                                                                                                  |
 |    2 | Usage or configuration error (invalid flags, requirements, `ansible.cfg`, an unsupported collection source, an explicit namespace conflicting with a dotted collection name, an unsupported cache-snapshot schema version, an unreadable or unparseable project requirements file, or a cache backend that cannot be used as configured)                                                                                                                          |
 |    3 | Dependency resolution failure (conflicts, missing candidates, cycle)                                                                                                                                                                                                                                                                                                                                                                                              |
-|    4 | Network or Galaxy API failure (timeouts, stalled transfers, metadata and cache-state deadlines, a versions listing that exceeded its page ceiling, a response body that exceeded its size ceiling (an artifact, a metadata document, or a bucket listing), offline-mode violations, an unreachable cache backend, or an `outdated` run in which at least one latest-version lookup failed)                                                                        |
-|    5 | Install-time failure (unsafe archive/symlink content, empty file, missing artifact cache)                                                                                                                                                                                                                                                                                                                                                                         |
+|    4 | Network or Galaxy API failure (timeouts, stalled transfers, metadata and cache-state deadlines, a Galaxy metadata URL no HTTP request can be built from, a versions listing that exceeded its page ceiling, a response body that exceeded its size ceiling (an artifact, a metadata document, or a bucket listing), offline-mode violations, an unreachable cache backend, or an `outdated` run in which at least one latest-version lookup failed for a reason not classified below - a lookup that failed on a userinfo refusal reports `5`)                                                                        |
+|    5 | Install-time failure (unsafe archive/symlink content, empty file, missing artifact cache, or a URL a Galaxy server supplied that this tool refuses to fetch from because it embeds a credential in its userinfo - an artifact download URL or a metadata URL alike, so a `lock` or `outdated` run can report `5` without ever installing anything)                                                                                                                |
 |    6 | Lockfile error (missing, invalid, mismatched with requirements, or out of date under `lock --frozen`)                                                                                                                                                                                                                                                                                                                                                             |
 |    7 | Artifact-integrity failure (content does not authenticate against its naming sha256, or the digest is malformed)                                                                                                                                                                                                                                                                                                                                                  |
 |    8 | Cache contention (the cache lock is held elsewhere, the S3 lock's wait ceiling elapsed after this run observed another holder, or a lock this run did hold was taken away by another holder mid-run)                                                                                                                                                                                                                                                              |

@@ -245,6 +245,17 @@ type resolvedRoot struct {
 // metadata's own versions_url, normalized against the same winning base,
 // when the metadata provides one - the fallback only matters for a root
 // metadata document that omits versions_url.
+//
+// It fails, rather than resolving, when that normalization refuses the
+// server's own versions_url: normalizeVersionsURL guards what it returns,
+// so a value carrying userinfo never becomes a request URL here. The
+// fallback this function builds itself is not subject to that, since it is
+// this program's own construction rather than the server's.
+//
+// Surviving that guard is not what makes the debug line below safe to print,
+// and the line does not rely on it: checkMetadataURLUserinfo passes through
+// every value url.Parse refuses, so the render is cut through
+// helpers.WithoutCredentials, which needs no successful parse to cut.
 func resolveRootMetadata(
 	ctx context.Context,
 	deps collectionDeps,
@@ -259,8 +270,11 @@ func resolveRootMetadata(
 	}
 	versionsURL := collectionVersionsURL(collection{Namespace: col.Namespace, Name: col.Name, Source: base})
 	if rootMeta != nil && rootMeta.VersionsURL != "" {
-		versionsURL = normalizeVersionsURL(base, rootMeta.VersionsURL)
-		runtime.Output.Debugf("versions URL for %s: %s", label, versionsURL)
+		versionsURL, err = normalizeVersionsURL(base, rootMeta.VersionsURL)
+		if err != nil {
+			return resolvedRoot{}, err
+		}
+		runtime.Output.Debugf("versions URL for %s: %s", label, helpers.WithoutCredentials(versionsURL))
 	}
 	return resolvedRoot{meta: rootMeta, versionsURL: versionsURL, base: base}, nil
 }
@@ -426,7 +440,11 @@ func loadVersionsListCached(
 			break
 		}
 		if page+1 >= maxVersionPages {
-			return nil, fmt.Errorf("%w: %s", helpers.ErrVersionsPagingExceeded, versionsURL)
+			// Cut like every other render of this value: versionsURL is the
+			// server's own versions_url when the root metadata declared one,
+			// and reaching this line means a server kept declaring more pages,
+			// which is not the behavior to hand an uncut URL to a log for.
+			return nil, fmt.Errorf("%w: %s", helpers.ErrVersionsPagingExceeded, helpers.WithoutCredentials(versionsURL))
 		}
 	}
 

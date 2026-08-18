@@ -83,16 +83,30 @@ func writeGalaxyInfo(target installTarget, cfg *config.Config, col collection, m
 // (target.info, derived from col by newInstallTarget) and the file body agree
 // by construction rather than by coincidence. meta, when present, contributes
 // only the informational fields col has no equivalent for: the download and
-// version URLs (with any capability-bearing query string stripped, see
-// helpers.WithoutQuery) and the signatures Galaxy attached to this version.
+// version URLs (each with both of the parts of a URL that can carry a
+// credential stripped - a capability-bearing query string and userinfo - see
+// helpers.WithoutCredentials) and the signatures Galaxy attached to this
+// version.
+//
+// Neither cut is redundant with the fetch-side refusals that reject a
+// userinfo-bearing URL before any request is built, because this sink is
+// reachable on a path where neither of them ran. On a run with signature
+// verification enabled, servableFromCacheAlone gives up the metadata-free
+// cache-hit fast path, so an already-cached artifact is served through
+// ArtifactStore.Fetch while its version metadata is still resolved:
+// validateDownloadInputs never runs on that path, and meta.DownloadURL reaches
+// this document unchecked. meta.Href is one step further out still, since no
+// fetch-side check judges it at all - normalizeVersionsURL guards the metadata
+// URLs a request is built from, not the href a version document declares about
+// itself.
 //
 // The parenthetical above covers only the download and version URLs, not the
 // signatures value alongside them in that same sentence: meta.Signatures is
 // copied through untyped and uncut, exactly as the server sent it. No cut is
-// available for it the way WithoutQuery is for a URL, because the field is
-// `any` - a JSON shape the server picks, not this program - and walking an
-// arbitrary decoded tree to rewrite every string inside it would be a
-// sanitizer whose coverage depends on guessing that shape right; a partial
+// available for it the way helpers.WithoutCredentials is for a URL, because the
+// field is `any` - a JSON shape the server picks, not this program - and
+// walking an arbitrary decoded tree to rewrite every string inside it would be
+// a sanitizer whose coverage depends on guessing that shape right; a partial
 // one would read as a guarantee this comment cannot make. Whether that value
 // can itself carry something worth stripping is a question this comment does
 // not answer, only discloses.
@@ -105,9 +119,9 @@ func buildGalaxyYAML(cfg *config.Config, col collection, meta *types.GalaxyColle
 		Version:   col.Version,
 	}
 	if meta != nil {
-		g.DownloadURL = helpers.WithoutQuery(meta.DownloadURL)
+		g.DownloadURL = helpers.WithoutCredentials(meta.DownloadURL)
 		g.Signatures = meta.Signatures
-		g.VersionURL = helpers.WithoutQuery(meta.Href)
+		g.VersionURL = helpers.WithoutCredentials(meta.Href)
 	}
 	return g
 }

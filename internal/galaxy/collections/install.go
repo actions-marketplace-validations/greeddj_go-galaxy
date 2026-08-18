@@ -919,20 +919,56 @@ func canSkipInstall(target installTarget, col collection, st *store.Store, out o
 // outer helpers.Retry loop - which re-runs this whole establish step
 // together with the stream-to-temp and sha verify that follow it - can
 // classify whether the failure is worth repeating.
+//
+// Every message this function composes about collectionURL cuts it through
+// helpers.WithoutCredentials, while the request is built from collectionURL
+// whole. Cutting once at the top of this function instead would break every
+// presigned download: the query string those messages drop is the capability
+// the object store authenticates the GET by.
+//
+// Two of the messages it returns are not composed here at all, and they answer
+// differently. The *url.Error http.NewRequestWithContext builds for a URL
+// url.Parse refuses names the value whole, and is unreachable from here rather
+// than exempt: this function is only ever entered through
+// downloadCollectionToCache, whose validateDownloadInputs call refuses an
+// unparseable download URL before the retry loop. The transport failure's own
+// cause is the other, and it is reachable: helpers.CutTransportURL cuts the
+// display it renders that cause beside, never the cause itself, so a
+// RoundTripper naming its own req.URL would print an uncut URL right back into
+// this line. That is closed at the transports rather than here - no
+// RoundTripper this program installs may render its request URL uncut - which
+// is the rule a reader reasoning only about the display would miss.
 func downloadCollection(ctx context.Context, runtime *infra.Infra, collectionURL string) (*http.Response, error) {
-	runtime.Output.Printf("🌐 Downloading %s", collectionURL)
+	runtime.Output.Printf("🌐 Downloading %s", helpers.WithoutCredentials(collectionURL))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, collectionURL, http.NoBody)
 	if err != nil {
 		return nil, err
 	}
 	resp, err := runtime.HTTP.Do(req)
 	if err != nil {
-		return nil, &downloadAttemptError{err: err}
+		// helpers.CutTransportURL, not err as it came: net/http masks a
+		// password while composing its *url.Error and leaves everything else,
+		// so on a presigned download URL what survives its own redaction is
+		// the capability itself. That wrapper holds the rest of the argument,
+		// including what its rendering of the ORIGINAL URL buys and costs on a
+		// redirect - a redirect into presigned object storage being the
+		// ordinary shape a Galaxy deployment answers an artifact request with.
+		// Unwrap keeps this a rendering change: downloadRetryable's transport
+		// arm reads status 0 off the *downloadAttemptError this is wrapped in,
+		// and both that classifier and exitcode's read context.Canceled,
+		// context.DeadlineExceeded and helpers.ErrReadStalled out of the tree
+		// underneath.
+		return nil, &downloadAttemptError{err: helpers.CutTransportURL(collectionURL, err)}
 	}
 	if resp.StatusCode != http.StatusOK {
 		_ = resp.Body.Close()
+		// The URL is cut for the same reason the announcement and the
+		// transport arm above it are: a presigned query rendered into a line
+		// an operator reads, copies or files is a live capability handed to
+		// whoever reads it next. What the operator needs to act - the host,
+		// the path, and the status - all survive the cut.
 		return nil, &downloadAttemptError{
-			err:    fmt.Errorf("%w: %s (%s)", helpers.ErrDownloadFailed, collectionURL, resp.Status),
+			err:    fmt.Errorf("%w: %s (%s)", helpers.ErrDownloadFailed, helpers.WithoutCredentials(collectionURL), resp.Status),
 			status: resp.StatusCode,
 		}
 	}
@@ -1048,6 +1084,17 @@ func downloadCollectionToCache(
 // cost is accepted rather than unnoticed - a deployment legitimately serving
 // downloads from another port of the same host warns - and it stays a
 // warning: the install proceeds either way.
+//
+// The URL is printed through helpers.WithoutCredentials while the fetch that
+// follows uses the whole value: a cut here costs the line nothing it is for -
+// the origin it exists to name survives both cuts - and keeps a presigned
+// capability out of a CI log. The userinfo half of that cut can additionally
+// never fire on this path, since validateDownloadInputs refused such a URL
+// before the retry loop that reaches this call; it is composed in anyway, so
+// this line's rendering property holds on its own rather than depending on
+// that ordering staying true. The two origins alongside it are rendered from
+// helpers.Origin, which builds a scheme, host and port and can carry no
+// userinfo of its own.
 func warnIfOffServerDownloadHost(runtime *infra.Infra, base, downloadURL string) {
 	if strings.TrimSpace(base) == "" {
 		return
@@ -1074,7 +1121,7 @@ func warnIfOffServerDownloadHost(runtime *infra.Infra, base, downloadURL string)
 	}
 	runtime.Output.Warnf(
 		"Downloading %s from origin %q, which differs from the configured server origin %q",
-		downloadURL, dlOrigin, serverOrigin,
+		helpers.WithoutCredentials(downloadURL), dlOrigin, serverOrigin,
 	)
 }
 
@@ -1227,25 +1274,73 @@ func firstNonNil(errs ...error) error {
 	return nil
 }
 
-// downloadURLAllowed reports whether raw is a URL this pipeline may fetch: an
-// absolute http or https URL that names a host. Anything else - a relative
-// reference, a scheme this program never speaks, or a URL with no host at all
-// - is refused before a request is built.
+// checkDownloadURL refuses raw unless it is a URL this pipeline may fetch: an
+// absolute http or https URL that names a host and embeds no userinfo.
+// Anything else - a relative reference, a scheme this program never speaks, a
+// URL with no host at all, or one carrying a credential in its authority - is
+// refused before a request is built.
 //
-// This is hardening rather than a live hole today: runtime.HTTP is an ordinary
-// *http.Client that registers no additional protocols, so net/http already
-// refuses a scheme like file: with "unsupported protocol scheme". What the
-// check adds is that the refusal is classified and raised once per artifact
-// acquisition, ahead of the request, instead of surfacing per attempt as an
-// opaque transport failure - and that registering a protocol on this client
-// later cannot silently turn a poisoned download_url into a fetch.
-func downloadURLAllowed(raw string) bool {
-	u, err := url.Parse(raw)
+// The two halves are refused together and stand on different ground.
+//
+// The scheme half is hardening rather than a live hole today: runtime.HTTP is
+// an ordinary *http.Client that registers no additional protocols, so net/http
+// already refuses a scheme like file: with "unsupported protocol scheme". What
+// the check adds is that the refusal is classified and raised once per
+// artifact acquisition, ahead of the request, instead of surfacing per attempt
+// as an opaque transport failure - and that registering a protocol on this
+// client later cannot silently turn a poisoned download_url into a fetch.
+//
+// The userinfo half is not hardening. It closes a live hole: net/http composes
+// a Basic credential from a URL's userinfo before any transport runs, and
+// fetch.authTransport then declines to attach the operator's own token to a
+// request that already carries an Authorization header, so without this
+// refusal a credential a Galaxy server chose replaces the operator's own on
+// the request that fetches the artifact. helpers.ErrDownloadURLUserinfo holds
+// the measurement and the rest of that argument.
+//
+// The order is load-bearing, not incidental: the scheme and host are judged
+// first, so ErrDownloadURLUserinfo is only ever raised for a URL that was
+// otherwise perfectly fetchable - which is exactly what that sentinel claims
+// about itself, and what separates it from ErrUnsupportedDownloadURLScheme.
+//
+// display is computed before anything parses the value for a reason of
+// availability rather than of policy: url.Parse returns a nil *url.URL
+// alongside its error, so the branch that has to render a refusal for an
+// unparseable value has nothing parsed to build a display out of. Deriving it
+// from the raw string is the only form both branches can share, and
+// helpers.URLForMessage is that form - the one every refusal in this program
+// renders a URL by, and the one place the argument for its cuts and their
+// residual lives. See the parse branch below for why url.Parse's own error is
+// not wrapped in.
+//
+// %q, not %s, and for more than one reason: what is rendered is the cut
+// display form, but its scheme, host and path are still text a server or a
+// cached snapshot chose, no name alphabet ever judged it, and
+// TruncateForMessage cuts on a byte boundary that can split a rune - %q
+// escapes such a byte rather than emitting it.
+//
+// It runs once per artifact acquisition, from validateDownloadInputs, never
+// per retry attempt: downloadCollection runs once per attempt and re-parsing
+// there would buy nothing. What it does not reach are the sinks that render or
+// persist such a URL rather than fetch it - helpers.WithoutCredentials
+// (internal/galaxy/helpers/url.go) covers those.
+func checkDownloadURL(raw string) error {
+	display := helpers.URLForMessage(raw)
+
+	parsed, err := url.Parse(raw)
 	if err != nil {
-		return false
+		// The parse error is deliberately not wrapped in: url.Error renders the
+		// whole value it failed on, query string and userinfo included.
+		return fmt.Errorf("%w: %q could not be parsed as a URL", helpers.ErrUnsupportedDownloadURLScheme, display)
 	}
-	scheme := strings.ToLower(u.Scheme)
-	return (scheme == "http" || scheme == "https") && u.Host != ""
+	scheme := strings.ToLower(parsed.Scheme)
+	if (scheme != "http" && scheme != "https") || parsed.Host == "" {
+		return fmt.Errorf("%w: %q", helpers.ErrUnsupportedDownloadURLScheme, display)
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("%w: %q", helpers.ErrDownloadURLUserinfo, display)
+	}
+	return nil
 }
 
 func validateDownloadInputs(cfg *config.Config, artifacts cacheManager.ArtifactStore, meta *types.GalaxyCollectionVersionInfo) error {
@@ -1255,11 +1350,8 @@ func validateDownloadInputs(cfg *config.Config, artifacts cacheManager.ArtifactS
 	if meta.DownloadURL == "" {
 		return helpers.ErrMissingDownloadURL
 	}
-	if !downloadURLAllowed(meta.DownloadURL) {
-		// %q, not %s: this string came off a server or out of a cached
-		// snapshot, no name alphabet ever judged it, and internal/safeout's
-		// printer boundary does not reach the text of a returned error.
-		return fmt.Errorf("%w: %q", helpers.ErrUnsupportedDownloadURLScheme, meta.DownloadURL)
+	if err := checkDownloadURL(meta.DownloadURL); err != nil {
+		return err
 	}
 	if cfg == nil {
 		return helpers.ErrConfigIsNil

@@ -32,7 +32,8 @@ import (
 //
 // It removes a query and nothing else - a URL's userinfo, the other place a
 // credential travels, survives it untouched - so a value that may carry one
-// goes through WithoutUserinfo below as well, in either order. WithoutFragment
+// goes through WithoutUserinfo below as well, in either order, which is what
+// WithoutCredentials composes once for the sinks needing both. WithoutFragment
 // is the third cut alongside these two, removing the one part of a URL neither
 // of them touches.
 func WithoutQuery(raw string) string {
@@ -149,20 +150,56 @@ func WithoutUserinfo(raw string) string {
 	return raw[:off] + raw[off+at+1:]
 }
 
+// WithoutCredentials returns raw with both of the parts of a URL that can
+// carry a credential removed: its query string, where a presigned
+// object-storage capability travels, and its userinfo, which net/http turns
+// into a Basic credential on the request before any transport runs.
+// WithoutQuery and WithoutUserinfo above hold each cut's own argument, and
+// this function adds no behavior over the two. It exists so that a value this
+// program renders or persists rather than fetches names one rule, instead of
+// leaving each sink to remember a composition of two.
+//
+// The composition is named here rather than folded into WithoutQuery because
+// that function's contract is exactly one cut, and two callers depend on its
+// leaving everything else alone: normalizeSignatures
+// (internal/galaxy/collections) and signaturesWithoutQuery
+// (internal/galaxy/store) each cut a signature source's query on its way into
+// persisted state and change nothing else about the value.
+//
+// A URL's fragment is deliberately not among them. It carries no credential -
+// it is the one part of a URL that reaches no endpoint at all, which is
+// WithoutFragment's own subject - so cutting it here would answer a question
+// about naming the exact thing that was opened inside a function whose rule is
+// about disclosure. A message that has to make that claim composes all three
+// cuts itself.
+//
+// The order of the two is immaterial rather than merely untested:
+// WithoutUserinfo's authority scan terminates at "?" as well as at "#", so
+// neither cut can reach across the other's boundary - its own doc comment
+// holds that argument, and the residual it discloses there is unchanged by
+// this composition.
+func WithoutCredentials(raw string) string {
+	return WithoutUserinfo(WithoutQuery(raw))
+}
+
 // MessageValueMaxLen bounds one attacker-influenced string before an
-// operator-facing message renders it. Three values are subject to it today: a
+// operator-facing message renders it. Five values are subject to it today: a
 // Galaxy version-metadata href, which becomes a signature blob's origin; the
-// display form of a signature source out of a requirements file; and the
-// identity a collection artifact's own MANIFEST.json declares.
+// display form of a signature source out of a requirements file; the identity
+// a collection artifact's own MANIFEST.json declares; a collection artifact's
+// download URL, refused for its scheme or for embedded userinfo; and a Galaxy
+// metadata URL derived from a server's own versions_url or
+// highest_version.href, refused for that same userinfo.
 //
 // None of them is bounded by what such a value can legitimately be - the first
 // only by MetadataMaxSize (16 MiB), the third only by ManifestScanMaxBytes
-// (64 MiB) - so the ceiling is 512 bytes, roughly three times the longest
-// real value measured: 119 bytes for a galaxy.ansible.com v3 version-detail
-// href, 172 for a Red Hat Automation Hub one carrying a synclist-scoped base
-// path and a long namespace, 66 for this project's own test double. A
-// collection's namespace, name and version are each an order of magnitude
-// shorter again.
+// (64 MiB), the last two by that same MetadataMaxSize, since each is a field
+// of the metadata document that carried it - so the ceiling is 512 bytes,
+// roughly three times the longest real value measured: 119 bytes for a
+// galaxy.ansible.com v3 version-detail href, 172 for a Red Hat Automation Hub
+// one carrying a synclist-scoped base path and a long namespace, 66 for this
+// project's own test double. A collection's namespace, name and version are
+// each an order of magnitude shorter again.
 //
 // What the cap removes is the multiplication rather than one long line: an
 // origin is copied onto every blob gathered for a collection and rendered once
@@ -198,4 +235,31 @@ func TruncateForMessage(value string) string {
 	}
 
 	return value[:MessageValueMaxLen] + fmt.Sprintf("... (%d bytes)", len(value))
+}
+
+// URLForMessage returns the form of raw an operator-facing message names: all
+// three of the parts a URL carries that this program did not author are cut -
+// the query, the fragment and the userinfo - and what is left is bounded by
+// TruncateForMessage.
+//
+// It is a fourth function rather than a fourth caller of the same three
+// because of which question it answers. WithoutCredentials answers a
+// disclosure question alone, and is the rule for any value this program
+// renders or persists rather than fetches. This one answers that same question
+// plus a naming one: a refusal an operator is expected to act on has to name
+// the exact thing that was requested or opened, which is what the fragment cut
+// adds (WithoutFragment holds that argument), and it has to be a length a
+// message can carry, which is what the cap adds (MessageValueMaxLen holds that
+// measurement). So this is the display form of a value this program refuses
+// and then names while refusing it, whatever the boundary that value entered
+// through.
+//
+// Cut before truncate is load-bearing: truncating first would keep whatever
+// fits inside the cap, credential included, and each cut would then have
+// nothing left to find beyond it. The order among the three cuts is
+// immaterial, since WithoutUserinfo's authority scan terminates at "?" and at
+// "#" so no cut can reach across another's boundary - that function's own doc
+// comment holds the argument, and the residual all three share.
+func URLForMessage(raw string) string {
+	return TruncateForMessage(WithoutUserinfo(WithoutFragment(WithoutQuery(raw))))
 }

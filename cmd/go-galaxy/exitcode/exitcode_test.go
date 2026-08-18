@@ -107,6 +107,20 @@ var fromErrorCases = []exitCase{
 		wantCode: ExitNetwork,
 	},
 	{
+		// The discriminator against the row directly above, which keeps
+		// ExitNetwork: that one's metadata could not name a fetchable artifact
+		// at all, while this one names a perfectly fetchable artifact and is
+		// refused for the credential that would ride along to it.
+		name:     "download url with userinfo",
+		err:      fmt.Errorf("%w: %q", helpers.ErrDownloadURLUserinfo, "https://h/a.tar.gz"),
+		wantCode: ExitInstall,
+	},
+	{
+		name:     "metadata url with userinfo",
+		err:      fmt.Errorf("%w: %q", helpers.ErrMetadataURLUserinfo, "https://h/api/v3/versions/"),
+		wantCode: ExitInstall,
+	},
+	{
 		name:     "galaxy server auth failed",
 		err:      fmt.Errorf("%w: server a: ctx", helpers.ErrGalaxyAuthFailed),
 		wantCode: ExitNetwork,
@@ -529,7 +543,7 @@ func TestIntegritySentinelsMapToExitIntegrity(t *testing.T) {
 // moving the isIntegrityError entry of exitClasses below the isLockError
 // and isInstallError entries, which makes isInstallError claim the headline
 // first; verified, that mutation makes this test fail with:
-// "exitcode_test.go:539: FromError(integrity join) = 5, want 7".
+// "exitcode_test.go:553: FromError(integrity join) = 5, want 7".
 func TestIntegrityOutranksInstallFailureHeadline(t *testing.T) {
 	t.Parallel()
 	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
@@ -889,7 +903,7 @@ func TestStateObjectDeadlineClassification(t *testing.T) {
 // KILLING MUTATION, run and reverted: moving the isCacheBusyError entry of
 // exitClasses above its isInstallError entry makes this test fail with:
 //
-//	exitcode_test.go:898: FromError(joined) = 8, want 5
+//	exitcode_test.go:912: FromError(joined) = 8, want 5
 func TestCacheBusyFoldedBehindInstallFailureClassifiesAsInstall(t *testing.T) {
 	t.Parallel()
 	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
@@ -1094,11 +1108,94 @@ func TestLockfileUserinfoClassifiesAsLock(t *testing.T) {
 	}
 }
 
+// serverSuppliedURLPolicyCase is one row of
+// TestServerSuppliedURLPolicyClassifiesUniformly: an error tree carrying one
+// of the two server-supplied-URL sentinels under one of the three aggregation
+// shapes this project's headlines put an error into.
+type serverSuppliedURLPolicyCase struct {
+	err  error
+	name string
+}
+
+// serverSuppliedURLPolicyCases is a deliberate cross-product, not a catalog
+// of shapes production produces: both sentinels times all three aggregation
+// shapes, including two cells nothing produces today. A bare download-URL
+// refusal is one - checkDownloadURL is reached only from
+// validateDownloadInputs inside an install worker, so it always arrives behind
+// the install headline - and a download-URL refusal behind the
+// latest-version-lookup headline is the other, since outdated resolves root
+// metadata and never validates a download URL at all. Both are still rows,
+// because what the entry under test promises is a property of the error tree
+// rather than of the command that built it: a sentinel classifies the same
+// wherever it is joined, and a table cut down to today's reachable cells would
+// go quiet the moment a command grew a path into one of the others.
+//
+// The three shapes, named as properties of the tree rather than as a list of
+// the commands that build them: the sentinel alone, wrapped by prefixes that
+// add no sentinel of their own; the sentinel joined behind the per-collection
+// install-failure headline; and the sentinel joined behind the per-entry
+// latest-version-lookup headline. Both headlines are spelled exactly as
+// failureSummary renders them, "%w for %d collections", so a cell that IS a
+// production shape pins what a run actually produces rather than something
+// written for this test.
+//
+// Every row must classify identically. That is the whole point of the
+// isServerSuppliedURLPolicyError entry: without it the three shapes above
+// answer three different predicates, so one condition with one remedy would
+// report a different exit code depending only on what it was joined behind.
+func serverSuppliedURLPolicyCases() []serverSuppliedURLPolicyCase {
+	installHeadline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
+	outdatedHeadline := fmt.Errorf("%w for 1 collections", helpers.ErrLatestVersionLookupFailed)
+	download := fmt.Errorf("%w: %q", helpers.ErrDownloadURLUserinfo, "https://h/a.tar.gz")
+	metadata := fmt.Errorf("%w: %q", helpers.ErrMetadataURLUserinfo, "https://h/api/v3/versions/")
+
+	return []serverSuppliedURLPolicyCase{
+		{name: "download url, bare", err: download},
+		{name: "metadata url, bare", err: metadata},
+		{name: "download url, behind the install-failure headline", err: errors.Join(installHeadline, download)},
+		{name: "metadata url, behind the install-failure headline", err: errors.Join(installHeadline, metadata)},
+		{name: "download url, behind the latest-version-lookup headline", err: errors.Join(outdatedHeadline, download)},
+		{name: "metadata url, behind the latest-version-lookup headline", err: errors.Join(outdatedHeadline, metadata)},
+	}
+}
+
+// TestServerSuppliedURLPolicyClassifiesUniformly pins the class this run
+// reports when a Galaxy server, or a snapshot replaying one, supplies a URL
+// carrying a credential: ExitInstall, whatever the tree it arrives in.
+//
+// KILLING MUTATION, run: removing the isServerSuppliedURLPolicyError entry
+// from exitClasses fails four of the six rows - the two bare ones as ExitError
+// and the two behind the latest-version-lookup headline as ExitNetwork, while
+// the two behind the install-failure headline stay green because isInstallError
+// claims that headline anyway:
+//
+//	exitcode_test.go:1183: FromError(collection download url must not contain
+//	userinfo: "https://h/a.tar.gz") = 1, want ExitInstall (5)
+//
+// and, on the outdated-shaped rows, the same assertion reporting = 4.
+func TestServerSuppliedURLPolicyClassifiesUniformly(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range serverSuppliedURLPolicyCases() {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := FromError(tt.err); got != ExitInstall {
+				t.Errorf("FromError(%v) = %d, want ExitInstall (%d)", tt.err, got, ExitInstall)
+			}
+		})
+	}
+}
+
 // wantExitClassOrder is the precedence exitClasses must express, written out
 // as exit codes so the expectation is readable as the contract a CI branches
 // on rather than as a list of predicate names. Kept as a separate literal
 // from the table it checks: a copy of exitClasses's own order would agree
 // with any reordering by construction.
+//
+// Two adjacent entries carry the same code, which is a property of the table
+// rather than a typo here: isServerSuppliedURLPolicyError yields ExitInstall
+// and sits immediately above isInstallError, since what its entry buys is a
+// uniform class across every aggregation shape, not a code of its own.
 //
 //nolint:gochecknoglobals // a fixed table consumed by one test, not mutable shared state
 var wantExitClassOrder = []int{
@@ -1106,6 +1203,7 @@ var wantExitClassOrder = []int{
 	ExitIntegrity,
 	ExitSignature,
 	ExitLock,
+	ExitInstall,
 	ExitInstall,
 	ExitNetwork,
 	ExitCacheBusy,
@@ -1125,8 +1223,8 @@ var wantExitClassOrder = []int{
 // KILLING MUTATION, run and reverted: swapping the isCacheBusyError and
 // isCacheCorruptError entries of exitClasses makes this test fail with:
 //
-//	exitcode_test.go:1137: exitClasses[6].code = 9, want 8
-//	exitcode_test.go:1137: exitClasses[7].code = 8, want 9
+//	exitcode_test.go:1235: exitClasses[7].code = 9, want 8
+//	exitcode_test.go:1235: exitClasses[8].code = 8, want 9
 func TestExitClassOrderIsPinned(t *testing.T) {
 	t.Parallel()
 	if len(exitClasses) != len(wantExitClassOrder) {
@@ -1158,6 +1256,15 @@ type exitPrecedenceCase struct {
 // disturbs first, and covering every pair means no swap anywhere in the table
 // can leave this table silent.
 //
+// One adjacent pair has no row and cannot have one:
+// isServerSuppliedURLPolicyError sits directly above isInstallError and yields
+// that entry's own code, so no error tree can distinguish which of the two
+// claimed it and a row would assert nothing. The "lock over install" row is
+// the other consequence of that entry - the pair it names is no longer
+// adjacent - and it is kept anyway, since a lockfile verdict outranking the
+// install class is worth pinning whether or not another entry sits between
+// them.
+//
 //nolint:gochecknoglobals // a fixed table consumed by one test, not mutable shared state
 var adjacentExitPrecedenceCases = []exitPrecedenceCase{
 	{
@@ -1183,6 +1290,14 @@ var adjacentExitPrecedenceCases = []exitPrecedenceCase{
 		wantJoined: ExitSignature,
 		wantHigher: ExitSignature,
 		wantLower:  ExitLock,
+	},
+	{
+		name:       "lock over server-supplied url policy",
+		higher:     helpers.ErrLockfileDrift,
+		lower:      helpers.ErrDownloadURLUserinfo,
+		wantJoined: ExitLock,
+		wantHigher: ExitLock,
+		wantLower:  ExitInstall,
 	},
 	{
 		name:       "lock over install",
@@ -1246,7 +1361,7 @@ var adjacentExitPrecedenceCases = []exitPrecedenceCase{
 // isCacheCorruptError entries of exitClasses makes the "cache busy over cache
 // corrupt" row fail with:
 //
-//	exitcode_test.go:1257: FromError(joined) = 9, want 8
+//	exitcode_test.go:1372: FromError(joined) = 9, want 8
 func TestAdjacentExitClassPrecedence(t *testing.T) {
 	t.Parallel()
 	for _, tt := range adjacentExitPrecedenceCases {
@@ -1500,8 +1615,8 @@ var signatureExitCases = []exitCase{
 // KILLING MUTATION, run and reverted: moving the isSignatureError entry of
 // exitClasses below its isInstallError entry. Both aggregated rows fail:
 //
-//	exitcode_test.go:1511: FromError(signature verification failed, aggregated) = 5, want 10
-//	exitcode_test.go:1511: FromError(signature attribution mismatch, aggregated) = 5, want 10
+//	exitcode_test.go:1626: FromError(signature verification failed, aggregated) = 5, want 10
+//	exitcode_test.go:1626: FromError(signature attribution mismatch, aggregated) = 5, want 10
 func TestSignatureExitClassification(t *testing.T) {
 	t.Parallel()
 	for _, tt := range signatureExitCases {
@@ -1511,5 +1626,34 @@ func TestSignatureExitClassification(t *testing.T) {
 				t.Errorf("FromError(%s) = %d, want %d", tt.name, got, tt.wantCode)
 			}
 		})
+	}
+}
+
+// TestMetadataRequestBuildFailedClassifiesNetwork pins the classification
+// helpers.ErrMetadataRequestBuildFailed's own doc comment claims for itself,
+// on both shapes it reaches FromError in: bare, as internal/galaxy/cache
+// raises it, and wrapped, as collections.loadCollectionMetadata carries it up.
+// Both are asserted because they arrive by different routes and
+// isMetadataFetchError has to claim each one.
+//
+// It is a test of its own rather than another row in the tables above, and the
+// reason has nothing to do with this sentinel: each of those tables is
+// followed by a comment citing a line of this file by number, so inserting a
+// row silently invalidates every citation below it.
+//
+// KILLING MUTATION, run: deleting the helpers.ErrMetadataRequestBuildFailed
+// line from isMetadataFetchError. Both assertions fail:
+//
+//	exitcode_test.go:1653: FromError(bare) = 1, want 4
+//	exitcode_test.go:1657: FromError(wrapped) = 1, want 4
+func TestMetadataRequestBuildFailedClassifiesNetwork(t *testing.T) {
+	t.Parallel()
+
+	if got := FromError(helpers.ErrMetadataRequestBuildFailed); got != ExitNetwork {
+		t.Errorf("FromError(bare) = %d, want %d", got, ExitNetwork)
+	}
+	wrapped := fmt.Errorf("failed to load root metadata: %w", helpers.ErrMetadataRequestBuildFailed)
+	if got := FromError(wrapped); got != ExitNetwork {
+		t.Errorf("FromError(wrapped) = %d, want %d", got, ExitNetwork)
 	}
 }

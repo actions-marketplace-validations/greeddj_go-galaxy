@@ -172,6 +172,26 @@ var exitClasses = []exitClass{
 	// and a lockfile verdict resolves here.
 	{match: isSignatureError, code: ExitSignature},
 	{match: isLockError, code: ExitLock},
+	// isServerSuppliedURLPolicyError sits above isInstallError even though it
+	// yields that entry's own code, and what the entry buys is uniformity
+	// rather than a code: measured with this entry removed, a tree carrying
+	// one of these sentinels with no aggregation headline matches no predicate
+	// at all and falls back to ExitError, while the same sentinel joined
+	// behind helpers.ErrLatestVersionLookupFailed is claimed by isNetworkError
+	// and one joined behind helpers.ErrInstallationFailed by isInstallError -
+	// one condition with one remedy reporting three different codes decided
+	// only by what it was joined behind. Its position is the table's own
+	// convention, not a new rule: below isCanceled, isIntegrityError,
+	// isSignatureError and isLockError, since a Ctrl-C, a digest failure, a
+	// signature verdict and a lockfile verdict each outrank it for the reasons
+	// stated on those entries; and above isInstallError and isNetworkError,
+	// the two that were measured claiming these shapes and the reason this
+	// class is reachable at all. isResolutionError sits below it positionally
+	// rather than as a third hazard: the only member of that predicate a
+	// userinfo sentinel could plausibly travel behind is
+	// helpers.ErrLoadMetadataFailed, which loadRootMetadataCached raises bare
+	// as its own exhausted-walk verdict and joins with nothing.
+	{match: isServerSuppliedURLPolicyError, code: ExitInstall},
 	{match: isInstallError, code: ExitInstall},
 	{match: isNetworkError, code: ExitNetwork},
 	// isCacheBusyError sits in exactly this one position, for four
@@ -366,6 +386,48 @@ func isCacheBusyError(err error) bool {
 	return errors.Is(err, helpers.ErrCacheBusy) ||
 		errors.Is(err, helpers.ErrAnotherInstanceIsRunning) ||
 		errors.Is(err, helpers.ErrCacheLockLost)
+}
+
+// isServerSuppliedURLPolicyError reports whether err says a Galaxy server -
+// or a cached snapshot replaying one - supplied a URL this run refuses to use,
+// because it embeds a credential in its userinfo: an artifact's download URL
+// (helpers.ErrDownloadURLUserinfo) or a metadata reference derived from a
+// server's own versions_url or highest_version.href
+// (helpers.ErrMetadataURLUserinfo). Neither is repaired by a retry, by a
+// different server, or by an operator editing this run's configuration: the
+// offending value is content a server chose, so the remedy is on the server
+// that published it.
+//
+// The class is ExitInstall rather than a code of its own because there is no
+// third answer a pipeline would take: the run refused to fetch what it was
+// pointed at, exactly as it does for the install-time refusals that already
+// carry that code, and a new code buys a branch nobody writes.
+//
+// ExitNetwork is the alternative that has a real claim, and it is not
+// dismissed for lack of one. An entry sitting in this exact position and
+// yielding that code instead would deliver the identical uniformity, since the
+// uniformity comes from the position rather than from the code;
+// helpers.ErrUnsupportedDownloadURLScheme is a refusal of the very same field
+// already sitting there; and helpers.ErrLatestVersionLookupFailed, the
+// headline an outdated run joins this sentinel behind, sits there too. Two
+// things decide it the other way. The discriminator against
+// ErrUnsupportedDownloadURLScheme is whether the metadata could name a
+// fetchable value at all - isArtifactShapeError's own doc comment gives that
+// same reasoning for its own split - and a URL refused for its userinfo names
+// one perfectly well. And a network code is the one a CI reflexively runs
+// again, while this refusal is deterministic: the same server answers with the
+// same URL, so a retry can only spend the budget. What ExitInstall costs is
+// stated rather than denied - a lock or an outdated run installs nothing and
+// can still report an install-time failure, which the exit-code table
+// discloses - and a code an operator reads once is cheaper than a loop a CI
+// runs forever.
+//
+// And it is not ExitUsage, where helpers.ErrGalaxyServerURLUserinfo sits, for
+// the plainest reason available: nothing an operator wrote produced this
+// value, so there is nothing in flags, environment or requirements.yml to fix.
+func isServerSuppliedURLPolicyError(err error) bool {
+	return errors.Is(err, helpers.ErrDownloadURLUserinfo) ||
+		errors.Is(err, helpers.ErrMetadataURLUserinfo)
 }
 
 // isInstallError reports whether err is an install-time sentinel (unsafe
@@ -610,7 +672,11 @@ func isTransportError(err error) bool {
 // helpers.ErrMissingDownloadURL does: metadata that parsed into the expected
 // shape and still cannot yield a fetchable artifact is the same defect as
 // metadata carrying no download URL at all, so it classifies alike rather
-// than earning an exit class of its own.
+// than earning an exit class of its own. helpers.ErrMetadataRequestBuildFailed
+// is that same defect one step earlier - a metadata URL net/http will not
+// build a request from names nothing fetchable either - and it is deliberately
+// not routed to the userinfo class below: net/http refusing a value is not a
+// verdict about a credential, and the value it refused is never inspected.
 //
 // helpers.ErrLatestVersionLookupFailed is also an aggregation headline whose
 // per-entry causes are joined behind it via errors.Join, exactly like
@@ -622,12 +688,15 @@ func isTransportError(err error) bool {
 // helpers.ErrLockfileInvalid instead, and isLockError is checked ahead of
 // isNetworkError in the exitClasses table, so errors.Is walking the joined
 // tree lets isLockError claim it first regardless of what else is joined
-// alongside it.
+// alongside it. A metadata URL refused for embedded userinfo is the second
+// example of that same rule: it answers isServerSuppliedURLPolicyError, whose
+// entry sits ahead of this one's for the identical reason.
 func isMetadataFetchError(err error) bool {
 	return errors.Is(err, helpers.ErrMetadataUnavailable) ||
 		errors.Is(err, helpers.ErrMetadataIsNil) ||
 		errors.Is(err, helpers.ErrMissingDownloadURL) ||
 		errors.Is(err, helpers.ErrUnsupportedDownloadURLScheme) ||
+		errors.Is(err, helpers.ErrMetadataRequestBuildFailed) ||
 		errors.Is(err, helpers.ErrVersionsPayloadEmpty) ||
 		errors.Is(err, helpers.ErrVersionsPayloadUnsupported) ||
 		errors.Is(err, helpers.ErrVersionsPagingExceeded) ||
