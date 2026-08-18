@@ -300,6 +300,118 @@ Resolution itself is stricter than ansible's: a constraint set with no solution
 is a failure with a proof, not a lenient pick. See [Exit codes](#exit-codes) for
 what each failure class exits with.
 
+### Differences a migration runs into
+
+Everything below is deliberate too, and accepted for this tool's CI scope;
+what separates it from the list above is subject matter rather than posture.
+Those differences are about servers, credentials and artifact trust, while
+these are what a pipeline moving off `ansible-galaxy` actually meets: what a
+resolve picks, which defaults differ, which features are absent, what an exit
+code means, and what an installed tree looks like. Every "ansible does X"
+claim in this subsection is read against ansible-core 2.21.2. One of them is
+a property rather than an inventory and is stated once here: a flag this tool
+does not define is a usage error naming the flag and exits `2`, which is how
+`-U`, `--force`, `--force-with-deps` and `--pre` surface.
+
+- **The resolve decides the version, not what is already installed.** ansible
+  prefers a collection that is already present and does not query the Galaxy
+  API for it, upgrading only under `-U` and reinstalling only under
+  `--force`/`--force-with-deps`. Here resolution never consults the installed
+  tree at all: nothing on disk can influence which version is chosen. The
+  installed tree is read only afterwards, to decide whether the resolved
+  version still has to be installed - the record is looked up under the exact
+  resolved `<namespace>.<name>@<version>`, and a record that exists must
+  still name the same install path, name the same server the collection now
+  resolves from, and agree with any lockfile pin, with the extract marker
+  checked on top. A record that satisfies all of that skips the install
+  rather than downloading anything again. The consequence runs both ways: the
+  install path carries the namespace and the name but not the version, so a
+  resolve that lands lower installs the lower version over a newer tree, and
+  there is no "prefer what is there". A rerun is not by itself a new resolve,
+  though - with `requirements.yml` and the effective server list both
+  unchanged, the recorded resolution is replayed and the same versions come
+  back; `--refresh` (see [install options](#install-options)), or a change to
+  either input, makes it resolve again, and only then can an open constraint
+  land somewhere new. To hold versions still across runs, lock them - see
+  [lock](#lock).
+- **Prereleases are excluded and admitted on different rules than ansible's.**
+  Stricter in one direction: a collection publishing only prerelease versions
+  satisfies no plain constraint here, so the resolve fails with its proof plus
+  a hint naming that collection and pointing at an exact pin or a `>=X.Y.Z-0`
+  floor, where ansible-core 2.21.2 installs it, since every published version
+  stays a candidate there. Looser in the other: a constraint carrying a
+  prerelease operand admits prerelease versions for that whole constraint, so
+  a `>=1.0.0-0` floor also matches a later prerelease such as `2.0.0-rc1`,
+  which ansible filters out. Take away both halves rather than either one -
+  prereleases are not unreachable here, since an exact pin on one installs it
+  and a `-0` floor admits them; they are reached by naming them in the
+  constraint, and `--pre` is not a flag this tool defines.
+- **`requires_ansible` is not checked.** ansible reads a collection's
+  `meta/runtime.yml` and refuses to install one whose `requires_ansible`
+  excludes the running core version. go-galaxy never reads that file: it
+  installs no ansible-core and so has no version to check a requirement
+  against, and a collection ansible would refuse installs cleanly here. The
+  check does not disappear, it moves - from install time to play time,
+  surfacing when the playbook runs rather than when the collection lands.
+- **`collections_path` is one path, not a search list.** The value is split on
+  `:` and only the first entry is used, whichever route it arrived by:
+  `[defaults] collections_path`, `ANSIBLE_COLLECTIONS_PATH`, or
+  `-p`/`--download-path`. The ignored entries are named in one stderr warning
+  and nothing else ever looks at them - `-p "a:b:c"` warns `collections_path
+  lists multiple paths; using "a" and ignoring the rest: [b c]` and installs
+  into `a`. ansible searches every entry when deciding what is already
+  installed, so a collection installed under a later entry is invisible here
+  and is installed into the first one. The default differs as well:
+  `.collections`, project-local, against ansible's `~/.ansible/collections`.
+- **No token file is read.** ansible falls back to a token file when no server
+  section supplies one - `~/.ansible/galaxy_token`, relocatable through
+  `[galaxy] token_path`. go-galaxy reads no token file at all: `token_path` is
+  one of the `[galaxy]` keys it drops without a word - unlike the four
+  signature keys, which are named in a warning - and no default path is
+  consulted. The routes that do supply a credential are
+  `--token`/`GO_GALAXY_TOKEN`, a `[galaxy_server.<id>] token`, and
+  `ANSIBLE_GALAXY_SERVER_<ID>_TOKEN` - see [Galaxy servers and
+  authentication](#galaxy-servers-and-authentication). Both directions are
+  worth planning for: against a hub that requires a credential the run fails
+  loudly and names the server (exit `4`, the fail-closed 401/403 behavior
+  [Deliberate differences](#deliberate-differences) already describes), while
+  against a server that serves anonymously, as the public Galaxy does, the run
+  simply proceeds unauthenticated with nothing said.
+- **The request-timeout default is tighter.** `--timeout` defaults to `30s`
+  here, against ansible-core 2.21.2's 60s, and both tools read the same
+  `ANSIBLE_GALAXY_SERVER_TIMEOUT`: a pipeline that sets it gets the same
+  number in both, and a pipeline relying on the default gets a tighter budget
+  here. go-galaxy takes this setting from `--timeout` and its environment
+  variables only, reading no timeout out of `ansible.cfg` at all, so nothing
+  in that file changes it here. A hub slow to answer headers can therefore sit
+  inside ansible's default and outside this one, with `--timeout` or that
+  same shared variable as the remedy. What the budget bounds is unchanged - see
+  the `--timeout` bullet above and [install options](#install-options).
+- **The exit codes are not ansible's, and the same numbers mean different
+  things.** ansible-core 2.21.2 uses a small flat set: `1` generic, `4` parser
+  error, `5` options error, `99` interrupt, `250` unexpected. go-galaxy's
+  codes are class-specific and do not line up with those - `4` and `5` exist
+  in both with unrelated meanings, and an interrupt here is `130`/`143`/`129`
+  rather than `99`. A script branching on ansible's numbers therefore misreads
+  a go-galaxy run silently. See [Exit codes](#exit-codes) for what each code
+  means here.
+- **An installed tree looks different on disk.** An installed regular file
+  carries the mode it was unpacked with, and that mode has no write bit for
+  anyone, because the write bits are stripped once - when an artifact is
+  unpacked - so nothing downstream hands out a writable copy.
+  `ansible-galaxy`'s own installed files are writable by their owner, so an
+  in-place edit that worked after an ansible install fails here with a
+  permission error. The reason is that an install can share the unpacked bytes
+  with every other install that references them, so a writable installed file
+  would alias a write into all of them. Directories are not read-only, so this
+  is about editing an installed file, not about a frozen tree; edit a copy
+  outside the collections tree instead. Each collection directory also carries
+  a `.extract-done.<sha256>` marker this tool writes, which is not part of the
+  collection's own content: it records a count of entries and directories plus
+  those entries' total size, not a hash. An edit that changes any of those
+  makes the next install re-extract the collection over it; an edit that
+  preserves the edited file's exact byte length does not, and survives.
+
 ## Features
 
 - Dependency resolution with snapshot reuse.
