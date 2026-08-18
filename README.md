@@ -42,8 +42,14 @@ so pipelines finish sooner and changes ship faster.
   - `[galaxy] server`
   - `[galaxy] server_list`
   - `[galaxy] cache_dir`
-  - `[galaxy_server.<id>]` sections (`url`, `token`, `validate_certs`; see
-    [Galaxy servers and authentication](#galaxy-servers-and-authentication))
+  - `[galaxy_server.<id>]` sections (`url`, `token`, `validate_certs`)
+- A `server` or `url` value read from this file, or a `validate_certs`
+  value that relaxes TLS verification, is never paired with a token from
+  anywhere else: unconditionally for `[galaxy] server` (which has no
+  `validate_certs` key to relax), and for a `[galaxy_server.<id>]`
+  section's own `url` or `validate_certs` unless that same section also
+  supplied the token - see [Galaxy servers and
+  authentication](#galaxy-servers-and-authentication)
 
 ## Benchmarks
 
@@ -132,7 +138,24 @@ same `ANSIBLE_*` environment variables, for the collections subset above. It
 does not mean identical behavior everywhere: each deliberate difference is
 called out below rather than left to be discovered in CI.
 
-Signature verification is the one surface where that "same `ansible.cfg` keys
+Token handling is a second surface where that sentence splits, though less
+sharply than signature verification does below, where the four `[galaxy]`
+keys are refused outright: a `url` or a `validate_certs` is still read here
+exactly as ansible reads it, and only its pairing with a token you supplied
+is refused. What an *unauthenticated* run reads is drop-in: `[galaxy] server`
+and every `[galaxy_server.<id>]` url come from a discovered file exactly as
+ansible takes them. That is drop-in in what such a run reads, not in
+everything it then does - the deliberate differences below (one server rather
+than a union, a fail-closed 401/5xx) apply to an unauthenticated run too. An
+*authenticated* run differs in one more way, deliberately and loudly:
+go-galaxy refuses to pair a token with a server URL a file supplied -
+unconditionally for `[galaxy] server`, and for a `[galaxy_server.<id>] url`
+unless that same section also supplied the token - which ansible does not
+check at all either way - see [Galaxy servers and
+authentication](#galaxy-servers-and-authentication) and its `--token`
+section for the rule, its cost, and its remedies.
+
+Signature verification is the one other surface where that "same `ansible.cfg` keys
 and the same `ANSIBLE_*` environment variables" sentence splits in two:
 `ansible.cfg`'s four `[galaxy]` signature keys are refused (see [Signature
 verification](#signature-verification) below for why), while all four
@@ -191,9 +214,16 @@ Anything else in `ansible.cfg` is ignored. Within `[galaxy_server.<id>]` the
 exceptions are deliberate and loud: `username`/`password` (Basic auth) and
 `auth_url`/`client_id` (Keycloak/SSO) are refused as config errors naming the
 key rather than ignored, because silently dropping a credential would send an
-unauthenticated request to a private hub. See [Galaxy servers and
-authentication](#galaxy-servers-and-authentication) for the full table, token
-precedence, and TLS.
+unauthenticated request to a private hub. A token is also never paired with a
+`[galaxy] server` or `[galaxy_server.<id>] url` this file supplied, and
+never paired with a server whose certificate verification a
+`[galaxy_server.<id>] validate_certs` key in this file disabled: for
+`[galaxy] server` the destination refusal is unconditional, since there is
+no `[galaxy] token` to satisfy it and no `[galaxy] validate_certs` key to
+relax in the first place, while for a `[galaxy_server.<id>]` section either
+refusal lifts only when that same section also supplied the token - see
+[Galaxy servers and authentication](#galaxy-servers-and-authentication) for
+the full table, token precedence, and TLS.
 
 ### Deliberate differences
 
@@ -209,6 +239,24 @@ precedence, and TLS.
   server. ansible swallows those and moves on, which turns a wrong token or a
   five-minute hub outage into an install from the public Galaxy - dependency
   confusion by accident.
+- **A token is never handled on terms an ansible.cfg file chose - not the
+  server URL it is sent to, and not whether that server's certificate is
+  checked.** ansible has no such rule: whatever address `[galaxy] server` or
+  a `[galaxy_server.<id>]` section names, and whatever that section sets
+  `validate_certs` to, any token you have configured simply goes there over
+  whatever connection results. go-galaxy refuses both pairings instead - a
+  file-sourced URL, or a file-relaxed TLS policy, receiving an
+  operator-sourced token - because the alternative is worse than a refused
+  run: an attacker who can only commit a repository file, never touch your
+  credential, still gets to choose where it is sent, or to strip the
+  authentication of the connection it travels over. Silently dropping the
+  token instead of refusing would not be safe either - an origin they chose
+  that simply answers anonymously would then install its own, or the public
+  Galaxy's, content in place of the private collections you meant to fetch,
+  the identical dependency-confusion shape the previous bullet already
+  refuses to risk. See [Galaxy servers and
+  authentication](#galaxy-servers-and-authentication) for the exact rule and
+  its remedies.
 - **`--timeout` is a no-progress budget, not a total-transfer cap.** It bounds
   the wait for response headers and the gap between two body reads, so a large
   download that keeps streaming is never cut off by it, however long it takes.
@@ -429,8 +477,12 @@ two-flag set of their own, listed under
   `$GO_GALAXY_SERVER` (or pass `--server`) to keep the old behavior.
 - `--token` (`$GO_GALAXY_TOKEN`) - Galaxy API token for the single effective server;
   an error if a multi-entry `server_list` is configured, and setting it to the
-  empty string clears a previously configured token (see
-  [Galaxy servers and authentication](#galaxy-servers-and-authentication))
+  empty string clears a previously configured token. **Breaking change:** also
+  refused, and not merely applied, when that single server's URL was sourced
+  from an ansible.cfg file rather than from you, and refused the same way when
+  that server's certificate verification was disabled by the file rather than
+  by you - see [--token](#--token) for the remedy each half needs and why a
+  section's own `token` key does not authorize an override either.
 - `--timeout` (`$GO_GALAXY_SERVER_TIMEOUT`, `$GO_GALAXY_TIMEOUT`, `$ANSIBLE_GALAXY_SERVER_TIMEOUT`)
   `--timeout` is a no-progress budget - it bounds the response-header wait and the gap between two
   body reads. It bounds neither total transfer time nor a byte-drip: a server that keeps dribbling a
@@ -725,9 +777,17 @@ url = https://galaxy.ansible.com
 ```
 
 ```bash
+export ANSIBLE_GALAXY_SERVER_AUTOMATION_HUB_URL=https://hub.example.internal/api/galaxy
 export ANSIBLE_GALAXY_SERVER_AUTOMATION_HUB_TOKEN=xxxxxxxxxxxxxxxx
 go-galaxy install
 ```
+
+The `_URL` export here is not redundant with the identical `url` the section
+above already names: a token this run supplies is refused against a server
+URL this run read out of the ansible.cfg file instead of from the operator -
+see [--token](#--token) below for why. Naming the same address again through
+the environment moves it onto the operator's own channel, which is what lets
+the token export above resolve at all.
 
 Every collection is resolved independently against `automation_hub` first, falling
 back to `release_galaxy` only if the private hub doesn't have it - so one install
@@ -739,15 +799,15 @@ Automation Hub deployment mounts directly under its own base path, so the same
 
 `[galaxy_server.<id>]` keys, and what go-galaxy does with them:
 
-| Key                     | Support                                                                                                                   |
-|:------------------------|:--------------------------------------------------------------------------------------------------------------------------|
-| `url`                   | Supported, required.                                                                                                      |
-| `token`                 | Supported.                                                                                                                |
-| `validate_certs`        | Supported (see TLS below).                                                                                                |
-| `api_version`           | Accepted only as `v3` (a no-op; this tool always speaks the v3 API); any other value is a config-load error.              |
-| `username`, `password`  | Hard config-load error naming the key: this is ansible's Basic auth, which this tool does not implement.                  |
-| `auth_url`, `client_id` | Hard config-load error naming the key: this is ansible's Keycloak/SSO token exchange, which this tool does not implement. |
-| anything else           | Warned about and ignored.                                                                                                 |
+| Key                     | Support                                                                                                                                                |
+|:----------------------|:-----------------------------------------------------------------------------------------------------------------------------------------------------|
+| `url`                   | Supported, required. A token is never sent to a `url` supplied by this key unless this same section also supplies the token - see [--token](#--token). |
+| `token`                 | Supported. Authorizes only itself against this section's own `url`; it does not authorize an operator-supplied token overriding it.                    |
+| `validate_certs`        | Supported (see TLS below). A token is never sent over a connection this key disabled verification for unless this same section also supplies the token - see [--token](#--token). |
+| `api_version`           | Accepted only as `v3` (a no-op; this tool always speaks the v3 API); any other value is a config-load error.                                           |
+| `username`, `password`  | Hard config-load error naming the key: this is ansible's Basic auth, which this tool does not implement.                                               |
+| `auth_url`, `client_id` | Hard config-load error naming the key: this is ansible's Keycloak/SSO token exchange, which this tool does not implement.                              |
+| anything else           | Warned about and ignored.                                                                                                                              |
 
 Basic auth and Keycloak/SSO are refused outright rather than silently sending an
 unauthenticated request and surfacing a confusing 401 later - the error names the
@@ -773,6 +833,58 @@ token instead. When it does apply, it overrides that one server's own
 configured token; setting it to the empty string clears the token entirely,
 letting a pipeline force an anonymous run by exporting `GO_GALAXY_TOKEN=`
 without editing any config.
+
+The pairing rule below is documented here, but it is not scoped to this
+flag. It applies to every token you supplied yourself, which includes a
+per-server `ANSIBLE_GALAXY_SERVER_<ID>_TOKEN` inside a multi-entry
+`server_list` - a shape `--token` itself cannot reach, since there it is a
+hard error for the separate reason above. Every configured server is judged
+on its own, and the first one that offends fails the whole config load
+naming that server, so a `server_list` entry other than the first is refused
+just as squarely. Where the rest of this section says "the single effective
+server", read "the server that token is configured for" whenever the token
+in your hands is a per-server `_TOKEN`.
+
+**`--token` / `GO_GALAXY_TOKEN` is refused, not merely overridden, when the
+single effective server's URL came from the ansible.cfg file rather than
+from you, and refused the same way when that server's certificate
+verification was disabled by the file rather than by you.** A repository
+can commit an `ansible.cfg` naming any address it likes - a bare `[galaxy]
+server` line is enough, no `server_list` and no `[galaxy_server.<id>]`
+section required - and a token you export the ordinary CI way must never
+follow an address you did not yourself supply, nor cross a connection whose
+verification you did not yourself disable. Two remedies both move the URL
+onto your own channel instead of the file's, and neither needs a new
+switch: export `ANSIBLE_GALAXY_SERVER` (or, for a `server_list` entry, that
+id's own `ANSIBLE_GALAXY_SERVER_<ID>_URL`) naming the identical address, or
+pass `--server`/`$GO_GALAXY_SERVER` the address itself. Naming the
+`server_list` id through `--server=<id>` does not help: an id match only
+selects which section applies, and that section's own `url` is still
+file-sourced either way. The TLS-policy refusal has its own analogous
+remedy instead - `ANSIBLE_GALAXY_SERVER_<ID>_VALIDATE_CERTS`, naming the
+identical value already in the section - since moving the *address* onto
+your own channel does nothing for a *TLS policy* the file separately
+disabled for it. When one section supplies both `url` and `validate_certs`,
+the two remedies are not alternatives: you need both, and you meet them one
+at a time, since the destination refusal is reported first and the TLS one
+only on the rerun after you have fixed it. A section's own `token` key does
+not open either door: overriding it with `--token`/`GO_GALAXY_TOKEN` while the `url` or the
+`validate_certs` is still file-sourced is refused the same way, because
+whether a section also declares a decoy `token` is a choice made by
+whoever authored that file, not by you - the same pairing rule the
+`[galaxy_server.<id>]` key table above states for `url`, `token`, and
+`validate_certs`.
+
+A `server_list` id containing a `-` makes the `ANSIBLE_GALAXY_SERVER_<ID>_*`
+remedy above unsettable by a plain shell `export`, since `-` is not a legal
+character in a POSIX shell variable name. Four routes remain: `env
+'ANSIBLE_GALAXY_SERVER_MY-ID_VALIDATE_CERTS=no' go-galaxy ...` (`env`
+accepts a name a shell `export` cannot); a container's own `-e` flag, which
+carries the same exemption; renaming the id in `server_list` to use `_`
+instead of `-`; or `--server=<url>` naming the address directly, which
+discards the `[galaxy_server.<id>]` section entirely - its own `token` and
+`validate_certs` go with it, so that route is a different configuration
+rather than a workaround for this one.
 
 Prefer the environment variable over the flag. A token passed as `--token`
 lands in this process's argv, where any local process can read it - on Linux
@@ -825,9 +937,22 @@ from the configured `url`).
 server - but only for that one server's own network origin, never globally and
 never for a download host on a different origin. The run warns loudly about
 it, even in quiet mode (twice, if that server also carries a token, since the
-token would then cross a connection this run cannot authenticate). Prefer
-trusting a self-signed hub's CA instead of disabling verification: point
-`SSL_CERT_FILE` or `SSL_CERT_DIR` at it and leave `validate_certs` unset.
+token would then cross a connection this run cannot authenticate).
+
+Prefer trusting a self-signed hub's CA over disabling verification at all:
+point `SSL_CERT_FILE` or `SSL_CERT_DIR` at it and leave `validate_certs`
+unset. That is the remedy that needs no `validate_certs` key at all, so
+nothing below ever applies to it.
+
+When `validate_certs = false` genuinely has to stay, and the same server
+also carries a token you supply yourself (`--token`, `GO_GALAXY_TOKEN`, or
+that server's own `ANSIBLE_GALAXY_SERVER_<ID>_TOKEN`), the pairing is
+refused unless the `validate_certs` key is *also* sourced from your own
+environment rather than the file: export
+`ANSIBLE_GALAXY_SERVER_<ID>_VALIDATE_CERTS` naming the identical value. See
+[Rejected as configuration errors](#rejected-as-configuration-errors) below
+and [Galaxy servers and authentication](#galaxy-servers-and-authentication)
+for the exact rule and its remedies.
 
 ### Rejected as configuration errors
 
@@ -840,6 +965,14 @@ These are refused before any request is made, exiting with the usage exit code
 - A token configured for a plaintext (`http://`) origin that isn't loopback.
 - Two configured servers that share a network origin but disagree on their
   token or their `validate_certs`.
+- An operator-supplied token (`--token`, `GO_GALAXY_TOKEN`, or that
+  server's own `ANSIBLE_GALAXY_SERVER_<ID>_TOKEN`) paired with a server URL
+  this run read out of `[galaxy] server` or a `[galaxy_server.<id>] url`,
+  unless that same section also supplied the token itself.
+- The identical operator-supplied token paired with a server whose
+  certificate verification a `[galaxy_server.<id>] validate_certs` key
+  disabled, unless that same section also supplied the token itself. See
+  [TLS: validate_certs](#tls-validate_certs) above for the remedy.
 
 By contrast, an auth failure (401/403) or an unavailable server exits with the
 network exit code (`4`) instead, since that's a runtime condition to retry or

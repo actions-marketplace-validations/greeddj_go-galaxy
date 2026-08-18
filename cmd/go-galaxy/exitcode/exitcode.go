@@ -788,14 +788,20 @@ func isGalaxyServerSectionError(err error) bool {
 
 // isGalaxyServerPolicyError reports whether err says the configuration
 // parses but describes something this tool refuses to do: leak a
-// credential through a URL or a plaintext transport, or give one origin
-// two different credential/TLS policies.
+// credential through a URL or a plaintext transport, give one origin two
+// different credential/TLS policies, or pair a credential with a server
+// address or TLS policy this run did not source from the operator -
+// config.checkTokenPairing's two sentinels, which share this class because
+// they share one remedy: an operator export naming the address, or the TLS
+// policy, on the operator's own channel.
 func isGalaxyServerPolicyError(err error) bool {
 	return errors.Is(err, helpers.ErrGalaxyServerURLUserinfo) ||
 		errors.Is(err, helpers.ErrInsecureTokenTransport) ||
 		errors.Is(err, helpers.ErrConflictingServerTLSPolicy) ||
 		errors.Is(err, helpers.ErrConflictingServerToken) ||
-		errors.Is(err, helpers.ErrAmbiguousGalaxyToken)
+		errors.Is(err, helpers.ErrAmbiguousGalaxyToken) ||
+		errors.Is(err, helpers.ErrTokenDestinationFromAnsibleConfig) ||
+		errors.Is(err, helpers.ErrTokenTLSPolicyFromAnsibleConfig)
 }
 
 // isCollectionNameUsageError reports whether err is an invalid-collection-name/format

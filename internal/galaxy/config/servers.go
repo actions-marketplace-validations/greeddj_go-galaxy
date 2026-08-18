@@ -118,6 +118,52 @@ type Server struct {
 	URL                   string
 	Token                 Secret
 	InsecureSkipTLSVerify bool
+	// urlFromAnsibleConfig reports whether URL was sourced from an
+	// ansible.cfg file - [galaxy] server or a [galaxy_server.<id>] url -
+	// rather than from the operator: anything but the ansible.cfg file
+	// itself, which is the flag's own built-in default, --server,
+	// GO_GALAXY_SERVER, ANSIBLE_GALAXY_SERVER, and
+	// ANSIBLE_GALAXY_SERVER_<ID>_URL. Those five are the whole operator
+	// channel list; buildImplicitServer's own doc comment names only the
+	// four its path can produce, since a per-server _URL override is read
+	// by buildServer and never reaches it. Unexported deliberately:
+	// provenance is config-internal and must never reach serverAuths, which
+	// needs the resolved origin, token, and TLS policy - never where any of
+	// the three came from. tokenPairingOffense is the sole reader.
+	urlFromAnsibleConfig bool
+	// tokenFromAnsibleConfig mirrors urlFromAnsibleConfig for Token: it
+	// reports whether Token was sourced from a [galaxy_server.<id>] token
+	// key rather than from the operator (--token, GO_GALAXY_TOKEN, or
+	// ANSIBLE_GALAXY_SERVER_<ID>_TOKEN). It is a pure provenance bool, so
+	// it also reads true for a server whose section declares no token key
+	// at all: envOrIni returns ("", false) for a key nothing set, and this
+	// field is that bool negated. Nothing acts on the wrong-looking true,
+	// because tokenPairingOffense reaches this field only past its own
+	// Token.IsSet() term, which a server carrying no token never survives.
+	// That makes the shield the reader's rather than the field's - the
+	// asymmetry insecureFromAnsibleConfig below states from its side.
+	// tokenPairingOffense is the sole reader.
+	tokenFromAnsibleConfig bool
+	// insecureFromAnsibleConfig is a conjunction, not a provenance: true only
+	// when InsecureSkipTLSVerify is itself true AND that true came from a
+	// [galaxy_server.<id>] validate_certs key rather than from
+	// ANSIBLE_GALAXY_SERVER_<ID>_VALIDATE_CERTS. It is deliberately not a
+	// pure provenance bool mirroring its two siblings above: envOrIni returns
+	// ("", false) for a key the section never set at all, so a pure
+	// provenance bool would read "the file supplied it" for a server with no
+	// validate_certs key whatsoever - an actively wrong value a future gate
+	// could read as "this server's TLS policy is file-sourced" when no policy
+	// was ever stated. Folding InsecureSkipTLSVerify's own value into this one
+	// makes that invalid state unrepresentable: a server with certs verified
+	// (the default, or an explicit validate_certs = true) always reads false
+	// here regardless of which channel supplied it. tokenFromAnsibleConfig
+	// above is the pure provenance bool this one declines to be, and it does
+	// carry exactly that wrong-looking true for an absent key; what keeps it
+	// harmless is tokenPairingOffense's own Token.IsSet() term, a guarantee
+	// that lives in the reader and moves whenever the reader changes, which
+	// is what this field's shape does not need. tokenPairingOffense is the
+	// sole reader.
+	insecureFromAnsibleConfig bool
 }
 
 // galaxyServerHardErrorKeys are the [galaxy_server.<id>] keys ansible
@@ -195,6 +241,13 @@ func resolveServers(cfg *Config, c *cli.Command, ansCfg ansibleConfig) error {
 	if err := applyTokenFlag(c, servers); err != nil {
 		return err
 	}
+	// Must run after applyTokenFlag: that call is what pairs an operator
+	// --token/GO_GALAXY_TOKEN with servers[0], so checking either arm of the
+	// pairing any earlier would inspect a token that has not been assigned
+	// yet.
+	if err := checkTokenPairing(servers); err != nil {
+		return err
+	}
 
 	cfg.Servers = servers
 	cfg.Server = servers[0].URL
@@ -222,6 +275,11 @@ func resolveServers(cfg *Config, c *cli.Command, ansCfg ansibleConfig) error {
 // can force an anonymous run by exporting GO_GALAXY_TOKEN= without editing
 // any config. An unset flag - including a command that never registers it -
 // leaves the list untouched.
+//
+// The token this sets is always operator-sourced (--token or GO_GALAXY_TOKEN
+// are both operator channels), so tokenFromAnsibleConfig is cleared alongside
+// Token: a section's own token, once overridden here, must no longer read as
+// authorizing anything through checkTokenPairing's pairing rule.
 func applyTokenFlag(c *cli.Command, servers []Server) error {
 	if !c.IsSet("token") {
 		return nil
@@ -242,6 +300,7 @@ func applyTokenFlag(c *cli.Command, servers []Server) error {
 		return err
 	}
 	servers[0].Token = token
+	servers[0].tokenFromAnsibleConfig = false
 	return nil
 }
 
@@ -277,7 +336,11 @@ func resolveServerCandidates(
 		return servers, nil
 	}
 
-	server, err := buildImplicitServer(cfg.Server)
+	// cfg.AnsibleServerUsed && !cfg.AnsibleServerEnvUsed is the predicate for
+	// "cfg.Server was supplied by the ansible.cfg file, not by
+	// $ANSIBLE_GALAXY_SERVER" - see Config.AnsibleServerEnvUsed's own doc
+	// comment.
+	server, err := buildImplicitServer(cfg.Server, cfg.AnsibleServerUsed && !cfg.AnsibleServerEnvUsed)
 	if err != nil {
 		return nil, err
 	}
@@ -306,7 +369,10 @@ func resolveExplicitServer(value string, ids []string, sections map[string]map[s
 		}
 		return buildServer(id, sections[id])
 	}
-	server, err := buildImplicitServer(value)
+	// value is --server's own value or GO_GALAXY_SERVER - both operator
+	// channels - so the resulting anonymous server's URL is never
+	// ansible.cfg-sourced.
+	server, err := buildImplicitServer(value, false)
 	return server, nil, err
 }
 
@@ -389,13 +455,16 @@ func buildServer(id string, kv map[string]string) (Server, []string, error) {
 	}
 	warnings := unknownKeyWarnings(id, keys)
 
-	normalized, parsed, err := resolveServerURL(id, envOrIni(id, "URL", kv["url"]))
+	rawURL, urlFromEnv := envOrIni(id, "URL", kv["url"])
+	normalized, parsed, err := resolveServerURL(id, rawURL)
 	if err != nil {
 		return Server{}, warnings, err
 	}
 
-	token := NewSecret(envOrIni(id, "TOKEN", kv["token"]))
-	insecure, err := resolveValidateCerts(id, envOrIni(id, "VALIDATE_CERTS", kv["validate_certs"]))
+	rawToken, tokenFromEnv := envOrIni(id, "TOKEN", kv["token"])
+	token := NewSecret(rawToken)
+	rawValidateCerts, validateCertsFromEnv := envOrIni(id, "VALIDATE_CERTS", kv["validate_certs"])
+	insecure, err := resolveValidateCerts(id, rawValidateCerts)
 	if err != nil {
 		return Server{}, warnings, err
 	}
@@ -404,7 +473,12 @@ func buildServer(id string, kv map[string]string) (Server, []string, error) {
 		return Server{}, warnings, err
 	}
 
-	return Server{ID: id, URL: normalized, Token: token, InsecureSkipTLSVerify: insecure}, warnings, nil
+	return Server{
+		ID: id, URL: normalized, Token: token, InsecureSkipTLSVerify: insecure,
+		urlFromAnsibleConfig:      !urlFromEnv,
+		tokenFromAnsibleConfig:    !tokenFromEnv,
+		insecureFromAnsibleConfig: insecure && !validateCertsFromEnv,
+	}, warnings, nil
 }
 
 // checkHardErrorKeys returns ErrUnsupportedGalaxyServerKey, naming the
@@ -485,17 +559,32 @@ func parseAnsibleBool(raw string) (bool, bool) {
 // translation of either (ansible does not case- or dash-normalize the id,
 // so neither does this) - wins outright when the environment variable is
 // set at all, even to an empty string; otherwise iniValue is used.
-func envOrIni(id, key, iniValue string) string {
+//
+// The bool reports whether the environment supplied the value: buildServer
+// needs it alongside the value itself to record, for every key whose
+// provenance the pairing rule weighs, whether the ansible.cfg file or an
+// operator channel supplied it - a distinction the resolved string alone
+// cannot make once env and ini have already been collapsed into it.
+// tokenPairingOffense is what reads those recorded bits, to tell a credential
+// the operator supplied, or an address or TLS policy the operator named,
+// apart from one this process merely read out of a section.
+func envOrIni(id, key, iniValue string) (string, bool) {
 	if v, ok := os.LookupEnv("ANSIBLE_GALAXY_SERVER_" + strings.ToUpper(id) + "_" + key); ok {
-		return v
+		return v, true
 	}
-	return iniValue
+	return iniValue, false
 }
 
 // buildImplicitServer builds the single anonymous server ("" id, no token,
 // certs verified) used whenever no server_list is in effect: rawURL is
 // already the fully precedence-resolved single-server value ([galaxy]
 // server, the --server flag, or an explicit anonymous --server override).
+// urlFromAnsibleConfig records that value's own provenance, exactly as
+// buildServer does for a server_list entry's url: true when rawURL was
+// sourced from the ansible.cfg file itself ([galaxy] server, but not its
+// ANSIBLE_GALAXY_SERVER environment spelling), false for every operator
+// channel (--server, GO_GALAXY_SERVER, ANSIBLE_GALAXY_SERVER, or the flag's
+// own built-in default).
 //
 // An empty rawURL is not itself an error: BuildCollectionConfig's
 // documented contract is that a command which does not register the
@@ -506,7 +595,16 @@ func envOrIni(id, key, iniValue string) string {
 // other unregistered flag; a real, flag-registering command's default is
 // never empty (see cmd/go-galaxy/cliflags/const.go's defaultServerURL), so
 // this only ever fires for the "not registered at all" case in practice.
-func buildImplicitServer(rawURL string) (Server, error) {
+//
+// It takes no validate_certs-provenance parameter to mirror
+// urlFromAnsibleConfig with, and that is a containment fact rather than an
+// omission: ansibleGalaxyConfig's [galaxy] struct carries only CacheDir,
+// Server, ServerList, and SignatureKeys - there is no [galaxy] validate_certs
+// key for this path to read - so the returned Server's
+// insecureFromAnsibleConfig is always its zero value, false, and
+// tokenPairingOffense's TLS-policy arm can never fire for a server this
+// function built.
+func buildImplicitServer(rawURL string, urlFromAnsibleConfig bool) (Server, error) {
 	if rawURL == "" {
 		return Server{}, nil
 	}
@@ -517,7 +615,7 @@ func buildImplicitServer(rawURL string) (Server, error) {
 	if parsed.User != nil {
 		return Server{}, helpers.ErrGalaxyServerURLUserinfo
 	}
-	return Server{URL: normalized}, nil
+	return Server{URL: normalized, urlFromAnsibleConfig: urlFromAnsibleConfig}, nil
 }
 
 // normalizeServerURL trims raw, strips one pair of surrounding double
@@ -601,6 +699,190 @@ func checkOriginConflicts(servers []Server) error {
 		if !prior.Token.sameAs(s.Token) {
 			return fmt.Errorf("%w: %q and %q share origin %s", helpers.ErrConflictingServerToken, prior.ID, s.ID, origin)
 		}
+	}
+	return nil
+}
+
+// tokenPairingOffense reports the credential-pairing violation server s
+// commits, or nil when none applies. It is the whole predicate
+// checkTokenPairing consults, kept separate from the url.Parse and origin
+// rendering below it so the pairing logic itself stays a pure function of a
+// Server.
+//
+// A server is exempt - nil regardless of everything else - when no token is
+// configured (!Token.IsSet()) or when the token itself came from the same
+// ansible.cfg section as whatever else is being checked
+// (tokenFromAnsibleConfig): a section that supplied its own credential
+// authorizes only itself, never a value layered on top of it from an
+// operator channel.
+//
+// Past that guard, two properties are checked in a fixed order, and the
+// order is deliberate: whether the server's URL is file-sourced
+// (urlFromAnsibleConfig) first, then - only once that is clear - whether an
+// ansible.cfg file disabled certificate verification for it
+// (insecureFromAnsibleConfig). A file-sourced destination completes an
+// exfiltration on its own, since the operator's token then reaches an
+// address the file alone chose; a file-sourced TLS policy still sends the
+// token to an address the operator named, merely over a connection this run
+// cannot authenticate. The graver fault is reported first, so an operator
+// holding both is told the destination problem and reaches the TLS refusal
+// only on the rerun, once that first one is fixed. Each of the two returned
+// sentinels names exactly one remedy, which is why they are two distinct
+// values rather than one error carrying a variable message.
+func tokenPairingOffense(s Server) error {
+	if !s.Token.IsSet() || s.tokenFromAnsibleConfig {
+		return nil
+	}
+	if s.urlFromAnsibleConfig {
+		return helpers.ErrTokenDestinationFromAnsibleConfig
+	}
+	if s.insecureFromAnsibleConfig {
+		return helpers.ErrTokenTLSPolicyFromAnsibleConfig
+	}
+	return nil
+}
+
+// checkTokenPairing refuses a Galaxy token paired with a server this run did
+// not source, in full, from the operator: a server URL - [galaxy] server or
+// a [galaxy_server.<id>] url - sourced from an ansible.cfg file rather than
+// from the operator, or a server whose certificate verification an
+// ansible.cfg file disabled for it, in either case unless the token itself
+// came from that same file's own [galaxy_server.<id>] section.
+// tokenPairingOffense holds the per-server predicate and the fixed order
+// between its two checks; this function is the walk over servers, the
+// url.Parse needed to render an origin, and the error wrapping - never a
+// second copy of the predicate.
+//
+// The one pairing rule governs two questions: WHERE a credential is sent
+// (its destination), and WHETHER the address it is sent to is verified (its
+// TLS policy). Both are checked on identical terms, which is what keeps this
+// one function rather than two: the predicate is a pairing, never an
+// authorship test. This function cannot learn who actually wrote a given
+// ansible.cfg, so it does not try to - it
+// only asks whether the credential and the property being checked against it
+// arrived through the same channel. A section that pairs its own url, or its
+// own validate_certs, with its own token (file+file) is accepted, because
+// one author supplied both halves and could equally have chosen to send the
+// token nowhere at all, or to leave verification on. What is refused is
+// exactly the case where the two halves have different authors: a URL, or a
+// relaxed TLS policy, a repository's ansible.cfg chose, paired with a token
+// the operator supplied through --token, GO_GALAXY_TOKEN, or an
+// ANSIBLE_GALAXY_SERVER_<ID>_TOKEN. A repository a CI job merely checks out
+// can commit that file and name any address it likes, or disable
+// verification for one it names honestly; the operator's export was never
+// scoped to that address or that policy, so honoring either there hands the
+// credential to whatever the checked-out tree names, or strips the
+// authentication of the connection it travels over - the simplest shape
+// needs nothing but a bare "[galaxy] server" line and the token environment
+// variable CI already exports, with no server_list, no per-server section,
+// and no id to guess.
+//
+// Naming a server through an operator channel is not the same as naming its
+// address, or its TLS policy, through one: --server naming a server_list id,
+// or ANSIBLE_GALAXY_SERVER_LIST naming which ids are even in play, both pick
+// which section applies without supplying that section's own url or
+// validate_certs, so neither launders a file-sourced value onto the operator
+// channel - only a channel naming the value itself does that (--server given
+// the url directly, GO_GALAXY_SERVER, ANSIBLE_GALAXY_SERVER, or
+// ANSIBLE_GALAXY_SERVER_<ID>_URL for the destination;
+// ANSIBLE_GALAXY_SERVER_<ID>_VALIDATE_CERTS for the TLS policy).
+//
+// What the rule costs a legitimate deployment is concrete, and the canonical
+// ansible CI shape is the one that pays it: a [galaxy_server.<id>] url
+// committed to the repository beside an ANSIBLE_GALAXY_SERVER_<ID>_TOKEN the
+// job exports. That configuration is refused outright - a config-load failure
+// exiting with the usage class, before any request leaves the process - until
+// the operator either exports ANSIBLE_GALAXY_SERVER_<ID>_URL naming the
+// identical address the section already carries, or moves the token into that
+// same section. The price is one duplicated environment variable per
+// authenticated server, paid once per pipeline; what it buys is that no
+// checked-out file gets to pick where that credential goes.
+//
+// A section's own token does not authorize an operator token overriding it
+// either: whether the section also declares its own "token = x" is a choice
+// made by the same untrusted author as the url or the validate_certs beside
+// it, and letting that declaration flip the verdict would let a hostile file
+// unlock the operator's real credential by adding one line a diff review is
+// unlikely to flag as security-relevant. So the file+file pairing above is
+// the only shape a section's own token legitimizes; an operator token
+// layered on top of it is refused exactly like one layered on a bare url or
+// a bare validate_certs.
+//
+// The TLS-policy half is this codebase's signature-settings principle -
+// stated in CLAUDE.md as "a setting able to relax a verification check must
+// not come from a file whose author cannot be established", the reason
+// ansible's four [galaxy] signature settings are configured from flags and
+// environment variables only and never from a discovered ansible.cfg at all
+// - applied to validate_certs, but scoped to the credential rather than
+// unconditional. validate_certs, unlike those four keys, is inside this
+// tool's ansible.cfg drop-in-compatibility promise, so an unauthenticated
+// run against a self-hosted, private-CA hub configured entirely from
+// ansible.cfg must keep working; refusing validate_certs outright the way
+// the signature settings are refused would break that legitimate shape for a
+// run sending no credential there at all. The refusal fires only once an
+// operator's own token is in the picture alongside it.
+//
+// [galaxy] itself never reaches the TLS-policy arm: ansibleGalaxyConfig
+// carries only CacheDir, Server, ServerList, and SignatureKeys - no
+// validate_certs field - so buildImplicitServer, the bare "[galaxy] server"
+// path, can never produce a Server with insecureFromAnsibleConfig true. That
+// path can only ever commit the destination offense above.
+//
+// The preferred remedy avoids the setting entirely: point SSL_CERT_FILE or
+// SSL_CERT_DIR at the hub's own CA and leave validate_certs unset, which
+// needs no export this rule inspects at all. The direct remedy, when
+// validate_certs = no genuinely has to stay, mirrors the destination
+// refusal's own: ANSIBLE_GALAXY_SERVER_<ID>_VALIDATE_CERTS, naming the
+// identical value, moves the policy onto the operator channel too, so the
+// pairing holds by construction - not a go-galaxy-specific switch to learn,
+// but the same environment surface the rest of this package already reads.
+//
+// Disclosed residual: this rule narrows an ansible.cfg file's reach over an
+// operator's own credential; it does not, and is not meant to, stop a file
+// disabling verification for an unauthenticated run, or for a credential the
+// file itself supplied (the file+file shape above) - both stay covered by
+// tlsWarnings alone, which fires on InsecureSkipTLSVerify regardless of any
+// token's provenance.
+//
+// Two further limitations are disclosed rather than closed.
+//
+// The first: a server_list id containing "-" makes
+// ANSIBLE_GALAXY_SERVER_<ID>_VALIDATE_CERTS - and, identically, its _URL and
+// _TOKEN siblings - unsettable by a plain shell `export`, since "-" is not a
+// legal character in a POSIX shell variable name. This function is what makes
+// that limitation load-bearing: its remedies are what require an operator
+// with a dashed id to set a per-server environment variable at all. Four
+// routes remain: `env 'ANSIBLE_GALAXY_SERVER_MY-ID_VALIDATE_CERTS=no' go-galaxy
+// ...` (env accepts a name a shell export cannot); a container's own `-e`
+// flag, which carries the same exemption; renaming the id in server_list to
+// use "_" instead of "-"; or --server=<url> naming the address directly,
+// which discards the [galaxy_server.<id>] section entirely - its own token
+// and validate_certs go with it, so that route is a different configuration
+// rather than a workaround for this one.
+//
+// The second: an operator-sourced url or TLS policy paired with a
+// file-sourced token is accepted by design, because the credential being sent is not the
+// operator's own - this function has nothing of the operator's to protect
+// there, so it stays silent. What that leaves as an accepted risk, beyond
+// attribution and the visible collection set: a collection the operator's
+// own account could see and the file-supplied token's account cannot now
+// resolves as a 404 from that server instead of the intended content, and
+// under a multi-entry server_list the resolve silently advances to the next
+// configured server rather than surfacing the mismatch.
+func checkTokenPairing(servers []Server) error {
+	for _, s := range servers {
+		offense := tokenPairingOffense(s)
+		if offense == nil {
+			continue
+		}
+		parsed, err := url.Parse(s.URL)
+		if err != nil {
+			// s.URL was already normalized and validated by buildServer or
+			// buildImplicitServer; an already-valid absolute URL string
+			// always reparses cleanly.
+			return fmt.Errorf("%w: server %q", helpers.ErrInvalidGalaxyServerURL, s.ID)
+		}
+		return fmt.Errorf("%w: server %q (%s)", offense, s.ID, helpers.Origin(parsed))
 	}
 	return nil
 }

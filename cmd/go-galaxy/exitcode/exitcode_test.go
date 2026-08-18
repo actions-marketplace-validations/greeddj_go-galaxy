@@ -465,6 +465,8 @@ var galaxyServerConfigSentinels = []struct {
 	{name: "conflicting tls policy", err: helpers.ErrConflictingServerTLSPolicy},
 	{name: "conflicting token", err: helpers.ErrConflictingServerToken},
 	{name: "ambiguous --token", err: helpers.ErrAmbiguousGalaxyToken},
+	{name: "token destination from ansible.cfg", err: helpers.ErrTokenDestinationFromAnsibleConfig},
+	{name: "token tls policy from ansible.cfg", err: helpers.ErrTokenTLSPolicyFromAnsibleConfig},
 }
 
 // TestGalaxyServerConfigErrorsMapToUsage pins every Galaxy server
@@ -527,7 +529,7 @@ func TestIntegritySentinelsMapToExitIntegrity(t *testing.T) {
 // moving the isIntegrityError entry of exitClasses below the isLockError
 // and isInstallError entries, which makes isInstallError claim the headline
 // first; verified, that mutation makes this test fail with:
-// "exitcode_test.go:537: FromError(integrity join) = 5, want 7".
+// "exitcode_test.go:539: FromError(integrity join) = 5, want 7".
 func TestIntegrityOutranksInstallFailureHeadline(t *testing.T) {
 	t.Parallel()
 	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
@@ -887,7 +889,7 @@ func TestStateObjectDeadlineClassification(t *testing.T) {
 // KILLING MUTATION, run and reverted: moving the isCacheBusyError entry of
 // exitClasses above its isInstallError entry makes this test fail with:
 //
-//	exitcode_test.go:896: FromError(joined) = 8, want 5
+//	exitcode_test.go:898: FromError(joined) = 8, want 5
 func TestCacheBusyFoldedBehindInstallFailureClassifiesAsInstall(t *testing.T) {
 	t.Parallel()
 	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
@@ -1123,8 +1125,8 @@ var wantExitClassOrder = []int{
 // KILLING MUTATION, run and reverted: swapping the isCacheBusyError and
 // isCacheCorruptError entries of exitClasses makes this test fail with:
 //
-//	exitcode_test.go:1135: exitClasses[6].code = 9, want 8
-//	exitcode_test.go:1135: exitClasses[7].code = 8, want 9
+//	exitcode_test.go:1137: exitClasses[6].code = 9, want 8
+//	exitcode_test.go:1137: exitClasses[7].code = 8, want 9
 func TestExitClassOrderIsPinned(t *testing.T) {
 	t.Parallel()
 	if len(exitClasses) != len(wantExitClassOrder) {
@@ -1244,7 +1246,7 @@ var adjacentExitPrecedenceCases = []exitPrecedenceCase{
 // isCacheCorruptError entries of exitClasses makes the "cache busy over cache
 // corrupt" row fail with:
 //
-//	exitcode_test.go:1255: FromError(joined) = 9, want 8
+//	exitcode_test.go:1257: FromError(joined) = 9, want 8
 func TestAdjacentExitClassPrecedence(t *testing.T) {
 	t.Parallel()
 	for _, tt := range adjacentExitPrecedenceCases {
@@ -1496,10 +1498,10 @@ var signatureExitCases = []exitCase{
 // name a single one.
 //
 // KILLING MUTATION, run and reverted: moving the isSignatureError entry of
-// exitClasses below its isInstallError entry. Exactly one row fails - the
-// aggregated verdict, which is the whole reason that entry sits where it does:
+// exitClasses below its isInstallError entry. Both aggregated rows fail:
 //
-//	exitcode_test.go:1509: FromError(signature verification failed, aggregated) = 5, want 10
+//	exitcode_test.go:1511: FromError(signature verification failed, aggregated) = 5, want 10
+//	exitcode_test.go:1511: FromError(signature attribution mismatch, aggregated) = 5, want 10
 func TestSignatureExitClassification(t *testing.T) {
 	t.Parallel()
 	for _, tt := range signatureExitCases {

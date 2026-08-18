@@ -560,6 +560,38 @@ var (
 	// Configure the token in that server's own [galaxy_server.<id>] section
 	// or its ANSIBLE_GALAXY_SERVER_<ID>_TOKEN variable instead.
 	ErrAmbiguousGalaxyToken = errors.New("--token is ambiguous with a multi-entry server_list")
+	// ErrTokenDestinationFromAnsibleConfig indicates a Galaxy token is
+	// paired with a server URL this run sourced from an ansible.cfg file
+	// rather than from the operator, while the token itself did not come
+	// from that same file's own [galaxy_server.<id>] section. This is a
+	// hard refusal rather than a warning or a silent drop: a warning is
+	// easy to miss in CI output, and a silent drop would still perform an
+	// unauthenticated request against an address the operator never chose -
+	// both leave the credential's destination up to whatever ansible.cfg a
+	// checked-out repository happens to carry. config.checkTokenPairing
+	// is the single gate that produces this and holds the full argument for
+	// the pairing rule it enforces. It sits beside ErrAmbiguousGalaxyToken
+	// as the answer to a different question, not as a narrower form of the
+	// same one: that sentinel asks which server a --token/GO_GALAXY_TOKEN
+	// credential is even for, and fires only where no single server is
+	// addressable; this one asks who chose the address a credential is
+	// already bound to, and fires for a per-server
+	// ANSIBLE_GALAXY_SERVER_<ID>_TOKEN inside a multi-entry server_list too -
+	// a shape the other sentinel cannot reach at all, since such a token
+	// names its own server and nothing about it is ambiguous.
+	ErrTokenDestinationFromAnsibleConfig = errors.New("galaxy server token destination came from ansible.cfg")
+	// ErrTokenTLSPolicyFromAnsibleConfig indicates a Galaxy token is paired
+	// with a server whose certificate verification an ansible.cfg file
+	// disabled for it, while the token itself did not come from that same
+	// file. It is the second value of the one pairing rule
+	// config.checkTokenPairing enforces and holds the argument for -
+	// ErrTokenDestinationFromAnsibleConfig covers where the credential is
+	// sent, this covers whether that address's certificate is checked. The
+	// two stay distinct sentinels because they name distinct remedies:
+	// ANSIBLE_GALAXY_SERVER_<ID>_URL for the first,
+	// ANSIBLE_GALAXY_SERVER_<ID>_VALIDATE_CERTS for the second.
+	ErrTokenTLSPolicyFromAnsibleConfig = errors.New(
+		"galaxy server certificate verification was disabled by ansible.cfg for a token it did not supply")
 
 	// ErrGalaxyAuthFailed indicates a configured Galaxy server answered a
 	// root-metadata request with 401 or 403. This is fail-closed: unlike a
