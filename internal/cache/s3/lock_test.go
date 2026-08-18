@@ -34,18 +34,39 @@ var errRawInFlightPlaceholder = errors.New("raw in-flight transport failure")
 //
 // These shrunken intervals sit on top of the client's fixed retry policy
 // (s3RetryPolicy, base s3RetryBackoffBase = 200ms, 4 attempts), which tests
-// cannot shrink; heartbeatOpTimeout and releaseTimeout are sized for clean
-// round trips, so a single jittered retry backoff can consume a whole op
-// budget. Therefore any test that injects a retryable 5xx on a lock-path key
-// must synchronize on the fault having been consumed, never sleep a number
-// of intervals.
+// cannot shrink; heartbeatOpTimeout is sized for a clean round trip, so a
+// single jittered retry backoff can consume that whole op budget. Therefore
+// any test that injects a retryable 5xx on a lock-path key must synchronize
+// on the fault having been consumed, never sleep a number of intervals.
+//
+// waitCeiling is a LIVENESS margin here rather than a timing assertion, which
+// is why it sits an order above the round trips it covers: it bounds waits
+// these tests expect to end on their own, so a slow or loaded machine makes
+// such a test slower rather than wrong - the same contract lockEventWaitCeiling
+// states for itself. A test asserting that the ceiling fires is asserting on
+// that budget and must override it with a value of its own; leaving it
+// defaulted would make the assertion a bet on the machine.
+//
+// releaseTimeout is deliberately NOT raised alongside it, and the difference
+// between the two is the whole question a default is decided on: a budget
+// nothing ever reaches costs nothing to widen, while one something does reach
+// is paid on every run. abandonLockObject reaches this one - it runs the
+// release path's own HEAD/DELETE pair on this same budget against an endpoint
+// that may never answer, so a fixture that never answers waits out the whole of
+// it rather than merely being allowed to. Measured on this package:
+// newSilentEndpointBackend's row costs 0.40s at 200ms and 10.20s at 10s, taking
+// the whole package from 4.06s to 13.33s. A test wanting a longer release
+// budget takes one per test, which is the rule above applied rather than an
+// exception to it.
+// heartbeatOpTimeout stays short for a different reason - a tick that misses
+// its budget is transient and the next tick retries, so it is self-healing.
 func testLockTiming(ttl time.Duration) lockTiming {
 	return lockTiming{
 		ttl:                ttl,
 		heartbeatInterval:  30 * time.Millisecond,
 		heartbeatOpTimeout: 200 * time.Millisecond,
 		releaseTimeout:     200 * time.Millisecond,
-		waitCeiling:        time.Second,
+		waitCeiling:        10 * time.Second,
 		backoffBase:        10 * time.Millisecond,
 		backoffCap:         50 * time.Millisecond,
 	}
@@ -197,14 +218,39 @@ func TestLockAcquiresOnEmptyBucket(t *testing.T) {
 // for the loser to acquire afterward, which is correct behavior but would
 // make this particular assertion (a single winner from the race itself)
 // meaningless.
+//
+// Both Backends share one client wrapped in answeredDespiteCancelTransport,
+// because this fixture is doubly exposed to the ceiling it keeps: the winner's
+// create PUT and the ownership HEAD behind it both have to fit inside that
+// ceiling, and so does the loser's own observation of the winner. The fake
+// answers every request it is given, which is what makes the wrapper
+// admissible here. The holder TTL is contendedLockHoldTTL for the reason that
+// constant states, reached here from the other side: with the ceiling no longer
+// bounding either goroutine, the winner staying live for the whole run has to
+// be a fact rather than a bet.
+//
+// KILLING MUTATION, run and reverted: in reclaimIfExpired's live-holder arm,
+// return lockAttempt{observed: true}, nil becomes return lockAttempt{}, nil, so
+// a wait that saw the winner holding the lock records nothing. Five runs, five
+// failures, all identical:
+//
+//	lock_test.go:286: expected exactly one timeout, got 0 (successes=1, other=1)
+//
+// The loser still fails, and still at the ceiling; what it loses is the
+// contention verdict, which is the whole difference between "rerun once the
+// other run finishes" and "this backend could not be reached".
 func TestLockConcurrentFreshAcquireSingleWinner(t *testing.T) {
 	t.Parallel()
 	endpoint, client := newLockFake(t)
+	// A copy of the fake's own client rather than a bare http.Client, so
+	// whatever else httptest configured on it survives the wrapping.
+	answering := *client
+	answering.Transport = answeredDespiteCancelTransport{base: client.Transport}
 
-	timing := testLockTiming(time.Minute)
+	timing := testLockTiming(contendedLockHoldTTL)
 	timing.waitCeiling = 300 * time.Millisecond
-	b1 := newLockBackendAt(t, endpoint, client, timing)
-	b2 := newLockBackendAt(t, endpoint, client, timing)
+	b1 := newLockBackendAt(t, endpoint, &answering, timing)
+	b2 := newLockBackendAt(t, endpoint, &answering, timing)
 
 	type lockResult struct {
 		release func() error
@@ -283,18 +329,21 @@ func TestLockReclaimsExpiredLock(t *testing.T) {
 	}
 }
 
-// TestLockWaitsThenTimesOutOnLiveLock seeds a live (freshly-written, so not
-// yet TTL-expired) foreign lock and confirms Lock backs off at least once
-// before giving up with errS3LockWaitTimeout once waitCeiling elapses.
+// TestLockWaitsThenTimesOutOnLiveLock takes newContendedLockBackend's live
+// foreign holder - one this run can never acquire - and confirms Lock backs
+// off at least once before giving up with errS3LockWaitTimeout once
+// waitCeiling elapses.
+//
+// KILLING MUTATION, run and reverted: reclaimIfExpired's live-holder arm
+// returning lockAttempt{} in place of lockAttempt{observed: true}. Five runs,
+// five failures, all identical (one line, wrapped here):
+//
+//	lock_test.go:353: expected errS3LockWaitTimeout, got cache backend
+//	unavailable: s3 lock wait ceiling elapsed without ever observing a lock holder
 func TestLockWaitsThenTimesOutOnLiveLock(t *testing.T) {
 	t.Parallel()
-	b := newTestBackend(t)
-	timing := testLockTiming(5 * time.Second) // stays live for the whole test window
-	timing.waitCeiling = 150 * time.Millisecond
-	b.lock = timing
+	b := newContendedLockBackend(t, 150*time.Millisecond)
 	ctx := context.Background()
-
-	seedLockObject(ctx, t, b, time.Now().UTC().Add(b.lock.ttl))
 
 	start := time.Now()
 	_, _, err := b.Lock(ctx)
@@ -316,6 +365,89 @@ func TestLockWaitsThenTimesOutOnLiveLock(t *testing.T) {
 	if !errors.Is(err, helpers.ErrCacheBusy) {
 		t.Fatalf("expected errors.Is(err, helpers.ErrCacheBusy), got %v", err)
 	}
+}
+
+// answeredDespiteCancelTransport forwards each request on a context with
+// cancellation and deadline stripped, so a request already in flight when the
+// caller's own context ends is still sent and still answered rather than being
+// aborted by http.Transport.roundTrip's own context check.
+//
+// A fixture wants that because acquireLockLoop's errS3LockWaitTimeout verdict
+// requires the wait ceiling to fire AFTER some attempt has recorded observed,
+// and that ceiling cannot be widened into a liveness margin the way
+// lockEventWaitCeiling is - the verdict REQUIRES it to fire - so the race
+// between the ceiling and the loopback round trips that record the observation
+// has to be taken out on the other side.
+//
+// The observation becomes unconditional rather than merely likely, and that is
+// a chain rather than an assertion: a conditional PUT is single-shot in
+// putObject, and helpers.Retry calls attempt() before it ever looks at the
+// context, so nothing on the way in consults the caller's context; newRequest
+// only hands that context to http.NewRequestWithContext; and Client.do reads
+// req.Context().Err() only once an error has already come back. Measured on
+// go1.26.6, the toolchain go.mod pins: http.Client.Do calls a custom
+// RoundTripper for a request whose context has already expired, and delivers
+// the response intact.
+//
+// Admissible ONLY for a fixture that answers every request it is given. One
+// that deliberately hangs a request must keep the caller's context attached,
+// since that cancellation is the only thing that ever ends the hang:
+// TestLockAcquireTimesOutAfterObservationThenSilence is exactly that shape.
+// Measured rather than predicted - its client was wrapped and the test run
+// under a 20s package timeout, which it reached: "panic: test timed out after
+// 20s", the acquisition parked in net/http's persistConn.roundTrip with no
+// context left to unpark it. A 300ms test becomes a hang.
+//
+// DOCUMENTED-UNCOVERED: no test can demonstrate this wrapper is necessary,
+// because the failure it removes needs a loaded machine and an idle one does
+// not produce it - measured at 1 failure per 5 full `go test ./... -race` runs
+// against 0 in 30 runs of this package alone at -count=30. Removing it returns
+// the rows it serves to that rate.
+//
+// srv.Client().Transport is always non-nil for an httptest server, so base is
+// never nil and no guard is needed; a future nil would panic at the first
+// request rather than quietly changing what a fixture measures.
+type answeredDespiteCancelTransport struct{ base http.RoundTripper }
+
+// RoundTrip forwards req on a context stripped of cancellation and deadline.
+// The type's own doc comment holds why, and where this must not be used.
+func (t answeredDespiteCancelTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.base.RoundTrip(req.Clone(context.WithoutCancel(req.Context())))
+}
+
+// contendedLockHoldTTL is the TTL the foreign holder newContendedLockBackend
+// seeds is written under. It is an hour because the wait ceiling no longer
+// bounds the run once the transport above ignores it, which leaves the OTHER
+// verdict this fixture can produce - the seeded lock read as expired,
+// reclaimIfExpired taking it over, and Lock succeeding - decided by the wall
+// clock alone. lockExpired reads X-Amz-Meta-Deadline first, so a deadline an
+// hour out makes "the holder is still live" a fact rather than a bet; the five
+// seconds the rows it serves used to seed was that bet. RFC3339's second
+// resolution is moot at this scale.
+const contendedLockHoldTTL = time.Hour
+
+// newContendedLockBackend builds a Backend against a fresh fake S3 server whose
+// lock object is already held by a live foreign acquirer, with waitCeiling set
+// to waitCeiling: an acquisition against it observes that holder and then runs
+// out of ceiling. Its client is wrapped in answeredDespiteCancelTransport,
+// which is what makes the observation independent of whether the ceiling fires
+// while a request is still in flight.
+func newContendedLockBackend(t *testing.T, waitCeiling time.Duration) *Backend {
+	t.Helper()
+	fake := newFakeS3()
+	srv := httptest.NewServer(fake)
+	t.Cleanup(srv.Close)
+
+	// A copy of the server's own client rather than a bare http.Client, so
+	// whatever else httptest configured on it survives the wrapping.
+	client := *srv.Client()
+	client.Transport = answeredDespiteCancelTransport{base: srv.Client().Transport}
+
+	timing := testLockTiming(contendedLockHoldTTL)
+	timing.waitCeiling = waitCeiling
+	b := newLockBackendAt(t, srv.URL, &client, timing)
+	seedLockObject(context.Background(), t, b, time.Now().UTC().Add(timing.ttl))
+	return b
 }
 
 // newSilentEndpointBackend builds a Backend pointed at a live TCP listener
@@ -361,6 +493,26 @@ func newSilentEndpointBackend(t *testing.T, waitCeiling time.Duration) *Backend 
 // waitCeilingErr itself) still produces genuine contention when contention is
 // what actually happened, so the first row's refusal is not merely a
 // classifier that never fires at all.
+//
+// The two rows' fixtures differ in transport by design rather than by
+// accident: row one must be genuinely silent, so it keeps a real listener with
+// the caller's context attached, while row two must answer and therefore goes
+// through answeredDespiteCancelTransport. What the "neither timing difference
+// can explain the result" claim above rests on is the wait ceiling, and both
+// rows still take that one unchanged.
+//
+// KILLING MUTATION, run and reverted: reclaimIfExpired's live-holder arm
+// returning lockAttempt{} in place of lockAttempt{observed: true}. Five runs,
+// five failures of the second row alone, all identical (one line, wrapped
+// here):
+//
+//	lock_test.go:555: errors.Is(err, helpers.ErrCacheBusy) = false, want true
+//	(err: cache backend unavailable: s3 lock wait ceiling elapsed without ever
+//	observing a lock holder)
+//
+// The first row never changes under it, which is the shape this table is for:
+// the mutation removes the evidence, and only the row whose verdict rests on
+// that evidence moves.
 func TestLockWaitCeilingDistinguishesSilentBackendFromContention(t *testing.T) {
 	t.Parallel()
 
@@ -383,12 +535,7 @@ func TestLockWaitCeilingDistinguishesSilentBackendFromContention(t *testing.T) {
 			name: "live foreign lock outlasts the ceiling",
 			build: func(t *testing.T) *Backend {
 				t.Helper()
-				b := newTestBackend(t)
-				timing := testLockTiming(5 * time.Second) // stays live for the whole test window
-				timing.waitCeiling = waitCeiling
-				b.lock = timing
-				seedLockObject(context.Background(), t, b, time.Now().UTC().Add(b.lock.ttl))
-				return b
+				return newContendedLockBackend(t, waitCeiling)
 			},
 			wantBusy: true,
 		},
@@ -417,6 +564,38 @@ func TestLockWaitCeilingDistinguishesSilentBackendFromContention(t *testing.T) {
 	}
 }
 
+// answeredWhileUngatedTransport strips cancellation and deadline from a request
+// only while gated still reports zero, and forwards every later request on the
+// caller's own context untouched. gated is the fixture's own counter rather than
+// a second one: the handler increments it as it serves the single request it
+// will answer, so both halves work from one definition of which request that is.
+//
+// It exists because answeredDespiteCancelTransport - whose doc comment holds the
+// argument for stripping a context at all, and the boundary this type sits
+// outside of - is inadmissible on a fixture that hangs a request on purpose,
+// measured there as a hang until the package timeout. This one strips exactly
+// the prefix of the run that fixture does answer: every request issued before
+// the first gated one has been served, which is the create PUT and the HEAD
+// whose observation the verdict rests on, and nothing after it.
+//
+// The predicate errs toward attaching. A request issued once the counter has
+// moved keeps the caller's context even where the fixture would have answered
+// it, so the worst case is a request the ceiling may cut short - never one that
+// nothing can end.
+type answeredWhileUngatedTransport struct {
+	base  http.RoundTripper
+	gated *atomic.Int32
+}
+
+// RoundTrip strips cancellation only while gated still reports zero. The type's
+// own doc comment holds the predicate and why it is that way round.
+func (t answeredWhileUngatedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.gated.Load() > 0 {
+		return t.base.RoundTrip(req)
+	}
+	return t.base.RoundTrip(req.Clone(context.WithoutCancel(req.Context())))
+}
+
 // TestLockAcquireTimesOutAfterObservationThenSilence pins acquireLockLoop's
 // accumulation of observedHolder across attempts, not just the attempt in
 // flight when the wait ceiling fires: a live foreign lock is seeded so the
@@ -428,6 +607,23 @@ func TestLockWaitCeilingDistinguishesSilentBackendFromContention(t *testing.T) {
 // own answer. This is also waitCeilingErr's own "stale evidence" residual
 // (see its doc comment) made executable: the backend genuinely goes silent,
 // rather than merely failing, for the remainder of the wait.
+//
+// The one HEAD this fixture answers is the only observation the whole wait ever
+// gets, so losing it to a starved goroutine would leave nothing to accumulate.
+// The client therefore goes through answeredWhileUngatedTransport, sharing
+// headCount with the handler: that HEAD and the PUT ahead of it cannot be cut
+// short by the ceiling, while every gated HEAD after it keeps the caller's
+// context, which is the only thing that ends the hang.
+//
+// KILLING MUTATION, run and reverted: acquireLockLoop's accumulation itself,
+// observedHolder = observedHolder || res.observed becoming observedHolder =
+// res.observed, so the wait remembers only its last attempt. Five runs, five
+// failures, differing only in the fake's per-run port (one line, wrapped here):
+//
+//	lock_test.go:676: expected errS3LockWaitTimeout, got cache backend
+//	unavailable: s3 lock wait ceiling elapsed without ever observing a lock
+//	holder: Head "http://127.0.0.1:61732/test/locks/cache.lock": context
+//	deadline exceeded
 func TestLockAcquireTimesOutAfterObservationThenSilence(t *testing.T) {
 	t.Parallel()
 
@@ -467,7 +663,11 @@ func TestLockAcquireTimesOutAfterObservationThenSilence(t *testing.T) {
 
 	timing := testLockTiming(5 * time.Second) // stays live for the whole test window
 	timing.waitCeiling = 300 * time.Millisecond
-	b := newLockBackendAt(t, srv.URL, srv.Client(), timing)
+	// The transport reads the same headCount the handler writes, so which
+	// request is "the one this fixture answers" has a single definition.
+	client := *srv.Client()
+	client.Transport = answeredWhileUngatedTransport{base: srv.Client().Transport, gated: &headCount}
+	b := newLockBackendAt(t, srv.URL, &client, timing)
 
 	seedLockObject(context.Background(), t, b, time.Now().UTC().Add(b.lock.ttl))
 
@@ -801,7 +1001,7 @@ func TestHeartbeatRefreshesDeadline(t *testing.T) {
 // heartbeatTick, leaving the cancel in place. The wait still completes, and the
 // failure lands on this test's own assertion, which is the claim above:
 //
-//	lock_test.go:831: expected errS3LockLost, got <nil>
+//	lock_test.go:1031: expected errS3LockLost, got <nil>
 func TestHeartbeatDetectsLostOwnershipAndReleaseSkipsDelete(t *testing.T) {
 	t.Parallel()
 	b := newTestBackend(t)

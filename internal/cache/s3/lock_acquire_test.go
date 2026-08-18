@@ -11,14 +11,53 @@ import (
 	"time"
 )
 
-// freshCreateOrphanBudget bounds the acquisition of the row that must fail
+// freshCreateCutShortBudget bounds the acquisition of the row that must fail
 // after its create-if-absent PUT landed. It has to clear the one loopback round
 // trip ahead of that PUT - measured at 87-169us on this fixture, the
 // measurement recorded on reclaimSwapHold - by enough that the row never fails
 // before reaching the state it is about, and it is also the entire time the
 // fixture then holds the ownership check open, so it is what that row waits.
 // Well past the former, small enough to be a cheap test.
-const freshCreateOrphanBudget = 300 * time.Millisecond
+const freshCreateCutShortBudget = 300 * time.Millisecond
+
+// freshCreateCompletionMargin is the deadline the control row hands
+// tryAcquireOnce, and it is a second constant rather than the one above for a
+// reason that is the defect rather than tidiness: a value that must FIRE and a
+// value a round trip must FIT INSIDE are opposite requirements, so the number
+// that keeps the failure row cheap is the same number that makes the control
+// row a bet on the machine, and one constant serving both is wrong for
+// whichever of the two it was not chosen for.
+//
+// The control row no longer bets on this number at all: its client is wrapped
+// in answeredDespiteCancelTransport, so no request it makes can be cut short by
+// any context, and what is left for the deadline to bound is the part of that
+// row which is not a request - helpers.Retry's own backoff select, which a row
+// meant to succeed never reaches. The call takes a context regardless, and this
+// is the value it carries. reclaimCompletionMargin is its twin on the take-over
+// branch; stateDeadlineCompletionMargin is the one margin of the three still
+// bet on, for the reason its own doc gives.
+const freshCreateCompletionMargin = 10 * time.Second
+
+// orphanRowClient returns the http.Client one orphan-cleanup row runs on, and it
+// is the single place the two rows of those tables stop being protected by the
+// same thing: the control row's client is wrapped in
+// answeredDespiteCancelTransport, so no request it makes can be cut short by a
+// clock at all, while the blocked row keeps the server's own client, because its
+// budget expiring inside the ownership check IS the state that row exists to
+// reach. Wrapping the blocked row would delete what it measures.
+//
+// Both orphan tables call this rather than spelling the choice out twice, so the
+// asymmetry has one home; each of their doc comments points here rather than
+// restating it.
+func orphanRowClient(srv *httptest.Server, blockPostPutHead bool) *http.Client {
+	// A copy of the server's own client rather than a bare http.Client, so
+	// whatever else httptest configured on it survives the wrapping.
+	client := *srv.Client()
+	if !blockPostPutHead {
+		client.Transport = answeredDespiteCancelTransport{base: srv.Client().Transport}
+	}
+	return &client
+}
 
 // TestFreshCreateAbandonsALockItNeverHeld is the fresh-create counterpart of
 // TestReclaimAbandonsALockItNeverHeld: the same orphan, on the branch that
@@ -47,11 +86,16 @@ const freshCreateOrphanBudget = 300 * time.Millisecond
 // foreign is what a competing acquirer would leave and this cleanup must never
 // delete that.
 //
+// The two rows are not protected by the same thing - the control row cannot be
+// cut short by a clock at all, while the failure row is defined by its budget
+// firing - and that asymmetry is deliberate rather than something to be tidied
+// away. orphanRowClient is where it is decided, and why.
+//
 // KILLING MUTATION, run and reverted: deleting the abandonLockObject call from
 // tryAcquireOnce's claim-error arm. The failure row then leaves the orphan
 // behind:
 //
-//	lock_acquire_test.go:69: lock object after an abandoned acquisition: headObject err = <nil>, want errS3NotFound
+//	lock_acquire_test.go:113: lock object after an abandoned acquisition: headObject err = <nil>, want errS3NotFound
 func TestFreshCreateAbandonsALockItNeverHeld(t *testing.T) {
 	t.Parallel()
 
@@ -80,7 +124,14 @@ func assertFreshCreateOrphanCleanup(t *testing.T, blockPostPutHead, wantRelease 
 	key := path.Join(locksPrefix, lockObject)
 	fake := newFakeS3()
 	lockPath := "/" + fake.bucket + "/" + key
-	opCtx, cancel := context.WithTimeout(context.Background(), freshCreateOrphanBudget)
+	// The blocked row is the one whose budget must fire; the control row's has
+	// to fit a whole acquisition inside it instead. See
+	// freshCreateCompletionMargin.
+	budget := freshCreateCompletionMargin
+	if blockPostPutHead {
+		budget = freshCreateCutShortBudget
+	}
+	opCtx, cancel := context.WithTimeout(context.Background(), budget)
 	t.Cleanup(cancel)
 
 	var putsServed atomic.Int32
@@ -98,7 +149,7 @@ func assertFreshCreateOrphanCleanup(t *testing.T, blockPostPutHead, wantRelease 
 	}))
 	t.Cleanup(srv.Close)
 
-	b := newLockBackendAt(t, srv.URL, srv.Client(), testLockTiming(time.Minute))
+	b := newLockBackendAt(t, srv.URL, orphanRowClient(srv, blockPostPutHead), testLockTiming(time.Minute))
 	// Open runs before the budget matters and writes only its own probe key, so
 	// the lock key is untouched when tryAcquireOnce reaches it: its
 	// create-if-absent PUT is the first write this key ever sees, which is what
@@ -177,11 +228,11 @@ func assertFreshCreateObject(t *testing.T, wantRelease bool, b *Backend, key str
 // report the identical message, so the row name is what tells them apart.
 // Deleting tryAcquireOnce's errS3ConditionalConflict arm fails the create row:
 //
-//	lock_acquire_test.go:199: Lock: cache backend unavailable: s3 conditional write conflicted with a concurrent request
+//	lock_acquire_test.go:250: Lock: cache backend unavailable: s3 conditional write conflicted with a concurrent request
 //
 // Deleting reclaimIfExpired's own arm fails the reclaim row:
 //
-//	lock_acquire_test.go:199: Lock: cache backend unavailable: s3 conditional write conflicted with a concurrent request
+//	lock_acquire_test.go:250: Lock: cache backend unavailable: s3 conditional write conflicted with a concurrent request
 func TestConditionalConflictIsRetriedNotFatal(t *testing.T) {
 	t.Parallel()
 

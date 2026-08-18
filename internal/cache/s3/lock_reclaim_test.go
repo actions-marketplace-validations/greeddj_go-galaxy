@@ -346,13 +346,20 @@ func TestReclaimRefusesAnUnversionedHead(t *testing.T) {
 	}
 }
 
-// reclaimOrphanBudget bounds the acquisition of the row that must fail after
+// reclaimCutShortBudget bounds the acquisition of the row that must fail after
 // its swap PUT landed. It has to clear the two loopback round trips ahead of
 // the swap - measured at 87-169us each on this fixture - by enough that the row
 // never fails before reaching the state it is about, and it is also the entire
 // time the fixture then holds the ownership check open, so it is what that row
 // waits. Well past the former, small enough to be a cheap test.
-const reclaimOrphanBudget = 300 * time.Millisecond
+const reclaimCutShortBudget = 300 * time.Millisecond
+
+// reclaimCompletionMargin is the deadline the control row hands
+// reclaimIfExpired. That row's client is wrapped, so it is not a margin the row
+// bets on; freshCreateCompletionMargin is its twin on the create branch and
+// holds both why the two rows cannot share one constant and what the wrapper
+// changed about this one.
+const reclaimCompletionMargin = 10 * time.Second
 
 // TestReclaimAbandonsALockItNeverHeld drives what happens after a reclaim's own
 // swap PUT has landed and the acquisition then ends anyway. The object at that
@@ -374,11 +381,16 @@ const reclaimOrphanBudget = 300 * time.Millisecond
 // foreign is what a competing acquirer would leave and this cleanup must never
 // delete that.
 //
+// The two rows are not protected by the same thing - the control row cannot be
+// cut short by a clock at all, while the failure row is defined by its budget
+// firing - and that asymmetry is deliberate rather than something to be tidied
+// away. orphanRowClient is where it is decided, and why.
+//
 // KILLING MUTATION, run and reverted: deleting the abandonLockObject call from
 // reclaimIfExpired's claim-error arm. The failure row then leaves the orphan
 // behind:
 //
-//	lock_reclaim_test.go:396: lock object after an abandoned reclaim: headObject err = <nil>, want errS3NotFound
+//	lock_reclaim_test.go:408: lock object after an abandoned reclaim: headObject err = <nil>, want errS3NotFound
 func TestReclaimAbandonsALockItNeverHeld(t *testing.T) {
 	t.Parallel()
 
@@ -406,7 +418,13 @@ func assertReclaimOrphanCleanup(t *testing.T, blockPostPutHead, wantRelease bool
 	key := path.Join(locksPrefix, lockObject)
 	fake := newFakeS3()
 	lockPath := "/" + fake.bucket + "/" + key
-	opCtx, cancel := context.WithTimeout(context.Background(), reclaimOrphanBudget)
+	// The blocked row is the one whose budget must fire; the control row's has
+	// to fit a whole reclaim inside it instead. See freshCreateCompletionMargin.
+	budget := reclaimCompletionMargin
+	if blockPostPutHead {
+		budget = reclaimCutShortBudget
+	}
+	opCtx, cancel := context.WithTimeout(context.Background(), budget)
 	t.Cleanup(cancel)
 
 	var putsServed atomic.Int32
@@ -424,7 +442,7 @@ func assertReclaimOrphanCleanup(t *testing.T, blockPostPutHead, wantRelease bool
 	}))
 	t.Cleanup(srv.Close)
 
-	b := newLockBackendAt(t, srv.URL, srv.Client(), testLockTiming(time.Minute))
+	b := newLockBackendAt(t, srv.URL, orphanRowClient(srv, blockPostPutHead), testLockTiming(time.Minute))
 	if err := b.Open(context.Background()); err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -505,11 +523,28 @@ const reclaimSwapHold = 50 * time.Millisecond
 // are legitimate, so the test asserts the count of holders and the loser's
 // error class, never which Backend ends up with the lock.
 //
+// Both acquirers share one client wrapped in answeredDespiteCancelTransport,
+// which closes this test's wall-clock exposures rather than widening them:
+// neither the winner's swap and its ownership HEAD nor the loser's own
+// observation of that winner can be cut short by the 600ms ceiling, so a
+// starved goroutine costs time here and never a verdict. The ceiling still ends
+// the loser's wait - lockBackoff selects on waitCtx, which no transport
+// touches. The wrapper is admissible because newHeldFirstSwapServer answers
+// every request it is given, holding one PUT and then serving it; a request
+// that hangs, added to that fixture later, takes the admissibility away.
+//
+// Its reach is the whole run rather than the acquisition, and that is what
+// covers the last of the three exposures rather than any budget of this test's
+// own: the winner's heartbeat and both releases go through it too, so a release
+// here is not bounded by testLockTiming's short default for as long as the
+// client is wrapped. Unwrapping it hands all three exposures back at once - the
+// two ceilings, and that default over a release's own HEAD and DELETE.
+//
 // KILLING MUTATION, run and reverted: replacing the swap's condition with an
 // unconditional write, putCondition{ifMatch: etag} to putCondition{}. Five
 // runs, five failures, all identical:
 //
-//	lock_reclaim_test.go:541: 2 of 2 reclaimers ended up holding the lock, want exactly 1 (errors: [<nil> <nil>])
+//	lock_reclaim_test.go:580: 2 of 2 reclaimers ended up holding the lock, want exactly 1 (errors: [<nil> <nil>])
 //
 // The two nil errors are the sharp end of it: both acquisitions reported
 // success, so neither run learns anything is wrong until a heartbeat tick - and
@@ -522,8 +557,12 @@ func TestTwoReclaimersEndWithOneHolder(t *testing.T) {
 	timing.waitCeiling = 600 * time.Millisecond
 
 	srv := newHeldFirstSwapServer(t, key, reclaimSwapHold)
-	b1 := newLockBackendAt(t, srv.URL, srv.Client(), timing)
-	b2 := newLockBackendAt(t, srv.URL, srv.Client(), timing)
+	// A copy of the server's own client rather than a bare http.Client, so
+	// whatever else httptest configured on it survives the wrapping.
+	answering := *srv.Client()
+	answering.Transport = answeredDespiteCancelTransport{base: srv.Client().Transport}
+	b1 := newLockBackendAt(t, srv.URL, &answering, timing)
+	b2 := newLockBackendAt(t, srv.URL, &answering, timing)
 	seedLockObject(context.Background(), t, b1, time.Now().UTC().Add(-time.Hour))
 
 	releases := make([]func() error, 2)

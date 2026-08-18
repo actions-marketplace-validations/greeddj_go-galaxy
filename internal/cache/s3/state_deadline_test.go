@@ -50,9 +50,19 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 )
 
-// stateDeadlineBudget is the fixed cacheManager.WithStateDeadline budget
-// every test in this file uses.
-const stateDeadlineBudget = 300 * time.Millisecond
+// stateDeadlineDripBudget is the cacheManager.WithStateDeadline budget the drip
+// test gives itself. It is what that test waits: the budget has to FIRE against
+// a body that never ends, so it is small on purpose.
+const stateDeadlineDripBudget = 300 * time.Millisecond
+
+// stateDeadlineCompletionMargin is the budget the positive control's whole
+// LoadStore has to fit inside, which is not one round trip: a lazy Open's
+// bucket HEAD and both halves of its conditional-PUT probe, then the object GET
+// and the inflate behind it. That is why it is larger than this package's other
+// completion margins rather than equal to them. freshCreateCompletionMargin
+// holds why a budget that must fire and a budget a call must fit inside cannot
+// be one constant.
+const stateDeadlineCompletionMargin = 30 * time.Second
 
 // TestStateObjectDeadlineFitsInsideTheLockTimings is a relation pin, not a
 // behavior test: it asserts the numeric ordering
@@ -105,7 +115,7 @@ func TestStateDeadlineBoundsADrippingSnapshotRead(t *testing.T) {
 	putStoreObject(ctx, t, b, helpers.StoreSnapshotSchemaVersion, nil)
 	fake.dripGet(b.key(statePrefix, storeObject), 5*time.Millisecond)
 
-	wrapped := cacheManager.WithStateDeadline(b, stateDeadlineBudget)
+	wrapped := cacheManager.WithStateDeadline(b, stateDeadlineDripBudget)
 	_, err := wrapped.LoadStore(ctx)
 	if !errors.Is(err, helpers.ErrStateObjectDeadline) {
 		t.Fatalf("LoadStore error = %v, want errors.Is ErrStateObjectDeadline", err)
@@ -130,7 +140,7 @@ func TestStateDeadlineBoundsADrippingSnapshotReadPositiveControl(t *testing.T) {
 
 	putStoreObject(ctx, t, b, helpers.StoreSnapshotSchemaVersion, nil)
 
-	wrapped := cacheManager.WithStateDeadline(b, stateDeadlineBudget)
+	wrapped := cacheManager.WithStateDeadline(b, stateDeadlineCompletionMargin)
 	st, err := wrapped.LoadStore(ctx)
 	if err != nil {
 		t.Fatalf("LoadStore: %v", err)
