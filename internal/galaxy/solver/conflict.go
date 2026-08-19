@@ -51,16 +51,7 @@ func (s *solveState) resolveConflict(startIdx int) (int, *incompatibility, error
 		}
 		prevLevel := s.prevSatisfierLevel(inc, satisfier)
 
-		// A no-versions/unknown-package leaf whose single term is satisfied by
-		// a derivation (a dependency assignment from some parent version), not
-		// a decision, is resolved rather than backjumped: backjumping learns
-		// only the leaf itself and drops the attribution from the empty package
-		// back to the parent version that required it, so a transitively
-		// unsatisfiable higher version is never learned as "not parent version"
-		// and the solvable graph is falsely rejected. Merging instead reaches
-		// the parent version's dependency and lets conflict resolution learn
-		// the real, conditional cause.
-		if s.shouldBackjump(inc, satisfier, prevLevel) {
+		if shouldBackjump(satisfier, prevLevel) {
 			return s.backjump(inc, curIdx, incChanged, prevLevel)
 		}
 
@@ -70,31 +61,18 @@ func (s *solveState) resolveConflict(startIdx int) (int, *incompatibility, error
 	return 0, nil, s.buildConflictError(inc)
 }
 
-// shouldBackjump decides resolveConflict's terminate-vs-resolve step. The
-// reference rule backjumps when the satisfier is a decision or comes from a
-// different level than its own previous satisfier; the one exception is a
-// no-versions/unknown-package leaf satisfied by a derivation, which is resolved
-// instead so the merge reaches the parent version that required the empty
-// package and its attribution survives into the learned clause.
-func (s *solveState) shouldBackjump(inc *incompatibility, satisfier *assignment, prevLevel int) bool {
-	if s.isExternalLeaf(inc) && !satisfier.isDecision() {
-		return false
-	}
+// shouldBackjump decides resolveConflict's terminate-vs-resolve step: the
+// reference rule verbatim, backjumping when the satisfier is a decision or
+// comes from a different level than its own previous satisfier. No
+// exception for no-versions/unknown-package leaves is needed under signed
+// exact terms: after a plain backjump on such a leaf, propagation derives
+// the leaf term's negation, the parent's dependency incompatibility then
+// relates SATISFIED through the negative-negative entailment, and the
+// ordinary propagate-resolve cycle merges through to "not parent@version" -
+// the attribution the retired exception used to force inside a single
+// resolveConflict call.
+func shouldBackjump(satisfier *assignment, prevLevel int) bool {
 	return satisfier.isDecision() || prevLevel != satisfier.DecisionLevel
-}
-
-// isExternalLeaf reports whether inc is a single-term leaf recorded directly
-// by decision making (a no-versions or unknown-package incompatibility).
-func (s *solveState) isExternalLeaf(inc *incompatibility) bool {
-	if len(inc.Terms) != 1 {
-		return false
-	}
-	switch inc.Cause.(type) {
-	case causeNoVersions, causeUnknownPackage:
-		return true
-	default:
-		return false
-	}
 }
 
 // prevSatisfierLevel returns the decision level of the earliest assignment

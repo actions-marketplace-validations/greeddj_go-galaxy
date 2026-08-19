@@ -219,34 +219,16 @@ func TestTransitiveUnsatisfiableBacktrack(t *testing.T) {
 }
 
 // TestTransitiveUnknownPackageBacktrack is the neighbor above's
-// unknown-package twin, and it exists because one fixture cannot reach both
-// arms of isExternalLeaf. That test covers the causeNoVersions arm; every
-// other unknown-package test in this package pins an unsolvable graph, where
-// the error has to be a *ConflictError carrying a particular proof, so none
-// of them can tell whether the backjump exception is applied to a
-// causeUnknownPackage leaf at all. Here the graph is solvable:
-// acme.foo@2.0.0 depends on a package the provider has never heard of, so
-// conflict resolution has to merge through that leaf to reach the parent
-// version that required it, and settle on acme.foo@1.2.0. Solving at all is
+// unknown-package twin: acme.foo@2.0.0 depends on a package the provider
+// has never heard of, and the solvable graph must settle on acme.foo@1.2.0
+// rather than be falsely rejected. Under the retired bitset representation
+// this path needed a special backjump exception for unknown-package leaves
+// (this test was written to pin that exception's causeUnknownPackage arm);
+// under signed exact terms the ordinary propagate-resolve cycle carries the
+// leaf's attribution back to the parent version on its own, and this test
+// stays as the end-to-end pin that it keeps doing so. Solving at all is
 // this test's own positive control - a fixture that failed to solve would
-// prove nothing about which arm ran.
-//
-// KILLING MUTATION 1, run and reverted, narrowing isExternalLeaf's switch in
-// conflict.go to `case causeNoVersions:` alone:
-//
-//	solver_test.go:258: unexpected error: So, because acme.ghost has no published versions, version solving failed.
-//
-// That mutation was also run against the whole package, and this test is the
-// only one in it that fails - which is the measurement this test was written
-// for, since the arm is otherwise reachable but unpinned.
-//
-// KILLING MUTATION 2, run and reverted, dropping the exception altogether by
-// replacing shouldBackjump's body in conflict.go with `return
-// satisfier.isDecision() || prevLevel != satisfier.DecisionLevel`. It lands
-// on the same assertion with the same message, since removing the exception
-// and narrowing this leaf out of it leave the leaf on the same path:
-//
-//	solver_test.go:258: unexpected error: So, because acme.ghost has no published versions, version solving failed.
+// prove nothing about the attribution path.
 func TestTransitiveUnknownPackageBacktrack(t *testing.T) {
 	t.Parallel()
 	const survivor = "1.2.0"
@@ -284,7 +266,7 @@ func TestSolveStopsOnCanceledContext(t *testing.T) {
 		// running `go test ./internal/galaxy/solver/ -run
 		// TestSolveStopsOnCanceledContext -race -v -count=1` makes this exact
 		// assertion fail with:
-		// "solver_test.go:290: Solve returned a non-nil result on an
+		// "solver_test.go:272: Solve returned a non-nil result on an
 		// already-canceled context: map[acme.foo:2.0.0]"
 		if res != nil {
 			t.Fatalf("Solve returned a non-nil result on an already-canceled context: %v", res.Versions)
