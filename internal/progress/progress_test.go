@@ -879,7 +879,7 @@ func warnMark() string { return marker(warnGlyph, ansiYellow, true) }
 
 // Printing color from every marker unconditionally, including into a
 // redirected file, means `go-galaxy install > install.log 2>&1` puts
-// "\x1b[1m\x1b[32m✔\x1b[1m\x1b[0m " in front of the line an operator greps
+// "\x1b[1m\x1b[32m✔\x1b[0m " in front of the line an operator greps
 // for, so `grep '^✔'` silently matches nothing. The tests below pin the two
 // halves of the rule - the destination check and the environment overrides -
 // and pin them on the package-level helpers too, which own no Progress and

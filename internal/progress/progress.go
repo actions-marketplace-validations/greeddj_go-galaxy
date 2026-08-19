@@ -28,7 +28,7 @@ const (
 	ansiRed     = "\x1b[1m\x1b[31m"
 	ansiGreen   = "\x1b[1m\x1b[32m"
 	ansiYellow  = "\x1b[1m\x1b[33m"
-	ansiReset   = "\x1b[1m\x1b[0m"
+	ansiReset   = "\x1b[0m"
 	okGlyph     = "✔"
 	failGlyph   = "✗"
 	warnGlyph   = "!"
