@@ -3,6 +3,7 @@ package solver
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -416,11 +417,7 @@ func (s *solveState) dependencyIncompatibilities(ctx context.Context, pkg string
 	}
 	s.depsAdded[key] = true
 
-	names := make([]string, 0, len(deps))
-	for d := range deps {
-		names = append(names, d)
-	}
-	slices.Sort(names)
+	names := slices.Sorted(maps.Keys(deps))
 
 	parentTerm := term{Package: pkg, Set: singletonSet(v), Positive: true}
 	added := make([]int, 0, len(names))

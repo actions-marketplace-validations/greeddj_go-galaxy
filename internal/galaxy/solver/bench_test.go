@@ -8,14 +8,6 @@ import (
 	"testing"
 )
 
-// sink receives every benchmark iteration's Result so the compiler cannot
-// prove the call is dead and elide it. It is never read - only written - and
-// is intentionally a package-level var rather than a local, which the Go
-// compiler is otherwise free to optimize away as unused.
-//
-//nolint:gochecknoglobals // standard benchmark-result sink pattern, write-only
-var sink *Result
-
 // scaledGraphFanout is the branching factor of the synthetic dependency tree
 // buildScaledGraph builds: package i's children are indices
 // [i*fanout+1, i*fanout+fanout] (standard k-ary heap indexing), so every
@@ -106,19 +98,18 @@ func buildScaledGraph(seed int64, n int) ([]Requirement, *fakeProvider) {
 // BenchmarkSolve measures raw Solve time over the in-memory fakeProvider
 // (no network, no disk) as the package count scales from a typical
 // requirements.yml size up to a stress size well beyond any real Galaxy
-// collection graph. Each subtest builds its graph once, before ResetTimer,
-// so only Solve itself is measured.
+// collection graph. Each subtest builds its graph once, outside the timed
+// b.Loop body, so only Solve itself is measured.
 func BenchmarkSolve(b *testing.B) {
 	for _, n := range []int{10, 100, 1000} {
 		b.Run(strconv.Itoa(n), func(b *testing.B) {
 			reqs, p := buildScaledGraph(int64(n), n)
-			b.ResetTimer()
-			for range b.N {
+			for b.Loop() {
 				res, err := Solve(context.Background(), reqs, p)
 				if err != nil {
 					b.Fatalf("Solve: %v", err)
 				}
-				sink = res
+				_ = res
 			}
 		})
 	}
@@ -180,13 +171,12 @@ func buildGalaxyShapeGraph() ([]Requirement, *fakeProvider) {
 // on a small shared set of hub dependencies.
 func BenchmarkSolveGalaxyShape(b *testing.B) {
 	reqs, p := buildGalaxyShapeGraph()
-	b.ResetTimer()
-	for range b.N {
+	for b.Loop() {
 		res, err := Solve(context.Background(), reqs, p)
 		if err != nil {
 			b.Fatalf("Solve: %v", err)
 		}
-		sink = res
+		_ = res
 	}
 }
 
@@ -227,9 +217,8 @@ func buildDeepBacktrackGraph(n int) ([]Requirement, *fakeProvider) {
 // the point is to measure the backtracking path itself, not the outcome.
 func BenchmarkSolveDeepBacktrack(b *testing.B) {
 	reqs, p := buildDeepBacktrackGraph(deepBacktrackChainLength)
-	b.ResetTimer()
-	for range b.N {
+	for b.Loop() {
 		res, _ := Solve(context.Background(), reqs, p)
-		sink = res
+		_ = res
 	}
 }
