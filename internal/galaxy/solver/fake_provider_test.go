@@ -125,7 +125,7 @@ func (f *fakeProvider) withDeps(pkg, version string, deps map[string]string) *fa
 // withHighest overrides the registry-reported highest_version probe result
 // for pkg, independent of its true universe maximum - modeling a registry
 // field that a test can point at whatever value it needs to exercise the
-// probe/materialize fork.
+// probe-or-fetch fork.
 func (f *fakeProvider) withHighest(pkg, version string) *fakeProvider {
 	f.highestOf[pkg] = version
 	return f

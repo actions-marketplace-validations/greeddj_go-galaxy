@@ -3,7 +3,6 @@ package solver
 import (
 	"hash/fnv"
 	"slices"
-	"strconv"
 )
 
 // cause is the closed sum of reasons an incompatibility exists. External
@@ -87,26 +86,19 @@ func (inc *incompatibility) termForPackage(pkg string) (term, bool) {
 	return term{}, false
 }
 
-// normalizeTerms merges multiple terms for the same package into one
-// (intersecting their permitted-sets via boundary-extended bitset algebra -
-// the only producer of multi-term-per-package input is conflict resolution,
-// by which point every named package is materialized), sorts the result by
+// normalizeTerms merges multiple terms for the same package into one (their
+// signed conjunction via termIntersect - the only producer of
+// multi-term-per-package input is conflict resolution), sorts the result by
 // package ascending, and - when more than one term remains - drops positive
 // terms naming the root package. Root is the one package structurally
 // guaranteed to be part of every solution (it is always decided first,
 // unconditionally, regardless of any other package's availability), so its
 // own singleton term is always true and contributes nothing to whether the
-// incompatibility can fire. This does NOT generalize to any other package
-// whose universe happens to have shrunk to one version: an ordinary
-// package's term is only trivially true IF that package ends up selected at
-// all, which is conditional on something actually depending on it -
-// dropping it would silently discard that conditionality. uni resolves a
-// package name to its materialization context. The merge itself is called
-// only from conflict resolution, so it always operates over the
-// boundary-extended universe (term.go); the result stays in that
-// representation, since the partial solution's running intersection and
-// relation's Case C now read extended-universe terms directly.
-func normalizeTerms(terms []term, uni func(string) *packageUniverse) []term {
+// incompatibility can fire. This does NOT generalize to any other package:
+// an ordinary package's positive term asserts that the package is selected
+// at all, which is conditional on something actually depending on it -
+// dropping it would silently discard that conditionality.
+func normalizeTerms(terms []term) []term {
 	byPkg := make(map[string][]term, len(terms))
 	order := make([]string, 0, len(terms))
 	for _, t := range terms {
@@ -118,7 +110,7 @@ func normalizeTerms(terms []term, uni func(string) *packageUniverse) []term {
 
 	merged := make([]term, 0, len(order))
 	for _, pkg := range order {
-		merged = append(merged, mergeTermGroup(pkg, byPkg[pkg], uni))
+		merged = append(merged, mergeTermGroup(byPkg[pkg]))
 	}
 
 	slices.SortFunc(merged, comparePackageAsc)
@@ -126,27 +118,24 @@ func normalizeTerms(terms []term, uni func(string) *packageUniverse) []term {
 		merged = dropPositiveRoot(merged)
 	}
 	if len(merged) > 1 {
-		merged = dropTautological(merged, uni)
+		merged = dropTautological(merged)
 	}
 	return merged
 }
 
-// dropTautological removes any term whose permitted set spans the whole
-// boundary-extended universe. Such a term is always satisfiable, so within an
-// incompatibility (a conjunction that must not hold in full) it contributes
-// nothing and is redundant: "{A, always-true}" is equivalent to "{A}". A
-// tautological negative term arises when a dependency names a version range no
-// published version satisfies (its positive reading is empty, so its negation
-// is the whole universe); left in a merged root cause it would leave that
-// package permanently unsatisfied and the learned clause non-unit after a
-// backjump, which conflict resolution would then reject as inconclusive. Only
-// applied when more than one term remains, so a genuinely tautological
-// single-term incompatibility is never emptied here.
-func dropTautological(terms []term, uni func(string) *packageUniverse) []term {
+// dropTautological removes any term that is true for every selection
+// (exactly N({}), see termIsTautological). Such a term contributes nothing
+// inside an incompatibility (a conjunction that must not hold in full):
+// "{A, always-true}" is equivalent to "{A}", and left in a merged root
+// cause it would leave that package permanently unsatisfied and the learned
+// clause non-unit after a backjump, which conflict resolution would then
+// reject as inconclusive. Only applied when more than one term remains, so
+// a genuinely tautological single-term incompatibility is never emptied
+// here.
+func dropTautological(terms []term) []term {
 	out := terms[:0:0]
 	for _, t := range terms {
-		u := uni(t.Package)
-		if popcount(permittedExtBits(t, u)) == u.extendedLen() {
+		if termIsTautological(t) {
 			continue
 		}
 		out = append(out, t)
@@ -157,21 +146,20 @@ func dropTautological(terms []term, uni func(string) *packageUniverse) []term {
 	return out
 }
 
-// mergeTermGroup collapses one package's group of terms into a single term:
-// the sole member unchanged if the group has exactly one, otherwise the
-// boundary-extended bitset intersection of every member's permitted set,
-// always re-emitted as a positive term (mirroring projectTermToPublished's
-// own polarity convention for a merged result).
-func mergeTermGroup(pkg string, group []term, uni func(string) *packageUniverse) term {
+// mergeTermGroup collapses one package's group of terms into their signed
+// conjunction: the sole member unchanged if the group has exactly one,
+// otherwise the termIntersect fold. Signed intersection IS conjunction, so
+// the merged term is exactly equivalent to the group - including keeping a
+// legitimately negative result negative rather than forcing a polarity.
+func mergeTermGroup(group []term) term {
 	if len(group) == 1 {
 		return group[0]
 	}
-	u := uni(pkg)
-	bits := slices.Clone(permittedExtBits(group[0], u)) // own copy: never alias the classification cache
+	merged := group[0]
 	for _, t := range group[1:] {
-		bits = intersectNew(bits, permittedExtBits(t, u))
+		merged = termIntersect(merged, t)
 	}
-	return term{Package: pkg, Set: u.asExtBitsetSet(bits, "(merged)"), Positive: true}
+	return merged
 }
 
 // comparePackageAsc orders terms by package name ascending, the canonical
@@ -284,13 +272,7 @@ func hashIncompat(inc *incompatibility) uint64 {
 		} else {
 			_, _ = h.Write([]byte{0})
 		}
-		if t.Set.kind == setSymbolic {
-			_, _ = h.Write([]byte(t.Set.key))
-		} else {
-			for _, w := range t.Set.bits {
-				_, _ = h.Write([]byte(strconv.FormatUint(w, 16)))
-			}
-		}
+		t.Set.writeCanonical(h)
 		_, _ = h.Write([]byte{0xff})
 	}
 	return h.Sum64()

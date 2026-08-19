@@ -10,21 +10,18 @@ import "testing"
 // upper-bound derivation).
 func TestEarliestSatisfierJointSatisfaction(t *testing.T) {
 	t.Parallel()
-	s := newTestState(newFakeProvider().withVersions("foo", "1.0.0", "1.5.0", "2.0.0", "3.0.0"))
-	materializeForTest(t, s)
+	s := newTestState(newFakeProvider())
 
-	dummyCause := &incompatibility{Terms: []term{{Package: "unrelated", Set: anySet, Positive: true}}}
+	dummyCause := &incompatibility{Terms: []term{{Package: "unrelated", Set: fullVerSet(), Positive: true}}}
 	dummyIdx, _ := s.store.add(dummyCause)
 	lower := s.ps.derive(term{Package: "foo", Set: mustSet(t, ">=1.0.0"), Positive: true}, dummyIdx)
 	upper := s.ps.derive(term{Package: "foo", Set: mustSet(t, "<2.0.0"), Positive: true}, dummyIdx)
 
-	// Neither assignment alone satisfies "foo ^1.0.0" (>=1.0.0,<2.0.0): the
-	// lower bound alone still admits 2.0.0 and 3.0.0, the upper bound alone
-	// still admits versions below 1.0.0 (none exist here, but the running
-	// intersection is seeded full, so upper alone reads {1.0.0,1.5.0} minus
-	// nothing below - still a superset of what ^1.0.0 permits is false only
-	// once combined). Combined, they exactly pin {1.0.0, 1.5.0} which does
-	// satisfy foo ^1.0.0's own permitted set for this universe.
+	// Neither assignment alone entails "foo ^1.0.0": the lower bound alone
+	// still admits 2.0.0 and above, the upper bound alone still admits
+	// versions below 1.0.0. Their signed conjunction is exactly
+	// [1.0.0, 2.0.0), which does entail it - so the satisfier is the later
+	// of the two jointly-necessary assignments.
 	inc := &incompatibility{Terms: []term{{Package: "foo", Set: mustSet(t, "^1.0.0"), Positive: true}}}
 
 	satisfier, satisfiedTerm := s.earliestSatisfier(inc)
@@ -53,9 +50,8 @@ func TestEarliestSatisfierJointSatisfaction(t *testing.T) {
 // previousSatisfier, since nothing before it was needed.
 func TestEarliestSatisfierSingleAssignment(t *testing.T) {
 	t.Parallel()
-	s := newTestState(newFakeProvider().withVersions("foo", "1.0.0", "2.0.0"))
-	materializeForTest(t, s)
-	cause := &incompatibility{Terms: []term{{Package: "root-req", Set: anySet, Positive: true}}}
+	s := newTestState(newFakeProvider())
+	cause := &incompatibility{Terms: []term{{Package: "root-req", Set: fullVerSet(), Positive: true}}}
 	causeIdx, _ := s.store.add(cause)
 	a := s.ps.derive(term{Package: "foo", Set: mustSet(t, "^1.0.0"), Positive: true}, causeIdx)
 
@@ -77,13 +73,11 @@ func TestResolveConflictBackjumpsWhenSatisfierIsDecision(t *testing.T) {
 	s := newTestState(newFakeProvider().withVersions("foo", "1.0.0"))
 	s.ps.decide(rootPkg, rootVersion)
 	s.ps.decide("foo", mustV(t, "1.0.0"))
-	materializeForTest(t, s)
-	s.ps.materializePackage("foo")
 
 	inc := &incompatibility{Terms: []term{{Package: "foo", Set: mustSet(t, "^1.0.0"), Positive: true}}}
 	idx, _ := s.store.add(inc)
 
-	rootIdx, rootCause, err := s.resolveConflict(t.Context(), idx)
+	rootIdx, rootCause, err := s.resolveConflict(idx)
 	if err != nil {
 		t.Fatalf("resolveConflict: %v", err)
 	}
@@ -130,14 +124,12 @@ func TestResolveConflictSkipsStoreAddWhenUnchanged(t *testing.T) {
 	s := newTestState(newFakeProvider().withVersions("foo", "1.0.0"))
 	s.ps.decide(rootPkg, rootVersion)
 	s.ps.decide("foo", mustV(t, "1.0.0"))
-	materializeForTest(t, s)
-	s.ps.materializePackage("foo")
 
 	inc := &incompatibility{Terms: []term{{Package: "foo", Set: mustSet(t, "^1.0.0"), Positive: true}}}
 	idx, _ := s.store.add(inc)
 	before := len(s.store.all)
 
-	_, rootCause, err := s.resolveConflict(t.Context(), idx)
+	_, rootCause, err := s.resolveConflict(idx)
 	if err != nil {
 		t.Fatalf("resolveConflict: %v", err)
 	}

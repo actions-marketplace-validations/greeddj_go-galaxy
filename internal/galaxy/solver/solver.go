@@ -34,7 +34,7 @@ var fuelLimit = 1_000_000
 var errSolverBug = errors.New("solver: internal invariant violated")
 
 // solveState is one Solve call's mutable state: the incompatibility store,
-// the partial solution, per-package materialization/universe data, and the
+// the partial solution, per-package published-universe data, and the
 // bookkeeping the decision heuristic and dependency injection need. It is
 // never shared across goroutines and never persisted between calls.
 type solveState struct {
@@ -57,18 +57,18 @@ type solveState struct {
 // it returns ctx.Err() bare - never wrapped in errSolverBug, so a caller's own
 // cancellation is never reported as an internal defect. Once per iteration is
 // the whole of what this loop guarantees, and it is deliberately not a claim
-// of promptness: a single iteration can issue many provider calls, since
-// conflict resolution materializes every package it touches, so a cancellation
-// arriving mid-iteration is observed by the provider first - which is what
-// Provider's own contract requires of a call that performs I/O - and comes
-// back as that provider's error wrapped by materializePkg, dependenciesOf, or
-// tryDecideByProbe, keeping errors.Is(err, context.Canceled) true but not
-// bare.
+// of promptness: decision making is the only phase that reaches the provider
+// (term arithmetic is exact without any universe, so propagation and conflict
+// resolution perform no I/O at all), and a cancellation arriving inside it is
+// observed by the provider first - which is what Provider's own contract
+// requires of a call that performs I/O - and comes back as that provider's
+// error wrapped by ensureUniverse, dependenciesOf, or tryDecideByProbe,
+// keeping errors.Is(err, context.Canceled) true but not bare.
 func Solve(ctx context.Context, reqs []Requirement, p Provider) (*Result, error) {
 	s := newSolveState(p, reqs)
 
 	rootInc := &incompatibility{
-		Terms: []term{{Package: rootPkg, Set: singletonSet(rootVersion), Positive: false}},
+		Terms: []term{{Package: rootPkg, Set: singletonVerSet(rootVersion), Positive: false}},
 		Cause: causeRoot{},
 	}
 	s.store.add(rootInc)
@@ -81,7 +81,7 @@ func Solve(ctx context.Context, reqs []Requirement, p Provider) (*Result, error)
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if err := s.unitPropagation(ctx, next); err != nil {
+		if err := s.unitPropagation(next); err != nil {
 			return nil, err
 		}
 		pkg, done, err := s.makeDecision(ctx)
@@ -112,18 +112,17 @@ func newSolveState(p Provider, reqs []Requirement) *solveState {
 		depsAdded:      make(map[string]bool),
 		rootDeps:       rootDeps,
 	}
-	s.ps = newPartialSolution(s.uniFor)
+	s.ps = newPartialSolution()
 
 	rootUni := newPackageUniverse()
 	rootUni.setVersions([]Version{rootVersion})
 	s.universes[rootPkg] = rootUni
-	s.ps.materializePackage(rootPkg)
 
 	return s
 }
 
-// uniFor returns pkg's materialization context, lazily creating an
-// unmaterialized placeholder for a package that has never been touched yet.
+// uniFor returns pkg's published-universe record, lazily creating an
+// unfetched placeholder for a package that has never been touched yet.
 func (s *solveState) uniFor(pkg string) *packageUniverse {
 	u, ok := s.universes[pkg]
 	if !ok {
@@ -133,29 +132,25 @@ func (s *solveState) uniFor(pkg string) *packageUniverse {
 	return u
 }
 
-// materializePkg fetches pkg's universe from the provider (unless it is the
-// synthetic root, which is pre-materialized and never fetched, or the
-// universe was already fetched earlier) and brings the partial solution's
-// running intersection for it up to date. The latter is always attempted,
-// even when the universe fetch itself is skipped: a backtrack that wipes
-// every one of pkg's assignments resets its partial-solution-level
-// materialized flag (see backtrackTo) without forgetting the fetched
-// universe, so a later re-materialization here is a cheap local replay, not
-// a second provider call; ps.materializePackage is already a no-op if it is
-// still up to date.
-func (s *solveState) materializePkg(ctx context.Context, pkg string) error {
+// ensureUniverse fetches pkg's published version list from the provider,
+// unless it is the synthetic root (pre-populated, never fetched) or the
+// list was already fetched earlier. It has no partial-solution side effect:
+// term arithmetic is exact without any universe, so only decision making
+// (picking a concrete published candidate, detecting an empty candidate
+// set) and error reporting's cosmetics ever need the list.
+func (s *solveState) ensureUniverse(ctx context.Context, pkg string) error {
 	if pkg == rootPkg {
 		return nil
 	}
 	u := s.uniFor(pkg)
-	if !u.materialized {
-		versions, err := s.provider.Universe(ctx, pkg)
-		if err != nil {
-			return fmt.Errorf("fetching version universe for %s: %w", pkg, err)
-		}
-		u.setVersions(buildUniverse(versions))
+	if u.fetched {
+		return nil
 	}
-	s.ps.materializePackage(pkg)
+	versions, err := s.provider.Universe(ctx, pkg)
+	if err != nil {
+		return fmt.Errorf("fetching version universe for %s: %w", pkg, err)
+	}
+	u.setVersions(buildUniverse(versions))
 	return nil
 }
 

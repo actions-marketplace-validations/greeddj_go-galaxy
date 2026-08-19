@@ -2,15 +2,15 @@ package solver
 
 import "testing"
 
-// TestFullConstraintInvisibilityBacktrack pins the clear-if-full fix: a
-// vacuously-true dependency term (one that classifies to the full
-// boundary-extended universe, like an unconstrained "*") must still stay a
-// visible contributor to its package's running intersection. gen.p0@1.5.0
-// requires gen.p1 via a wildcard ("*") and gen.p2 via ^0.0.3 (which gen.p2
-// cannot satisfy), so gen.p0@1.5.0 is unsatisfiable. Because the wildcard
-// classifies to the full extended universe, it must still stay a visible
-// contributor so the solver learns "not gen.p0@1.5.0" and backtracks to
-// gen.p0@1.2.0 rather than falsely rejecting the graph.
+// TestFullConstraintInvisibilityBacktrack pins wildcard-dependency
+// visibility: an unconstrained ("*") dependency term constrains nothing by
+// itself, yet must still stay a visible, attributable contributor to its
+// package's requirement (under signed terms, the derived positive "any"
+// assignment is that contributor). gen.p0@1.5.0 requires gen.p1 via a
+// wildcard ("*") and gen.p1 requires gen.p2 via ^0.0.3 (which gen.p2
+// cannot satisfy), so gen.p0@1.5.0 is transitively unsatisfiable. The
+// solver must learn "not gen.p0@1.5.0" and backtrack to gen.p0@1.2.0
+// rather than falsely rejecting the graph.
 func TestFullConstraintInvisibilityBacktrack(t *testing.T) {
 	t.Parallel()
 	p := newFakeProvider().

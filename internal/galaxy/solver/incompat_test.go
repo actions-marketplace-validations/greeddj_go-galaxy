@@ -71,35 +71,40 @@ func TestIncompatStoreByPackageAppendOrder(t *testing.T) {
 }
 
 // TestNormalizeTermsMergesDuplicatePackages pins that normalizeTerms merges
-// multiple terms for the same package via bitset intersection.
+// multiple terms for the same package into their signed conjunction.
 func TestNormalizeTermsMergesDuplicatePackages(t *testing.T) {
 	t.Parallel()
-	s := newTestState(newFakeProvider().withVersions(testPkgFoo, "1.0.0", "1.5.0", "2.0.0"))
-	materializeForTest(t, s)
-
 	terms := []term{
 		{Package: testPkgFoo, Set: mustSet(t, ">=1.0.0"), Positive: true},
 		{Package: testPkgFoo, Set: mustSet(t, "<2.0.0"), Positive: true},
 	}
-	merged := normalizeTerms(terms, s.uniFor)
+	merged := normalizeTerms(terms)
 	if len(merged) != 1 {
 		t.Fatalf("normalizeTerms merged %d terms for one package, want 1", len(merged))
 	}
 	if merged[0].Package != testPkgFoo || !merged[0].Positive {
 		t.Fatalf("merged term = %+v, want a single positive foo term", merged[0])
 	}
-	// normalizeTerms merges over the boundary-extended universe (conflict
-	// resolution's own arithmetic), so the result is a setExtBitset term.
-	// Nothing in production ever needs to collapse that back to a
-	// published-only reading (the running intersection and Case C consume
-	// the extended term directly), but this assertion still wants to inspect
-	// exactly which published versions the merge actually permits, so it
-	// uses projectTermToPublished directly for that purpose only.
-	uni := s.uniFor(testPkgFoo)
-	published := projectTermToPublished(merged[0], uni)
-	bits := permittedBits(published, uni)
-	if popcount(bits) != 2 { // only 1.0.0 and 1.5.0 satisfy both >=1.0.0 and <2.0.0
-		t.Fatalf("merged term permits %d versions, want 2 (1.0.0 and 1.5.0)", popcount(bits))
+	if !merged[0].Set.equalSet(mustSet(t, ">=1.0.0, <2.0.0")) {
+		t.Fatalf("merged term's set = %q, want the exact conjunction >=1.0.0,<2.0.0", merged[0].Set.displayLabel())
+	}
+}
+
+// TestNormalizeTermsMergeKeepsNegativeConjunction pins the signed merge's
+// polarity honesty: two negative terms conjoin to the negation of their
+// sets' union, never to a force-repolarized positive term.
+func TestNormalizeTermsMergeKeepsNegativeConjunction(t *testing.T) {
+	t.Parallel()
+	terms := []term{
+		{Package: testPkgFoo, Set: mustSet(t, "^1.0.0"), Positive: false},
+		{Package: testPkgFoo, Set: mustSet(t, "^2.0.0"), Positive: false},
+	}
+	merged := normalizeTerms(terms)
+	if len(merged) != 1 || merged[0].Positive {
+		t.Fatalf("normalizeTerms = %+v, want a single negative foo term", merged)
+	}
+	if !merged[0].Set.equalSet(mustSet(t, "^1.0.0 || ^2.0.0")) {
+		t.Fatalf("merged negative set = %q, want the union of both ranges", merged[0].Set.displayLabel())
 	}
 }
 
@@ -107,12 +112,11 @@ func TestNormalizeTermsMergesDuplicatePackages(t *testing.T) {
 // dropped once more than one term remains.
 func TestNormalizeTermsDropsPositiveRoot(t *testing.T) {
 	t.Parallel()
-	s := newTestState(newFakeProvider())
 	terms := []term{
-		{Package: rootPkg, Set: singletonSet(rootVersion), Positive: true},
+		{Package: rootPkg, Set: singletonVerSet(rootVersion), Positive: true},
 		{Package: testPkgFoo, Set: mustSet(t, "^1.0.0"), Positive: false},
 	}
-	merged := normalizeTerms(terms, s.uniFor)
+	merged := normalizeTerms(terms)
 	if len(merged) != 1 || merged[0].Package != testPkgFoo {
 		t.Fatalf("normalizeTerms = %+v, want only the foo term (root dropped)", merged)
 	}
@@ -122,10 +126,31 @@ func TestNormalizeTermsDropsPositiveRoot(t *testing.T) {
 // is never dropped (it must survive to be recognized by isTerminal).
 func TestNormalizeTermsKeepsSoleRootTerm(t *testing.T) {
 	t.Parallel()
-	s := newTestState(newFakeProvider())
-	terms := []term{{Package: rootPkg, Set: singletonSet(rootVersion), Positive: true}}
-	merged := normalizeTerms(terms, s.uniFor)
+	terms := []term{{Package: rootPkg, Set: singletonVerSet(rootVersion), Positive: true}}
+	merged := normalizeTerms(terms)
 	if len(merged) != 1 || merged[0].Package != rootPkg {
 		t.Fatalf("normalizeTerms = %+v, want the sole root term preserved", merged)
+	}
+}
+
+// TestNormalizeTermsDropsTautologicalTerm pins dropTautological's new
+// definition: N({}) - the always-true negation of an unsatisfiable positive
+// statement - is redundant next to any other term and is removed, while a
+// sole tautological term survives (a single-term incompatibility is never
+// emptied here).
+func TestNormalizeTermsDropsTautologicalTerm(t *testing.T) {
+	t.Parallel()
+	tautology := term{Package: "bar", Set: emptyVerSet(), Positive: false}
+	terms := []term{
+		{Package: testPkgFoo, Set: mustSet(t, "^1.0.0"), Positive: true},
+		tautology,
+	}
+	merged := normalizeTerms(terms)
+	if len(merged) != 1 || merged[0].Package != testPkgFoo {
+		t.Fatalf("normalizeTerms = %+v, want the tautological bar term dropped", merged)
+	}
+	sole := normalizeTerms([]term{tautology})
+	if len(sole) != 1 {
+		t.Fatalf("normalizeTerms emptied a single-term incompatibility: %+v", sole)
 	}
 }

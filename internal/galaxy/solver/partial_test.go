@@ -13,7 +13,7 @@ import (
 // "foo" right after the append, captured before backtrackTo ever runs, so a
 // caller can assert that pointer is untouched when backtrackTo returns an
 // error.
-func backtrackToFixture(t *testing.T, set versionSet) (*solveState, *packageAssignments) {
+func backtrackToFixture(t *testing.T, set verSet) (*solveState, *packageAssignments) {
 	t.Helper()
 	s := newTestState(newFakeProvider())
 	s.ps.append(term{Package: "foo", Set: set, Positive: true}, 1, -1)
@@ -32,12 +32,12 @@ func TestPartialSolutionBacktrackTo(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name    string
-		set     versionSet
+		set     verSet
 		wantErr bool
 	}{
 		{
 			name: "singleton decision term rebuilds decisionVersion",
-			set:  singletonSet(mustV(t, "1.0.0")),
+			set:  singletonVerSet(mustV(t, "1.0.0")),
 		},
 		{
 			name:    "non-singleton decision term reports an invariant error",

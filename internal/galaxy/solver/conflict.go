@@ -1,7 +1,6 @@
 package solver
 
 import (
-	"context"
 	"fmt"
 )
 
@@ -11,21 +10,12 @@ import (
 // be almost satisfied - the "root cause" unit propagation continues from.
 // If no solution can exist, it returns a *ConflictError.
 //
-// Satisfier-finding and merge arithmetic inside this loop operate on the
-// boundary-extended universe (term.go), the same representation the partial
-// solution's running intersection and relation's Case C now use: a package
-// whose published universe has few members otherwise looks tautologically
-// true to a term that only actually holds because of a specific, informative
-// assignment, and settling for that tautology as "the satisfier" would merge
-// with a content-free external leaf and permanently lose the dependency edge
-// that explains why the package was relevant at all (see term.go's
-// boundary-extended-universe comment). Every incompatibility this function
-// returns or stores stays in whatever representation it was built in
-// (extended-universe terms flow straight into the store and into relation's
-// Case C without any projection step); only decision making, which can only
-// ever choose a published version, ever needs to collapse an extended
-// running intersection down to published-only cells (pointCellsOf).
-func (s *solveState) resolveConflict(ctx context.Context, startIdx int) (int, *incompatibility, error) {
+// Satisfier-finding and merge arithmetic operate on signed exact terms
+// (term.go), the same representation the partial solution's accumulations
+// and relation() use, so a satisfier always exists for a genuinely
+// satisfied incompatibility: nothing is ever vacuously true against the
+// N({}) seed, and every judgment here is exact without any provider call.
+func (s *solveState) resolveConflict(startIdx int) (int, *incompatibility, error) {
 	inc := s.store.all[startIdx]
 	curIdx := startIdx
 
@@ -44,31 +34,19 @@ func (s *solveState) resolveConflict(ctx context.Context, startIdx int) (int, *i
 	// large input - mirroring the main solve loop's own fuel guard.
 	for guard := range 10_000 {
 		_ = guard
-		if err := s.materializeTerms(ctx, inc.Terms); err != nil {
-			return 0, nil, err
-		}
 		if inc.isTerminal() {
 			return 0, nil, s.buildConflictError(inc)
 		}
 
 		satisfier, term := s.earliestSatisfier(inc)
 		if satisfier == nil {
-			// The incompatibility is satisfied only vacuously: every term is
-			// tautological (its permitted set spans the whole extended
-			// universe), so there is no real assignment to resolve against. A
-			// tautologically-satisfied incompatibility is a genuine dead end -
-			// the forbidden combination always holds - so it is reported as a
-			// clean conflict, not an internal-invariant error.
-			if s.allTautological(inc) {
-				return 0, nil, s.buildConflictError(inc)
-			}
-			// The reference algorithm assumes a satisfier always exists for
-			// a genuinely satisfied incompatibility; under the
-			// boundary-extended universe this holds for every package, which
-			// a published-only reading would not give: there a one-version
-			// package's term can be vacuously "true" from the very start.
-			// Reaching this means the assumption broke - a defect,
-			// not a legitimate proof - so fail loudly instead of guessing.
+			// The reference algorithm guarantees a satisfier exists for a
+			// genuinely satisfied incompatibility, and signed exact terms
+			// uphold that: no term is satisfied by the empty prefix (a
+			// positive term needs a positive assignment, and tautological
+			// negative terms never enter the store). Reaching this means the
+			// assumption broke - a defect, not a legitimate proof - so fail
+			// loudly instead of guessing.
 			return 0, nil, fmt.Errorf("no satisfier found for a satisfied incompatibility: %w", errSolverBug)
 		}
 		prevLevel := s.prevSatisfierLevel(inc, satisfier)
@@ -86,11 +64,7 @@ func (s *solveState) resolveConflict(ctx context.Context, startIdx int) (int, *i
 			return s.backjump(inc, curIdx, incChanged, prevLevel)
 		}
 
-		next, err := s.mergeWithSatisfierCause(ctx, inc, satisfier, term)
-		if err != nil {
-			return 0, nil, err
-		}
-		inc = next
+		inc = s.mergeWithSatisfierCause(inc, satisfier, term)
 		incChanged = true
 	}
 	return 0, nil, s.buildConflictError(inc)
@@ -157,42 +131,23 @@ func (s *solveState) backjump(inc *incompatibility, curIdx int, incChanged bool,
 // (excluding the satisfier's package), adding a partial-satisfier correction
 // term when the satisfier's assignment does not, on its own, satisfy inc's
 // term for that package (satisfierTerm).
-func (s *solveState) mergeWithSatisfierCause(
-	ctx context.Context, inc *incompatibility, satisfier *assignment, satisfierTerm term,
-) (*incompatibility, error) {
+func (s *solveState) mergeWithSatisfierCause(inc *incompatibility, satisfier *assignment, satisfierTerm term) *incompatibility {
 	cause := s.store.all[satisfier.CauseIndex]
-	if err := s.materializeTerms(ctx, cause.Terms); err != nil {
-		return nil, err
-	}
-
-	uni := s.uniFor(satisfier.term.Package)
 	prior := mergeTermsExcluding(inc, cause, satisfier.term.Package)
-	if !termSatisfies(satisfier.term, satisfierTerm, uni) {
-		prior = append(prior, negatedDifferenceTerm(satisfier.term, satisfierTerm, uni))
+	if !termSubset(satisfier.term, satisfierTerm) {
+		prior = append(prior, negatedDifferenceTerm(satisfier.term, satisfierTerm))
 	}
 
 	return &incompatibility{
-		Terms: normalizeTerms(prior, s.uniFor),
+		Terms: normalizeTerms(prior),
 		Cause: causeConflict{Left: inc, Right: cause},
-	}, nil
-}
-
-// materializeTerms materializes every package named in terms that is not
-// already materialized.
-func (s *solveState) materializeTerms(ctx context.Context, terms []term) error {
-	for _, t := range terms {
-		if err := s.materializePkg(ctx, t.Package); err != nil {
-			return err
-		}
 	}
-	return nil
 }
 
 // mergeTermsExcluding collects the terms of a and b except any naming
-// exclude, ready for normalizeTerms to merge duplicate packages (via
-// extended-universe bitset intersection) and drop redundant positive root
-// terms. This is the "priorCause" step of conflict resolution's generalized
-// resolution rule.
+// exclude, ready for normalizeTerms to merge duplicate packages (via signed
+// term intersection) and drop redundant positive root terms. This is the
+// "priorCause" step of conflict resolution's generalized resolution rule.
 func mergeTermsExcluding(a, b *incompatibility, exclude string) []term {
 	collected := make([]term, 0, len(a.Terms)+len(b.Terms))
 	for _, t := range a.Terms {
@@ -208,59 +163,44 @@ func mergeTermsExcluding(a, b *incompatibility, exclude string) []term {
 	return collected
 }
 
-// allTautological reports whether every term in inc is always-satisfiable -
-// its permitted set spans every cell of that package's extended universe.
-func (s *solveState) allTautological(inc *incompatibility) bool {
-	for _, t := range inc.Terms {
-		u := s.uniFor(t.Package)
-		if popcount(permittedExtBits(t, u)) != u.extendedLen() {
-			return false
-		}
-	}
-	return true
-}
-
-// termSatisfies reports whether a's permitted set is a subset of b's over
-// the boundary-extended universe - i.e. whether a on its own, without
-// anything else, already satisfies b. a and b must name the same package.
-func termSatisfies(a, b term, uni *packageUniverse) bool {
-	return subset(permittedExtBits(a, uni), permittedExtBits(b, uni))
-}
-
-// negatedDifferenceTerm returns "not (satisfierTerm \ term)" for
-// satisfierTerm's package, computed over the boundary-extended universe:
-// the partial-satisfier correction term added to the prior cause when the
+// negatedDifferenceTerm returns "not (satisfierTerm minus incTerm)": the
+// partial-satisfier correction term added to the prior cause when the
 // satisfier's assignment does not, on its own, satisfy the incompatibility's
-// term for that package.
-func negatedDifferenceTerm(satisfierTerm, incTerm term, uni *packageUniverse) term {
-	diff := differenceNew(permittedExtBits(satisfierTerm, uni), permittedExtBits(incTerm, uni))
-	return term{Package: satisfierTerm.Package, Set: uni.asExtBitsetSet(diff, "(difference)"), Positive: false}
+// term for its package. The subtraction is the signed conjunction of the
+// satisfier's term with the incompatibility term's negation.
+func negatedDifferenceTerm(satisfierTerm, incTerm term) term {
+	return termIntersect(satisfierTerm, incTerm.Negate()).Negate()
 }
 
 // computeFirstSatisfied scans assignments[0:limit] forward, maintaining a
-// per-package running intersection bitset over the boundary-extended
-// universe (seeded with seed's contribution for its own package, if seed is
-// non-nil - representing a satisfier pinned in regardless of prefix
-// length), and returns, for every package named in inc, the index of the
-// first assignment after which that package's running intersection
-// satisfies inc's term for it. When seed is non-nil (the previousSatisfier
-// computation), a package already satisfied by the seed alone - before any
-// prefix assignment is scanned - maps to the -1 sentinel directly: the seed
-// is a real assignment, so "satisfied by the seed alone" is the legitimate
-// no-earlier-satisfier answer. When seed is nil (the forward satisfier
-// scan), a term the full extended universe already satisfies before any
-// real assignment exists is only ever true for a tautological term (one
-// whose permitted set spans every cell, as causeUnknownPackage's "in any"
-// leaf does) - such a term still needs a real assignment establishing it
-// before it can map to -1, so it is tracked separately and only falls back
-// to the sentinel once the forward scan finishes without ever satisfying it
-// through a real assignment. A package genuinely never satisfied within the
-// scanned prefix, and never vacuous, is absent from the result.
+// per-package signed accumulation (seeded with seed's contribution for its
+// own package, if seed is non-nil - representing a satisfier pinned in
+// regardless of prefix length), and returns, for every package named in
+// inc, the index of the first assignment after which that package's
+// accumulation satisfies inc's term for it. When seed is non-nil (the
+// previousSatisfier computation), a package already satisfied by the seed
+// alone - before any prefix assignment is scanned - maps to the -1 sentinel
+// directly: the seed is a real assignment, so "satisfied by the seed alone"
+// is the legitimate no-earlier-satisfier answer. When seed is nil, nothing
+// is satisfied before a real assignment is folded in: the N({}) seed never
+// entails a positive term, and tautological negative terms never enter the
+// store. A package never satisfied within the scanned prefix is absent from
+// the result.
 func (s *solveState) computeFirstSatisfied(inc *incompatibility, seed *term, limit int) map[string]int {
 	firstIdx := make(map[string]int, len(inc.Terms))
 	done := make(map[string]bool, len(inc.Terms))
-	running := make(map[string][]uint64, len(inc.Terms))
-	vacuous := s.seedRunningIntersections(inc, seed, running, firstIdx, done)
+	running := make(map[string]term, len(inc.Terms))
+	for _, t := range inc.Terms {
+		acc := accumSeed(t.Package)
+		if seed != nil && seed.Package == t.Package {
+			acc = termIntersect(acc, *seed)
+			if termSubset(acc, t) {
+				firstIdx[t.Package] = -1
+				done[t.Package] = true
+			}
+		}
+		running[t.Package] = acc
+	}
 
 	for i := range limit {
 		a := &s.ps.assignments[i]
@@ -268,67 +208,14 @@ func (s *solveState) computeFirstSatisfied(inc *incompatibility, seed *term, lim
 		if !ok || done[t.Package] {
 			continue
 		}
-		u := s.uniFor(t.Package)
-		rb := running[t.Package]
-		intersectExtAssignmentInto(rb, a.term, u)
-		if subsetOfPermittedExt(rb, t, u) {
+		acc := termIntersect(running[t.Package], a.term)
+		running[t.Package] = acc
+		if termSubset(acc, t) {
 			firstIdx[t.Package] = i
 			done[t.Package] = true
 		}
 	}
-	for pkg := range vacuous {
-		if !done[pkg] {
-			firstIdx[pkg] = -1
-		}
-	}
 	return firstIdx
-}
-
-// seedRunningIntersections initializes running with every inc term's
-// package's full-extended-universe intersection (folding in seed's own
-// contribution, if seed names that package), and reports which packages are
-// vacuous: already satisfied before any real assignment is scanned, purely
-// by the full universe's own permitted set.
-//
-// A positive term is only vacuously satisfiable when it is tautological
-// (its permitted set spans every cell, as causeUnknownPackage's "in any"
-// leaf does), and the reference algorithm's semantics require a positive
-// term to be satisfied by a real positive assignment, not by the empty
-// prefix. So when seed is nil (the forward satisfier scan), a vacuous
-// package is only recorded in the returned set, not settled into
-// firstIdx/done at once: computeFirstSatisfied's forward scan still gets a
-// chance to find a real assignment establishing the term, falling back to
-// the -1 sentinel only once that scan finishes without ever satisfying it.
-// When seed is non-nil (the previousSatisfier computation), a vacuous
-// package is instead recorded into firstIdx/done immediately: the seed
-// itself is a real assignment, so "satisfied by the seed alone" is the
-// legitimate no-earlier-satisfier answer that computation exists to report.
-func (s *solveState) seedRunningIntersections(
-	inc *incompatibility,
-	seed *term,
-	running map[string][]uint64,
-	firstIdx map[string]int,
-	done map[string]bool,
-) map[string]bool {
-	vacuous := make(map[string]bool, len(inc.Terms))
-	for _, t := range inc.Terms {
-		u := s.uniFor(t.Package)
-		rb := fullExtBits(u)
-		running[t.Package] = rb
-		if seed != nil && seed.Package == t.Package {
-			intersectExtAssignmentInto(rb, *seed, u)
-		}
-		if !subsetOfPermittedExt(rb, t, u) {
-			continue
-		}
-		if seed != nil {
-			firstIdx[t.Package] = -1
-			done[t.Package] = true
-		} else {
-			vacuous[t.Package] = true
-		}
-	}
-	return vacuous
 }
 
 // earliestSatisfier finds the earliest assignment such that the partial

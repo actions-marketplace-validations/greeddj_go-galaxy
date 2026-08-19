@@ -28,7 +28,7 @@ const scaledGraphFanout = 3
 // membership authority property_test.go uses), falling back to "*" - which
 // every published version admits - if none of pool's forms happen to. This
 // is what lets buildScaledGraph and buildGalaxyShapeGraph draw real
-// constraint forms (narrow enough to sometimes force materialization,
+// constraint forms (narrow enough to sometimes force a universe fetch,
 // unlike a blanket "*") while staying guaranteed-solvable.
 func safeConstraint(rng *rand.Rand, pool, childVersions []string) string {
 	candidates := make([]string, 0, len(pool))

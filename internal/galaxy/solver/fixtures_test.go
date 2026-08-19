@@ -255,9 +255,8 @@ func scanProofShape(lines []string) (bool, bool) {
 
 // TestFixtureUnknownPackage pins that a full Solve for a package the provider
 // reports zero published versions for carries CauseUnknownPackage through
-// conflict resolution to a *ConflictError, never the internal-invariant
-// defect a zero-versions leaf can otherwise trigger under the
-// boundary-extended universe.
+// conflict resolution to a *ConflictError, never an internal-invariant
+// defect.
 func TestFixtureUnknownPackage(t *testing.T) {
 	t.Parallel()
 	p := newFakeProvider() // "ghost" has no registered versions

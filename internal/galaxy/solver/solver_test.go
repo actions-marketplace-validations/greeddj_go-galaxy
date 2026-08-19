@@ -39,16 +39,16 @@ func TestFuelGuard(t *testing.T) {
 	}
 }
 
-// TestConservativeRelationFence targets section 7.3/7.2's Case D
-// conservatism directly: two symbolic ranges on the SAME undecided package
-// that are, in fact, disjoint (foo ^1.0.0 and foo ^2.0.0 can never both
-// hold) are NOT detected as contradictory by relation()'s cheap key-identity
-// check, since their keys differ - relation must answer INCONCLUSIVE for
-// each against the other, deferring the conflict rather than inventing a
-// false CONTRADICTED verdict Case D is not entitled to. The solve must still
-// terminate correctly once a real decision (or materialization) makes the
-// conflict concrete.
-func TestConservativeRelationFence(t *testing.T) {
+// TestExactRelationDetectsDisjointRanges pins the exactness the signed
+// term algebra provides where the retired symbolic key-identity comparison
+// had to defer: two positive ranges on the SAME undecided package that are,
+// in fact, disjoint (foo ^1.0.0 and foo ^2.0.0 can never both hold) are
+// detected as an outright CONTRADICTED the moment the second is related,
+// with the package's universe never fetched - the conjunction of the two
+// exact sets is the unsatisfiable positive empty set, and relation reports
+// exactly that instead of deferring to a later materialization the exact
+// representation no longer needs.
+func TestExactRelationDetectsDisjointRanges(t *testing.T) {
 	t.Parallel()
 	s := newTestState(newFakeProvider())
 	s.ps.decide(rootPkg, rootVersion)
@@ -56,23 +56,22 @@ func TestConservativeRelationFence(t *testing.T) {
 	s.ps.derive(rangeA, mustDummyCause(t, s))
 
 	rangeB := term{Package: "foo", Set: mustSet(t, "^2.0.0"), Positive: true}
-	// relation(rangeB, ...) must be INCONCLUSIVE here: foo is unmaterialized,
-	// and Case D's key-identity check cannot see that ^1.0.0 and ^2.0.0 are
-	// disjoint (different keys, not the same key with opposite polarity) -
-	// this is exactly the conservative deferral the design mandates, not a
-	// defect someone might try to remove as a false optimization.
-	if got := relation(rangeB, s.ps, s.uniFor); got != termInconclusive {
-		t.Fatalf("relation(disjoint range against an unmaterialized package) = %v, want termInconclusive (deferred, per section 7.3)", got)
+	// relation(rangeB) must be CONTRADICTED here even though foo's universe
+	// was never fetched: P(^1.0.0) conjoined with P(^2.0.0) is P({}), the
+	// statement no selection can satisfy. The old representation could only
+	// see this after materialization; exactness is the point of the signed
+	// verSet algebra, so this assertion pins it directly.
+	if got := relation(rangeB, s.ps); got != termContradicted {
+		t.Fatalf("relation(disjoint range against an unfetched package) = %v, want termContradicted (exact algebra)", got)
 	}
 
-	// The deferred conflict must still surface correctly, and the solve must
-	// still terminate, once foo actually gets materialized and decision
-	// making has to pick a real candidate: with both ^1.0.0 and ^2.0.0
-	// required (through two independent dependers, since two root
-	// requirements on the very same package would be rejected upstream by
-	// the requirements parser before ever reaching the core) and no version
-	// satisfying both, the empty intersection must be caught exactly (Case C
-	// is exact bitset algebra, unlike Case D's conservative deferral).
+	// The conflict must also surface correctly through a whole solve, and
+	// the solve must still terminate, when decision making has to pick a
+	// real candidate: with both ^1.0.0 and ^2.0.0 required (through two
+	// independent dependers, since two root requirements on the very same
+	// package would be rejected upstream by the requirements parser before
+	// ever reaching the core) and no version satisfying both, the empty
+	// conjunction must be caught and reported as a clean conflict.
 	p2 := newFakeProvider().
 		withVersions("mid1", "1.0.0").
 		withVersions("mid2", "1.0.0").
@@ -131,16 +130,16 @@ func TestExtractResultGuardFiresOnConstructedIncompleteResolution(t *testing.T) 
 	fooV := mustNewVersion(testVersion100)
 	s.store.add(&incompatibility{
 		Terms: []term{
-			{Package: rootPkg, Set: singletonSet(rootVersion), Positive: true},
-			{Package: "acme.foo", Set: anySet, Positive: false},
+			{Package: rootPkg, Set: singletonVerSet(rootVersion), Positive: true},
+			{Package: "acme.foo", Set: fullVerSet(), Positive: false},
 		},
 		Cause: causeDependency{Parent: rootPkg, ParentVersion: rootVersion, Dep: "acme.foo", Constraint: "*"},
 	})
 	s.ps.decide("acme.foo", fooV)
 	s.store.add(&incompatibility{
 		Terms: []term{
-			{Package: "acme.foo", Set: singletonSet(fooV), Positive: true},
-			{Package: "acme.bar", Set: anySet, Positive: false},
+			{Package: "acme.foo", Set: singletonVerSet(fooV), Positive: true},
+			{Package: "acme.bar", Set: fullVerSet(), Positive: false},
 		},
 		Cause: causeDependency{Parent: "acme.foo", ParentVersion: fooV, Dep: "acme.bar", Constraint: "*"},
 	})
@@ -235,7 +234,7 @@ func TestTransitiveUnsatisfiableBacktrack(t *testing.T) {
 // KILLING MUTATION 1, run and reverted, narrowing isExternalLeaf's switch in
 // conflict.go to `case causeNoVersions:` alone:
 //
-//	solver_test.go:259: unexpected error: So, because acme.ghost has no published versions, version solving failed.
+//	solver_test.go:258: unexpected error: So, because acme.ghost has no published versions, version solving failed.
 //
 // That mutation was also run against the whole package, and this test is the
 // only one in it that fails - which is the measurement this test was written
@@ -247,7 +246,7 @@ func TestTransitiveUnsatisfiableBacktrack(t *testing.T) {
 // on the same assertion with the same message, since removing the exception
 // and narrowing this leaf out of it leave the leaf on the same path:
 //
-//	solver_test.go:259: unexpected error: So, because acme.ghost has no published versions, version solving failed.
+//	solver_test.go:258: unexpected error: So, because acme.ghost has no published versions, version solving failed.
 func TestTransitiveUnknownPackageBacktrack(t *testing.T) {
 	t.Parallel()
 	const survivor = "1.2.0"
@@ -285,7 +284,7 @@ func TestSolveStopsOnCanceledContext(t *testing.T) {
 		// running `go test ./internal/galaxy/solver/ -run
 		// TestSolveStopsOnCanceledContext -race -v -count=1` makes this exact
 		// assertion fail with:
-		// "solver_test.go:291: Solve returned a non-nil result on an
+		// "solver_test.go:290: Solve returned a non-nil result on an
 		// already-canceled context: map[acme.foo:2.0.0]"
 		if res != nil {
 			t.Fatalf("Solve returned a non-nil result on an already-canceled context: %v", res.Versions)
@@ -301,7 +300,7 @@ func TestSolveStopsOnCanceledContext(t *testing.T) {
 		}
 		// Documentary, not pinned: the two counters below cannot be this
 		// chain's first failing line. Highest answers 2.0.0 for this fixture,
-		// so tryDecideByProbe decides acme.foo and materializePkg is never
+		// so tryDecideByProbe decides acme.foo and ensureUniverse is never
 		// reached - Universe is unreachable on every path here - and
 		// Dependencies is reached only from decideVersion inside that same
 		// probe branch, i.e. always after the Highest call the assertion above

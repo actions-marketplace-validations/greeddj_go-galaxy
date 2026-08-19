@@ -6,7 +6,8 @@ import (
 
 // constraintCase mirrors the row shape of
 // internal/galaxy/collections/semver_semantics_test.go's constraintCase, so
-// the same ground-truth semantics rows can drive versionSet.Contains here.
+// the same ground-truth semantics rows can drive the exact set builder here
+// (TestVerSetGroundTruthRows in versetbuild_test.go consumes them).
 type constraintCase struct {
 	name       string
 	constraint string
@@ -18,9 +19,9 @@ type constraintCase struct {
 // symbolicSemanticsCases reuses the pinned semver semantics rows: basic
 // operators, x-ranges, tilde, caret (stable and zero-major), prerelease
 // exclusion/inclusion, the "==" -> "=" rewrite, and the over-normalization
-// guards. versionSet.Contains must agree with every row, since it is built
-// from the exact same NormalizeConstraint -> semver.NewConstraint -> Check
-// pipeline.
+// guards. newVerSet must agree with every row, since Masterminds'
+// NormalizeConstraint -> NewConstraint -> Check pipeline is the membership
+// authority the exact sets are differentially tested against.
 func symbolicSemanticsCases() []constraintCase {
 	return []constraintCase{
 		{name: "bare exact match", constraint: "1.2.3", version: "1.2.3", wantMatch: true},
@@ -56,57 +57,6 @@ func symbolicSemanticsCases() []constraintCase {
 	}
 }
 
-func TestVersionSetSymbolicContains(t *testing.T) {
-	t.Parallel()
-	for _, tt := range symbolicSemanticsCases() {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			set, err := newSymbolicSet(tt.constraint)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("newSymbolicSet(%q) expected an error", tt.constraint)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("newSymbolicSet(%q) unexpected error: %v", tt.constraint, err)
-			}
-			v, err := NewVersion(tt.version)
-			if err != nil {
-				t.Fatalf("NewVersion(%q): %v", tt.version, err)
-			}
-			if got := set.Contains(v); got != tt.wantMatch {
-				t.Fatalf("Contains(%q) against %q = %v, want %v", tt.version, tt.constraint, got, tt.wantMatch)
-			}
-		})
-	}
-}
-
-// TestAnySetIsSingleIdentity pins the single-anySet-identity invariant:
-// every unconstrained input (raw "*", raw empty, and their normalized form)
-// must produce the exact same Key ("") as the package-level anySet value.
-func TestAnySetIsSingleIdentity(t *testing.T) {
-	t.Parallel()
-	for _, raw := range []string{"", "*", "  ", " * "} {
-		set, err := newSymbolicSet(raw)
-		if err != nil {
-			t.Fatalf("newSymbolicSet(%q): %v", raw, err)
-		}
-		if set.Key() != "" {
-			t.Fatalf("newSymbolicSet(%q).Key() = %q, want \"\"", raw, set.Key())
-		}
-		if !set.isAny() {
-			t.Fatalf("newSymbolicSet(%q) is not recognized as anySet", raw)
-		}
-		if !set.Contains(mustV(t, "0.0.1")) || !set.Contains(mustV(t, "999.999.999-rc1")) {
-			t.Fatalf("newSymbolicSet(%q) does not admit every version, including prereleases", raw)
-		}
-	}
-	if anySet.Key() != "" {
-		t.Fatalf("anySet.Key() = %q, want \"\"", anySet.Key())
-	}
-}
-
 func mustV(t *testing.T, raw string) Version {
 	t.Helper()
 	v, err := NewVersion(raw)
@@ -117,7 +67,7 @@ func mustV(t *testing.T, raw string) Version {
 }
 
 // buildTestUniverse parses and orders raw version strings the same way the
-// core does when materializing a package's universe.
+// core does when a package's universe is fetched.
 func buildTestUniverse(t *testing.T, raw ...string) []Version {
 	t.Helper()
 	versions := make([]Version, 0, len(raw))
@@ -162,242 +112,117 @@ func originals(vs []Version) []string {
 	return out
 }
 
-// ---- bitset algebra, property-checked against direct enumeration ---------
+// ---- signed term algebra ----------------------------------------------------
 
-func enumerateBits(b []uint64, n int) []int {
-	var out []int
-	for i := range n {
-		if testBit(b, i) {
-			out = append(out, i)
-		}
+// termAlgebraSets is the small set pool the signed-algebra tests draw
+// sign/set combinations from; the pairs cover subset, disjoint, and
+// partial-overlap relationships.
+func termAlgebraSets(t *testing.T) []verSet {
+	t.Helper()
+	out := make([]verSet, 0, 6)
+	for _, c := range []string{"^1.0.0", ">=1.0.0", "^2.0.0", "=1.5.0", ">=1.5.0,<2.5.0", "*"} {
+		out = append(out, mustSet(t, c))
 	}
 	return out
 }
 
-// bitsFromTestUniverseSize is the fixed universe size every TestBitsetAlgebra*
-// subtest below shares.
-const bitsFromTestUniverseSize = 10
-
-// bitsFrom builds a bitsFromTestUniverseSize-cell test bitset with bit i set
-// for every i in on. Every caller works within the same fixed test universe,
-// so this hardcodes that size rather than threading an always-identical
-// parameter.
-func bitsFrom(on ...int) []uint64 {
-	b := newBits(bitsFromTestUniverseSize)
-	for _, i := range on {
-		setBit(b, i)
+// termAlgebraProbes is the probe pool the pointwise checks evaluate on.
+func termAlgebraProbes(t *testing.T) []Version {
+	t.Helper()
+	raws := []string{"0.9.0", "1.0.0", "1.0.0-rc.1", "1.5.0", "1.9.9", "2.0.0", "2.4.0", "2.5.0", "3.0.0"}
+	out := make([]Version, 0, len(raws))
+	for _, r := range raws {
+		out = append(out, mustV(t, r))
 	}
-	return b
+	return out
 }
 
-// TestBitsetAlgebraSetOps covers the binary set-combinator operations:
-// intersect, union, difference, and complement.
-func TestBitsetAlgebraSetOps(t *testing.T) {
+// TestTermIntersectPointwise property-checks the signed conjunction table
+// against direct membership: for every sign/set combination and probe,
+// selecting v keeps the conjunction true exactly when it keeps both
+// conjuncts true.
+func TestTermIntersectPointwise(t *testing.T) {
 	t.Parallel()
-	const n = bitsFromTestUniverseSize
-	a := bitsFrom(1, 3, 5, 7)
-	b := bitsFrom(3, 5, 9)
-
-	t.Run("intersect", func(t *testing.T) {
-		t.Parallel()
-		got := enumerateBits(intersectNew(a, b), n)
-		want := []int{3, 5}
-		if !slicesEqual(got, want) {
-			t.Fatalf("intersect = %v, want %v", got, want)
-		}
-	})
-	t.Run("union", func(t *testing.T) {
-		t.Parallel()
-		got := enumerateBits(unionNew(a, b), n)
-		want := []int{1, 3, 5, 7, 9}
-		if !slicesEqual(got, want) {
-			t.Fatalf("union = %v, want %v", got, want)
-		}
-	})
-	t.Run("difference", func(t *testing.T) {
-		t.Parallel()
-		got := enumerateBits(differenceNew(a, b), n)
-		want := []int{1, 7}
-		if !slicesEqual(got, want) {
-			t.Fatalf("difference a\\b = %v, want %v", got, want)
-		}
-	})
-	t.Run("complement", func(t *testing.T) {
-		t.Parallel()
-		got := enumerateBits(complementNew(a, n), n)
-		want := []int{0, 2, 4, 6, 8, 9}
-		if !slicesEqual(got, want) {
-			t.Fatalf("complement = %v, want %v", got, want)
-		}
-	})
-}
-
-// TestBitsetAlgebraPredicates covers the boolean predicates: subset,
-// disjointness, popcount, and emptiness.
-func TestBitsetAlgebraPredicates(t *testing.T) {
-	t.Parallel()
-	const n = bitsFromTestUniverseSize
-	a := bitsFrom(1, 3, 5, 7)
-	b := bitsFrom(3, 5, 9)
-
-	t.Run("subset true", func(t *testing.T) {
-		t.Parallel()
-		sub := bitsFrom(3, 5)
-		if !subset(sub, a) {
-			t.Fatalf("expected %v to be a subset of %v", enumerateBits(sub, n), enumerateBits(a, n))
-		}
-	})
-	t.Run("subset false", func(t *testing.T) {
-		t.Parallel()
-		if subset(a, bitsFrom(3, 5)) {
-			t.Fatalf("did not expect %v to be a subset of {3,5}", enumerateBits(a, n))
-		}
-	})
-	t.Run("disjoint true", func(t *testing.T) {
-		t.Parallel()
-		if !disjointBits(a, bitsFrom(0, 2, 4)) {
-			t.Fatalf("expected disjoint sets to be reported disjoint")
-		}
-	})
-	t.Run("disjoint false", func(t *testing.T) {
-		t.Parallel()
-		if disjointBits(a, b) {
-			t.Fatalf("did not expect overlapping sets to be reported disjoint")
-		}
-	})
-	t.Run("popcount", func(t *testing.T) {
-		t.Parallel()
-		if got := popcount(a); got != 4 {
-			t.Fatalf("popcount = %d, want 4", got)
-		}
-	})
-	t.Run("empty", func(t *testing.T) {
-		t.Parallel()
-		if !isEmptyBits(newBits(n)) {
-			t.Fatalf("expected a freshly allocated bitset to be empty")
-		}
-		if isEmptyBits(a) {
-			t.Fatalf("did not expect a non-empty bitset to be reported empty")
-		}
-	})
-}
-
-// TestBitsetAlgebraOrdering covers lowestSetBit (the "highest version"
-// query) and fullBits' trailing-bit masking.
-func TestBitsetAlgebraOrdering(t *testing.T) {
-	t.Parallel()
-	const n = bitsFromTestUniverseSize
-	a := bitsFrom(1, 3, 5, 7)
-
-	t.Run("highest member is the lowest set bit", func(t *testing.T) {
-		t.Parallel()
-		idx, ok := lowestSetBit(a)
-		if !ok || idx != 1 {
-			t.Fatalf("lowestSetBit(a) = (%d, %v), want (1, true)", idx, ok)
-		}
-	})
-	t.Run("highest member of empty set is absent", func(t *testing.T) {
-		t.Parallel()
-		if _, ok := lowestSetBit(newBits(n)); ok {
-			t.Fatalf("lowestSetBit of an empty set should report ok=false")
-		}
-	})
-	t.Run("full bits are exactly n members", func(t *testing.T) {
-		t.Parallel()
-		full := fullBits(n)
-		if popcount(full) != n {
-			t.Fatalf("popcount(fullBits(%d)) = %d, want %d", n, popcount(full), n)
-		}
-		// Trailing bits beyond n in the last word must stay masked to zero,
-		// since complement and other whole-word operations flip them.
-		comp := complementNew(full, n)
-		if !isEmptyBits(comp) {
-			t.Fatalf("complement of a full n-bit set should be empty, got %v", enumerateBits(comp, 64))
-		}
-	})
-}
-
-func slicesEqual(a, b []int) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-// ---- materialization -------------------------------------------------------
-
-// TestMaterializationEquivalence pins the core correctness invariant of
-// materialization: for every universe member, the bit in the materialized
-// set must equal what symbolic Contains would say directly.
-func TestMaterializationEquivalence(t *testing.T) {
-	t.Parallel()
-	u := newPackageUniverse()
-	u.setVersions(buildTestUniverse(t, "1.0.0", "1.5.0", "2.0.0", "2.0.0-rc1", "0.9.0"))
-
-	for _, raw := range []string{"^1.0.0", ">=1.0.0,<2.0.0", "*", "", "=1.5.0", ">=1.0.0-0"} {
-		set, err := newSymbolicSet(raw)
-		if err != nil {
-			t.Fatalf("newSymbolicSet(%q): %v", raw, err)
-		}
-		bits := u.materializeSet(set)
-		for i, v := range u.versions {
-			want := set.Contains(v)
-			got := testBit(bits, i)
-			if got != want {
-				t.Fatalf("constraint %q: materialized bit[%d] (%s) = %v, want %v", raw, i, v.Original(), got, want)
+	sets := termAlgebraSets(t)
+	probes := termAlgebraProbes(t)
+	for _, sa := range sets {
+		for _, sb := range sets {
+			for _, pa := range []bool{true, false} {
+				for _, pb := range []bool{true, false} {
+					a := term{Package: "foo", Set: sa, Positive: pa}
+					b := term{Package: "foo", Set: sb, Positive: pb}
+					joint := termIntersect(a, b)
+					for _, v := range probes {
+						want := termPermits(a, v) && termPermits(b, v)
+						if got := termPermits(joint, v); got != want {
+							t.Fatalf("termIntersect(%v %q, %v %q) at %q = %v, want %v",
+								pa, sa.displayLabel(), pb, sb.displayLabel(), v.Original(), got, want)
+						}
+					}
+				}
 			}
 		}
 	}
 }
 
-// TestClassificationCacheReuse pins that materializing the same symbolic key
-// twice returns the exact same cached bitset (identity reuse, not just
-// value equality), and that the cache is keyed by symbolic key rather than
-// re-running Contains again for a distinct versionSet value with the same
-// key.
-func TestClassificationCacheReuse(t *testing.T) {
+// TestTermIntersectIdentitySeed pins the N({}) identity: folding any term
+// over the seed returns that term verbatim, cosmetic carriers included -
+// which is what lets a single "=X" assignment keep its pinned version
+// visible through the accumulation.
+func TestTermIntersectIdentitySeed(t *testing.T) {
 	t.Parallel()
-	u := newPackageUniverse()
-	u.setVersions(buildTestUniverse(t, "1.0.0", "2.0.0", "3.0.0"))
-
-	setA, err := newSymbolicSet("^1.0.0")
-	if err != nil {
-		t.Fatalf("newSymbolicSet: %v", err)
+	pinned := term{Package: "foo", Set: mustSet(t, "=1.2.3"), Positive: true}
+	folded := termIntersect(accumSeed("foo"), pinned)
+	if !sameTerm(folded, pinned) {
+		t.Fatalf("identity fold changed the term: %+v", folded)
 	}
-	setB, err := newSymbolicSet("^1.0.0")
-	if err != nil {
-		t.Fatalf("newSymbolicSet: %v", err)
-	}
-
-	bitsA := u.materializeSet(setA)
-	bitsB := u.materializeSet(setB)
-	if &bitsA[0] != &bitsB[0] {
-		t.Fatalf("materializeSet did not reuse the cached bitset for an identical symbolic key")
-	}
-	if len(u.classCache) != 1 {
-		t.Fatalf("classCache has %d entries, want exactly 1 for one distinct key", len(u.classCache))
+	if v, ok := folded.Set.decidedVersion(); !ok || v.Original() != "1.2.3" {
+		t.Fatalf("identity fold dropped the pinned version: (%q, %v)", v.Original(), ok)
 	}
 }
 
-// TestSingletonSetIsExactMembership pins that a decision's singleton set
-// (built by singletonSet) matches exactly one version and nothing else,
-// through the same Masterminds Check authority as any other set.
-func TestSingletonSetIsExactMembership(t *testing.T) {
+// TestTermSubsetTable pins the four entailment rows directly, including the
+// two sign asymmetries: a negative term never entails a positive one, and
+// negative-negative entailment inverts the subset direction.
+func TestTermSubsetTable(t *testing.T) {
 	t.Parallel()
-	v := mustV(t, "1.2.3")
-	set := singletonSet(v)
-	if !set.Contains(v) {
-		t.Fatalf("singletonSet(%s) does not contain itself", v.Original())
+	narrow, wide := mustSet(t, "^1.0.0"), mustSet(t, ">=1.0.0")
+	disjoint := mustSet(t, "^2.0.0")
+
+	pNarrow := term{Package: "foo", Set: narrow, Positive: true}
+	pWide := term{Package: "foo", Set: wide, Positive: true}
+	nNarrow := term{Package: "foo", Set: narrow, Positive: false}
+	nWide := term{Package: "foo", Set: wide, Positive: false}
+	nDisjoint := term{Package: "foo", Set: disjoint, Positive: false}
+
+	if !termSubset(pNarrow, pWide) || termSubset(pWide, pNarrow) {
+		t.Fatalf("positive-positive entailment must follow set inclusion")
 	}
-	if set.Contains(mustV(t, "1.2.4")) {
-		t.Fatalf("singletonSet(%s) unexpectedly contains 1.2.4", v.Original())
+	if !termSubset(pNarrow, nDisjoint) || termSubset(pNarrow, nNarrow) {
+		t.Fatalf("positive-negative entailment must follow disjointness")
 	}
-	if !set.isSingleton {
-		t.Fatalf("singletonSet(%s).isSingleton = false", v.Original())
+	if termSubset(nWide, pWide) {
+		t.Fatalf("a negative term must never entail a positive one")
+	}
+	if !termSubset(nWide, nNarrow) || termSubset(nNarrow, nWide) {
+		t.Fatalf("negative-negative entailment must invert set inclusion")
+	}
+}
+
+// TestTermIsTautological pins the tautology definition: exactly N({}); a
+// positive term is never tautological, even over the full set.
+func TestTermIsTautological(t *testing.T) {
+	t.Parallel()
+	if !termIsTautological(term{Package: "foo", Set: emptyVerSet(), Positive: false}) {
+		t.Fatalf("N({}) must be tautological")
+	}
+	if termIsTautological(term{Package: "foo", Set: fullVerSet(), Positive: true}) {
+		t.Fatalf("P(full) asserts selection and must not be tautological")
+	}
+	if termIsTautological(term{Package: "foo", Set: emptyVerSet(), Positive: true}) {
+		t.Fatalf("P({}) is unsatisfiable, not tautological")
+	}
+	if termIsTautological(term{Package: "foo", Set: fullVerSet(), Positive: false}) {
+		t.Fatalf("N(full) forbids selection and must not be tautological")
 	}
 }

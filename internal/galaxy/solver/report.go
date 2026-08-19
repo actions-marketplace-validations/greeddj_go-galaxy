@@ -324,7 +324,7 @@ func finalizeLine(line, desc string) string {
 // buildConflictError renders the full proof for inc (the terminal
 // incompatibility resolveConflict produced) and returns either the
 // ConflictError built from it or the invariant-violation error the render
-// walk recorded, via outcome. It runs while every package materialized
+// walk recorded, via outcome. It runs while every package universe fetched
 // during the solve is still live, since the hint conditions inspect
 // universes.
 func (s *solveState) buildConflictError(inc *incompatibility) error {
@@ -399,7 +399,7 @@ func (s *solveState) collectHints(inc *incompatibility) []string {
 }
 
 // prereleaseHint implements the two prerelease-related hint conditions of
-// section 10.4 for pkg's materialized universe.
+// section 10.4 for pkg's fetched universe.
 func (s *solveState) prereleaseHint(pkg string) (string, bool) {
 	u := s.uniFor(pkg)
 	if len(u.versions) == 0 {
@@ -508,27 +508,40 @@ func (s *solveState) describeTwoTerm(a, b term) string {
 }
 
 // termLabel renders a human label for a (package, set) pair: "root" for the
-// synthetic root (its single version is never shown), "every version of X"
-// for a set covering the whole universe, "X <version>" for a singleton, and
-// "X <display>" otherwise.
-func (s *solveState) termLabel(pkg string, set versionSet) string {
+// synthetic root (its single version is never shown), "X <version>" for a
+// singleton-built set, "every version of X" for the full set or one that
+// covers the package's whole fetched universe (a cosmetic consultation of
+// the universe - display never feeds a logic decision), and the set's own
+// rendering otherwise.
+func (s *solveState) termLabel(pkg string, set verSet) string {
 	if pkg == rootPkg {
 		return "root"
 	}
-	if set.isSingleton {
-		return fmt.Sprintf("%s %s", pkg, set.singleton.Original())
+	if v, ok := set.decidedVersion(); ok {
+		return fmt.Sprintf("%s %s", pkg, v.Original())
 	}
-	if set.isAny() {
+	if set.isFull() || s.coversFetchedUniverse(pkg, set) {
 		return "every version of " + pkg
 	}
-	if set.kind == setBitset {
-		u := s.uniFor(pkg)
-		if len(u.versions) > 0 && popcount(set.bits) == len(u.versions) {
-			return "every version of " + pkg
-		}
-	}
-	if set.display != "" {
-		return fmt.Sprintf("%s %s", pkg, set.display)
+	if label := set.displayLabel(); label != "" {
+		return fmt.Sprintf("%s %s", pkg, label)
 	}
 	return pkg
+}
+
+// coversFetchedUniverse reports whether set admits every published version
+// of pkg's already-fetched universe - the friendlier "every version of X"
+// phrasing for a range that spans everything actually published without
+// being the full version space.
+func (s *solveState) coversFetchedUniverse(pkg string, set verSet) bool {
+	u := s.uniFor(pkg)
+	if !u.fetched || len(u.versions) == 0 {
+		return false
+	}
+	for _, v := range u.versions {
+		if !set.contains(v) {
+			return false
+		}
+	}
+	return true
 }

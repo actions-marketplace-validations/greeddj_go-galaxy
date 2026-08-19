@@ -37,7 +37,7 @@ func TestMakeDecisionProbeSatisfiesZeroUniverseCalls(t *testing.T) {
 
 // TestMakeDecisionProbeUnavailableFallsBackToMaterialize pins the other
 // probe-fail path: when the provider reports the probe itself unavailable
-// (ok == false), decision making falls back to materializing the package
+// (ok == false), decision making falls back to fetching the package universe
 // exactly as it would for a candidate that failed to satisfy.
 func TestMakeDecisionProbeUnavailableFallsBackToMaterialize(t *testing.T) {
 	t.Parallel()
@@ -66,7 +66,7 @@ func TestMakeDecisionProbeUnavailableFallsBackToMaterialize(t *testing.T) {
 
 // TestMakeDecisionProbeFailsFallsBackToMaterialize pins the fallback: when
 // the probe's candidate does not satisfy the accumulated constraints, the
-// package is materialized (a real Universe call) and the highest ALLOWED
+// package universe is fetched (a real Universe call) and the highest ALLOWED
 // version is chosen instead.
 func TestMakeDecisionProbeFailsFallsBackToMaterialize(t *testing.T) {
 	t.Parallel()
@@ -85,7 +85,7 @@ func TestMakeDecisionProbeFailsFallsBackToMaterialize(t *testing.T) {
 		t.Fatalf("makeDecision = (%q, %v), want (\"foo\", false)", pkg, done)
 	}
 	if p.universeCalls[testPkgFoo] != 1 {
-		t.Fatalf("Universe was called %d times, want exactly 1 (materialize fallback)", p.universeCalls[testPkgFoo])
+		t.Fatalf("Universe was called %d times, want exactly 1 (universe-fetch fallback)", p.universeCalls[testPkgFoo])
 	}
 	if got := s.ps.pkgState(testPkgFoo).decisionVersion.Original(); got != "1.5.0" {
 		t.Fatalf("decided version = %q, want 1.5.0 (highest allowed under both constraints)", got)
@@ -202,6 +202,6 @@ func TestPickPackagePinFirst(t *testing.T) {
 // specific one.
 func mustDummyCause(t *testing.T, s *solveState) int {
 	t.Helper()
-	idx, _ := s.store.add(&incompatibility{Terms: []term{{Package: "\x00dummy", Set: anySet, Positive: true}}})
+	idx, _ := s.store.add(&incompatibility{Terms: []term{{Package: "\x00dummy", Set: fullVerSet(), Positive: true}}})
 	return idx
 }

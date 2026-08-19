@@ -119,7 +119,7 @@ func FuzzSolve(f *testing.F) {
 // (two independent paths converging on a shared dependency), a transitively
 // unsatisfiable higher root version that must force a backtrack to a lower
 // one, and a wildcard ("*") dependency term that must stay a visible
-// contributor even though it classifies to the full extended universe. Each
+// contributor even though it constrains nothing by itself. Each
 // decoded shape was confirmed once by hand against fuzzDecodeGraph's own
 // output before being pinned here; the byte values themselves have no
 // meaning beyond what they decode to.

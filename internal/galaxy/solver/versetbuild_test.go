@@ -189,34 +189,3 @@ func TestSingletonVerSetRoundtrip(t *testing.T) {
 		t.Fatalf("singletonVerSet(1.2.3+build) membership is not the single precedence point")
 	}
 }
-
-// TestVerSetBridgeAgainstMaterializeSet cross-checks the exact set against
-// the bitset pipeline it replaces: for every pool constraint and every
-// published version of a fixture universe, membership must agree with the
-// symbolic set's materialized classification.
-func TestVerSetBridgeAgainstMaterializeSet(t *testing.T) {
-	t.Parallel()
-	versions := make([]Version, 0, len(sharpVersionPool()))
-	for _, raw := range sharpVersionPool() {
-		versions = append(versions, mustV(t, raw))
-	}
-	uni := newPackageUniverse()
-	uni.setVersions(buildUniverse(versions))
-
-	for _, c := range differentialConstraintPool() {
-		exact, err := newVerSet(c)
-		if err != nil {
-			t.Fatalf("newVerSet(%q): %v", c, err)
-		}
-		symbolic, err := newSymbolicSet(c)
-		if err != nil {
-			t.Fatalf("newSymbolicSet(%q): %v", c, err)
-		}
-		bits := uni.materializeSet(symbolic)
-		for i, v := range uni.versions {
-			if got, want := exact.contains(v), testBit(bits, i); got != want {
-				t.Fatalf("constraint %q at %q: exact %v, materialized bitset %v", c, v.Original(), got, want)
-			}
-		}
-	}
-}
