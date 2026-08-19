@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver/v3"
+	cacheManager "github.com/greeddj/go-galaxy/internal/galaxy/cache"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
@@ -189,7 +190,7 @@ func lookupOutdated(ctx context.Context, deps collectionDeps, e lockfile.Entry) 
 		source = deps.cfg.Server
 	}
 	col := collection{Namespace: ns, Name: name, Source: source}
-	policy := cachePolicyForConstraint(deps.cfg, false)
+	policy := cacheManager.PolicyForConstraint(deps.cfg, false)
 	root, err := resolveRootMetadata(ctx, deps, col, policy, e.Name)
 	if err != nil {
 		return outdatedEntry{Name: e.Name, Locked: e.Version, Err: err}

@@ -214,7 +214,7 @@ func refreshAPICacheEntry(entry store.APICacheEntry, etag, lastModified string) 
 // value every existing caller in this package's own test suite passes)
 // structurally falls back to helpers.MetadataFetchDeadline via
 // metadataBudget. This is deliberately not established one layer up, in
-// internal/galaxy/collections/compat.go's thin wrapper: the precedent this
+// internal/galaxy/collections/fetchpolicy.go's thin wrapper: the precedent this
 // follows (helpers.ArtifactDownloadDeadline, established in
 // downloadCollectionToCache) is "the budget is established by the code that
 // owns the unit of work, and never behind the Backend seam". This function
@@ -222,7 +222,7 @@ func refreshAPICacheEntry(entry store.APICacheEntry, etag, lastModified string) 
 // exactly the unit the budget bounds; internal/galaxy/cache is on the
 // business-logic side of the Backend seam (it is not internal/cache/*), so
 // establishing the budget here does not cross it. Establishing it one layer
-// up in collections/compat.go instead would put the budget in a pass-through
+// up in collections/fetchpolicy.go instead would put the budget in a pass-through
 // wrapper that owns nothing, would leave fetchRetryable unable to see the
 // sentinel it must classify terminal (see fetchRetryable's own doc comment),
 // and would let a future direct caller of the exported

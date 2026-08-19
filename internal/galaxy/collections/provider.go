@@ -83,7 +83,7 @@ func (p *MetadataProvider) Highest(ctx context.Context, fqdn string) (solver.Ver
 	if err != nil {
 		return solver.Version{}, false, err
 	}
-	policy := cachePolicyForConstraint(p.deps.cfg, false)
+	policy := cacheManager.PolicyForConstraint(p.deps.cfg, false)
 	rootMeta, _, known, err := p.resolveRoot(ctx, fqdn, ns, name, policy)
 	if err != nil {
 		return solver.Version{}, false, err
@@ -110,7 +110,7 @@ func (p *MetadataProvider) Universe(ctx context.Context, fqdn string) ([]solver.
 	if err != nil {
 		return nil, err
 	}
-	policy := cachePolicyForConstraint(p.deps.cfg, false)
+	policy := cacheManager.PolicyForConstraint(p.deps.cfg, false)
 	_, versionsURL, known, err := p.resolveRoot(ctx, fqdn, ns, name, policy)
 	if err != nil {
 		return nil, err
@@ -139,7 +139,7 @@ func (p *MetadataProvider) Dependencies(ctx context.Context, fqdn string, v solv
 	if err != nil {
 		return nil, err
 	}
-	policy := cachePolicyForConstraint(p.deps.cfg, true)
+	policy := cacheManager.PolicyForConstraint(p.deps.cfg, true)
 	col := collection{Namespace: ns, Name: name, Source: p.sourceOf(fqdn)}
 
 	base, err := p.boundBaseFor(ctx, col, fqdn, policy)
@@ -269,8 +269,8 @@ func isUnknownPackageError(err error) bool {
 	if errors.Is(err, helpers.ErrLoadMetadataFailed) {
 		return true
 	}
-	var statusErr *cacheManager.HTTPStatusError
-	return errors.As(err, &statusErr) && statusErr.Code == http.StatusNotFound
+	statusErr, ok := errors.AsType[*cacheManager.HTTPStatusError](err)
+	return ok && statusErr.Code == http.StatusNotFound
 }
 
 // splitFQDN validates fqdn as a "namespace.name" fully qualified collection

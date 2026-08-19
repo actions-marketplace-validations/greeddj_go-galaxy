@@ -47,12 +47,13 @@ import (
 //
 // What gets warmed, per root, depends on how the solve would resolve it. An
 // unpinned root's root-metadata document is requested by both Highest and
-// Universe - they share one cachePolicyForConstraint(deps.cfg, false) call
-// and one resolveRoot - so warming it via Highest alone covers whichever of
-// the two the solver ends up calling, without needing to know which. An
-// exactly pinned root whose dependencies the solve will follow is warmed via
-// Dependencies, the method that fetches and caches its version-detail
-// document. An exactly pinned root under cfg.NoDeps warms nothing: the solve
+// Universe - they share one cacheManager.PolicyForConstraint(deps.cfg,
+// false) call and one resolveRoot - so warming it via Highest alone covers
+// whichever of the two the solver ends up calling, without needing to know
+// which. An exactly pinned root whose dependencies the solve will follow is
+// warmed via Dependencies, the method that fetches and caches its
+// version-detail document. An exactly pinned root under cfg.NoDeps warms
+// nothing: the solve
 // wraps its provider in NewNoDepsProvider, whose Dependencies never reaches
 // the wrapped provider at all, so a prewarmed document for it would be the
 // only request made for that root all run.
@@ -66,9 +67,9 @@ import (
 // to learn the same root's highest_version.
 //
 // A root is skipped - contributing no request at all - when
-// prewarmPolicyUsable(cachePolicyForConstraint(deps.cfg, exact)) is false:
-// this function pays for a request only where the solve itself would later
-// read what that request wrote, and PolicyForConstraint (internal/galaxy/
+// prewarmPolicyUsable(cacheManager.PolicyForConstraint(deps.cfg, exact)) is
+// false: this function pays for a request only where the solve itself would
+// later read what that request wrote, and PolicyForConstraint (internal/galaxy/
 // cache/policy.go) is the single function deciding both sides of that
 // question, since it is also what the solve's own MetadataProvider calls to
 // decide whether to read or write the cache.
@@ -214,8 +215,8 @@ func prewarmEnabled(deps collectionDeps, roots []collection) bool {
 	if deps.cfg == nil || deps.st == nil || len(roots) < 2 {
 		return false
 	}
-	return prewarmPolicyUsable(cachePolicyForConstraint(deps.cfg, false)) ||
-		prewarmPolicyUsable(cachePolicyForConstraint(deps.cfg, true))
+	return prewarmPolicyUsable(cacheManager.PolicyForConstraint(deps.cfg, false)) ||
+		prewarmPolicyUsable(cacheManager.PolicyForConstraint(deps.cfg, true))
 }
 
 // prewarmOne makes at most one provider call for root, never both, and none
@@ -245,7 +246,7 @@ func prewarmOne(ctx context.Context, deps collectionDeps, sources map[string]str
 	if exact && deps.cfg.NoDeps {
 		return nil
 	}
-	if !prewarmPolicyUsable(cachePolicyForConstraint(deps.cfg, exact)) {
+	if !prewarmPolicyUsable(cacheManager.PolicyForConstraint(deps.cfg, exact)) {
 		return nil
 	}
 

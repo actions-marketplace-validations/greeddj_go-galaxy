@@ -27,7 +27,7 @@ func loadCollectionMetadata(
 	if err != nil {
 		return nil, err
 	}
-	policy := cachePolicyForConstraint(cfg, exact)
+	policy := cacheManager.PolicyForConstraint(cfg, exact)
 
 	rootMetadata, base, err := loadRootMetadataCached(ctx, deps, col, policy)
 	if err != nil {
@@ -117,8 +117,7 @@ func loadRootMetadataCached(
 		// error - is not something a different server could route around
 		// (and, for auth/availability, must not be silently routed around),
 		// so it aborts the whole walk immediately.
-		var statusErr *cacheManager.HTTPStatusError
-		if errors.As(err, &statusErr) && statusErr.Code == http.StatusNotFound {
+		if statusErr, ok := errors.AsType[*cacheManager.HTTPStatusError](err); ok && statusErr.Code == http.StatusNotFound {
 			lastErr = err
 			continue
 		}
@@ -159,8 +158,7 @@ func tryServerRootMetadata(
 		runtime.Output.Debugf("root metadata GET %s", cand.url)
 		var root types.GalaxyCollection
 		if err := fetchJSONWithCachePolicy(ctx, runtime, cand.url, st, &root, policy); err != nil {
-			var statusErr *cacheManager.HTTPStatusError
-			if errors.As(err, &statusErr) {
+			if statusErr, ok := errors.AsType[*cacheManager.HTTPStatusError](err); ok {
 				switch {
 				case statusErr.Code == http.StatusNotFound:
 					runtime.Output.Debugf("root metadata 404 %s", cand.url)
