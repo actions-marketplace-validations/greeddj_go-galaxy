@@ -8,22 +8,12 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 )
 
-// Attribution pairs a constraint with the parent that imposed it, mirroring
-// the existing "which parent wants what" block the install pipeline already
-// renders for a plain version conflict.
-type Attribution struct {
-	Parent     string
-	Constraint string
-}
-
 // ConflictError reports that no selection of versions satisfies every
 // requirement. It carries a human-readable proof (the derivation graph
-// walked into numbered prose), a set of conditional hints, and the flat
-// per-parent attributions the existing conflict UX renders.
+// walked into numbered prose) and a set of conditional hints.
 type ConflictError struct {
-	proofLines   []string
-	hints        []string
-	attributions []Attribution
+	proofLines []string
+	hints      []string
 }
 
 // Error renders the proof followed by any hints, one per line.
@@ -58,12 +48,6 @@ func (e *ConflictError) ProofLines() []string {
 // Hints returns the deterministic, package-name-ordered hint texts.
 func (e *ConflictError) Hints() []string {
 	return e.hints
-}
-
-// Attributions returns every (parent, constraint) pair contributing a
-// dependency edge to the proof, sorted by (Parent, Constraint).
-func (e *ConflictError) Attributions() []Attribution {
-	return e.attributions
 }
 
 // isDerivedInc reports whether inc is a conflict-resolution-derived
@@ -361,53 +345,17 @@ func (s *solveState) buildConflictError(inc *incompatibility) error {
 // invariant-violation error partway through the walk, in which case the
 // lines collected up to that point describe an incomplete, unusable proof.
 // Otherwise it returns the ConflictError assembled from b.lines and inc's
-// hints and attributions. Both arms return a non-nil value, so no typed-nil
-// interface is ever constructible from this method. Named outcome, not
-// result, to stay clear of the exported Result type.
+// hints. Both arms return a non-nil value, so no typed-nil interface is
+// ever constructible from this method. Named outcome, not result, to stay
+// clear of the exported Result type.
 func (b *reportBuilder) outcome(s *solveState, inc *incompatibility) error {
 	if b.bug != nil {
 		return b.bug
 	}
 	return &ConflictError{
-		proofLines:   b.lines,
-		hints:        s.collectHints(inc),
-		attributions: s.collectAttributions(inc),
+		proofLines: b.lines,
+		hints:      s.collectHints(inc),
 	}
-}
-
-// collectAttributions walks inc's derivation graph and returns every
-// distinct (Parent, Constraint) pair contributed by a causeDependency leaf,
-// sorted by (Parent, Constraint).
-func (s *solveState) collectAttributions(inc *incompatibility) []Attribution {
-	seen := make(map[Attribution]bool)
-	visited := make(map[*incompatibility]bool)
-	var walk func(*incompatibility)
-	walk = func(n *incompatibility) {
-		if visited[n] {
-			return
-		}
-		visited[n] = true
-		switch cause := n.Cause.(type) {
-		case causeConflict:
-			walk(cause.Left)
-			walk(cause.Right)
-		case causeDependency:
-			seen[Attribution{Parent: cause.Parent, Constraint: cause.Constraint}] = true
-		}
-	}
-	walk(inc)
-
-	out := make([]Attribution, 0, len(seen))
-	for a := range seen {
-		out = append(out, a)
-	}
-	slices.SortFunc(out, func(a, b Attribution) int {
-		if a.Parent != b.Parent {
-			return strings.Compare(a.Parent, b.Parent)
-		}
-		return strings.Compare(a.Constraint, b.Constraint)
-	})
-	return out
 }
 
 // collectHints walks inc's derivation graph for causeNoVersions leaves and
