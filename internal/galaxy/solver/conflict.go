@@ -208,9 +208,6 @@ func mergeTermsExcluding(a, b *incompatibility, exclude string) []term {
 	return collected
 }
 
-// termSatisfies reports whether a's permitted set is a subset of b's over
-// the boundary-extended universe - i.e. whether a on its own, without
-// anything else, already satisfies b. a and b must name the same package.
 // allTautological reports whether every term in inc is always-satisfiable -
 // its permitted set spans every cell of that package's extended universe.
 func (s *solveState) allTautological(inc *incompatibility) bool {
@@ -223,6 +220,9 @@ func (s *solveState) allTautological(inc *incompatibility) bool {
 	return true
 }
 
+// termSatisfies reports whether a's permitted set is a subset of b's over
+// the boundary-extended universe - i.e. whether a on its own, without
+// anything else, already satisfies b. a and b must name the same package.
 func termSatisfies(a, b term, uni *packageUniverse) bool {
 	return subset(permittedExtBits(a, uni), permittedExtBits(b, uni))
 }

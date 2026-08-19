@@ -405,9 +405,10 @@ func rawBits(set versionSet, uni *packageUniverse) []uint64 {
 
 // permittedBits returns the bitset of versions t actually permits (a fresh
 // allocation only when t is negative, since the positive case is exactly the
-// raw classification/cache bits). Used only outside the propagation fast
-// path (conflict resolution and Case C's explicit subset/disjoint tests use
-// the polarity-aware helpers below instead, to avoid this allocation).
+// raw classification/cache bits). Production code never calls it - the
+// propagation fast path, conflict resolution, and Case C all use the
+// polarity-aware helpers below instead, to avoid this allocation - it exists
+// as an oracle for test cross-checks of merged terms' permitted sets.
 func permittedBits(t term, uni *packageUniverse) []uint64 {
 	raw := rawBits(t.Set, uni)
 	if t.Positive {
@@ -514,12 +515,10 @@ func embedPublishedIntoExtended(published []uint64, extLen int) []uint64 {
 	return out
 }
 
-// materializeExtendedSet returns set's classification against u's
-// boundary-extended universe, computing and caching a fresh one for a
-// not-yet-seen symbolic key (in a cache separate from the published one).
-// A published bitset embeds via embedPublishedIntoExtended; an
-// already-extended bitset (produced by conflict resolution's own merge or
-// difference arithmetic) is returned as-is.
+// classifyIntoExtended sets, in the caller-provided bits (of extended
+// length n), every cell of u's boundary-extended universe whose probe
+// version set contains: the below-boundary cell, each published version's
+// cell, and the above-boundary cell.
 func (u *packageUniverse) classifyIntoExtended(set versionSet, bits []uint64, n int) {
 	if set.Contains(u.extBelow) {
 		setBit(bits, 0)
@@ -534,6 +533,12 @@ func (u *packageUniverse) classifyIntoExtended(set versionSet, bits []uint64, n 
 	}
 }
 
+// materializeExtendedSet returns set's classification against u's
+// boundary-extended universe, computing and caching a fresh one for a
+// not-yet-seen symbolic key (in a cache separate from the published one).
+// A published bitset embeds via embedPublishedIntoExtended; an
+// already-extended bitset (produced by conflict resolution's own merge or
+// difference arithmetic) is returned as-is.
 func (u *packageUniverse) materializeExtendedSet(set versionSet) []uint64 {
 	if set.kind == setExtBitset {
 		return set.bits
@@ -601,8 +606,10 @@ func fullExtBits(uni *packageUniverse) []uint64 {
 	return fullBits(uni.extendedLen())
 }
 
-// intersectExtAssignmentInto is intersectAssignmentInto's extended-universe
-// counterpart. Two consumers drive it, not one: conflict resolution's
+// intersectExtAssignmentInto folds t's contribution into running,
+// intersecting over uni's boundary-extended universe (a positive term
+// intersects with its raw cells, a negative term clears them, so no
+// complement is allocated). Two consumers drive it, not one: conflict resolution's
 // satisfier search, which folds assignments into a throwaway running
 // intersection while it walks an incompatibility, and the partial solution's
 // own live running intersections, which it seeds when a package is first

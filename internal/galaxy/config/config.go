@@ -576,9 +576,6 @@ func firstCollectionsPath(value string) (string, []string) {
 	return first, rest
 }
 
-// pickConfigValue picks a string config value with precedence:
-// explicit CLI/ENV (IsSet) > ansible.cfg > CLI default. The bool reports
-// whether the value came from ansible.cfg.
 // ansibleGalaxyServer resolves the ansible-side galaxy server value: the
 // ANSIBLE_GALAXY_SERVER env var when it is set at all, otherwise the
 // [galaxy] server key from ansible.cfg. It reports whether the value came
@@ -601,6 +598,9 @@ func ansibleGalaxyServer(ini string) (string, bool) {
 	return ini, false
 }
 
+// pickConfigValue picks a string config value with precedence:
+// explicit CLI/ENV (IsSet) > ansible.cfg > CLI default. The bool reports
+// whether the value came from ansible.cfg.
 func pickConfigValue(c *cli.Command, flag, ansibleValue string) (string, bool) {
 	if c.IsSet(flag) {
 		return c.String(flag), false

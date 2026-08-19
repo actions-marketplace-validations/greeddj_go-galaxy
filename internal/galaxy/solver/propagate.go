@@ -175,15 +175,6 @@ func (s *solveState) propagatePackage(ctx context.Context, p string, changed map
 	return false, nil
 }
 
-// deriveOnce derives term (caused by causeIdx) and marks its package changed,
-// unless an equivalent assignment for that package already exists. This is
-// a defensive dedup, not a correctness crutch: deriving a content-identical
-// fact twice is always sound to skip (a repeated derivation never carries
-// new information), so this guard costs nothing and catches any accidental
-// re-derivation regardless of cause - it is not what makes the solver
-// terminate: the boundary-extended universe fix is what prevents the
-// specific infinite re-derivation cycle this guard alone cannot stop; see
-// conflict.go and term.go's extended-universe comments.
 // withoutTautologicalTerms returns inc with any always-satisfiable
 // (full-permitted) term removed, so conflict resolution's returned root cause
 // relates as the unit clause it logically is: an always-true term is redundant
@@ -201,6 +192,15 @@ func (s *solveState) withoutTautologicalTerms(inc *incompatibility) *incompatibi
 	return &incompatibility{Terms: kept, Cause: inc.Cause}
 }
 
+// deriveOnce derives term (caused by causeIdx) and marks its package changed,
+// unless an equivalent assignment for that package already exists. This is
+// a defensive dedup, not a correctness crutch: deriving a content-identical
+// fact twice is always sound to skip (a repeated derivation never carries
+// new information), so this guard costs nothing and catches any accidental
+// re-derivation regardless of cause - it is not what makes the solver
+// terminate: the boundary-extended universe fix is what prevents the
+// specific infinite re-derivation cycle this guard alone cannot stop; see
+// conflict.go and term.go's extended-universe comments.
 func (s *solveState) deriveOnce(term term, causeIdx int, changed map[string]bool) {
 	if s.ps.hasEquivalentAssignment(term) {
 		return
