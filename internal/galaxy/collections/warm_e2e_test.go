@@ -122,6 +122,24 @@ func TestWarmColdCachePopulatesCacheWithoutInstalling(t *testing.T) {
 	}
 }
 
+// TestWarmColdCacheDownloadsEachArtifactOnce pins warm's prefetch handoff:
+// on a cold cache every collection's artifact is downloaded by a prefetch
+// worker and the temp is handed to the warm worker via Wait, so each
+// artifact costs exactly one GET - a warm worker that re-downloaded instead
+// of consuming the handoff would double the count.
+func TestWarmColdCacheDownloadsEachArtifactOnce(t *testing.T) {
+	t.Parallel()
+	f := newE2EFixture(t)
+
+	if err := collections.Warm(context.Background(), f.cfg, f.runtime); err != nil {
+		t.Fatalf("Warm: %v", err)
+	}
+
+	if got := f.server.Count(fakegalaxy.EndpointArtifact); got != 2 {
+		t.Errorf("EndpointArtifact count = %d, want 2 (one download per collection, prefetched then handed off)", got)
+	}
+}
+
 // TestInstallRecordsNoWarmedEntries proves installCollection never calls
 // recordWarmed: recordInstall alone already keeps a normal install's
 // extracted tree reachable through InstalledArtifactSHAByKey, and a warmed
@@ -392,13 +410,15 @@ func collectionKey(v fakegalaxy.Version) string {
 func TestWarmLockReleasedAfterFailingRun(t *testing.T) {
 	t.Parallel()
 	f := newE2EFixture(t)
-	// Bounded to exactly the retry budget: the first Warm's own retries
-	// exhaust this fault, so by the time it returns the rule is disarmed and
-	// the second Warm below hits a clean server rather than needing its own
-	// fault-clearing step.
+	// Bounded to exactly what a cold failing warm attempts: the prefetch
+	// worker's retry-bounded download and warmOne's own fallback download
+	// each spend helpers.FetchRetryMaxAttempts requests, so the first Warm
+	// exhausts this fault itself and the rule is disarmed by the time it
+	// returns - the second Warm below hits a clean server rather than
+	// needing its own fault-clearing step.
 	f.server.Fail(fakegalaxy.EndpointArtifact, "acme", "lib", fakegalaxy.Fault{
 		Status: http.StatusServiceUnavailable,
-		Count:  helpers.FetchRetryMaxAttempts,
+		Count:  2 * helpers.FetchRetryMaxAttempts,
 	})
 
 	err := collections.Warm(context.Background(), f.cfg, f.runtime)

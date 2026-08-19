@@ -60,7 +60,7 @@ func installCollection(
 			helpers.ErrUnsafeCollectionIdentifier, col.Namespace, col.Name, col.Version)
 	}
 
-	filename := fmt.Sprintf("%s-%s-%s.tar.gz", col.Namespace, col.Name, col.Version)
+	filename := helpers.ArtifactFilename(col.Namespace, col.Name, col.Version)
 
 	// An already-installed collection is skipped whether or not this run
 	// verifies signatures, and that is a decision rather than an oversight: the
@@ -89,9 +89,7 @@ func installCollection(
 		// already installed, and an already-installed collection is never scheduled, so its handoff would be empty. This is
 		// a defensive guard preserving the exactly-once cleanup contract for any future caller that hands a live temp into
 		// an already-installed collection.
-		if prefetched.Cleanup != nil {
-			prefetched.Cleanup()
-		}
+		cleanupIfNeeded(prefetched.Cleanup)
 		return nil
 	}
 
@@ -103,9 +101,7 @@ func installCollection(
 	// cleaned up here by the caller; any losing attempt along the way was
 	// already cleaned inside prepareAndExtract, so there is neither a double
 	// cleanup nor a leaked temp file.
-	if payload.artifact.Cleanup != nil {
-		defer payload.artifact.Cleanup()
-	}
+	defer cleanupIfNeeded(payload.artifact.Cleanup)
 
 	writeGalaxyInfoIfPresent(runtime, target, cfg, col, payload.meta)
 	recordInstall(st, col, target.path, payload.artifactSHA, resolvedDeps)
@@ -141,6 +137,14 @@ type installPayload struct {
 	// one that learned it is not. See resolveMetadata's cache-hit arm, the only
 	// place it is set.
 	metaUnavailable bool
+	// artifactSHAComputed reports that artifactSHA was computed by this
+	// process over the bytes at artifact.Path - a download streamed through a
+	// hasher, a backend fetch hashed on its way to disk, or an explicit file
+	// hash - rather than read back from a record (metadata or a cache
+	// sidecar). It is the provenance the extracted store's Ensure takes:
+	// exactly when this holds, ingesting the tarball skips a redundant
+	// re-hash of the same bytes.
+	artifactSHAComputed bool
 }
 
 type artifactData struct {
@@ -191,9 +195,9 @@ type artifactData struct {
 // ever hit is bounded to one collection failing its fetch where a fresh probe
 // would have fallen back to a download.
 //
-// A nil set - a disabled prefetcher, and the nil warm and prefetch-download
-// call sites pass - names no key, so "no hint" means "probe as before" with
-// no special case.
+// A nil set - a disabled prefetcher, and the nil the prefetcher's own
+// download deps pass - names no key, so "no hint" means "probe as before"
+// with no special case.
 func isCacheHit(ctx context.Context, deps installDeps, col collection, forceDownload bool) bool {
 	if forceDownload || deps.cfg.NoCache || deps.artifacts == nil {
 		return false
@@ -262,18 +266,17 @@ func prepareInstall(
 	if err != nil {
 		return installPayload{}, cacheHit, err
 	}
-	artifactSHA, err := resolveArtifactSHA(artifact.Path, meta, artifact.Meta, artifact.SHA, col.SHA256)
+	artifactSHA, shaComputed, err := resolveArtifactSHA(artifact.Path, meta, artifact.Meta, artifact.SHA, col.SHA256)
 	if err != nil {
-		if artifact.Cleanup != nil {
-			artifact.Cleanup()
-		}
+		cleanupIfNeeded(artifact.Cleanup)
 		return installPayload{}, cacheHit, err
 	}
 	return installPayload{
-		meta:            meta,
-		artifact:        artifact,
-		artifactSHA:     artifactSHA,
-		metaUnavailable: metaUnavailable,
+		meta:                meta,
+		artifact:            artifact,
+		artifactSHA:         artifactSHA,
+		metaUnavailable:     metaUnavailable,
+		artifactSHAComputed: shaComputed,
 	}, cacheHit, nil
 }
 
@@ -329,7 +332,8 @@ func verifyAndExtract(
 		return err
 	}
 	extractStart := time.Now()
-	err := extractCollection(ctx, col, payload.artifact.Path, target, deps.runtime, deps.extractStore, payload.artifactSHA)
+	err := extractCollection(ctx, col, payload.artifact.Path, target, deps.runtime, deps.extractStore,
+		payload.artifactSHA, payload.artifactSHAComputed)
 	if err != nil {
 		return fmt.Errorf("failed to extract %s: %w", filename, err)
 	}
@@ -427,9 +431,7 @@ func prepareWithRecovery(
 		if actionErr == nil {
 			return payload, nil
 		}
-		if payload.artifact.Cleanup != nil {
-			payload.artifact.Cleanup()
-		}
+		cleanupIfNeeded(payload.artifact.Cleanup)
 		if !canRetryCacheHit(deps, fromCache, forceDownload) || unrepairableByRefetch(actionErr) {
 			return installPayload{}, actionErr
 		}
@@ -587,7 +589,10 @@ func prepareAndExtract(
 // nothing to re-fetch. resolveArtifactSHA returns the download hash directly
 // (prefetched.SHA is non-empty), so a pinned collection's verifyPinnedSHA
 // still compares the pin against a hash of the real bytes - the reuse never
-// bypasses the pin. servedFromCache is reported false: these are fresh origin
+// bypasses the pin. The stream-computed provenance rides into the payload too
+// (artifactSHAComputed), so ingesting the handed-off temp into the extracted
+// store skips a redundant re-hash of bytes this run already hashed while
+// streaming them. servedFromCache is reported false: these are fresh origin
 // bytes, not a stale cache hit, so prepareWithRecovery must not spend an
 // evict-and-refetch on a verify/extract failure here.
 func payloadFromPrefetched(
@@ -596,18 +601,16 @@ func payloadFromPrefetched(
 	prefetched downloadResult,
 ) (installPayload, bool, error) {
 	artifact := artifactData{Path: prefetched.Path, Cleanup: prefetched.Cleanup, SHA: prefetched.SHA}
-	artifactSHA, err := resolveArtifactSHA(artifact.Path, meta, artifact.Meta, artifact.SHA, col.SHA256)
+	artifactSHA, shaComputed, err := resolveArtifactSHA(artifact.Path, meta, artifact.Meta, artifact.SHA, col.SHA256)
 	// Every handed-off downloadResult carries a non-empty SHA - hashed during the prefetch download itself - so
 	// resolveArtifactSHA always returns through its artifactSHA != "" arm here, and this error path is not reached
 	// in practice. It is kept for symmetry with resolveArtifactSHA's other callers, and to fail closed rather than
 	// silently install unhashed bytes if a handoff ever carried an empty SHA.
 	if err != nil {
-		if artifact.Cleanup != nil {
-			artifact.Cleanup()
-		}
+		cleanupIfNeeded(artifact.Cleanup)
 		return installPayload{}, false, err
 	}
-	return installPayload{meta: meta, artifact: artifact, artifactSHA: artifactSHA}, false, nil
+	return installPayload{meta: meta, artifact: artifact, artifactSHA: artifactSHA, artifactSHAComputed: shaComputed}, false, nil
 }
 
 func prepareFromCache(ctx context.Context, deps installDeps, col collection) (installPayload, error) {
@@ -615,14 +618,12 @@ func prepareFromCache(ctx context.Context, deps installDeps, col collection) (in
 	if err != nil {
 		return installPayload{}, err
 	}
-	artifactSHA, err := resolveArtifactSHA(artifact.Path, nil, artifact.Meta, artifact.SHA, col.SHA256)
+	artifactSHA, shaComputed, err := resolveArtifactSHA(artifact.Path, nil, artifact.Meta, artifact.SHA, col.SHA256)
 	if err != nil {
-		if artifact.Cleanup != nil {
-			artifact.Cleanup()
-		}
+		cleanupIfNeeded(artifact.Cleanup)
 		return installPayload{}, err
 	}
-	return installPayload{meta: nil, artifact: artifact, artifactSHA: artifactSHA}, nil
+	return installPayload{meta: nil, artifact: artifact, artifactSHA: artifactSHA, artifactSHAComputed: shaComputed}, nil
 }
 
 // writeGalaxyInfoIfPresent writes col's GALAXY.yml sidecar and reports any
@@ -675,7 +676,7 @@ func recordInstall(st *store.Store, col collection, installPath, artifactSHA str
 	if st == nil {
 		return
 	}
-	st.SetInstalled(col.key(), installedEntry{
+	st.SetInstalled(col.key(), store.InstalledEntry{
 		InstallPath:    installPath,
 		Source:         col.Source,
 		ArtifactSHA256: artifactSHA,
@@ -737,20 +738,38 @@ func fetchArtifact(
 		return artifactData{}, artifactDeadlineError(ctx, fetchCtx, budget, err)
 	}
 	runtime.Metrics.AddCacheHit()
-	return artifactData{Path: cached.Path, Cleanup: cached.Cleanup, Meta: cached.Meta}, nil
+	// cached.SHA is non-empty only when the backend hashed the bytes while
+	// producing the file (see cacheManager.ArtifactFile.SHA); carrying it into
+	// artifactData lets resolveArtifactSHA treat it as this process's own
+	// digest of the fetched bytes instead of re-reading the file. The local
+	// backend leaves it empty, so its cache hits keep resolving from the
+	// sidecar via Meta.
+	return artifactData{Path: cached.Path, Cleanup: cached.Cleanup, Meta: cached.Meta, SHA: cached.SHA}, nil
 }
 
 // resolveArtifactSHA determines the sha256 to record for an installed
 // artifact, preferring cheaper sources but never trusting an unverified one
-// when the lockfile pins an exact hash. artifactSHA (set only on a fresh
-// download) is always a hash of the actual bytes just streamed, so it is
-// authoritative regardless of pin. Everything else - a cache hit's recorded
-// metadata or its sidecar - was written by an earlier process and never
-// re-verified against the bytes on disk today, so a non-empty pin skips
+// when the lockfile pins an exact hash. artifactSHA - set on a fresh
+// download, on the prefetch handoff, and on a cache-hit fetch from a backend
+// that hashed the bytes while producing the file (cacheManager.ArtifactFile.
+// SHA) - is always a hash this process computed over the actual fetched
+// bytes, so it is authoritative regardless of pin: a pinned install compares
+// the pin against it (verifyPinnedSHA) with the same guarantee a fresh file
+// hash would give and zero extra I/O. Everything else - a cache hit's
+// recorded metadata or its sidecar - was written by an earlier process and
+// never re-verified against the bytes on disk today, so a non-empty pin skips
 // straight to hashing the real tarball: trusting a recorded value here would
 // let drifted-on-disk bytes slip past a frozen install by coincidentally
 // matching a stale pin. Without a pin, the cheaper recorded sources are used
 // in order, falling back to hashing the file only when none are available.
+//
+// The second result reports whether the returned sha was computed by this
+// process over the bytes at path - artifactSHA passed through, or either
+// archive.FileHashSHA256 arm - as opposed to read back from a record. It is
+// the provenance the extracted store's Ensure takes to decide whether the
+// tarball must be hashed once more before it keys the shared CAS
+// (extracted.SHASelfComputed skips that re-read, extracted.SHAFromRecord
+// performs it).
 //
 // meta.Artifact.Sha256 and artifactMeta["sha256"] are each validated against
 // helpers.IsSHA256Hex before being returned, and artifactSHA and the two
@@ -782,30 +801,32 @@ func resolveArtifactSHA(
 	artifactMeta map[string]string,
 	artifactSHA string,
 	pin string,
-) (string, error) {
+) (string, bool, error) {
 	if sha := strings.TrimSpace(artifactSHA); sha != "" {
-		return sha, nil
+		return sha, true, nil
 	}
 	if strings.TrimSpace(pin) != "" {
-		return archive.FileHashSHA256(path)
+		sha, err := archive.FileHashSHA256(path)
+		return sha, err == nil, err
 	}
 	if meta != nil {
 		if sha := strings.TrimSpace(meta.Artifact.Sha256); sha != "" {
 			if !helpers.IsSHA256Hex(sha) {
-				return "", fmt.Errorf("%w: %q", helpers.ErrMalformedArtifactSHA256, sha)
+				return "", false, fmt.Errorf("%w: %q", helpers.ErrMalformedArtifactSHA256, sha)
 			}
-			return sha, nil
+			return sha, false, nil
 		}
 	}
 	if artifactMeta != nil {
 		if sha := strings.TrimSpace(artifactMeta["sha256"]); sha != "" {
 			if !helpers.IsSHA256Hex(sha) {
-				return "", fmt.Errorf("%w: %q", helpers.ErrMalformedArtifactSHA256, sha)
+				return "", false, fmt.Errorf("%w: %q", helpers.ErrMalformedArtifactSHA256, sha)
 			}
-			return sha, nil
+			return sha, false, nil
 		}
 	}
-	return archive.FileHashSHA256(path)
+	sha, err := archive.FileHashSHA256(path)
+	return sha, err == nil, err
 }
 
 // artifactKey builds the cache key for a collection tarball, scoped to the
@@ -816,8 +837,7 @@ func resolveArtifactSHA(
 // the same <ns>-<name>-<version>.tar.gz would collide on one flat cache slot
 // with no way for isCacheHit to detect it.
 func artifactKey(col collection) string {
-	filename := fmt.Sprintf("%s-%s-%s.tar.gz", col.Namespace, col.Name, col.Version)
-	return helpers.ArtifactKey(col.Source, filename)
+	return helpers.ArtifactKey(col.Source, helpers.ArtifactFilename(col.Namespace, col.Name, col.Version))
 }
 
 // installEntryMatches reports whether a recorded install entry still points

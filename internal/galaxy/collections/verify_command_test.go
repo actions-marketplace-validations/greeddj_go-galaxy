@@ -600,7 +600,7 @@ var offlineWarnCommands = []offlineWarnCommand{
 // the first one. Only acme.other carries secondSources, when given.
 //
 // It exists for the outer-loop proof below: warnOfflineSignatureSources runs
-// on prep.AllRoots, which loadRoots builds straight from parsing this file,
+// on the roots loadRoots builds straight from parsing this file,
 // before resolveOrLoadLockfile ever contacts a server - so the fake server
 // here never needs to know about either collection for the warning itself to
 // fire, and acme.other is never registered on it at all.

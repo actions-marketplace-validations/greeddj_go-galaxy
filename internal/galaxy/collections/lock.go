@@ -101,13 +101,13 @@ func lockfileDepsFromGraph(graph map[string][]string, key string) []string {
 func resolveFromLockfile(
 	cfg *config.Config,
 	lf *lockfile.File,
-	prep *rootPreparation,
+	roots []collection,
 ) (map[string]collection, map[string][]string, error) {
 	byFQDN, err := indexLockfile(lf, cfg)
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := verifyRootsAgainstLockfile(prep, byFQDN); err != nil {
+	if err := verifyRootsAgainstLockfile(roots, byFQDN); err != nil {
 		return nil, nil, err
 	}
 	return materializeLockfile(byFQDN)
@@ -131,8 +131,8 @@ func indexLockfile(lf *lockfile.File, cfg *config.Config) (map[string]lockfile.E
 	return out, nil
 }
 
-func verifyRootsAgainstLockfile(prep *rootPreparation, byFQDN map[string]lockfile.Entry) error {
-	for _, root := range prep.AllRoots {
+func verifyRootsAgainstLockfile(roots []collection, byFQDN map[string]lockfile.Entry) error {
+	for _, root := range roots {
 		fqdn := fmt.Sprintf("%s.%s", root.Namespace, root.Name)
 		entry, ok := byFQDN[fqdn]
 		if !ok {

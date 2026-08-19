@@ -53,12 +53,12 @@ func runLock(ctx context.Context, cfg *config.Config, runtime *infra.Infra) erro
 // saveLockSnapshot), the stricter of the two verdicts winning by construction
 // rather than by which branch happens to run first.
 func lockWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra, state *installState, start time.Time) error {
-	prep, err := loadRoots(cfg, runtime)
+	roots, err := loadRoots(cfg, runtime)
 	if err != nil {
 		return err
 	}
 	deps := newCollectionDeps(cfg, runtime, state.store)
-	resolved, graph, err := resolveCollectionsInternal(ctx, deps, prep.AllRoots, true, true)
+	resolved, graph, err := resolveCollectionsInternal(ctx, deps, roots, resolveTopLevel)
 	if err != nil {
 		return fmt.Errorf("failed to resolve dependencies: %w", err)
 	}

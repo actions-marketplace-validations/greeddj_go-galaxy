@@ -2,13 +2,13 @@ package collections
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
+	"github.com/psvmcc/hub/pkg/types"
 )
 
 // Warm resolves dependencies and ensures every artifact is downloaded into
@@ -42,7 +42,7 @@ func runWarm(ctx context.Context, cfg *config.Config, runtime *infra.Infra) erro
 // holds that lifecycle - so it never touches state.release or
 // state.backend.Close itself.
 func warmWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra, state *installState, start time.Time) error {
-	prep, err := loadRoots(cfg, runtime)
+	roots, err := loadRoots(cfg, runtime)
 	if err != nil {
 		return err
 	}
@@ -51,11 +51,11 @@ func warmWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra
 	// none configured, is a configuration error this run never started work
 	// under, and joining it behind helpers.ErrInstallationFailed would exit it
 	// as a failed install rather than as the usage error it is.
-	verify, err := newVerifyContext(cfg, runtime, prep.AllRoots)
+	verify, err := newVerifyContext(cfg, runtime, roots)
 	if err != nil {
 		return err
 	}
-	resolved, _, err := resolveOrLoadLockfile(ctx, cfg, runtime, state, prep)
+	resolved, _, err := resolveOrLoadLockfile(ctx, cfg, runtime, state, roots)
 	if err != nil {
 		return err
 	}
@@ -146,12 +146,31 @@ func warmCollections(
 	verify *verifyContext,
 ) failureSummary {
 	var failures failureRecorder
+	// The same prefetcher install runs (see prepareInstallPlan): warm's cold
+	// keys download on the cfg.DownloadWorkers-bounded network pool while the
+	// cfg.Workers-bounded workers below consume the handoff via Wait, instead
+	// of each worker downloading inline at the smaller pool's concurrency.
+	// What that trades away is the fused single-pass streamDownloadAndExtract
+	// a worker-inline download would take - the identical trade install makes,
+	// and with the handoff's stream-computed hash provenance riding into
+	// Ensure, one that re-hashes nothing. The prefetcher's root is nil, like
+	// warm's own installDeps root below: shouldSchedulePrefetch reads a nil
+	// root as "not installed" and schedules on the cache probe alone, which is
+	// exactly warm's question. levels is nil too - warm has no install order -
+	// so the task queue falls back to plain key order (see sortTasksByLevel).
+	// Close before returning (deferred, ahead of the inline wg.Wait below)
+	// joins every prefetch worker and reclaims any unclaimed temp inside
+	// warmWithState's own frame, so no download outlives the backend lock.
+	prefetch := startPrefetcher(ctx, newPrefetchDeps(cfg, runtime, state.store, state.backend.Artifacts(), nil), collections, nil)
+	defer prefetch.Close()
 	// warm never touches the collections tree at all - it only downloads and
 	// extracts into the content-addressable extracted store - so its
 	// installDeps carries a nil root; newInstallTarget's own nil-root guard
 	// then makes any accidental collections-tree call from this path fail
 	// closed rather than by convention.
-	depsCtx := newInstallDeps(cfg, runtime, state.store, state.backend.Artifacts(), state.extractStore, nil, nil, verify)
+	depsCtx := newInstallDeps(
+		cfg, runtime, state.store, state.backend.Artifacts(), state.extractStore, nil, prefetch.cachedArtifacts(), verify,
+	)
 	var wg sync.WaitGroup
 	// max(cfg.Workers, 1): a zero Workers would make sem unbuffered, and the
 	// first send would block forever since no worker has started to drain it
@@ -188,7 +207,11 @@ func warmCollections(
 		sem <- struct{}{}
 		wg.Go(func() {
 			defer func() { <-sem }()
-			if err := warmOne(ctx, depsCtx, col); err != nil {
+			meta, prefetched, ok, prefetchErr := prefetch.Wait(col.key())
+			if ok && prefetchErr != nil {
+				runtime.Output.Printf("⚠️ Prefetch failed for %s: %v", col.key(), prefetchErr)
+			}
+			if err := warmOne(ctx, depsCtx, col, meta, prefetched); err != nil {
 				runtime.Output.Errorf("Failed: %s.%s error: %s", col.Namespace, col.Name, err)
 				failures.record(err)
 			} else {
@@ -217,18 +240,29 @@ func warmCollections(
 	return failures.summary()
 }
 
-func warmOne(ctx context.Context, deps installDeps, col collection) error {
-	filename := fmt.Sprintf("%s-%s-%s.tar.gz", col.Namespace, col.Name, col.Version)
-	// warm has no prefetcher, so there is never a prefetched temp to hand off.
-	payload, err := prepareWithRecovery(ctx, deps, col, nil, downloadResult{}, filename, func(payload installPayload) error {
+// warmOne materializes col into the artifact cache and the extracted store.
+// meta and prefetched carry warmCollections's prefetch handoff, consumed
+// exactly the way runInstallLevel's workers hand theirs to installCollection:
+// meta is the version metadata the key's prefetch worker already loaded (nil
+// when the key was never scheduled, or its prefetch failed), and prefetched
+// is the artifact temp that worker already downloaded and committed (zero
+// when there is nothing to hand off, in which case prepareWithRecovery
+// resolves and fetches on its own, as it does for every cache hit).
+func warmOne(
+	ctx context.Context,
+	deps installDeps,
+	col collection,
+	meta *types.GalaxyCollectionVersionInfo,
+	prefetched downloadResult,
+) error {
+	filename := helpers.ArtifactFilename(col.Namespace, col.Name, col.Version)
+	payload, err := prepareWithRecovery(ctx, deps, col, meta, prefetched, filename, func(payload installPayload) error {
 		return warmVerifyAndEnsure(ctx, deps, col, payload)
 	})
 	if err != nil {
 		return err
 	}
-	if payload.artifact.Cleanup != nil {
-		defer payload.artifact.Cleanup()
-	}
+	defer cleanupIfNeeded(payload.artifact.Cleanup)
 	recordWarmed(deps, col, payload.artifactSHA)
 	return nil
 }
@@ -274,6 +308,6 @@ func warmVerifyAndEnsure(ctx context.Context, deps installDeps, col collection, 
 	if deps.extractStore == nil {
 		return nil
 	}
-	_, err := deps.extractStore.Ensure(ctx, payload.artifactSHA, payload.artifact.Path)
+	_, err := deps.extractStore.Ensure(ctx, payload.artifactSHA, payload.artifact.Path, shaProvenance(payload.artifactSHAComputed))
 	return err
 }

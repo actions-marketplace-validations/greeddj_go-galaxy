@@ -96,9 +96,7 @@ func TestDownloadWithoutExtractStoreCommitsAValidArchive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("downloadCollectionToCache = %v, want nil", err)
 	}
-	if result.Cleanup != nil {
-		defer result.Cleanup()
-	}
+	defer cleanupIfNeeded(result.Cleanup)
 
 	cached, hasErr := deps.artifacts.Has(ctx, key)
 	if hasErr != nil {

@@ -96,6 +96,26 @@ var (
 	errIngestTempExhausted = errors.New("could not create an ingest temp directory")
 )
 
+// SHAProvenance states how the sha a caller hands Ensure relates to the bytes
+// at tarPath, which decides whether Ensure must hash the file before ingesting
+// it under that sha. The zero value is SHAFromRecord, so a caller that fails
+// to declare anything gets the verifying behavior, never the trusting one.
+type SHAProvenance int
+
+const (
+	// SHAFromRecord marks a sha read back from a record an earlier process
+	// wrote - a cache sidecar, a persisted snapshot, server metadata - and
+	// never checked against tarPath's bytes by the current process. Ensure
+	// verifies the file actually hashes to the sha before extracting it into
+	// the shared store.
+	SHAFromRecord SHAProvenance = iota
+	// SHASelfComputed marks a sha the current process computed itself over
+	// the bytes at tarPath - a download streamed through a hasher on its way
+	// to disk, or an explicit hash of the file. Re-reading the file could only
+	// re-derive the same answer, so Ensure ingests without a second read.
+	SHASelfComputed
+)
+
 // Store materializes tarballs once per SHA and reuses them via hardlinks.
 type Store struct {
 	locks    map[string]*sync.Mutex
@@ -127,7 +147,11 @@ func (s *Store) Root() string {
 
 // Ensure extracts tarPath into the store under sha if not already present
 // and returns the path of the extracted tree. Concurrent callers for the
-// same sha share the work.
+// same sha share the work. prov declares where sha came from: a
+// SHAFromRecord sha is verified against tarPath's bytes before they are
+// ingested, a SHASelfComputed sha is trusted as the hash of exactly those
+// bytes and ingested without a second read (see the provenance comment in
+// the body for why that skip concedes nothing the verifying path did not).
 //
 // The returned path is an ordinary string, deliberately: its consumer
 // (Materialize) walks the tree with fs.WalkDir, which does not follow
@@ -135,7 +159,7 @@ func (s *Store) Root() string {
 // moments earlier. A local writer racing between this return and that walk is
 // the same disclosed residual the install side carries for its own extraction
 // target, not a gap this root closes.
-func (s *Store) Ensure(ctx context.Context, sha, tarPath string) (string, error) {
+func (s *Store) Ensure(ctx context.Context, sha, tarPath string, prov SHAProvenance) (string, error) {
 	if s == nil {
 		return "", ErrStoreNotConfigured
 	}
@@ -159,21 +183,35 @@ func (s *Store) Ensure(ctx context.Context, sha, tarPath string) (string, error)
 		return final, nil
 	}
 	// The CAS tree for sha is absent, so we are about to ingest tarPath's bytes
-	// under sha as their content-addressable key. Verify the bytes actually
-	// hash to sha first: a rotted or tampered tarball whose sidecar-derived sha
-	// no longer matches its bytes must never be extracted into the shared store
-	// keyed by a sha its content does not produce, which would hand every other
-	// project that later references that sha content which does not hash to it.
+	// under sha as their content-addressable key. When the sha was merely read
+	// back from a record (SHAFromRecord), verify the bytes actually hash to it
+	// first: a rotted or tampered tarball whose sidecar-derived sha no longer
+	// matches its bytes must never be extracted into the shared store keyed by
+	// a sha its content does not produce, which would hand every other project
+	// that later references that sha content which does not hash to it.
 	//
-	// This costs one full read of tarPath ahead of extraction, but only on the
-	// CAS-absent ingest path taken at most once per sha (the lock above and the
-	// isReady checks bracketing it ensure that): the hot path where the CAS
-	// tree already exists short-circuits above before ever taking the lock, and
-	// a fresh download never reaches Ensure at all - it populates the CAS via
-	// Promote instead, whose sha is derived from a hash of the bytes just
-	// streamed, not from an unverified sidecar.
-	if err := verifyTarballSHA(tarPath, sha); err != nil {
-		return "", err
+	// A SHASelfComputed sha skips that read: the caller already hashed exactly
+	// the bytes at tarPath in this same process - a download streamed through a
+	// hasher on its way to disk (the prefetch handoff and a hashing backend's
+	// cache fetch both arrive this way), or a direct hash of the file - so a
+	// second full read could only re-derive the same answer. The window between
+	// the caller's hash and the extract below is the same verify-then-extract
+	// residual the SHAFromRecord arm carries between verifyTarballSHA and
+	// extractInto: a local writer swapping the file in either gap defeats
+	// either variant equally, so the skip concedes nothing the verifying path
+	// did not already disclose.
+	//
+	// The verify costs one full read of tarPath ahead of extraction, but only
+	// on the CAS-absent ingest path taken at most once per sha (the lock above
+	// and the isReady checks bracketing it ensure that): the hot path where the
+	// CAS tree already exists short-circuits above before ever taking the lock,
+	// and the streaming download path never reaches Ensure at all - it
+	// populates the CAS via Promote instead, whose sha is likewise derived from
+	// a hash of the bytes just streamed, not from an unverified sidecar.
+	if prov != SHASelfComputed {
+		if err := verifyTarballSHA(tarPath, sha); err != nil {
+			return "", err
+		}
 	}
 	return s.extractInto(ctx, rel, tarPath)
 }

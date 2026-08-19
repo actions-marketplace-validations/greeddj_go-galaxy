@@ -43,20 +43,14 @@ func TestInstallLevelsMissingCollectionSurfaces(t *testing.T) {
 	prefetch := &prefetcher{done: make(map[string]chan struct{})}
 
 	levels := [][]string{{missingKey}}
-	_, err := installLevels(
-		context.Background(),
-		cfg,
-		runtime,
-		st,
-		nil,
-		nil,
-		map[string]collection{},
-		map[string][]string{},
-		levels,
-		prefetch,
-		root,
-		nil,
-	)
+	deps := newInstallDeps(cfg, runtime, st, nil, nil, root, nil, nil)
+	plan := &installPlan{
+		collections: map[string]collection{},
+		graph:       map[string][]string{},
+		levels:      levels,
+		prefetch:    prefetch,
+	}
+	_, err := installLevels(context.Background(), deps, plan)
 	if !errors.Is(err, helpers.ErrMissingCollection) {
 		t.Fatalf("err = %v, want errors.Is helpers.ErrMissingCollection", err)
 	}
@@ -108,22 +102,17 @@ func TestInstallLevelsJoinsInFlightWorkerOnMissingCollection(t *testing.T) {
 	st := store.New()
 	root := newTestCollectionsRoot(t, cfg.DownloadPath)
 
+	deps := newInstallDeps(cfg, runtime, st, nil, nil, root, nil, nil)
+	plan := &installPlan{
+		collections: collections,
+		graph:       graph,
+		levels:      levels,
+		prefetch:    p,
+	}
+
 	done := make(chan error, 1)
 	go func() {
-		_, err := installLevels(
-			context.Background(),
-			cfg,
-			runtime,
-			st,
-			nil,
-			nil,
-			collections,
-			graph,
-			levels,
-			p,
-			root,
-			nil,
-		)
+		_, err := installLevels(context.Background(), deps, plan)
 		done <- err
 	}()
 

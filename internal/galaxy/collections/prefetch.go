@@ -18,8 +18,9 @@ type prefetcher struct {
 	cancel context.CancelFunc
 	// prefetched holds, per collection key, the artifact a prefetch worker
 	// already downloaded and committed to the shared cache, keyed until it is
-	// either handed off to an install worker via Wait (ownership transfers
-	// there) or reclaimed by Close (for a key whose install level never ran).
+	// either handed off to a consuming install or warm worker via Wait
+	// (ownership transfers there) or reclaimed by Close (for a key whose
+	// consumer never ran).
 	prefetched map[string]downloadResult
 	// presence is the set of artifact keys the buildPrefetchTasks scan found
 	// cached and left unscheduled for prefetch - see cachedArtifacts' own doc
@@ -33,7 +34,9 @@ type prefetcher struct {
 
 // startPrefetcher schedules prefetch tasks for collections. levels orders the
 // surviving tasks so background downloads track the level-ordered install
-// consumer instead of racing in map order.
+// consumer instead of racing in map order. warm passes nil levels - it has no
+// install order to track - which lands every task at level 0 and leaves
+// sortTasksByLevel's key tie-break as the whole queue order.
 func startPrefetcher(ctx context.Context, deps prefetchDeps, collections map[string]collection, levels [][]string) *prefetcher {
 	cfg := deps.cfg
 	artifacts := deps.artifacts
@@ -91,10 +94,12 @@ func buildLevelIndex(levels [][]string) map[string]int {
 // collection key as a deterministic tie-break within a level, so background
 // downloads track the level-ordered install consumer instead of racing in map
 // order. Prefetch order is a latency optimization only and never affects
-// correctness: each install worker blocks on Wait(key) for its own artifact
-// regardless of the order it was fetched. A key absent from levelIndex - which
-// cannot happen while collections and levels derive from the same graph -
-// therefore just defaults to level 0 and is fetched early, which is harmless.
+// correctness: each consuming worker blocks on Wait(key) for its own artifact
+// regardless of the order it was fetched. A key absent from levelIndex just
+// defaults to level 0, which is harmless: on install's path that absence
+// cannot happen while collections and levels derive from the same graph, and
+// warm's nil levels put every key there on purpose, leaving the key tie-break
+// as its whole queue order.
 func sortTasksByLevel(tasks []collection, levelIndex map[string]int) {
 	slices.SortFunc(tasks, func(a, b collection) int {
 		ka, kb := a.key(), b.key()
@@ -310,12 +315,12 @@ func (p *prefetcher) Wait(key string) (*types.GalaxyCollectionVersionInfo, downl
 // called for every task even on cancellation, so no Wait(key) can deadlock.
 //
 // Close also reclaims every prefetched artifact still sitting in
-// p.prefetched: a key whose install level never ran (a prior level failed
-// and installLevels broke before scheduling it) never has its temp claimed
-// by Wait, so without this drain it would leak on disk. Wait (during the
-// levels loop) and Close (runInstall's deferred join, after the loop) are
-// never concurrent, but the drain still takes p.mu to honor this type's
-// mutex discipline uniformly.
+// p.prefetched: a key whose consumer never ran (a prior install level failed
+// and installLevels broke before scheduling it, or a canceled warm stopped
+// dispatching) never has its temp claimed by Wait, so without this drain it
+// would leak on disk. Wait (during the consuming loop) and Close (the
+// deferred join after it) are never concurrent, but the drain still takes
+// p.mu to honor this type's mutex discipline uniformly.
 func (p *prefetcher) Close() {
 	if p.cancel != nil {
 		p.cancel()
@@ -324,9 +329,7 @@ func (p *prefetcher) Close() {
 
 	p.mu.Lock()
 	for key, result := range p.prefetched {
-		if result.Cleanup != nil {
-			result.Cleanup()
-		}
+		cleanupIfNeeded(result.Cleanup)
 		delete(p.prefetched, key)
 	}
 	p.mu.Unlock()

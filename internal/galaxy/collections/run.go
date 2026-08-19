@@ -325,23 +325,23 @@ func sweepDeadRunTemps(ctx context.Context, runtime *infra.Infra, backend cacheM
 func prepareInstallPlan(
 	ctx context.Context, cfg *config.Config, runtime *infra.Infra, state *installState, root *os.Root,
 ) (*installPlan, error) {
-	prep, err := loadRoots(cfg, runtime)
+	roots, err := loadRoots(cfg, runtime)
 	if err != nil {
 		return nil, err
 	}
 
-	// Resolved from the roots the requirements file declares, which survive on
-	// prep.AllRoots under --frozen too, since loadRoots runs before
-	// resolveOrLoadLockfile branches. It runs ahead of the prefetcher rather
+	// Resolved from the roots the requirements file declares, which survive
+	// under --frozen too, since loadRoots runs before resolveOrLoadLockfile
+	// branches. It runs ahead of the prefetcher rather
 	// than beside the install workers so that an unreadable keyring, or
 	// requirements declaring signatures with none configured, fails the run
 	// before a single background download has been scheduled.
-	verify, err := newVerifyContext(cfg, runtime, prep.AllRoots)
+	verify, err := newVerifyContext(cfg, runtime, roots)
 	if err != nil {
 		return nil, err
 	}
 
-	resolved, graph, err := resolveOrLoadLockfile(ctx, cfg, runtime, state, prep)
+	resolved, graph, err := resolveOrLoadLockfile(ctx, cfg, runtime, state, roots)
 	if err != nil {
 		return nil, err
 	}
@@ -351,7 +351,7 @@ func prepareInstallPlan(
 		return nil, err
 	}
 
-	if err := verifyRootsResolved(prep, resolved); err != nil {
+	if err := verifyRootsResolved(roots, resolved); err != nil {
 		return nil, err
 	}
 
@@ -393,7 +393,7 @@ func resolveOrLoadLockfile(
 	cfg *config.Config,
 	runtime *infra.Infra,
 	state *installState,
-	prep *rootPreparation,
+	roots []collection,
 ) (map[string]collection, map[string][]string, error) {
 	if cfg.Frozen {
 		path := lockfile.ResolveDefaultPath(cfg.RequirementsFile, cfg.LockFile)
@@ -402,7 +402,7 @@ func resolveOrLoadLockfile(
 		if err != nil {
 			return nil, nil, err
 		}
-		return resolveFromLockfile(cfg, lf, prep)
+		return resolveFromLockfile(cfg, lf, roots)
 	}
 
 	resolveStart := time.Now()
@@ -410,9 +410,8 @@ func resolveOrLoadLockfile(
 	resolved, graph, err := resolveCollectionsInternal(
 		ctx,
 		newCollectionDeps(cfg, runtime, state.store),
-		prep.AllRoots,
-		true,
-		true,
+		roots,
+		resolveTopLevel,
 	)
 	if err != nil {
 		return nil, nil, annotateOfflineConflict(cfg, fmt.Errorf("failed to resolve dependencies: %w", err))
@@ -426,7 +425,7 @@ func resolveOrLoadLockfile(
 // empty Source ("" for defaultSource below), deliberately not defaulted to
 // cfg.Server here: an unpinned root walks the whole configured server list
 // at resolve time (see serverCandidates) instead of being nailed to one.
-func loadRoots(cfg *config.Config, runtime *infra.Infra) (*rootPreparation, error) {
+func loadRoots(cfg *config.Config, runtime *infra.Infra) ([]collection, error) {
 	runtime.Output.Printf("🗂️ load collections from requirements file")
 	collectionsDirect, rolesFound, err := loadRequirements(cfg.RequirementsFile, "")
 	if err != nil {
@@ -436,11 +435,11 @@ func loadRoots(cfg *config.Config, runtime *infra.Infra) (*rootPreparation, erro
 		runtime.Output.Printf("⚠️ requirements.yml contains roles, but roles are not supported.")
 	}
 	runtime.Output.Printf("🧩 prepare roots")
-	prep, err := prepareRoots(collectionsDirect)
+	roots, err := prepareRoots(collectionsDirect)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare requirements: %w", err)
 	}
-	return prep, nil
+	return roots, nil
 }
 
 // buildCollectionsMap folds the resolved requirements into a key-addressed
@@ -505,8 +504,8 @@ func buildCollectionsMap(resolved map[string]collection) (map[string]collection,
 // builds resolved purely from result.Versions and never cross-checks it
 // against the requirements, so this is the only place a solver that silently
 // drops a root is caught on a fresh solve.
-func verifyRootsResolved(prep *rootPreparation, resolved map[string]collection) error {
-	for _, col := range prep.AllRoots {
+func verifyRootsResolved(roots []collection, resolved map[string]collection) error {
+	for _, col := range roots {
 		fqdn := fmt.Sprintf("%s.%s", col.Namespace, col.Name)
 		if _, ok := resolved[fqdn]; !ok {
 			return fmt.Errorf("%w: %s", helpers.ErrMissingResolvedRoot, fqdn)

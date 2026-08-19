@@ -63,11 +63,11 @@ func poisonedVersionFixture(t *testing.T) (*config.Config, *fakegalaxy.Server) {
 // upstream of buildCollectionsMap rejects it.
 func seedResolvedSnapshot(t *testing.T, runtime *infra.Infra, cfg *config.Config, version string) {
 	t.Helper()
-	prep, err := loadRoots(cfg, runtime)
+	roots, err := loadRoots(cfg, runtime)
 	if err != nil {
 		t.Fatalf("loadRoots: %v", err)
 	}
-	reqSpec := buildRequirementsSpec(prep.AllRoots)
+	reqSpec := buildRequirementsSpec(roots)
 	reqHash := requirementsSignatureFromSpec(reqSpec, cfg.NoDeps, serversSignature(cfg))
 
 	st := store.New()

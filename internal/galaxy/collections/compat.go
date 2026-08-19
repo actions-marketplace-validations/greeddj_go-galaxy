@@ -15,18 +15,6 @@ type installedEntry = store.InstalledEntry
 // requirementSpec aliases the store requirement spec for compatibility.
 type requirementSpec = store.RequirementSpec
 
-// setResolvedAll stores resolved collection versions in the snapshot.
-func setResolvedAll(st *store.Store, resolved map[string]collection) {
-	if st == nil {
-		return
-	}
-	entries := make(map[string]store.ResolvedEntry, len(resolved))
-	for fqdn, col := range resolved {
-		entries[fqdn] = store.ResolvedEntry{Version: col.Version, Source: col.Source}
-	}
-	st.SetResolvedAll(entries)
-}
-
 // fetchJSONWithCachePolicy fetches JSON using cache policy and context,
 // binding the request to runtime.MetadataDeadline() so no collections call
 // site can pass a wrong (or missing) metadata fetch budget - the budget is

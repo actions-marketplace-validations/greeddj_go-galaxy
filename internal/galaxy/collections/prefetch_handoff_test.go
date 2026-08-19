@@ -269,7 +269,7 @@ type prefetchHandoffFixture struct {
 	artifacts    *s3StyleArtifacts
 	extractStore *extracted.Store
 	// root is the real collections root opened for cfg.DownloadPath, threaded
-	// into every newPrefetchDeps/installLevels call this fixture drives - both
+	// into every newPrefetchDeps/newInstallDeps call this fixture drives - both
 	// now build an installTarget from it on every collection.
 	root *os.Root
 }
@@ -316,19 +316,14 @@ func (f *prefetchHandoffFixture) runLevels(
 	levels [][]string,
 ) (*prefetcher, failureSummary, error) {
 	prefetch := startPrefetcher(context.Background(), newPrefetchDeps(f.cfg, f.runtime, f.st, f.artifacts, f.root), collections, levels)
-	failures, err := installLevels(
-		context.Background(),
-		f.cfg,
-		f.runtime,
-		f.st,
-		f.artifacts,
-		f.extractStore,
-		collections,
-		graph,
-		levels,
-		prefetch,
-		f.root, nil,
-	)
+	deps := newInstallDeps(f.cfg, f.runtime, f.st, f.artifacts, f.extractStore, f.root, prefetch.cachedArtifacts(), nil)
+	plan := &installPlan{
+		collections: collections,
+		graph:       graph,
+		levels:      levels,
+		prefetch:    prefetch,
+	}
+	failures, err := installLevels(context.Background(), deps, plan)
 	return prefetch, failures, err
 }
 
@@ -444,7 +439,7 @@ func TestCachedArtifactProbedOnceAcrossScanAndInstall(t *testing.T) {
 	// isCacheHit (install.go) makes the install worker re-probe here, and
 	// this assertion fails with the real go test output:
 	//   --- FAIL: TestCachedArtifactProbedOnceAcrossScanAndInstall (0.01s)
-	//       prefetch_handoff_test.go:449: hasCount = 2, want exactly 1 (one scan probe, no install-worker re-probe)
+	//       prefetch_handoff_test.go:444: hasCount = 2, want exactly 1 (one scan probe, no install-worker re-probe)
 	if got := fx.artifacts.hasCountFor(key); got != 1 {
 		t.Fatalf("hasCount = %d, want exactly 1 (one scan probe, no install-worker re-probe)", got)
 	}

@@ -49,11 +49,11 @@ type installDeps struct {
 	verify *verifyContext
 	// presence carries the prefetcher's own scan-time cache-presence hints
 	// (see prefetcher.cachedArtifacts), keyed by artifactKey, so isCacheHit
-	// can skip a redundant repeat of a probe the scan already ran. It is nil
-	// for warm, which starts no prefetcher at all, and for the prefetcher's
-	// own downloadDeps, which never calls isCacheHit at all; a nil map reads
-	// as "no hint" everywhere it is indexed, so both callers need no special
-	// case.
+	// can skip a redundant repeat of a probe the scan already ran. install
+	// and warm each pass their own run's prefetcher's set; it is nil only
+	// for the prefetcher's own downloadDeps, which never calls isCacheHit at
+	// all - and a nil map reads as "no hint" everywhere it is indexed, so
+	// that caller needs no special case.
 	presence map[string]bool
 }
 
@@ -71,7 +71,10 @@ type prefetchDeps struct {
 	// root is threaded through so shouldSchedulePrefetch's cheap
 	// already-installed check (installRecordMatches) can be evaluated through
 	// the same rooted target the real install uses - see installDeps.root's
-	// own doc comment for what this closes.
+	// own doc comment for what this closes. warm passes nil, exactly as its
+	// installDeps does: it installs nothing, so "already installed" is never
+	// its reason to skip a prefetch, and shouldSchedulePrefetch reads a nil
+	// root as "not installed" and decides on the cache probe alone.
 	root *os.Root
 }
 

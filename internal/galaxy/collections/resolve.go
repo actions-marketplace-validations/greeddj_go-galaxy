@@ -8,6 +8,8 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/Masterminds/semver/v3"
 	cacheManager "github.com/greeddj/go-galaxy/internal/galaxy/cache"
@@ -15,6 +17,28 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
 	"github.com/psvmcc/hub/pkg/types"
+)
+
+// resolveMode selects how much of the persisted resolve state a
+// resolveCollectionsInternal call may touch. Snapshot reuse and result
+// recording always move together, which is why this is one two-valued mode
+// rather than two independent booleans: a call that may replay the persisted
+// whole-requirements snapshot is exactly the call whose result is that
+// snapshot's next value, and a call resolving only a subset of the run's
+// requirements must do neither.
+type resolveMode int
+
+const (
+	// resolveTopLevel is a whole-requirements resolve: it may reuse the
+	// persisted resolve snapshot (still subject to refreshBypassesSnapshot's
+	// run-wide veto) and records its result back into the store.
+	resolveTopLevel resolveMode = iota
+	// resolveNestedPartial is the changed-roots-only re-solve inside
+	// tryIncrementalResolveWithSnapshot: its roots are a subset of the run's
+	// requirements, so the whole-requirements snapshot must not answer for
+	// them, and its partial result must not be recorded as if it were the
+	// whole resolution - the caller records the merged graph itself.
+	resolveNestedPartial
 )
 
 // resolveCollectionsInternal resolves versions and dependencies for roots.
@@ -53,11 +77,11 @@ func resolveCollectionsInternal(
 	ctx context.Context,
 	deps collectionDeps,
 	roots []collection,
-	allowSnapshot bool,
-	record bool,
+	mode resolveMode,
 ) (map[string]collection, map[string][]string, error) {
 	cfg := deps.cfg
 	st := deps.st
+	allowSnapshot := mode == resolveTopLevel
 
 	reqSpec := buildRequirementsSpec(roots)
 	reqHash := requirementsSignatureFromSpec(reqSpec, cfg.NoDeps, serversSignature(cfg))
@@ -101,7 +125,7 @@ func resolveCollectionsInternal(
 	if err != nil {
 		return nil, nil, err
 	}
-	recordResolutionIfNeeded(st, record, resolved, graph, reqHash, cfg.Server, reqSpec)
+	recordResolutionIfNeeded(st, mode == resolveTopLevel, resolved, graph, reqHash, cfg.Server, reqSpec)
 	return resolved, graph, nil
 }
 
@@ -136,7 +160,7 @@ func recordResolutionIfNeeded(
 	graph map[string][]string,
 	reqHash string,
 	server string,
-	reqSpec map[string]requirementSpec,
+	reqSpec map[string]store.RequirementSpec,
 ) {
 	if !record || st == nil {
 		return
@@ -148,7 +172,7 @@ func resolveFromSnapshots(
 	ctx context.Context,
 	deps collectionDeps,
 	roots []collection,
-	reqSpec map[string]requirementSpec,
+	reqSpec map[string]store.RequirementSpec,
 	reqHash string,
 ) (map[string]collection, map[string][]string, bool, error) {
 	cfg := deps.cfg
@@ -170,12 +194,24 @@ func recordResolution(
 	graph map[string][]string,
 	reqHash string,
 	server string,
-	reqSpec map[string]requirementSpec,
+	reqSpec map[string]store.RequirementSpec,
 ) {
 	setResolvedAll(st, resolved)
 	st.SetGraphSnapshot(graph)
 	st.SetMetaRequirements(reqHash, server)
 	st.SetRequirements(reqSpec)
+}
+
+// setResolvedAll stores resolved collection versions in the snapshot.
+func setResolvedAll(st *store.Store, resolved map[string]collection) {
+	if st == nil {
+		return
+	}
+	entries := make(map[string]store.ResolvedEntry, len(resolved))
+	for fqdn, col := range resolved {
+		entries[fqdn] = store.ResolvedEntry{Version: col.Version, Source: col.Source}
+	}
+	st.SetResolvedAll(entries)
 }
 
 func buildGraphFromDeps(resolved map[string]collection, depsByParent map[string]map[string]string) (map[string][]string, error) {
@@ -308,13 +344,34 @@ func parseDependencies(deps map[string]string) (map[string]string, error) {
 // fetchJSONWithCachePolicy, so per-page ETag/cache behavior is unchanged.
 //
 // Pagination is bounded by maxVersionPages: a server that keeps reporting a
-// growing total forever (or lies about it) makes the loop fail hard via
-// helpers.ErrVersionsPagingExceeded instead of looping unboundedly or
+// growing total forever (or lies about it) makes the walk fail hard via
+// helpers.ErrVersionsPagingExceeded instead of paging unboundedly or
 // silently truncating the list a caller then resolves constraints against.
 //
-// The whole loop - every page, not one budget per page - runs under one
-// shared deps.runtime.MetadataDeadline() budget, established once here
-// around the `for page := 0; ; page++` loop. This is the one metadata call
+// Page 0 is fetched first, alone. When it reports a positive total, that
+// total schedules the remaining, now-bounded page offsets, which are
+// fetched concurrently (bounded by cfg.DownloadWorkers, the same
+// network-bound sizing the artifact prefetcher's pool uses) and consumed
+// strictly in offset order, so the list this function returns - and
+// cacheVersionsList persists - is the one an offset-ordered walk of the
+// same responses produces, regardless of arrival order. The declared total
+// bounds only that SCHEDULING, never trust: the walk re-judges termination
+// page by page from what each page actually returned (a short or empty page
+// ends the list there, discarding every later offset's result, content and
+// error alike; a page's own reported total ends it once the next offset
+// would pass that total), so a server whose total lied - promising pages it
+// then serves short, empty, or not at all - yields exactly the list a
+// strictly sequential walk would have collected, and a page past the
+// schedule that the walk still wants is fetched sequentially, on demand,
+// under the same ceiling. A page-0 total implying more than maxVersionPages
+// pages fails hard up front, before any further request - the same
+// never-truncate verdict the walk itself reaches at the ceiling - and a
+// total of 0 (unreported) schedules nothing: every page after the first is
+// then fetched sequentially, terminating on the identical conditions.
+//
+// The whole operation - every page, not one budget per page - runs under
+// one shared deps.runtime.MetadataDeadline() budget, established once here
+// around page 0 and every page after it. This is the one metadata call
 // site outside a single fetchJSONBody call where a per-request budget alone
 // is not enough, and the reason is not that the request count elsewhere is
 // operator- or program-chosen - it usually is not. MetadataProvider's own
@@ -387,13 +444,14 @@ func parseDependencies(deps map[string]string) (map[string]string, error) {
 // Nesting is safe: fetchJSONBody (via fetchVersionsPage) establishes its own
 // per-request context.WithTimeout derived from the dlCtx built here, so its
 // effective deadline becomes min(helpers.MetadataFetchDeadline, whatever is
-// left of this loop's budget) - the per-request ceiling still holds, and is
-// only ever tightened, never loosened, by the outer budget. If this loop's
-// budget expires while a page is in flight, that inner fetchJSONBody's own
-// deadlineError sees a parent (this loop's dlCtx) whose Err() is already
-// non-nil and passes its error through unchanged (idempotence rule 2); the
-// single cacheManager.MetadataDeadlineError call below then normalizes it
-// into exactly one sentinel, never two.
+// left of this operation's budget) - the per-request ceiling still holds,
+// and is only ever tightened, never loosened, by the outer budget. If this
+// operation's budget expires while a page is in flight, that inner
+// fetchJSONBody's own deadlineError sees a parent (this operation's dlCtx)
+// whose Err() is already non-nil and passes its error through unchanged
+// (idempotence rule 2); versionsPager.fetchPage's single
+// cacheManager.MetadataDeadlineError call then normalizes it into exactly
+// one sentinel, never two.
 func loadVersionsListCached(
 	ctx context.Context,
 	deps collectionDeps,
@@ -408,48 +466,164 @@ func loadVersionsListCached(
 	dlCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
-	var all []string
-	offset := 0
-	for page := 0; ; page++ {
-		versions, total, err := fetchVersionsPage(dlCtx, deps, policy, versionsURL, versionLimit, offset)
-		if err != nil {
-			return nil, cacheManager.MetadataDeadlineError(ctx, dlCtx, budget, err)
-		}
-		if page == 0 {
-			// Pre-size once, right after the first page is in: use the
-			// server's declared total when it reports one, so the common
-			// case (a handful of pages) never triggers append's internal
-			// growth; otherwise fall back to a single page's worth.
-			capacity := versionLimit
-			if total > 0 {
-				// Clamp to what the loop could ever collect before the
-				// maxVersionPages ceiling stops it: the server-declared total
-				// is untrusted, so a hostile or broken meta.count must not be
-				// allowed to drive the allocation (a huge value would panic
-				// make with "cap out of range" long before the ceiling fires).
-				capacity = min(total, maxVersionPages*versionLimit)
-			}
-			all = make([]string, 0, capacity)
-		}
-		all = append(all, versions...)
-		if len(versions) < versionLimit {
-			break
-		}
-		offset += versionLimit
-		if total > 0 && offset >= total {
-			break
-		}
-		if page+1 >= maxVersionPages {
-			// Cut like every other render of this value: versionsURL is the
-			// server's own versions_url when the root metadata declared one,
-			// and reaching this line means a server kept declaring more pages,
-			// which is not the behavior to hand an uncut URL to a log for.
-			return nil, fmt.Errorf("%w: %s", helpers.ErrVersionsPagingExceeded, helpers.WithoutCredentials(versionsURL))
-		}
+	pager := &versionsPager{
+		parent:      ctx,
+		dlCtx:       dlCtx,
+		deps:        deps,
+		versionsURL: versionsURL,
+		policy:      policy,
+		budget:      budget,
 	}
-
+	all, err := pager.collectAll()
+	if err != nil {
+		return nil, err
+	}
 	cacheVersionsList(deps.st, policy, versionsURL, all)
 	return all, nil
+}
+
+// versionsPager carries one loadVersionsListCached call's shared state: the
+// caller's own context (parent, consulted only to classify a failing page's
+// error), the budget-bounded context every page request runs under (dlCtx),
+// and the request parameters every page shares. See loadVersionsListCached's
+// doc comment for the paging strategy these methods implement together.
+type versionsPager struct {
+	//nolint:containedctx // the caller's original context, consulted only
+	// to classify a failing page's error as caller-canceled versus
+	// budget-expired; it never starts work of its own.
+	parent context.Context
+	//nolint:containedctx // the budget-bounded context every page request
+	// runs under; fetchPage funnels both walkPages and the prefetch
+	// workers through it, so it lives on the shared state rather than in
+	// each call's signature.
+	dlCtx       context.Context
+	deps        collectionDeps
+	versionsURL string
+	policy      cacheManager.Policy
+	budget      time.Duration
+}
+
+// pageResult is one fetched page: its version strings, the total the server
+// declared alongside them, and the fetch's error, already normalized by
+// fetchPage.
+type pageResult struct {
+	err      error
+	versions []string
+	total    int
+}
+
+// fetchPage fetches the page at offset under the shared budget. It is the
+// single funnel every page request and its error classification go through:
+// a failure is normalized here, via cacheManager.MetadataDeadlineError, into
+// at most one helpers.ErrMetadataFetchDeadline sentinel, whether the page
+// was fetched by walkPages directly or by a prefetchScheduled worker.
+func (p *versionsPager) fetchPage(offset int) pageResult {
+	versions, total, err := fetchVersionsPage(p.dlCtx, p.deps, p.policy, p.versionsURL, versionLimit, offset)
+	return pageResult{versions: versions, total: total, err: cacheManager.MetadataDeadlineError(p.parent, p.dlCtx, p.budget, err)}
+}
+
+// pagingExceeded builds the hard-failure verdict for a versions list that
+// needs more than maxVersionPages requests. Cut like every other render of
+// this value: versionsURL is the server's own versions_url when the root
+// metadata declared one, and this verdict means the server kept declaring
+// more pages, which is not the behavior to hand an uncut URL to a log for.
+func (p *versionsPager) pagingExceeded() error {
+	return fmt.Errorf("%w: %s", helpers.ErrVersionsPagingExceeded, helpers.WithoutCredentials(p.versionsURL))
+}
+
+// collectAll fetches page 0 and decides how the rest of the list is
+// collected: a short page 0 is already the whole list; a positive total
+// implying more pages than maxVersionPages fails hard before any further
+// request; a positive total page 0 already covers needs nothing more; and
+// otherwise the scheduled offsets are prefetched concurrently and consumed
+// by the walk, with an empty schedule when the total is 0 or unreported.
+//
+// The pre-size below is the one thing the declared total is taken at its
+// word for, and only after the pages-exceeded verdict has bounded it: a
+// hostile or broken meta.count large enough to matter to an allocation has
+// already failed the call above, never reaching make.
+func (p *versionsPager) collectAll() ([]string, error) {
+	first := p.fetchPage(0)
+	if first.err != nil {
+		return nil, first.err
+	}
+	if len(first.versions) < versionLimit || (first.total > 0 && versionLimit >= first.total) {
+		return first.versions, nil
+	}
+	if first.total > maxVersionPages*versionLimit {
+		return nil, p.pagingExceeded()
+	}
+	var scheduled []pageResult
+	capacity := versionLimit
+	if first.total > 0 {
+		scheduled = p.prefetchScheduled(first.total)
+		capacity = first.total
+	}
+	return p.walkPages(first.versions, scheduled, capacity)
+}
+
+// prefetchScheduled fetches, concurrently, every page offset the declared
+// total schedules beyond page 0, bounded by cfg.DownloadWorkers - the same
+// network-bound sizing the artifact prefetcher's own pool uses (see
+// startPrefetchWorkers), and safe over the shared store for the same reason
+// that pool already is: each page's fetchJSONWithCachePolicy writes a
+// distinct APICache key behind the store's own mutex. Workers write disjoint
+// slice elements, so no result mutex is needed; walkPages afterwards is what
+// decides which of these results the list actually keeps, in offset order.
+func (p *versionsPager) prefetchScheduled(total int) []pageResult {
+	results := make([]pageResult, (total-1)/versionLimit)
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, max(p.deps.cfg.DownloadWorkers, 1))
+	for i := range results {
+		sem <- struct{}{}
+		wg.Go(func() {
+			defer func() { <-sem }()
+			results[i] = p.fetchPage((i + 1) * versionLimit)
+		})
+	}
+	wg.Wait()
+	return results
+}
+
+// walkPages assembles the final list. It is the paging walk itself, with the
+// pages the schedule prefetched consumed in place of a fresh request:
+// termination is judged page by page against what each page actually
+// returned (its length and its own declared total), never against the
+// schedule, so a scheduled page past the point the walk ends is discarded
+// unread - content and error alike, exactly as an unfetched page would have
+// been - and a page the schedule never covered is fetched on demand. The
+// maxVersionPages ceiling binds the walk regardless of how a page was
+// obtained.
+func (p *versionsPager) walkPages(first []string, scheduled []pageResult, capacity int) ([]string, error) {
+	all := make([]string, 0, capacity)
+	all = append(all, first...)
+	offset := versionLimit
+	for page := 1; ; page++ {
+		if page >= maxVersionPages {
+			return nil, p.pagingExceeded()
+		}
+		result := p.pageAt(page, offset, scheduled)
+		if result.err != nil {
+			return nil, result.err
+		}
+		all = append(all, result.versions...)
+		if len(result.versions) < versionLimit {
+			return all, nil
+		}
+		offset += versionLimit
+		if result.total > 0 && offset >= result.total {
+			return all, nil
+		}
+	}
+}
+
+// pageAt serves the walk's page from the prefetched schedule when the
+// schedule covers it, and fetches it fresh otherwise.
+func (p *versionsPager) pageAt(page, offset int, scheduled []pageResult) pageResult {
+	if page <= len(scheduled) {
+		return scheduled[page-1]
+	}
+	return p.fetchPage(offset)
 }
 
 func cachedVersionsList(st *store.Store, policy cacheManager.Policy, versionsURL string) ([]string, bool) {
@@ -625,21 +799,11 @@ func normalizeRequirementConstraint(value string) string {
 }
 
 // requirementSpecEqual reports whether two requirement specs are equal.
-func requirementSpecEqual(a, b requirementSpec) bool {
+func requirementSpecEqual(a, b store.RequirementSpec) bool {
 	if a.Constraint != b.Constraint || a.Source != b.Source || a.Type != b.Type {
 		return false
 	}
-	left := normalizeSignatures(a.Signatures)
-	right := normalizeSignatures(b.Signatures)
-	if len(left) != len(right) {
-		return false
-	}
-	for i := range left {
-		if left[i] != right[i] {
-			return false
-		}
-	}
-	return true
+	return slices.Equal(normalizeSignatures(a.Signatures), normalizeSignatures(b.Signatures))
 }
 
 // exactVersionFromConstraints returns a single exact version if specified.
@@ -741,7 +905,7 @@ func tryIncrementalResolve(
 	ctx context.Context,
 	deps collectionDeps,
 	roots []collection,
-	currentSpec map[string]requirementSpec,
+	currentSpec map[string]store.RequirementSpec,
 	reqHash string,
 ) (map[string]collection, map[string][]string, bool, error) {
 	prevSpec := deps.st.RequirementsSnapshot()
@@ -773,7 +937,7 @@ func tryIncrementalResolveWithSnapshot(
 	deps collectionDeps,
 	unchangedRoots []collection,
 	changedRoots []collection,
-	currentSpec map[string]requirementSpec,
+	currentSpec map[string]store.RequirementSpec,
 	reqHash string,
 ) (map[string]collection, map[string][]string, bool, error) {
 	resolvedSnap, graphSnap, ok := loadSnapshotData(deps.st)
@@ -786,7 +950,7 @@ func tryIncrementalResolveWithSnapshot(
 		return nil, nil, false, nil
 	}
 
-	resolvedNew, graphNew, err := resolveCollectionsInternal(ctx, deps, changedRoots, false, false)
+	resolvedNew, graphNew, err := resolveCollectionsInternal(ctx, deps, changedRoots, resolveNestedPartial)
 	if err != nil {
 		return nil, nil, false, err
 	}
@@ -810,7 +974,7 @@ func tryIncrementalResolveWithSnapshot(
 	return mergedResolved, mergedGraph, true, nil
 }
 
-func splitRootsByChange(roots []collection, currentSpec, prevSpec map[string]requirementSpec) ([]collection, []collection) {
+func splitRootsByChange(roots []collection, currentSpec, prevSpec map[string]store.RequirementSpec) ([]collection, []collection) {
 	unchangedRoots := make([]collection, 0, len(roots))
 	changedRoots := make([]collection, 0, len(roots))
 	for _, root := range roots {
@@ -1022,8 +1186,8 @@ func validateMergedGraph(mergedResolved map[string]collection, mergedGraph map[s
 // configured server list instead of being nailed to one), and folding it
 // into cfg.Server would make two roots that mean different things ("no
 // preference" vs "pinned to the default server") hash identically.
-func buildRequirementsSpec(roots []collection) map[string]requirementSpec {
-	spec := make(map[string]requirementSpec, len(roots))
+func buildRequirementsSpec(roots []collection) map[string]store.RequirementSpec {
+	spec := make(map[string]store.RequirementSpec, len(roots))
 	for _, root := range roots {
 		fqdn := fmt.Sprintf("%s.%s", root.Namespace, root.Name)
 		constraint := root.Constraint
@@ -1031,7 +1195,7 @@ func buildRequirementsSpec(roots []collection) map[string]requirementSpec {
 			constraint = root.Version
 		}
 		constraint = normalizeRequirementConstraint(constraint)
-		spec[fqdn] = requirementSpec{
+		spec[fqdn] = store.RequirementSpec{
 			Constraint: constraint,
 			Source:     root.Source,
 			Type:       root.Type,
@@ -1058,7 +1222,7 @@ func buildRequirementsSpec(roots []collection) map[string]requirementSpec {
 // prefixes keep them from colliding with each other. They are prepended
 // rather than sorted into parts, so the per-root ordering stays
 // deterministic.
-func requirementsSignatureFromSpec(spec map[string]requirementSpec, noDeps bool, serversSig string) string {
+func requirementsSignatureFromSpec(spec map[string]store.RequirementSpec, noDeps bool, serversSig string) string {
 	parts := make([]string, 0, len(spec))
 	for fqdn, entry := range spec {
 		constraint := entry.Constraint

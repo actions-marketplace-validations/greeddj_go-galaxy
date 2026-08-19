@@ -398,11 +398,16 @@ func (vc *verifyContext) enabled() bool {
 // since nothing about a gathered blob is cached between attempts.
 //
 // Three residuals are disclosed rather than closed, and the first is the
-// largest of the three. The artifact cache and the extracted store are both
-// populated BEFORE this verdict is reached - on a fresh download with an
-// extracted store configured, streamDownloadAndExtract promotes the
-// content-addressable tree during the download itself - so a refused
-// collection leaves both populated while nothing is installed. For the
+// largest of the three. The artifact cache is populated BEFORE this verdict
+// is reached on every fresh-download shape (a prefetch worker commits during
+// its download; a consuming worker's own direct download commits during
+// streamDownloadAndExtract), and the extracted store is too on the direct
+// shape alone - a worker downloading with an extracted store configured has
+// streamDownloadAndExtract promote the content-addressable tree during the
+// download itself, while a prefetched handoff reaches extraction only after
+// this verdict - so a refused collection leaves the cache populated, and on
+// the direct shape the extracted store as well, while nothing is installed.
+// For the
 // extracted store that is benign: it is content-addressed, so its entry is
 // reachable only by naming the sha of the bytes it holds. The artifact
 // cache is NOT - helpers.ArtifactKey is a server fingerprint plus the

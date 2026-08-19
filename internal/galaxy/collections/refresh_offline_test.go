@@ -69,11 +69,11 @@ func TestRefreshOfflinePreservesResolveWithStaleMetadataCaches(t *testing.T) {
 	cfg.Offline = true
 	runtime := infra.New(noopPrinter{}, fetch.NewOffline(0))
 
-	prep, err := loadRoots(cfg, runtime)
+	roots, err := loadRoots(cfg, runtime)
 	if err != nil {
 		t.Fatalf("loadRoots: %v", err)
 	}
-	reqSpec := buildRequirementsSpec(prep.AllRoots)
+	reqSpec := buildRequirementsSpec(roots)
 	reqHash := requirementsSignatureFromSpec(reqSpec, cfg.NoDeps, serversSignature(cfg))
 
 	st := store.New()
@@ -86,7 +86,7 @@ func TestRefreshOfflinePreservesResolveWithStaleMetadataCaches(t *testing.T) {
 	st.ClearCaches()
 
 	deps := newCollectionDeps(cfg, runtime, st)
-	resolved, _, err := resolveCollectionsInternal(context.Background(), deps, prep.AllRoots, true, true)
+	resolved, _, err := resolveCollectionsInternal(context.Background(), deps, roots, resolveTopLevel)
 	if err != nil {
 		t.Fatalf("resolveCollectionsInternal (refresh + offline, resolve snapshot only, no metadata cache): %v", err)
 	}

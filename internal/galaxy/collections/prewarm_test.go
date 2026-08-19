@@ -205,7 +205,7 @@ func TestPrewarmFetchesRootMetadataConcurrently(t *testing.T) {
 	cfg := &config.Config{Server: srv.URL(), Workers: 4, NoDeps: true}
 	deps := newCollectionDeps(cfg, runtime, store.New())
 
-	_, _, err := resolveCollectionsInternal(context.Background(), deps, roots, false, false)
+	_, _, err := resolveCollectionsInternal(context.Background(), deps, roots, resolveNestedPartial)
 	if err != nil {
 		t.Fatalf("resolveCollectionsInternal: %v", err)
 	}
@@ -243,8 +243,9 @@ func TestPrewarmFetchesRootMetadataConcurrently(t *testing.T) {
 
 // TestPrewarmSkippedUnderRefresh is the mandatory positive control for
 // TestPrewarmFetchesRootMetadataConcurrently: the identical 8-unpinned-root
-// fixture, but with cfg.Refresh set, which makes cachePolicyForConstraint's
-// non-exact policy write-only (Read: false) and therefore
+// fixture, but with cfg.Refresh set, which makes
+// cacheManager.PolicyForConstraint's non-exact policy write-only (Read:
+// false) and therefore
 // prewarmPolicyUsable-false for every one of these unconstrained roots -
 // prewarmOne skips each one without ever calling the provider, so the
 // barrier only ever sees the solve's own strictly sequential requests. This
@@ -261,12 +262,12 @@ func TestPrewarmSkippedUnderRefresh(t *testing.T) {
 	cfg := &config.Config{Server: srv.URL(), Workers: 4, NoDeps: true, Refresh: true}
 	deps := newCollectionDeps(cfg, runtime, store.New())
 
-	_, _, err := resolveCollectionsInternal(context.Background(), deps, roots, false, false)
+	_, _, err := resolveCollectionsInternal(context.Background(), deps, roots, resolveNestedPartial)
 	if err != nil {
 		t.Fatalf("resolveCollectionsInternal: %v", err)
 	}
 	// Killing mutation, run: removing prewarmOne's own
-	// prewarmPolicyUsable(cachePolicyForConstraint(deps.cfg, exact)) check
+	// prewarmPolicyUsable(cacheManager.PolicyForConstraint(deps.cfg, exact)) check
 	// makes every one of these 8 unpinned roots' prewarm goroutines call
 	// mp.Highest regardless of --refresh, so up to cfg.Workers (4) of them
 	// race the barrier concurrently, same as
@@ -314,7 +315,7 @@ func TestPrewarmSkippedWhenSnapshotReplays(t *testing.T) {
 	cfg := &config.Config{Server: srv.URL(), Workers: 4, NoDeps: true}
 	deps := newCollectionDeps(cfg, runtime, store.New())
 
-	resolved, graph, err := resolveCollectionsInternal(context.Background(), deps, roots, true, true)
+	resolved, graph, err := resolveCollectionsInternal(context.Background(), deps, roots, resolveTopLevel)
 	if err != nil {
 		t.Fatalf("first resolveCollectionsInternal: %v", err)
 	}
@@ -326,7 +327,7 @@ func TestPrewarmSkippedWhenSnapshotReplays(t *testing.T) {
 	recordResolution(replaySt, resolved, graph, reqHash, cfg.Server, reqSpec)
 	replayDeps := newCollectionDeps(cfg, runtime, replaySt)
 
-	if _, _, err := resolveCollectionsInternal(context.Background(), replayDeps, roots, true, true); err != nil {
+	if _, _, err := resolveCollectionsInternal(context.Background(), replayDeps, roots, resolveTopLevel); err != nil {
 		t.Fatalf("second resolveCollectionsInternal: %v", err)
 	}
 	// Killing mutation, run: hoisting the prewarmRootMetadata(...) call above
@@ -357,7 +358,7 @@ func TestPrewarmSkippedForExactPinWithNoDeps(t *testing.T) {
 	cfg := &config.Config{Server: srv.URL(), Workers: 2, NoDeps: true}
 	deps := newCollectionDeps(cfg, runtime, store.New())
 
-	if _, _, err := resolveCollectionsInternal(context.Background(), deps, roots, false, false); err != nil {
+	if _, _, err := resolveCollectionsInternal(context.Background(), deps, roots, resolveNestedPartial); err != nil {
 		t.Fatalf("resolveCollectionsInternal: %v", err)
 	}
 	// Killing mutation, run: removing prewarmOne's `exact && deps.cfg.NoDeps`
@@ -387,7 +388,7 @@ func TestPrewarmFetchesVersionMetadataForExactPin(t *testing.T) {
 	cfg := &config.Config{Server: srv.URL(), Workers: 4}
 	deps := newCollectionDeps(cfg, runtime, store.New())
 
-	if _, _, err := resolveCollectionsInternal(context.Background(), deps, roots, false, false); err != nil {
+	if _, _, err := resolveCollectionsInternal(context.Background(), deps, roots, resolveNestedPartial); err != nil {
 		t.Fatalf("resolveCollectionsInternal: %v", err)
 	}
 	// Killing mutation, run: returning nil from prewarmOne's exact arm
@@ -443,7 +444,7 @@ func TestPrewarmSharesTheResolvePhaseAPIRootMemo(t *testing.T) {
 	cfg := &config.Config{Server: base, Workers: 1, NoDeps: true}
 	deps := newCollectionDeps(cfg, runtime, store.New())
 
-	if _, _, err := resolveCollectionsInternal(context.Background(), deps, roots, false, false); err != nil {
+	if _, _, err := resolveCollectionsInternal(context.Background(), deps, roots, resolveNestedPartial); err != nil {
 		t.Fatalf("resolveCollectionsInternal: %v", err)
 	}
 	// Arithmetic: the hub 404s the galaxy.ansible.com-shaped /api/v3 probe in
@@ -503,7 +504,7 @@ func TestPrewarmSkippedWithoutStore(t *testing.T) {
 	cfg := &config.Config{Server: srv.URL(), Workers: 4, NoDeps: true}
 	deps := newCollectionDeps(cfg, runtime, nil)
 
-	if _, _, err := resolveCollectionsInternal(context.Background(), deps, roots, false, false); err != nil {
+	if _, _, err := resolveCollectionsInternal(context.Background(), deps, roots, resolveNestedPartial); err != nil {
 		t.Fatalf("resolveCollectionsInternal: %v", err)
 	}
 	// Killing mutation, run: removing prewarmEnabled's `deps.st == nil` check

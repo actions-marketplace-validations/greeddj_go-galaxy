@@ -145,7 +145,7 @@ func TestRequirementsSnapshotDoesNotCarrySignatureQueryCapability(t *testing.T) 
 // binary predating this cut actually would have left it - a requirements
 // hash computed the same, self-consistent way the persisted spec itself was
 // written, over an unstripped signature.
-func legacyRequirementsSignature(t *testing.T, spec map[string]requirementSpec, noDeps bool, serversSig string) string {
+func legacyRequirementsSignature(t *testing.T, spec map[string]store.RequirementSpec, noDeps bool, serversSig string) string {
 	t.Helper()
 	parts := make([]string, 0, len(spec))
 	for fqdn, entry := range spec {
@@ -193,7 +193,7 @@ func TestUnstrippedPersistedSignatureQuerySelfHeals(t *testing.T) {
 		Source: srv.URL(), Signatures: []string{signatureSourceWithQuery},
 	}
 
-	oldSpec := map[string]requirementSpec{
+	oldSpec := map[string]store.RequirementSpec{
 		"acme.app": {Constraint: "^1.0.0", Source: srv.URL(), Signatures: []string{signatureSourceWithQuery}},
 	}
 	oldHash := legacyRequirementsSignature(t, oldSpec, cfg.NoDeps, serversSignature(cfg))
@@ -201,7 +201,7 @@ func TestUnstrippedPersistedSignatureQuerySelfHeals(t *testing.T) {
 	st.SetRequirements(oldSpec)
 
 	resolved, _, err := resolveCollectionsInternal(
-		context.Background(), newCollectionDeps(cfg, runtime, st), []collection{root}, true, true,
+		context.Background(), newCollectionDeps(cfg, runtime, st), []collection{root}, resolveTopLevel,
 	)
 	if err != nil {
 		t.Fatalf("resolveCollectionsInternal (unstripped persisted spec) = %v, want nil", err)
@@ -238,7 +238,7 @@ func TestLegacyRequirementsSignatureAgreesOnlyOnAStrippedSpec(t *testing.T) {
 	cfg := &config.Config{Server: "https://galaxy.example.com"}
 	serversSig := serversSignature(cfg)
 
-	strippedSpec := map[string]requirementSpec{
+	strippedSpec := map[string]store.RequirementSpec{
 		"acme.app": {Constraint: "^1.0.0", Source: cfg.Server, Signatures: []string{signatureSourceStripped}},
 	}
 	legacyStripped := legacyRequirementsSignature(t, strippedSpec, cfg.NoDeps, serversSig)
@@ -253,7 +253,7 @@ func TestLegacyRequirementsSignatureAgreesOnlyOnAStrippedSpec(t *testing.T) {
 	// this is the upgrade direction's own mismatch, and its absence here
 	// would mean the equality above proved nothing about the cut
 	// specifically.
-	unstrippedSpec := map[string]requirementSpec{
+	unstrippedSpec := map[string]store.RequirementSpec{
 		"acme.app": {Constraint: "^1.0.0", Source: cfg.Server, Signatures: []string{signatureSourceWithQuery}},
 	}
 	legacyUnstripped := legacyRequirementsSignature(t, unstrippedSpec, cfg.NoDeps, serversSig)

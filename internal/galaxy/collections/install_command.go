@@ -9,7 +9,6 @@ import (
 
 	cacheManager "github.com/greeddj/go-galaxy/internal/galaxy/cache"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
-	"github.com/greeddj/go-galaxy/internal/galaxy/extracted"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
@@ -77,20 +76,10 @@ func installWithState(ctx context.Context, cfg *config.Config, runtime *infra.In
 		return installDryRun(ctx, cfg, runtime, state, plan, start, root)
 	}
 
-	summary, err := installLevels(
-		ctx,
-		cfg,
-		runtime,
-		state.store,
-		state.backend.Artifacts(),
-		state.extractStore,
-		plan.collections,
-		plan.graph,
-		plan.levels,
-		plan.prefetch,
-		root,
-		plan.verify,
+	depsCtx := newInstallDeps(
+		cfg, runtime, state.store, state.backend.Artifacts(), state.extractStore, root, plan.prefetch.cachedArtifacts(), plan.verify,
 	)
+	summary, err := installLevels(ctx, depsCtx, plan)
 	if err != nil {
 		return err
 	}
@@ -160,24 +149,10 @@ func installDryRun(
 	return saveErr
 }
 
-func installLevels(
-	ctx context.Context,
-	cfg *config.Config,
-	runtime *infra.Infra,
-	st *store.Store,
-	artifacts cacheManager.ArtifactStore,
-	extractStore *extracted.Store,
-	collections map[string]collection,
-	graph map[string][]string,
-	levels [][]string,
-	prefetch *prefetcher,
-	root *os.Root,
-	verify *verifyContext,
-) (failureSummary, error) {
-	depsCtx := newInstallDeps(cfg, runtime, st, artifacts, extractStore, root, prefetch.cachedArtifacts(), verify)
+func installLevels(ctx context.Context, depsCtx installDeps, plan *installPlan) (failureSummary, error) {
 	var failures failureRecorder
-	for _, level := range levels {
-		if err := runInstallLevel(ctx, depsCtx, collections, graph, level, prefetch, &failures); err != nil {
+	for _, level := range plan.levels {
+		if err := runInstallLevel(ctx, depsCtx, plan.collections, plan.graph, level, plan.prefetch, &failures); err != nil {
 			// err here is helpers.ErrMissingCollection, a usage-class plan bug in
 			// the level/collections map built before any level ran - not an
 			// install failure. installWithState returns this err directly,

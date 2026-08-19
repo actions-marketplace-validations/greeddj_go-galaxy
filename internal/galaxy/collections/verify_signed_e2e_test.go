@@ -21,6 +21,7 @@ package collections
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -179,7 +180,7 @@ func TestInstallVerifiesAServerSignedCollectionEndToEnd(t *testing.T) {
 // assertion above the one this pins is satisfied by the mutated state; the
 // second Warm() call itself is what fails:
 //
-//	verify_signed_e2e_test.go:224: Warm() (second run) = installation failed: warm failed for 1 collections, want nil
+//	verify_signed_e2e_test.go:225: Warm() (second run) = installation failed: warm failed for 1 collections, want nil
 //
 // with the per-collection cause folded under that headline and recorded by
 // the run's own Output.Errorf - this fixture's capturingPrinter, not this
@@ -204,7 +205,7 @@ func TestInstallVerifiesAServerSignedCollectionEndToEnd(t *testing.T) {
 // is the request-count assertion right after it that fails instead, with
 // nothing above it disturbed:
 //
-//	verify_signed_e2e_test.go:227: second Warm() reached the version-detail endpoint 1 times, want 0: the server's own
+//	verify_signed_e2e_test.go:228: second Warm() reached the version-detail endpoint 1 times, want 0: the server's own
 //	signature must be served from the persisted cache, not fetched again
 func TestWarmVerifiesAServerSignedCollectionAcrossCachedRuns(t *testing.T) {
 	t.Parallel()
@@ -349,38 +350,73 @@ func TestInstallRefusesWithNoSignatureAnywhere(t *testing.T) {
 	}
 }
 
-// TestWarmLeavesTheExtractedTreeAfterARefusedSignature is N6: a real
-// collections.Warm run refuses a collection whose declared signature source
-// cannot be verified, and exits through the signature exit class - but the
-// content-addressable extracted tree for that artifact's sha is still
-// present on disk afterward.
+// TestWarmRefusedSignatureAndTheExtractedStore is N6, in two rows that map
+// where verifyCollectionSignatures' first disclosed residual lives on warm's
+// two download shapes. The sha each row checks is read from AddVersion's own
+// return value rather than hardcoded, since it names bytes the fixture built
+// and would change if the fixture ever did.
 //
-// This is the residual verifyCollectionSignatures' own doc comment
-// discloses by name: on a fresh download with an extracted store configured
-// (which warm always carries), streamDownloadAndExtract promotes the
-// content-addressable tree during the download itself, before
-// warmVerifyAndEnsure ever calls verifyCollectionSignatures - so a refused
-// collection still leaves that tree behind. This row exists so a future
-// change that closes the residual is noticed rather than silently assumed;
-// it pins today's actual behavior, not a claim that leaving the tree behind
-// is the right outcome. The sha is read from AddVersion's own return value
-// rather than hardcoded, since it names bytes this test built and could
-// change if the fixture ever does.
-func TestWarmLeavesTheExtractedTreeAfterARefusedSignature(t *testing.T) {
+// The prefetched row: on an ordinary cold warm the artifact arrives through
+// the prefetch handoff, whose download deps carry no extracted store, and
+// warmVerifyAndEnsure reaches Ensure only after the signature verdict - so a
+// refused collection leaves NO extracted tree. The artifact cache is still
+// populated ahead of the verdict (the prefetch worker commits during its
+// download), which is the half of the residual this path keeps.
+//
+// The direct-download row: with the prefetch attempt exhausted by a bounded
+// fault, warmOne falls back to downloading inside its own worker, whose deps
+// DO carry the extracted store - streamDownloadAndExtract then promotes the
+// content-addressable tree during the download itself, before the verdict,
+// so the refused collection leaves the tree behind. This row pins that
+// fallback's actual behavior, not a claim that leaving the tree behind is
+// the right outcome, so a future change closing the residual is noticed
+// rather than silently assumed.
+func TestWarmRefusedSignatureAndTheExtractedStore(t *testing.T) {
 	t.Parallel()
-	srv := fakegalaxy.New(t)
-	v := srv.AddVersion("acme", "app", "1.0.0", nil)
 
-	cfg, runtime, _ := newSignedFixture(t, srv, []string{writeUnverifiableSignature(t)}, 2)
+	t.Run("a prefetched refusal leaves no extracted tree", func(t *testing.T) {
+		t.Parallel()
+		srv := fakegalaxy.New(t)
+		v := srv.AddVersion("acme", "app", "1.0.0", nil)
 
-	err := Warm(context.Background(), cfg, runtime)
-	if got := exitcode.FromError(err); got != exitcode.ExitSignature {
-		t.Fatalf("exit code = %d, want %d (err = %v)", got, exitcode.ExitSignature, err)
-	}
+		cfg, runtime, _ := newSignedFixture(t, srv, []string{writeUnverifiableSignature(t)}, 2)
 
-	extractedStore := extracted.NewStore(cfg.CacheDir)
-	if !extractedStore.Ready(v.SHA256) {
-		t.Fatalf("extracted tree for sha %s is not present, want it left behind by the download that ran "+
-			"ahead of the refused verification", v.SHA256)
-	}
+		err := Warm(context.Background(), cfg, runtime)
+		if got := exitcode.FromError(err); got != exitcode.ExitSignature {
+			t.Fatalf("exit code = %d, want %d (err = %v)", got, exitcode.ExitSignature, err)
+		}
+
+		extractedStore := extracted.NewStore(cfg.CacheDir)
+		if extractedStore.Ready(v.SHA256) {
+			t.Fatalf("extracted tree for sha %s is present, want none: a prefetched handoff extracts only after "+
+				"the signature verdict", v.SHA256)
+		}
+	})
+
+	t.Run("a direct-download refusal still leaves the tree behind", func(t *testing.T) {
+		t.Parallel()
+		srv := fakegalaxy.New(t)
+		v := srv.AddVersion("acme", "app", "1.0.0", nil)
+		// Sized to the prefetch worker's whole retry budget: the prefetch
+		// download exhausts it and fails, and warmOne's own fallback download
+		// then hits a clean endpoint - the shape that routes the fresh bytes
+		// through streamDownloadAndExtract inside the warm worker itself.
+		srv.Fail(fakegalaxy.EndpointArtifact, "acme", "app", fakegalaxy.Fault{
+			Status: http.StatusServiceUnavailable,
+			Count:  helpers.FetchRetryMaxAttempts,
+		})
+
+		cfg, runtime, _ := newSignedFixture(t, srv, []string{writeUnverifiableSignature(t)}, 2)
+
+		err := Warm(context.Background(), cfg, runtime)
+		if got := exitcode.FromError(err); got != exitcode.ExitSignature {
+			t.Fatalf("exit code = %d, want %d (err = %v)", got, exitcode.ExitSignature, err)
+		}
+
+		extractedStore := extracted.NewStore(cfg.CacheDir)
+		if !extractedStore.Ready(v.SHA256) {
+			t.Fatalf("extracted tree for sha %s is not present, want it left behind by the fallback download that "+
+				"ran ahead of the refused verification", v.SHA256)
+		}
+	})
 }

@@ -58,7 +58,10 @@ func TestWarmOneEvictsAndRefetchesCorruptCacheHit(t *testing.T) {
 	}
 	deps := newTestInstallDepsWithExtractStore(t, cfg)
 
-	if err := warmOne(context.Background(), deps, col); err != nil {
+	// nil meta and a zero handoff: driving warmOne directly stands in for a
+	// key the run's prefetcher never scheduled, which is exactly this
+	// scenario's shape - a cache hit is never a prefetch task.
+	if err := warmOne(context.Background(), deps, col, nil, downloadResult{}); err != nil {
 		t.Fatalf("expected the corrupt cache hit to recover via a single refetch, got %v", err)
 	}
 	if got := srv.Count(fakegalaxy.EndpointArtifact); got != 1 {
@@ -102,7 +105,7 @@ func TestWarmOneOfflineCorruptSurfacesMismatch(t *testing.T) {
 	}
 	deps := newTestInstallDepsWithExtractStore(t, cfg)
 
-	err := warmOne(context.Background(), deps, col)
+	err := warmOne(context.Background(), deps, col, nil, downloadResult{})
 	if !errors.Is(err, helpers.ErrSHA256Mismatch) {
 		t.Fatalf("expected errors.Is ErrSHA256Mismatch, got %v", err)
 	}

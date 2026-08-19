@@ -44,7 +44,7 @@ func TestIncrementalResolveMergesPreservedAndSolverResolvedSubsets(t *testing.T)
 	appRoot := collection{Namespace: "acme", Name: "app", Constraint: "^1.0.0", Source: srv.URL()}
 
 	resolved1, graph1, err := resolveCollectionsInternal(
-		context.Background(), newCollectionDeps(cfg, runtime, st), []collection{appRoot}, true, true,
+		context.Background(), newCollectionDeps(cfg, runtime, st), []collection{appRoot}, resolveTopLevel,
 	)
 	if err != nil {
 		t.Fatalf("first resolveCollectionsInternal: %v", err)
@@ -57,7 +57,7 @@ func TestIncrementalResolveMergesPreservedAndSolverResolvedSubsets(t *testing.T)
 
 	toolRoot := collection{Namespace: "acme", Name: "tool", Constraint: "^1.0.0", Source: srv.URL()}
 	resolved2, graph2, err := resolveCollectionsInternal(
-		context.Background(), newCollectionDeps(cfg, runtime, st), []collection{appRoot, toolRoot}, true, true,
+		context.Background(), newCollectionDeps(cfg, runtime, st), []collection{appRoot, toolRoot}, resolveTopLevel,
 	)
 	if err != nil {
 		t.Fatalf("second resolveCollectionsInternal (acme.app/acme.lib must be preserved, not re-fetched): %v", err)
@@ -133,7 +133,7 @@ func TestIncrementalMergeConflictFallsBackToFullSolve(t *testing.T) {
 	rootA := collection{Namespace: "acme", Name: "a", Constraint: "^1.0.0", Source: srv.URL()}
 
 	resolved1, _, err := resolveCollectionsInternal(
-		context.Background(), newCollectionDeps(cfg, runtime, st), []collection{rootA}, true, true,
+		context.Background(), newCollectionDeps(cfg, runtime, st), []collection{rootA}, resolveTopLevel,
 	)
 	if err != nil {
 		t.Fatalf("first resolveCollectionsInternal: %v", err)
@@ -146,7 +146,7 @@ func TestIncrementalMergeConflictFallsBackToFullSolve(t *testing.T) {
 
 	rootB := collection{Namespace: "acme", Name: "b", Constraint: "^1.0.0", Source: srv.URL()}
 	resolved2, graph2, err := resolveCollectionsInternal(
-		context.Background(), newCollectionDeps(cfg, runtime, st), []collection{rootA, rootB}, true, true,
+		context.Background(), newCollectionDeps(cfg, runtime, st), []collection{rootA, rootB}, resolveTopLevel,
 	)
 	if err != nil {
 		t.Fatalf("second resolveCollectionsInternal (must fall back to a full solve, not fail): %v", err)

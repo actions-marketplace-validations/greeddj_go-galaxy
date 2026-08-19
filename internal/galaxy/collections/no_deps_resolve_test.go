@@ -34,7 +34,7 @@ func TestNoDepsUnpinnedRootResolvesConcreteVersion(t *testing.T) {
 	deps := newCollectionDeps(cfg, runtime, store.New())
 
 	root := collection{Namespace: "acme", Name: "solo", Version: "*", Constraint: "*", Source: srv.URL()}
-	resolved, graph, err := resolveCollectionsInternal(context.Background(), deps, []collection{root}, false, false)
+	resolved, graph, err := resolveCollectionsInternal(context.Background(), deps, []collection{root}, resolveNestedPartial)
 	if err != nil {
 		t.Fatalf("resolveCollectionsInternal: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestNoDepsPinnedRootSkipsMetadataFetch(t *testing.T) {
 	deps := newCollectionDeps(cfg, runtime, store.New())
 
 	root := collection{Namespace: "acme", Name: "pinned", Version: "1.0.0", Constraint: "1.0.0", Source: srv.URL()}
-	resolved, _, err := resolveCollectionsInternal(context.Background(), deps, []collection{root}, false, false)
+	resolved, _, err := resolveCollectionsInternal(context.Background(), deps, []collection{root}, resolveNestedPartial)
 	if err != nil {
 		t.Fatalf("resolveCollectionsInternal: %v", err)
 	}

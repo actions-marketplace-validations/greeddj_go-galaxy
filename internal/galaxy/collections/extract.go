@@ -15,6 +15,12 @@ import (
 // the content-addressable store and linked via hard links into target.path.
 // Otherwise the tarball is unpacked directly into target.path.
 //
+// artifactSHAComputed declares whether artifactSHA was hashed by this process
+// over tarPath's bytes (see installPayload.artifactSHAComputed); through
+// shaProvenance it decides whether the store's ingest must hash the tarball
+// once more before extracting under that sha. The empty-artifactSHA fallback
+// below hashes the file right here, so it always yields a self-computed sha.
+//
 // The reset (RemoveAll then MkdirAll) and the extract-marker read/write are
 // the only writes here that go through target.root: unpack itself is handed
 // target.path, a plain string, and operates below root's own reach. This is
@@ -31,6 +37,7 @@ func extractCollection(
 	runtime *infra.Infra,
 	extractStore *extracted.Store,
 	artifactSHA string,
+	artifactSHAComputed bool,
 ) error {
 	if artifactSHA == "" {
 		hash, err := archive.FileHashSHA256(tarPath)
@@ -38,6 +45,7 @@ func extractCollection(
 			return err
 		}
 		artifactSHA = hash
+		artifactSHAComputed = true
 	}
 	// Refused here, before any of the destructive work below, rather than
 	// left to writeExtractMarker's own guard at the end of this function:
@@ -68,20 +76,37 @@ func extractCollection(
 		return classifyCollectionsRootError(target.root, target.rel, err)
 	}
 
-	if err := unpack(ctx, tarPath, target.path, extractStore, artifactSHA); err != nil {
+	if err := unpack(ctx, tarPath, target.path, extractStore, artifactSHA, artifactSHAComputed); err != nil {
 		return err
 	}
 
 	return writeExtractMarker(target, artifactSHA)
 }
 
-func unpack(ctx context.Context, tarPath, installPath string, extractStore *extracted.Store, artifactSHA string) error {
+func unpack(
+	ctx context.Context,
+	tarPath, installPath string,
+	extractStore *extracted.Store,
+	artifactSHA string,
+	artifactSHAComputed bool,
+) error {
 	if extractStore == nil {
 		return archive.ExtractTarGz(ctx, tarPath, installPath)
 	}
-	src, err := extractStore.Ensure(ctx, artifactSHA, tarPath)
+	src, err := extractStore.Ensure(ctx, artifactSHA, tarPath, shaProvenance(artifactSHAComputed))
 	if err != nil {
 		return err
 	}
 	return extracted.Materialize(src, installPath)
+}
+
+// shaProvenance maps the payload's "this process hashed these bytes" flag
+// onto the extracted store's provenance declaration: a self-computed sha lets
+// Ensure ingest the tarball without re-reading it, any other sha must still
+// be verified against the file's bytes before it keys the shared CAS.
+func shaProvenance(selfComputed bool) extracted.SHAProvenance {
+	if selfComputed {
+		return extracted.SHASelfComputed
+	}
+	return extracted.SHAFromRecord
 }

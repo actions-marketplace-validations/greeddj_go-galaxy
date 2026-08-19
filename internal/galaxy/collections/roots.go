@@ -7,18 +7,12 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 )
 
-// rootPreparation groups normalized root collections.
-type rootPreparation struct {
-	AllRoots    []collection
-	GalaxyRoots []collection
-}
-
-// prepareRoots normalizes and validates root requirements. A root's empty
-// Source is left as-is: unpinned is now a distinct, stable value that lets
-// the root walk the configured server list, rather than being nailed to a
-// single default server here.
-func prepareRoots(roots []collection) (*rootPreparation, error) {
-	prep := &rootPreparation{}
+// prepareRoots normalizes and validates root requirements, returning the
+// normalized roots. A root's empty Source is left as-is: unpinned is now a
+// distinct, stable value that lets the root walk the configured server list,
+// rather than being nailed to a single default server here.
+func prepareRoots(roots []collection) ([]collection, error) {
+	prepared := make([]collection, 0, len(roots))
 	seen := make(map[string]collection)
 	addRoot := func(col collection) error {
 		fqdn := fmt.Sprintf("%s.%s", col.Namespace, col.Name)
@@ -48,11 +42,10 @@ func prepareRoots(roots []collection) (*rootPreparation, error) {
 		if err := addRoot(root); err != nil {
 			return nil, err
 		}
-		prep.GalaxyRoots = append(prep.GalaxyRoots, root)
-		prep.AllRoots = append(prep.AllRoots, root)
+		prepared = append(prepared, root)
 	}
 
-	return prep, nil
+	return prepared, nil
 }
 
 // normalizeType normalizes a collection type string.
