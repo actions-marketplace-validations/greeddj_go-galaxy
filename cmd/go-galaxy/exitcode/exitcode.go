@@ -821,7 +821,6 @@ func isEnvironmentUsageError(err error) bool {
 		errors.Is(err, helpers.ErrUnsupportedRequirementsFormat) ||
 		errors.Is(err, helpers.ErrCacheDirEmpty) ||
 		errors.Is(err, helpers.ErrInvalidTimeout) ||
-		errors.Is(err, helpers.ErrInvalidWorkers) ||
 		errors.Is(err, helpers.ErrAnsibleConfigNotFound) ||
 		errors.Is(err, helpers.ErrWarmCacheDisabled) ||
 		errors.Is(err, helpers.ErrCacheBackendUnusable)

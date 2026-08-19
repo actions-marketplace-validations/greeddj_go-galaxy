@@ -2,11 +2,11 @@ package commands
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -131,7 +131,7 @@ func TestCollectionCommandConfigSurface(t *testing.T) {
 		"--requirements-file=req.yml",
 		"--lock-file=req.lock.yml",
 		"--timeout=45s",
-		"--workers=3",
+		"--workers=1", // the one value inside the accepted range on every machine; see TestWorkersEnvShapes
 		"--offline",
 		"--cache-dir=" + cacheDir,
 	}
@@ -148,7 +148,7 @@ func TestCollectionCommandConfigSurface(t *testing.T) {
 	assertConfigField(t, "RequirementsFile", cfg.RequirementsFile, "req.yml")
 	assertConfigField(t, "LockFile", cfg.LockFile, "req.lock.yml")
 	assertConfigField(t, "Timeout", cfg.Timeout, 45*time.Second)
-	assertConfigField(t, "Workers", cfg.Workers, 3)
+	assertConfigField(t, "Workers", cfg.Workers, 1)
 	assertConfigField(t, "Offline", cfg.Offline, true)
 	assertConfigField(t, "CacheDir", cfg.CacheDir, cacheDir)
 }
@@ -410,13 +410,27 @@ func TestAnsibleRequirementsFileEnvIsStillRead(t *testing.T) {
 }
 
 // workersEnvRow is one shape GO_GALAXY_WORKERS can arrive in from an ambient
-// CI environment block: the exported value, and either the worker count the
-// run must resolve to or the refusal it must produce instead.
+// CI environment block: the exported value, the worker count the run must
+// resolve to, and whether it must also have warned about the value it replaced.
 type workersEnvRow struct {
-	name    string
-	value   string
-	want    int
-	wantErr bool
+	name     string
+	value    string
+	want     int
+	wantWarn bool
+}
+
+// workersWarning returns the queued configuration warning naming --workers, or
+// "" when the run queued none. It matches on the flag name the message carries
+// rather than on a position in the slice - applyWorkers happens to queue ahead
+// of every other config-load warning, and this assertion does not rest on that.
+// "--download-workers" does not match: its only "--" is followed by "download".
+func workersWarning(cfg *config.Config) string {
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "--workers") {
+			return w
+		}
+	}
+	return ""
 }
 
 // TestWorkersEnvShapes pins how each GO_GALAXY_WORKERS shape resolves, driven
@@ -425,50 +439,49 @@ type workersEnvRow struct {
 // (internal/galaxy/config), whose fixture builds its own --workers flag and so
 // can only pin the predicate, never the production flag's fields.
 //
-// The "3" row is the positive control for the empty-value row specifically:
-// without it, "the declared-but-empty variable was accepted" would be
+// Every want naming the derived default is computed from
+// galaxyhelpers.DefaultInstallWorkers rather than hand-spelled, the opposite
+// of TestApplyWorkers' rows, and forced rather than a matter of taste: this
+// surface cannot fabricate a procs value, since BuildCollectionConfig reads
+// runtime.GOMAXPROCS(0) itself, so a hand-spelled want would only pin
+// whichever CPU count the test machine happens to permit.
+//
+// The "1" row is the positive control for the empty-value row specifically:
+// without it, "the declared-but-empty variable was honored" would be
 // indistinguishable from "this harness never reads the environment at all",
-// since a harness ignoring the environment entirely would accept that row too
-// and resolve to the very same derived default.
+// since a harness ignoring the environment entirely would resolve that row to
+// the very same derived default. 1 is the value it is because it is the only
+// one both inside the accepted range on every machine - the ceiling is at
+// least 2 - and never equal to the derived default, whose own floor is 2.
 //
-// The two checks below say "config error" rather than naming
-// BuildCollectionConfig the way the rest of this file does, and that has to
-// survive a tidy-up: the refusal message they render is 79 columns on its own,
-// so the conventional wording pushes the quoted mutation output past lll's
-// 140-column budget and the quote would have to lose its line citation.
+// The "1000000" row assumes no machine running this suite permits a million
+// CPUs, which is what makes it an above-the-ceiling row rather than an
+// ordinary accepted value.
 //
-// KILLING MUTATIONS, all run and reverted.
+// KILLING MUTATIONS, both run and reverted.
 //
-// M2, the `Value` field deleted outright from the workers IntFlag in
-// cmd/go-galaxy/cliflags. Only the empty-value row fails - the other three
-// survive, and that selectivity is the point: the field is what turns a
-// declared-but-empty variable into the default rather than into a zero this
-// tool now refuses:
+// M-A, the `Value` field deleted outright from the workers IntFlag in
+// cmd/go-galaxy/cliflags. Only the empty-value row fails, and it fails on its
+// warning assertion rather than its worker count: with no Value that row reads
+// 0, which applyWorkers replaces with the same derived default the row already
+// wanted, so the warning is the only observable difference:
 //
-//	config_surface_test.go:487: config error = invalid workers: --workers (or $GO_GALAXY_WORKERS) = 0, want a positive integer, want nil
+//	config_surface_test.go:500: warned about --workers = true, want false
 //
-// M3, `n < 1` relaxed to `n < 0` in applyWorkers (internal/galaxy/config).
-// Only the zero row fails; the negative row survives, pinning the boundary
-// rather than refusal in general:
+// M-B, the `if !c.IsSet("workers")` branch deleted from applyWorkers
+// (internal/galaxy/config). Not one row of the table fails - none of them is
+// the unset shape - and the cleanup subtest at the end fails instead, which is
+// exactly the coverage that subtest exists to carry:
 //
-//	config_surface_test.go:482: config error = <nil>, want invalid workers
-//
-// M1, the `if !c.IsSet("workers")` gate deleted from applyWorkers, leaves
-// every row here passing - none of them is the unset shape - and instead
-// fails both TestCleanupConfigSurface subtests above, which register no
-// --workers flag at all, each through its own BuildCollectionConfig check:
-//
-//	BuildCollectionConfig() error = invalid workers: --workers (or $GO_GALAXY_WORKERS) = 0, want a positive integer, want nil
-//
-// That last quote drops the `config_surface_test.go:NNN:` prefix go test
-// prints ahead of it, for the same column budget the note above describes;
-// the two subtests reporting it are named in prose instead.
+//	config_surface_test.go:521: warned about --workers, want no such warning
 func TestWorkersEnvShapes(t *testing.T) {
+	derived := galaxyhelpers.DefaultInstallWorkers(runtime.GOMAXPROCS(0))
 	rows := []workersEnvRow{
-		{name: "a positive value is read", value: "3", want: 3},
-		{name: "a declared but empty value reads the flag default", value: "", want: galaxyhelpers.DefaultInstallWorkers(runtime.GOMAXPROCS(0))},
-		{name: "zero is refused", value: "0", wantErr: true},
-		{name: "a negative value is refused", value: "-1", wantErr: true},
+		{name: "a value inside the range is read", value: "1", want: 1},
+		{name: "a declared but empty value reads the flag default", value: "", want: derived},
+		{name: "zero is replaced with a warning", value: "0", want: derived, wantWarn: true},
+		{name: "a negative value is replaced with a warning", value: "-1", want: derived, wantWarn: true},
+		{name: "a value far above the ceiling is replaced with a warning", value: "1000000", want: derived, wantWarn: true},
 	}
 
 	for _, row := range rows {
@@ -477,16 +490,35 @@ func TestWorkersEnvShapes(t *testing.T) {
 			t.Setenv("GO_GALAXY_WORKERS", row.value)
 
 			cfg, err := buildConfigFor(t, "install", cliflags.CollectionFlags(), nil)
-			if row.wantErr {
-				if !errors.Is(err, galaxyhelpers.ErrInvalidWorkers) {
-					t.Fatalf("config error = %v, want %v", err, galaxyhelpers.ErrInvalidWorkers)
-				}
-				return
-			}
 			if err != nil {
-				t.Fatalf("config error = %v, want nil", err)
+				t.Fatalf("BuildCollectionConfig() error = %v, want nil", err)
 			}
 			assertConfigField(t, "Workers", cfg.Workers, row.want)
+
+			warned := workersWarning(cfg)
+			if (warned != "") != row.wantWarn {
+				t.Fatalf("warned about --workers = %v, want %v", warned != "", row.wantWarn)
+			}
+			if row.wantWarn && !strings.Contains(warned, row.value) {
+				t.Fatalf("warning does not name the supplied value %q: %q", row.value, warned)
+			}
 		})
 	}
+
+	// The cleanup shape, on the real flag set rather than a fixture: no
+	// --workers flag is registered at all, so no source supplied a value and
+	// nothing may be warned about one. Kept here rather than in
+	// TestCleanupConfigSurface because what it pins belongs to this test's
+	// subject - it is the only place in this package M-B is observable.
+	t.Run("a command registering no workers flag warns about none", func(t *testing.T) {
+		neutralizeAnsibleDiscovery(t)
+
+		cfg, err := buildConfigFor(t, "cleanup", cliflags.S3Flags(), nil)
+		if err != nil {
+			t.Fatalf("BuildCollectionConfig() error = %v, want nil", err)
+		}
+		if workersWarning(cfg) != "" {
+			t.Fatalf("warned about --workers, want no such warning")
+		}
+	})
 }

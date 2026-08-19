@@ -150,9 +150,7 @@ func BuildCollectionConfig(c *cli.Command) (*Config, error) {
 	if err := applyTimeout(cfg, c); err != nil {
 		return nil, err
 	}
-	if err := applyWorkers(c); err != nil {
-		return nil, err
-	}
+	applyWorkers(cfg, c, runtime.GOMAXPROCS(0))
 
 	ansibleConfig, ansiblePath, ansibleWarnings, err := loadAnsibleConfigFromCLI(c)
 	if err != nil {
@@ -186,7 +184,6 @@ func BuildCollectionConfig(c *cli.Command) (*Config, error) {
 
 func newConfigFromCLI(c *cli.Command) *Config {
 	cfg := &Config{
-		Workers:          c.Int("workers"),
 		DownloadWorkers:  c.Int("download-workers"),
 		RequirementsFile: c.String("requirements-file"),
 		LockFile:         c.String("lock-file"),
@@ -201,26 +198,20 @@ func newConfigFromCLI(c *cli.Command) *Config {
 		DownloadPath:     c.String("download-path"),
 	}
 
-	// Two shapes reach this, and only one of them survives. A command that
-	// does not register --workers (cleanup) reads the zero value of an
-	// unknown flag name and genuinely needs the fallback. A registering
-	// command whose source supplied a non-positive value reaches it too,
-	// since this runs before applyWorkers - but that config is discarded, so
-	// the fallback never reaches a caller for such a value. A registering
-	// command with no source filling the flag does not reach this at all: it
-	// reads the flag's own Value, which is this same derivation.
-	if cfg.Workers < 1 {
-		cfg.Workers = helpers.DefaultInstallWorkers(runtime.GOMAXPROCS(0))
-	}
-	// Same fallback shape as Workers above, and for the identical two
-	// reasons: a command that does not register --download-workers (cleanup)
-	// reads the zero value of an unknown flag name, and a registering command
-	// whose source supplied a non-positive value reaches it too. Unlike
-	// Workers, no companion applyWorkers-style function rejects an explicit
-	// non-positive value for this flag - it is silently replaced by the
-	// default instead, since download concurrency is a performance knob, not
-	// one whose zero value would otherwise mean "unbounded" the way a
-	// non-positive worker count could be misread.
+	// Two shapes reach this fallback. A command that does not register
+	// --download-workers (cleanup) reads the zero value of an unknown flag
+	// name, and a registering command whose source supplied a non-positive
+	// value reaches it too; a registering command with no source filling the
+	// flag does not reach it at all, since it reads the flag's own Value,
+	// which is this same derivation. Both shapes are replaced silently and
+	// against no ceiling, which is where this parts company with applyWorkers:
+	// that one enforces an upper bound as well, and warns whenever the value
+	// it replaces came from a source rather than from an unregistered flag
+	// name, because an install worker competes for the CPU it extracts on.
+	// Download concurrency is a performance knob that waits on the network, so
+	// a value above the permitted CPU is a legitimate configuration here rather
+	// than an oversubscription, and a non-positive one names no runnable pool
+	// rather than an unbounded one.
 	if cfg.DownloadWorkers < 1 {
 		cfg.DownloadWorkers = helpers.DefaultDownloadWorkers(runtime.GOMAXPROCS(0))
 	}
@@ -242,33 +233,87 @@ func applyTimeout(cfg *Config, c *cli.Command) error {
 	return nil
 }
 
-// applyWorkers refuses a --workers value some source actually supplied and
-// that is not a positive integer. It writes nothing: the value newConfigFromCLI
-// already read is either accepted as-is or the whole config load fails, so this
-// takes no *Config at all.
+// applyWorkers is the single owner of cfg.Workers: nothing else on the
+// config-load path writes that field, so every shape --workers can arrive in
+// is settled in one place. A Config built programmatically rather than loaded
+// - a test's own struct literal - is outside that path and carries whatever it
+// was given.
 //
-// The predicate is "present and non-positive", which two facts make correct.
-// A command that does not register --workers (cleanup) reads IsSet == false
-// and is skipped entirely, keeping the helpers.DefaultInstallWorkers fallback
-// newConfigFromCLI applies to its zero value. A command that does register the
-// flag, with no source filling it, reads that same default from the flag's own
-// Value rather than 0 (see collectionBehaviorFlags in
-// cmd/go-galaxy/cliflags/flags.go), so n < 1 here is reachable only for a
-// value some source genuinely supplied.
+// A value some source supplied is accepted only inside
+// 1..helpers.MaxAcceptedInstallWorkers(procs). Outside it, in EITHER
+// direction, the operator's value is replaced by
+// helpers.DefaultInstallWorkers(procs) and one warning is queued - the same
+// outcome for 0, for -1 and for a count far above what the machine can run,
+// since all three name a pool this run will not start and none of them is a
+// reason to fail a CI job that would otherwise install correctly. The ceiling
+// is floored at helpers.MinDefaultInstallWorkers so the substitute is always
+// itself inside the range being enforced; see MaxAcceptedInstallWorkers for
+// why that floor is what makes the two consistent on a single permitted CPU.
+//
+// c.IsSet gates the substitution because the two branches answer different
+// questions. Two shapes read IsSet == false, and neither may be warned about,
+// since nobody supplied either: a command that does not register --workers
+// (cleanup) reads the Go zero value of an unknown flag name, which that branch
+// replaces with the derived default, and a registering command whose sources
+// filled nothing reads the flag's own Value, which is already that same
+// derivation and is kept as it stands. A command that does register the flag
+// reaches the IsSet branch only for a value some source genuinely supplied, so
+// a warning there always names something an operator wrote.
 //
 // The message names both the flag and the environment variable because
 // c.IsSet cannot tell argv from env: an operator whose CI block exports
 // GO_GALAXY_WORKERS=0 would otherwise be pointed at a flag they never typed,
 // and urfave prints nothing of its own for an env-sourced value.
-func applyWorkers(c *cli.Command) error {
+//
+// A declared-but-empty GO_GALAXY_WORKERS= is IsSet too - urfave marks the
+// flag set and skips the parse for it - so that shape is judged by this
+// range rather than skipped by the gate. It passes because the flag's own
+// Value is what c.Int then reads, and that Value is
+// helpers.DefaultInstallWorkers(procs) against a ceiling of
+// helpers.MaxAcceptedInstallWorkers(procs) for the same procs, which is
+// arithmetic rather than a coincidence of one machine's CPU count: see
+// collectionBehaviorFlags in cmd/go-galaxy/cliflags/flags.go, which holds the
+// proof on the field it rests on.
+//
+// Documented-uncovered: what no test pins is the argument
+// BuildCollectionConfig passes for procs - runtime.GOMAXPROCS(0) rather than
+// runtime.NumCPU(). procs is a parameter precisely so the range logic can be
+// driven at any CPU count, so the logic is covered and the call site's choice
+// of argument is not. The divergence this call site's argument exists for is a
+// CFS bandwidth quota narrowing one and not the other, which no fixture can
+// arrange. A test could instead narrow GOMAXPROCS itself, and that is rejected
+// rather than merely unwritten: it is a process-global mutation racing every
+// parallel test in the package, and it proves nothing on a runner permitting
+// two CPUs or fewer, where the ceiling's own floor makes both answers the same
+// number. What a regression to NumCPU() would cost is measured on
+// helpers.DefaultInstallWorkers' own doc comment: a pod limited to 2 CPUs on a
+// 64-core node would size both answers from 64 rather than from 2, accepting
+// an operator's own 64 through helpers.MaxAcceptedInstallWorkers and deriving
+// 16, the cap helpers.MaxDefaultInstallWorkers imposes - where the right
+// answer to both is 2.
+func applyWorkers(cfg *Config, c *cli.Command, procs int) {
+	fallback := helpers.DefaultInstallWorkers(procs)
+	n := c.Int("workers")
 	if !c.IsSet("workers") {
-		return nil
+		// The cleanup shape: an unregistered flag name reads 0, which is the
+		// absence of a value rather than a value to warn about.
+		if n < 1 {
+			n = fallback
+		}
+		cfg.Workers = n
+		return
 	}
-	if n := c.Int("workers"); n < 1 {
-		return fmt.Errorf("%w: --workers (or $GO_GALAXY_WORKERS) = %d, want a positive integer",
-			helpers.ErrInvalidWorkers, n)
+
+	upper := helpers.MaxAcceptedInstallWorkers(procs)
+	if n < 1 || n > upper {
+		cfg.Warnings = append(cfg.Warnings, fmt.Sprintf(
+			"--workers (or $GO_GALAXY_WORKERS) = %d is outside 1..%d, the range this machine "+
+				"accepts (the ceiling is the CPU this process is permitted to use, at least %d); "+
+				"using %d instead",
+			n, upper, helpers.MinDefaultInstallWorkers, fallback))
+		n = fallback
 	}
-	return nil
+	cfg.Workers = n
 }
 
 // parseTimeout parses a --timeout value in either of the two forms ansible

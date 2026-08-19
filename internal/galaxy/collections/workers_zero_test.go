@@ -6,9 +6,10 @@ package collections
 // guard with max(_, 1) (see warm_command.go and install_command.go); without that guard, a zero Workers
 // makes the semaphore channel unbuffered, and the loop's first send blocks
 // forever because no worker has started yet to drain it - nothing reachable
-// from the CLI can set Workers to 0 (newConfigFromCLI clamps it to
-// helpers.DefaultInstallWorkers, whose own floor is 2), but a config.Config
-// built programmatically can.
+// from the CLI can set Workers to 0 (config.applyWorkers settles that field on
+// every config load, substituting helpers.DefaultInstallWorkers, whose own
+// floor is 2, for every value outside the range it accepts), but a
+// config.Config built programmatically can.
 
 import (
 	"context"

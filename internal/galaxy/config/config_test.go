@@ -382,10 +382,10 @@ func TestApplyTimeout(t *testing.T) {
 // defaultValue is a hand-copy of whichever production flag's own Value the
 // caller is mirroring, so it cannot pin that flag's Value on its own: that
 // pin lives in TestWorkersEnvShapes (cmd/go-galaxy/commands), which drives
-// the real helpers.CollectionFlags(). It is copied anyway so the rows below
-// see the shape production has - without it, a registered-but-unset flag
-// would read 0 here and the predicate under test would look like it refuses
-// an absent value.
+// the real cliflags.CollectionFlags(). It is copied anyway so the rows below
+// see the shape production has - a declared-but-empty environment variable is
+// marked set while its parse is skipped, so c.Int reads this Value for that
+// shape, and a 0 here would look like a value some source supplied.
 func newIntFlagCmd(t *testing.T, flagName, envName string, defaultValue int, registerFlag bool, args []string) *cli.Command {
 	t.Helper()
 
@@ -415,85 +415,198 @@ func newIntFlagCmd(t *testing.T, flagName, envName string, defaultValue int, reg
 	return captured
 }
 
-// TestApplyWorkers covers applyWorkers' predicate and nothing else: a
-// --workers value some source supplied and that is not positive is refused,
-// anything else is accepted. The first row is the positive control - without
-// it, the two refusals below would be indistinguishable from a fixture that
-// never reaches the check at all - and the last is the cleanup shape, a
-// command that registers no --workers flag and must keep its fallback rather
-// than being refused for a value nobody set.
-//
-// This test says nothing about which value an accepted flag resolves to; that
-// is TestWorkersEnvShapes' subject, on the real production flag.
-//
-// KILLING MUTATIONS, both run and reverted, both on applyWorkers in config.go.
-//
-// M1, the `if !c.IsSet("workers") { return nil }` gate deleted. Of this
-// table, only the unregistered row fails, because an unknown flag name reads
-// 0 through the same c.Int the gate exists to keep it away from:
-//
-//	config_test.go:482: applyWorkers() error = invalid workers: --workers (or $GO_GALAXY_WORKERS) = 0, want a positive integer, want nil
-//
-// M3, `n < 1` relaxed to `n < 0`. Only the zero row fails and the negative
-// row survives, which is what makes the pair a pin on the boundary rather
-// than on refusal in general:
-//
-//	config_test.go:477: applyWorkers() error = <nil>, want invalid workers
-func TestApplyWorkers(t *testing.T) {
-	tests := []struct {
-		name         string
-		args         []string
-		registerFlag bool
-		wantErr      bool
-	}{
-		{
-			name:         "positive value is accepted",
-			registerFlag: true,
-			args:         []string{"--workers=3"},
-		},
-		{
-			name:         "zero is refused",
-			registerFlag: true,
-			args:         []string{"--workers=0"},
-			wantErr:      true,
-		},
-		{
-			name:         "negative value is refused",
-			registerFlag: true,
-			args:         []string{"--workers=-1"},
-			wantErr:      true,
-		},
-		{
-			name: "unregistered flag is accepted",
-		},
+// workersRow is one shape a --workers value can arrive in: what the fixture
+// registers and supplies, the worker count applyWorkers must settle on, and
+// whether it must have queued a warning about the value it was handed.
+type workersRow struct {
+	name         string
+	wantWarnHas  string
+	args         []string
+	procs        int
+	wantWorkers  int
+	registerFlag bool
+	wantWarn     bool
+}
+
+// assertWorkersOutcome checks one row's settled worker count and the warning
+// that must or must not sit beside it. It calls t.Helper, so every failure
+// below is reported on the caller's line rather than on this function's own.
+func assertWorkersOutcome(t *testing.T, cfg *Config, row workersRow) {
+	t.Helper()
+
+	if cfg.Workers != row.wantWorkers {
+		t.Fatalf("cfg.Workers = %d, want %d", cfg.Workers, row.wantWorkers)
 	}
+	if !row.wantWarn {
+		if len(cfg.Warnings) != 0 {
+			t.Fatalf("len(cfg.Warnings) = %d, want 0", len(cfg.Warnings))
+		}
+		return
+	}
+	if len(cfg.Warnings) != 1 {
+		t.Fatalf("len(cfg.Warnings) = %d, want 1", len(cfg.Warnings))
+	}
+	if !strings.Contains(cfg.Warnings[0], row.wantWarnHas) {
+		t.Fatalf("warning does not name the supplied value %q: %q", row.wantWarnHas, cfg.Warnings[0])
+	}
+	if !strings.Contains(cfg.Warnings[0], "--workers") {
+		t.Fatalf("warning does not name the flag: %q", cfg.Warnings[0])
+	}
+}
+
+// workersRows enumerates the shapes TestApplyWorkers drives applyWorkers
+// with. It is a function of its own rather than a literal inside that test
+// only to keep the test itself inside funlen's budget.
+func workersRows() []workersRow {
+	return []workersRow{
+		{
+			name:  "a value inside the range is honored",
+			procs: 8, registerFlag: true, args: []string{"--workers=3"}, wantWorkers: 3,
+		},
+		{
+			name:  "the lower bound is inclusive",
+			procs: 8, registerFlag: true, args: []string{"--workers=1"}, wantWorkers: 1,
+		},
+		{
+			name:  "the upper bound is inclusive",
+			procs: 8, registerFlag: true, args: []string{"--workers=8"}, wantWorkers: 8,
+		},
+		{
+			name:  "zero is replaced with a warning",
+			procs: 8, registerFlag: true, args: []string{"--workers=0"}, wantWorkers: 8,
+			wantWarn: true, wantWarnHas: "= 0",
+		},
+		{
+			name:  "a negative value lands on the same outcome",
+			procs: 8, registerFlag: true, args: []string{"--workers=-1"}, wantWorkers: 8,
+			wantWarn: true, wantWarnHas: "= -1",
+		},
+		{
+			name:  "a single permitted cpu still accepts two workers",
+			procs: 1, registerFlag: true, args: []string{"--workers=2"}, wantWorkers: 2,
+		},
+		{
+			name:  "a single permitted cpu replaces five",
+			procs: 1, registerFlag: true, args: []string{"--workers=5"}, wantWorkers: 2,
+			wantWarn: true, wantWarnHas: "= 5",
+		},
+		{
+			name:  "above the ceiling the substitute is the default, not the ceiling",
+			procs: 64, registerFlag: true, args: []string{"--workers=65"}, wantWorkers: 16,
+			wantWarn: true, wantWarnHas: "= 65",
+		},
+		{
+			name:  "the ceiling is the permitted cpu, not the default's own cap",
+			procs: 64, registerFlag: true, args: []string{"--workers=32"}, wantWorkers: 32,
+		},
+		{name: "an unregistered flag takes the default silently", procs: 8, wantWorkers: 8},
+	}
+}
+
+// TestApplyWorkers covers applyWorkers and nothing else: which --workers
+// values it honors, which it replaces with helpers.DefaultInstallWorkers, and
+// when it queues a warning about a replacement. Every want is hand-spelled
+// rather than computed from helpers.DefaultInstallWorkers or
+// helpers.MaxAcceptedInstallWorkers, since a want built from the function it
+// checks moves with any mutation of that function and so could never fail
+// against one.
+//
+// The first row is the positive control - without it, the replacements below
+// would be indistinguishable from a fixture that never reaches the check at
+// all - and the last is the cleanup shape, a command that registers no
+// --workers flag and must take the default silently rather than be warned
+// about a value nobody supplied.
+//
+// Two procs values carry rows procs=8 structurally cannot. At 8 the derived
+// default and the accepted ceiling are the same number, so a substitution
+// handing back the ceiling instead of the default is invisible there; the
+// procs=64 rows separate the two (ceiling 64, default 16). At 8 the ceiling is
+// procs itself, so the floor under it is invisible too; the procs=1 rows are
+// where max(procs, MinDefaultInstallWorkers) is the only thing admitting 2.
+//
+// This test says nothing about which value the production flag resolves to;
+// that is TestWorkersEnvShapes' subject (cmd/go-galaxy/commands), on the real
+// cliflags.CollectionFlags().
+//
+// KILLING MUTATIONS, all four run and reverted.
+//
+// M1, applyWorkers' whole `if !c.IsSet("workers")` branch deleted. Of the
+// rows above only the unregistered one fails, and it fails on its WARNING
+// assertion rather than its value one: an unknown flag name reads 0, which the
+// range arm then replaces with the very default the deleted branch would have
+// taken, so the warning count is the only observable difference:
+//
+//	config_test.go:572: len(cfg.Warnings) = 1, want 0
+//
+// M2, helpers.MaxAcceptedInstallWorkers' body reduced to a bare `procs`. Of
+// the rows above only procs=1, --workers=2 fails, since it is the only one
+// whose honored value sits above procs and at or below the floor:
+//
+//	config_test.go:572: len(cfg.Warnings) = 1, want 0
+//
+// M3, the substitute changed from the default to the ceiling (`n = fallback`
+// rewritten to `n = upper`). Only the procs=64, --workers=65 row fails; every
+// procs=8 row survives it, which is exactly why that row exists at all:
+//
+//	config_test.go:572: cfg.Workers = 64, want 16
+//
+// M4, `n < 1` relaxed to `n < 0` in the range arm. Both zero shapes fail - the
+// zero row quoted below and the environment subtest that follows it - while
+// the negative row survives, pinning the boundary rather than replacement:
+//
+//	config_test.go:572: cfg.Workers = 0, want 8
+func TestApplyWorkers(t *testing.T) {
+	// The fixture flag's own Value. No row in the table reads it - each
+	// registered row supplies --workers explicitly and the unregistered one has
+	// no flag at all - so it matters only in the declared-but-empty subtest at
+	// the end, where it stands in for the production flag's Value at procs 8.
+	fixtureValue := helpers.DefaultInstallWorkers(8)
+
+	tests := workersRows()
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := newIntFlagCmd(t, "workers", "GO_GALAXY_WORKERS", runtime.NumCPU(), tt.registerFlag, tt.args)
-			err := applyWorkers(c)
-			if tt.wantErr {
-				if !errors.Is(err, helpers.ErrInvalidWorkers) {
-					t.Fatalf("applyWorkers() error = %v, want %v", err, helpers.ErrInvalidWorkers)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("applyWorkers() error = %v, want nil", err)
-			}
+			c := newIntFlagCmd(t, "workers", "GO_GALAXY_WORKERS", fixtureValue, tt.registerFlag, tt.args)
+			cfg := &Config{}
+			applyWorkers(cfg, c, tt.procs)
+			assertWorkersOutcome(t, cfg, tt)
 		})
 	}
+
+	// t.Setenv forbids t.Parallel, so the two environment-sourced shapes are
+	// their own non-parallel subtests rather than rows in the table above.
+	t.Run("a zero from the environment is replaced with a warning", func(t *testing.T) {
+		t.Setenv("GO_GALAXY_WORKERS", "0")
+		c := newIntFlagCmd(t, "workers", "GO_GALAXY_WORKERS", fixtureValue, true, nil)
+		cfg := &Config{}
+		applyWorkers(cfg, c, 8)
+		assertWorkersOutcome(t, cfg, workersRow{wantWorkers: 8, wantWarn: true, wantWarnHas: "= 0"})
+	})
+
+	// The declared-but-empty shape urfave marks as set while skipping the parse
+	// for. It reaches the range arm rather than the gate, and is honored there
+	// because what c.Int reads is the flag's own Value - which is why this
+	// subtest is the one place the fixture's Value has to be the production
+	// derivation rather than an arbitrary number.
+	t.Run("a declared but empty variable is honored on the flag's Value", func(t *testing.T) {
+		t.Setenv("GO_GALAXY_WORKERS", "")
+		c := newIntFlagCmd(t, "workers", "GO_GALAXY_WORKERS", fixtureValue, true, nil)
+		cfg := &Config{}
+		applyWorkers(cfg, c, 8)
+		assertWorkersOutcome(t, cfg, workersRow{wantWorkers: 8})
+	})
 }
 
 // TestDownloadWorkersDefault covers helpers.DefaultDownloadWorkers's own
 // clamp (cpus * DownloadWorkersPerCPU, floored at MinDefaultDownloadWorkers
 // and capped at MaxDefaultDownloadWorkers), plus newConfigFromCLI's
 // DownloadWorkers fallback, which applies that identical default whenever no
-// source supplied a positive --download-workers value - the same shape
-// already applied to Workers, minus applyWorkers' own refusal: an explicit
-// non-positive value here is silently replaced rather than rejected, since
-// download concurrency is a performance knob rather than one whose zero
-// value could be misread as "unbounded".
+// source supplied a positive --download-workers value. That fallback is
+// silent and carries no ceiling above it, which is where it parts company
+// with applyWorkers: a --workers value outside the range that one accepts is
+// replaced with a warning, while a --download-workers value above the
+// permitted CPU is a legitimate configuration rather than an oversubscription
+// - this pool waits on the network instead of extracting a tree.
 //
 // KILLING MUTATION, run for real: the MinDefaultDownloadWorkers floor
 // removed from DefaultDownloadWorkers (the inner `max(cpus*DownloadWorkersPerCPU,
@@ -501,7 +614,7 @@ func TestApplyWorkers(t *testing.T) {
 // leaving only the MaxDefaultDownloadWorkers cap). The 1-cpu row fails, because its
 // raw product (1*4=4) sits below the floor and nothing clamps it back up:
 //
-//	config_test.go:526: DefaultDownloadWorkers(1) = 4, want 8
+//	config_test.go:639: DefaultDownloadWorkers(1) = 4, want 8
 //
 // The 2-cpu row does NOT fail this mutation: its raw product (2*4=8) already
 // equals MinDefaultDownloadWorkers, so the floor was never the thing keeping
@@ -561,10 +674,11 @@ func TestDownloadWorkersDefault(t *testing.T) {
 
 // TestInstallWorkersDefault covers helpers.DefaultInstallWorkers's own clamp
 // (procs, floored at MinDefaultInstallWorkers and capped at
-// MaxDefaultInstallWorkers), plus newConfigFromCLI's Workers fallback, which
-// applies that identical default whenever no source supplied a positive
-// --workers value. It is TestDownloadWorkersDefault's sibling, against the
-// other of the two worker pools.
+// MaxDefaultInstallWorkers), plus the relation between that clamp and
+// helpers.MaxAcceptedInstallWorkers' ceiling. It is TestDownloadWorkersDefault's
+// sibling, against the other of the two worker pools. Which supplied values
+// applyWorkers then honors or replaces is TestApplyWorkers' subject, not this
+// one's.
 //
 // The rows are spelled as permitted CPUs rather than cores because that is
 // what the parameter means: under a CFS quota runtime.NumCPU() reports the
@@ -578,10 +692,10 @@ func TestDownloadWorkersDefault(t *testing.T) {
 // property of the values rather than a gap: the floor is 2, so "one below the
 // floor" IS the 1-cpu row, and "the floor itself" IS the 2-cpu row.
 //
-// The registered-but-unset shape is deliberately absent here. newIntFlagCmd's
-// defaultValue is a hand-copy of the production flag's own Value, so a row
-// asserting it would compare that copy against itself; the real flag's Value
-// is pinned by TestWorkersEnvShapes (cmd/go-galaxy/commands) instead.
+// No row here drives a *cli.Command at all. The production flag's own Value is
+// pinned by TestWorkersEnvShapes (cmd/go-galaxy/commands), which runs the real
+// cliflags.CollectionFlags(); a fixture flag here would only carry a hand-copy
+// of that Value and so could only compare it against itself.
 //
 // KILLING MUTATIONS, both run for real against helpers.DefaultInstallWorkers.
 //
@@ -589,7 +703,7 @@ func TestDownloadWorkersDefault(t *testing.T) {
 // `min(procs, MaxDefaultInstallWorkers)`. Only the 1-cpu row fails, since it
 // is the only row whose input sits below the floor at all:
 //
-//	config_test.go:623: DefaultInstallWorkers(1) = 1, want 2
+//	config_test.go:737: DefaultInstallWorkers(1) = 1, want 2
 //
 // The 2-cpu row does NOT fail this mutation: its input already equals
 // MinDefaultInstallWorkers, so the floor was never what kept that row at 2 -
@@ -600,8 +714,8 @@ func TestDownloadWorkersDefault(t *testing.T) {
 // the row exactly at it survives, which is what makes the trio a pin on the
 // boundary rather than on clamping in general:
 //
-//	config_test.go:623: DefaultInstallWorkers(17) = 17, want 16
-//	config_test.go:623: DefaultInstallWorkers(128) = 128, want 16
+//	config_test.go:737: DefaultInstallWorkers(17) = 17, want 16
+//	config_test.go:737: DefaultInstallWorkers(128) = 128, want 16
 func TestInstallWorkersDefault(t *testing.T) {
 	t.Run("derives from permitted cpu", func(t *testing.T) {
 		tests := []struct {
@@ -626,24 +740,42 @@ func TestInstallWorkersDefault(t *testing.T) {
 		}
 	})
 
-	t.Run("explicit positive value survives unoverridden", func(t *testing.T) {
-		c := newIntFlagCmd(t, "workers", "GO_GALAXY_WORKERS",
-			helpers.DefaultInstallWorkers(runtime.GOMAXPROCS(0)), true, []string{"--workers=3"})
-		cfg := newConfigFromCLI(c)
-		if cfg.Workers != 3 {
-			t.Fatalf("cfg.Workers = %d, want 3", cfg.Workers)
+	// What this pins is the RELATION between the two functions; the ceiling
+	// assertion ahead of it holds each hand-spelled wantCeiling to
+	// MaxAcceptedInstallWorkers' own answer, so the relation is measured
+	// against the real ceiling rather than a figure that drifted from it - and
+	// hand-spelled for the same reason every want above is. The relation is
+	// what a declared-but-empty GO_GALAXY_WORKERS= rests on: that shape reaches
+	// applyWorkers' range arm carrying the flag's Value, so a derived default
+	// outside the accepted range would warn about a value nobody wrote.
+	t.Run("the derived default is always inside the accepted range", func(t *testing.T) {
+		tests := []struct {
+			name        string
+			procs       int
+			wantCeiling int
+		}{
+			{name: "1 permitted cpu is floored to two", procs: 1, wantCeiling: 2},
+			{name: "2 permitted cpus are the floor itself", procs: 2, wantCeiling: 2},
+			{name: "3 permitted cpus pass through", procs: 3, wantCeiling: 3},
+			{name: "4 permitted cpus pass through", procs: 4, wantCeiling: 4},
+			{name: "12 permitted cpus pass through", procs: 12, wantCeiling: 12},
+			{name: "15 permitted cpus stay one below the default's cap", procs: 15, wantCeiling: 15},
+			{name: "16 permitted cpus meet the default's cap", procs: 16, wantCeiling: 16},
+			{name: "17 permitted cpus pass the default's cap", procs: 17, wantCeiling: 17},
+			{name: "64 permitted cpus are accepted in full", procs: 64, wantCeiling: 64},
+			{name: "128 permitted cpus are accepted in full", procs: 128, wantCeiling: 128},
+			{name: "1024 permitted cpus are accepted in full", procs: 1024, wantCeiling: 1024},
 		}
-	})
-
-	// The cleanup shape: no --workers flag exists at all, so c.Int reads 0 and
-	// newConfigFromCLI's own fallback - not the flag's Value - is what supplies
-	// the default. This is the one subtest here that actually exercises it.
-	t.Run("an unregistered flag falls back to the derived default", func(t *testing.T) {
-		c := newIntFlagCmd(t, "workers", "GO_GALAXY_WORKERS", 0, false, nil)
-		cfg := newConfigFromCLI(c)
-		want := helpers.DefaultInstallWorkers(runtime.GOMAXPROCS(0))
-		if cfg.Workers != want {
-			t.Fatalf("cfg.Workers = %d, want %d (the derived default)", cfg.Workers, want)
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				if got := helpers.MaxAcceptedInstallWorkers(tt.procs); got != tt.wantCeiling {
+					t.Fatalf("MaxAcceptedInstallWorkers(%d) = %d, want %d", tt.procs, got, tt.wantCeiling)
+				}
+				got := helpers.DefaultInstallWorkers(tt.procs)
+				if got < 1 || got > tt.wantCeiling {
+					t.Fatalf("DefaultInstallWorkers(%d) = %d, want inside 1..%d", tt.procs, got, tt.wantCeiling)
+				}
+			})
 		}
 	})
 }
@@ -915,7 +1047,7 @@ func subtestNonWorldWritableCwdDiscovered(t *testing.T) {
 // current directory %q is world-writable; ignoring ./ansible.cfg as a
 // configuration source") leaves this subtest's first two assertions passing -
 // the file still loads, and the text still names the directory as
-// world-writable - and fails the third, at config_test.go:941:
+// world-writable - and fails the third, at config_test.go:1073:
 //
 //	warnings = [the current directory "/var/folders/..." is world-writable;
 //	ignoring ./ansible.cfg as a configuration source], want one naming
@@ -1014,11 +1146,11 @@ func assertDiscoveryFallsThroughCleanly(t *testing.T, gotPath string, err error)
 // ini value over the env one (returning ini whenever it is non-empty). Two
 // rows fail - the first, on the precedence itself:
 //
-//	config_test.go:1030: Server = "https://ini.example", want "https://env.example"
+//	config_test.go:1162: Server = "https://ini.example", want "https://env.example"
 //
 // and the third, because a non-empty ini value shadows the empty-env case too:
 //
-//	config_test.go:1055: Server = "https://ini.example", want the flag default "https://default.example"
+//	config_test.go:1187: Server = "https://ini.example", want the flag default "https://default.example"
 func TestAnsibleGalaxyServerEnv(t *testing.T) {
 	const envServer = "https://env.example"
 

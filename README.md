@@ -73,11 +73,12 @@ where applicable).
 
 The speedup grows with the number of collections - `go-galaxy` parallelizes
 downloads and cache presence probes across `--download-workers` (network-bound,
-sized well above core count by default) and extractions across `--workers`
-cores (CPU-bound), uses hard links from a content-addressable cache on warm
-runs, and skips the network entirely under `--frozen --offline`. With a
-lockfile and warm caches, installing 100 collections takes ~12 s instead of
-~5 minutes.
+and always the larger default of the two) and extractions across `--workers`
+workers (CPU-bound, sized from the CPU this process is permitted to use rather
+than from the node's core count), uses hard links from a content-addressable
+cache on warm runs, and skips the network entirely under `--frozen --offline`.
+With a lockfile and warm caches, installing 100 collections takes ~12 s instead
+of ~5 minutes.
 
 Reproduce locally:
 
@@ -661,16 +662,32 @@ two-flag set of their own, listed under
   order (see [Configuration go-galaxy reads](#configuration-go-galaxy-reads) above), so a path that
   does not exist there is not an error at all - discovery just moves on to `./ansible.cfg`,
   `~/.ansible.cfg` and `/etc/ansible/ansible.cfg`, and finding none of them is fine too.
-- `--workers` (`$GO_GALAXY_WORKERS`) - number of concurrent workers; unset means one per CPU. A
-  non-positive value is a usage error and exits `2`.
+- `--workers` (`$GO_GALAXY_WORKERS`) - number of concurrent workers. Unset, it derives from the CPU
+  this process is permitted to use (a container quota, not the node's core count), floored at 2 and
+  capped at 16. A value is accepted from `1` up to that permitted CPU count, itself floored at 2 -
+  so a 1- or 2-CPU runner still accepts `2`. Outside that range, in either direction, one warning is
+  printed to stderr and the derived default is used instead, never a usage error. A value that is
+  not an integer at all is a different matter: it fails the flag parse itself and still exits `2`.
+  **Breaking change (after v1.0.2):** through v1.0.2, `--workers` (and `$GO_GALAXY_WORKERS`) was
+  taken as given: any value at or above `1` was honoured however far it exceeded the machine, and a
+  non-positive one silently became the node's core count. Two groups are affected. An operator
+  deliberately oversubscribing - `--workers=32` on a 4-CPU runner - no longer gets the pool they
+  asked for: it is replaced by the derived default and one warning goes to stderr, so ask for a
+  count inside the accepted range instead, or raise the CPU the runner permits if the larger pool
+  was the point. And a pipeline branching on a nonzero exit from `--workers=0` now sees that warning
+  and a successful run instead: v1.0.2 substituted the core count silently, and a build tracking
+  main between releases exited `2` here, but neither happens now - drop the value, it never
+  selected a pool. The ceiling is machine-dependent (the CPU this process is permitted to use,
+  floored at 2), so one fixed `--workers` value in a shared CI config can be accepted on one runner
+  and replaced with a warning on another.
 - `--download-workers` (`$GO_GALAXY_DOWNLOAD_WORKERS`) - number of concurrent artifact downloads
   and cache presence probes, separate from `--workers`: `--workers` bounds extraction, which is
   CPU-bound (an install or warm worker unpacks a tree in the same goroutine that downloaded it),
   while `--download-workers` bounds downloads and cache probes, which are network-bound (a HEAD
-  probe or a streamed GET into a temp file, never an extraction). Unset, it derives from the core
-  count (4× per core) with a floor of 8 and a ceiling of 32, so a low-core CI runner still gets
-  meaningful download concurrency and a high-core one does not oversubscribe the HTTP connection
-  pool. A non-positive value falls back to that same default rather than erroring.
+  probe or a streamed GET into a temp file, never an extraction). Unset, it derives from that same
+  permitted CPU count (4× per CPU) with a floor of 8 and a ceiling of 32, so a low-CPU CI runner
+  still gets meaningful download concurrency and a high-CPU one does not oversubscribe the HTTP
+  connection pool. A non-positive value falls back to that same default rather than erroring.
   **Breaking change (after v1.0.2):** through v1.0.2, the concurrency of artifact downloads and
   cache presence probes followed `--workers` (one per CPU by default), so a 4-core CI runner issued at
   most 4 concurrent requests to the configured Galaxy server. It now follows `--download-workers`'s

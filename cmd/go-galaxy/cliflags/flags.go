@@ -119,19 +119,28 @@ func collectionPathFlags() []cli.Flag {
 func collectionBehaviorFlags() []cli.Flag {
 	return []cli.Flag{
 		&cli.IntFlag{
-			Name:  "workers",
-			Usage: "Number of concurrent workers",
-			// Value is load-bearing for a refusal, not just a default.
-			// applyWorkers (internal/galaxy/config/config.go) rejects a
-			// non-positive workers value that any source supplied, and urfave
-			// marks a declared-but-empty env var as set while skipping the
-			// parse for it - so a CI block exporting GO_GALAXY_WORKERS= reads
-			// this Value and is accepted. Remove it and that same shape reads 0
-			// and exits 2 instead. The value being derived rather than literal
-			// costs that property nothing: runtime.GOMAXPROCS(0) is always at
-			// least 1, and DefaultInstallWorkers floors its result at
-			// MinDefaultInstallWorkers, so what lands here is never
-			// non-positive and never the 0 applyWorkers refuses.
+			Name: "workers",
+			Usage: "Number of concurrent workers; accepted from 1 up to the CPU this process may use " +
+				"(at least 2), and outside that range the derived default is used instead",
+			// Value is load-bearing for an acceptance, not just a default.
+			// urfave marks a declared-but-empty env var as set while skipping
+			// the parse for it, so a CI block exporting GO_GALAXY_WORKERS=
+			// reaches applyWorkers (internal/galaxy/config/config.go) through
+			// its IsSet branch and is judged against that branch's range
+			// rather than skipped by its gate. What c.Int reads there is this
+			// Value, and that it lands inside the range is arithmetic rather
+			// than a coincidence of one machine's CPU count. Write p for
+			// runtime.GOMAXPROCS(0): the ceiling is
+			// MaxAcceptedInstallWorkers(p) = max(p, MinDefaultInstallWorkers),
+			// call it X, and this Value is DefaultInstallWorkers(p), which is
+			// that very X under a min() with MaxDefaultInstallWorkers - so
+			// min(X, MaxDefaultInstallWorkers) <= X puts Value at or below the
+			// ceiling for every p. The lower end is that same max() again,
+			// with MaxDefaultInstallWorkers sitting above
+			// MinDefaultInstallWorkers so the min() cannot cut beneath it:
+			// Value is never below MinDefaultInstallWorkers and so never below
+			// 1. Remove this field and that same shape reads 0, which is
+			// outside the range in the other direction and warns.
 			Value:   galaxyhelpers.DefaultInstallWorkers(runtime.GOMAXPROCS(0)),
 			Sources: cli.EnvVars("GO_GALAXY_WORKERS"),
 		},

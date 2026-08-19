@@ -713,9 +713,12 @@ const (
 	// retried attempts of a Galaxy API GET or artifact download.
 	FetchRetryBackoffCap = 5 * time.Second
 
-	// MinDefaultInstallWorkers floors DefaultInstallWorkers' result. See that
-	// function's doc comment for why the floor buys latency hiding rather
-	// than throughput, and for what it costs on a single permitted CPU.
+	// MinDefaultInstallWorkers floors DefaultInstallWorkers' result, and
+	// floors MaxAcceptedInstallWorkers' ceiling with it so that the two can
+	// never disagree on a single permitted CPU. See DefaultInstallWorkers' doc
+	// comment for why the floor buys latency hiding rather than throughput,
+	// and for what it costs on a single permitted CPU; see
+	// MaxAcceptedInstallWorkers' for why the ceiling takes the same floor.
 	MinDefaultInstallWorkers = 2
 	// MaxDefaultInstallWorkers caps DefaultInstallWorkers' result. See that
 	// function's doc comment for the memory budget the number is derived
@@ -882,8 +885,9 @@ func FetchRetryPolicy() RetryPolicy {
 // measured in a container on an 8-vCPU guest, --cpus=2 leaves
 // runtime.NumCPU() reporting 8 while runtime.GOMAXPROCS(0) reports 2. Only a
 // cpuset (--cpuset-cpus=0-1) narrows both. Sizing from the core count there
-// hands a pod limited to 2 CPUs on a 64-core node a 64-worker pool for the 2
-// CPUs it may actually use.
+// hands a pod limited to 2 CPUs on a 64-core node a pool sized from 64 for the
+// 2 CPUs it may actually use: 16 workers after this function's own cap, and up
+// to 64 accepted from an operator through MaxAcceptedInstallWorkers.
 //
 // The floor buys latency hiding, not throughput. An install worker does not
 // only extract: it can block on an artifact acquisition the prefetcher did
@@ -919,9 +923,12 @@ func FetchRetryPolicy() RetryPolicy {
 // backend opens one of its own to inflate a state object, at init, before
 // either pool has started. At the default ceilings and not in general:
 // --workers and --download-workers each replace their own default outright,
-// and neither is clamped from above. An uncapped one-per-CPU install pool on
-// a 64-core node would on its own reserve 64 * 4 MiB = 256 MiB in block
-// pools.
+// and what bounds a replacement is not the same on the two. --download-workers
+// is clamped only below 1, so nothing bounds that pool's claim from above;
+// --workers is clamped above as well, at MaxAcceptedInstallWorkers(procs),
+// which ties this pool's claim to the permitted CPU rather than removing it -
+// an operator's own 64 on a node permitting 64 CPUs is inside that ceiling and
+// reserves 64 * 4 MiB = 256 MiB in block pools.
 //
 // Beside a real run's footprint: peak RSS over a 100-collection corpus
 // measured 93.0 MiB frozen+offline and 183.0 MiB s3-warm (testing/bench.sh's
@@ -951,11 +958,57 @@ func FetchRetryPolicy() RetryPolicy {
 // of system time). On a filesystem that serializes metadata mutation this is
 // therefore not the best value - measured, APFS on a 12-core host has its
 // optimum at 4, well under what this function returns there - and the remedy
-// is --workers, which replaces this default outright. Deriving the default from
-// the filesystem instead would mean probing it, which is a different
-// mechanism from this one.
+// is --workers, which replaces this default outright for any count inside
+// MaxAcceptedInstallWorkers' range. Lowering the count to 1 or more - the
+// direction this residual points in - is always inside it. Deriving the
+// default from the filesystem instead would mean probing it, which is a
+// different mechanism from this one.
 func DefaultInstallWorkers(procs int) int {
 	return min(max(procs, MinDefaultInstallWorkers), MaxDefaultInstallWorkers)
+}
+
+// MaxAcceptedInstallWorkers is the largest --workers value a run accepts on a
+// machine permitting procs CPUs. It bounds a value an OPERATOR supplied, which
+// is what separates it from MaxDefaultInstallWorkers: that constant caps what
+// DefaultInstallWorkers may DERIVE, so a machine permitting 64 CPUs derives 16
+// and still accepts an operator's own 32.
+//
+// The ceiling is the permitted CPU because that is what an install worker
+// competes for - it extracts a tree in its own goroutine - so past that number
+// the workers contend rather than add. That is where they certainly stop
+// adding rather than where they always do: metadata mutation rather than CPU
+// is what an extraction is actually bounded by, so on a filesystem that
+// serializes it the useful count sits lower still - the residual
+// DefaultInstallWorkers discloses on its own default, and one this ceiling
+// does not close either. procs carries exactly the meaning it has in
+// DefaultInstallWorkers, whose doc comment holds the measurement of why a CFS
+// quota makes runtime.GOMAXPROCS(0) and runtime.NumCPU() different answers; a
+// caller supplies it the same way here.
+//
+// What contends past that number is the extraction work, and that is a
+// disclosed narrowing rather than the whole story of what a worker does: an
+// install worker can also block on an artifact acquisition the prefetcher did
+// not cover, which is the stall DefaultInstallWorkers' own floor buys tolerance
+// for - deliberately, at a measured throughput cost, and by one extra worker
+// rather than by a count that keeps scaling. That argument does not stop at a
+// single permitted CPU, and nothing measured here says a larger
+// oversubscription buys more tolerance, so an operator asking for 12 on a
+// machine permitting 8 in order to hide uncovered acquisitions is replaced and
+// warned like any other value outside the range: a deliberate oversubscription
+// for stall hiding is the configuration this ceiling refuses.
+//
+// It is floored at MinDefaultInstallWorkers so that the ceiling can never sit
+// below the value substituted for one outside it: on a single permitted CPU
+// DefaultInstallWorkers returns 2, and an unfloored ceiling of 1 would put
+// that substitute outside the very range it is being substituted into.
+//
+// It governs cfg.Workers alone and must not be extended to cfg.DownloadWorkers,
+// whose default is deliberately a multiple of the permitted CPU (see
+// DownloadWorkersPerCPU): that pool waits on the network rather than on the
+// CPU, so a count well above the permitted CPU is its useful configuration
+// rather than an oversubscription of it.
+func MaxAcceptedInstallWorkers(procs int) int {
+	return max(procs, MinDefaultInstallWorkers)
 }
 
 // DefaultDownloadWorkers derives the default size of the artifact-download
