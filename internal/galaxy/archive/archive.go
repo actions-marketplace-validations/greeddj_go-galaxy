@@ -431,10 +431,10 @@ func extractTarEntries(tarReader *tar.Reader, dstDir string, maxEntries int64) e
 // arm skips.
 func chargeEntrySize(header *tar.Header, declared *int64) error {
 	if header.Size < 0 {
-		return fmt.Errorf("%w: %s ", helpers.ErrArchiveEntryHasNegativeSize, header.Name)
+		return fmt.Errorf("%w: %q", helpers.ErrArchiveEntryHasNegativeSize, header.Name)
 	}
 	if header.Size > helpers.ArchiveMaxEntrySize {
-		return fmt.Errorf("%w %s: %d bytes", helpers.ErrArchiveEntryIsTooLarge, header.Name, header.Size)
+		return fmt.Errorf("%w: %q: %d bytes", helpers.ErrArchiveEntryIsTooLarge, header.Name, header.Size)
 	}
 	if *declared+header.Size > helpers.ArchiveMaxTotalSize {
 		return fmt.Errorf("%w: %d bytes", helpers.ErrArchiveExceedsMaxSize, helpers.ArchiveMaxTotalSize)
