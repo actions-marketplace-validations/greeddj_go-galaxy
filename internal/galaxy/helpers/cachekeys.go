@@ -3,6 +3,7 @@ package helpers
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/url"
 )
 
@@ -43,6 +44,18 @@ const DepsCacheKeySeparator = "|"
 // Bolt dump is worth more than the handful of bytes a hash would save.
 func ScopedDepsCacheKey(serverBase, fqdnAtVersion string) string {
 	return serverBase + DepsCacheKeySeparator + fqdnAtVersion
+}
+
+// ArtifactFilename composes the cache filename for a collection artifact
+// tarball: "<namespace>-<name>-<version>.tar.gz". It is the artifact's cache
+// filename contract, composed identically by the writer (collections
+// install/warm, which commit an artifact under a key built from this name)
+// and the deleter (cleanup, which purges that same key when a collection is
+// removed) - the two sides must agree byte-for-byte. cleanup discards its
+// Delete's error, so drift between the two compositions would not fail
+// anything; it would silently stop cached tarballs from ever being purged.
+func ArtifactFilename(namespace, name, version string) string {
+	return fmt.Sprintf("%s-%s-%s.tar.gz", namespace, name, version)
 }
 
 // ArtifactKey builds the cache key for a collection artifact tarball named

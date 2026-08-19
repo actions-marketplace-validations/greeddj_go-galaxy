@@ -25,6 +25,11 @@ import (
 // regardless of whether its collection is still reachable. sweepLegacyArtifacts
 // is the only remaining caller, purging it unconditionally as a one-time
 // migration cleanup rather than leaving it as permanent orphaned disk usage.
+//
+// The filename literal here deliberately does not call
+// helpers.ArtifactFilename: this key must keep matching the bytes old
+// versions actually wrote, so it stays frozen even if the live filename
+// contract ever changes.
 func legacyArtifactKey(namespace, name, version string) string {
 	filename := fmt.Sprintf("%s-%s-%s.tar.gz", namespace, name, version)
 	return url.QueryEscape(filename)

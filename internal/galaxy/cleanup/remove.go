@@ -170,7 +170,7 @@ func removeInstalled(ctx context.Context, inst installedCollection, artifacts ca
 	}
 
 	if artifacts != nil && strings.TrimSpace(source) != "" {
-		filename := fmt.Sprintf("%s-%s-%s.tar.gz", namespace, name, inst.Version)
+		filename := helpers.ArtifactFilename(namespace, name, inst.Version)
 		_ = artifacts.Delete(ctx, helpers.ArtifactKey(source, filename))
 	}
 	return nil
