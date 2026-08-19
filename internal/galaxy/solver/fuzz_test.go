@@ -75,6 +75,14 @@ func fuzzDecodeGraph(data []byte) generatedGraph {
 	return g
 }
 
+// fuzzOracleCap bounds the assignment space (the product over packages of
+// versions+1) a fuzz iteration is willing to brute-force for the oracle
+// check below: fuzzMaxPackages=6 with up to 8 versions each can reach 9^6
+// assignments, and enumerating that unconditionally would starve the
+// fuzzing budget, so only decoded graphs under this cap get the full
+// membership check.
+const fuzzOracleCap = 4096
+
 // FuzzSolve checks the same universal properties TestPropertyResolutionSatisfiesConstraints
 // does, but over the fuzzer's own adversarial corpus rather than a fixed seed
 // sweep: Solve must never panic (enforced by the fuzzing framework itself
@@ -82,12 +90,12 @@ func fuzzDecodeGraph(data []byte) generatedGraph {
 // constraint that names a resolved package (checked independently via
 // propCheck, never the resolver's own set algebra), and a failure must
 // always be a *ConflictError - never errSolverBug, which would mean the
-// fuzzed input tripped a genuine internal invariant violation. Oracle
-// membership is deliberately not checked here: the committed oracle corpus
-// has a small, accepted residual false-rejection tail beyond its own seed
-// count (see oracle_test.go), and a false rejection must not fail the fuzz -
-// only a panic, an internal-bug error, or an actual constraint violation
-// does.
+// fuzzed input tripped a genuine internal invariant violation. On decoded
+// graphs whose assignment space fits under fuzzOracleCap, the brute-force
+// oracle additionally gates completeness and membership: a ConflictError on
+// a graph the oracle can solve, or a resolution outside the oracle's valid
+// set, fails the fuzz - the exact signed-set algebra claims completeness,
+// so a false rejection is a bug here exactly as it is in oracle_test.go.
 func FuzzSolve(f *testing.F) {
 	for _, seed := range fuzzSeedCorpus() {
 		f.Add(seed)
@@ -96,19 +104,52 @@ func FuzzSolve(f *testing.F) {
 		g := fuzzDecodeGraph(data)
 		res, err := Solve(t.Context(), g.roots, g.provider())
 		if err != nil {
-			if errors.Is(err, errSolverBug) {
-				t.Fatalf("internal-bug error on a fuzzed input: %v (roots=%v)", err, g.roots)
-			}
-			var ce *ConflictError
-			if !errors.As(err, &ce) {
-				t.Fatalf("want success or *ConflictError, got %v (roots=%v)", err, g.roots)
-			}
+			checkFuzzConflict(t, g, err)
 			return
 		}
 		if v := g.constraintViolation(res); v != "" {
 			t.Fatalf("%s (result=%v, roots=%v)", v, res.Versions, g.roots)
 		}
+		if g.enumerationSpace() <= fuzzOracleCap {
+			if valid := g.bruteForceResolutions(); !containsResolution(valid, res.Versions) {
+				t.Fatalf("resolution %v is not a member of the oracle's %d valid resolutions (roots=%v)",
+					res.Versions, len(valid), g.roots)
+			}
+		}
 	})
+}
+
+// checkFuzzConflict asserts a failed solve's error shape (a clean
+// *ConflictError, never errSolverBug) and, when the graph's assignment
+// space fits under fuzzOracleCap, its completeness (the oracle must agree
+// nothing was solvable).
+func checkFuzzConflict(t *testing.T, g generatedGraph, err error) {
+	t.Helper()
+	if errors.Is(err, errSolverBug) {
+		t.Fatalf("internal-bug error on a fuzzed input: %v (roots=%v)", err, g.roots)
+	}
+	var ce *ConflictError
+	if !errors.As(err, &ce) {
+		t.Fatalf("want success or *ConflictError, got %v (roots=%v)", err, g.roots)
+	}
+	if g.enumerationSpace() <= fuzzOracleCap {
+		if valid := g.bruteForceResolutions(); len(valid) != 0 {
+			t.Fatalf("false rejection: resolver conflicted but the oracle has %d valid resolutions, e.g. %v (roots=%v)",
+				len(valid), valid[0], g.roots)
+		}
+	}
+}
+
+// enumerationSpace returns the size of g's brute-force assignment space:
+// the product over packages of (published versions + 1 for absence). The
+// bounded multiply cannot overflow at fuzz scale (at most 9^6), so no
+// saturation guard is needed beyond the cap comparison itself.
+func (g generatedGraph) enumerationSpace() int {
+	space := 1
+	for _, pkg := range g.pkgs {
+		space *= len(g.versions[pkg]) + 1
+	}
+	return space
 }
 
 // fuzzSeedCorpus returns the curated starting points FuzzSolve registers via

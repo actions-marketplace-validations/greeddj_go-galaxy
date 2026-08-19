@@ -8,14 +8,17 @@ import (
 )
 
 // oracleSeedCount bounds the brute-force membership corpus below: this many
-// seeds per package-count, small enough to keep the per-seed enumeration
-// cheap. It is a bar, not a proof - a wider run (the same package-counts by
-// three thousand seeds) surfaces a small residual set of hard multi-hop
-// conflict cases that the resolver still false-rejects. Those remaining cases
-// are an accepted limitation and are not chased here; the conflict path fails
-// loud on them (a ConflictError, never a wrong resolution), so the risk is a
-// spurious rejection to investigate, not a silently incorrect install.
-const oracleSeedCount = 1500
+// seeds per package-count, at which the per-seed enumeration stays cheap
+// (propCheck's parse memo is what keeps the widened count affordable under
+// -race). Since the exact signed-set algebra replaced the bitset
+// representation, this suite is a completeness gate, not just a soundness
+// one: the resolver must false-reject NOTHING the oracle can enumerate.
+// The count is a regression bar whose level is documented to have killed
+// the bitset implementation - it false-rejected seeds 1623 and 2373 (both
+// under this count, at n=4) on a 10000-seed evidence sweep whose exact
+// graphs completeness_regression_test.go pins as named fixtures; the same
+// sweep on the exact algebra completes with zero false rejections.
+const oracleSeedCount = 3000
 
 // reachableClosure returns the packages reachable from the roots by following,
 // from each present package, the dependency edges of its assigned version, to a

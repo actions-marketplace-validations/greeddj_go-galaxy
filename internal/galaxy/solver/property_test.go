@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Masterminds/semver/v3"
@@ -90,6 +91,20 @@ func (g generatedGraph) provider() *fakeProvider {
 	return p
 }
 
+// propCheckConstraintMemo and propCheckVersionMemo cache successful parses
+// across propCheck calls: the oracle's brute-force enumeration re-checks
+// the same few constraint and version strings hundreds of times per seed,
+// and the parse (not Check itself) dominates that cost. Parsed values are
+// immutable and Check is read-only, so sharing them across parallel tests
+// is safe. Membership authority is unchanged: still Masterminds Check,
+// never the resolver's own set algebra.
+//
+//nolint:gochecknoglobals // immutable parse cache shared across parallel tests, not mutable logic state
+var propCheckConstraintMemo sync.Map
+
+//nolint:gochecknoglobals // immutable parse cache shared across parallel tests, not mutable logic state
+var propCheckVersionMemo sync.Map
+
 // propCheck is the independent membership authority: Masterminds Check over the
 // same normalization the resolver's provider contract uses, never the
 // resolver's own set algebra.
@@ -98,15 +113,50 @@ func propCheck(version, constraint string) bool {
 	if norm == "" {
 		return true
 	}
-	c, err := semver.NewConstraint(norm)
-	if err != nil {
+	c := memoConstraint(norm)
+	if c == nil {
 		return false
 	}
-	v, err := semver.NewVersion(version)
-	if err != nil {
+	v := memoVersion(version)
+	if v == nil {
 		return false
 	}
 	return c.Check(v)
+}
+
+// memoConstraint returns norm's parsed constraint from the memo, parsing
+// and storing it on first sight; nil means the parse failed (failures are
+// deliberately not cached - they are rare and re-parsing keeps the memo
+// value type uniform).
+func memoConstraint(norm string) *semver.Constraints {
+	if cached, ok := propCheckConstraintMemo.Load(norm); ok {
+		if c, isConstraint := cached.(*semver.Constraints); isConstraint {
+			return c
+		}
+		return nil
+	}
+	parsed, err := semver.NewConstraint(norm)
+	if err != nil {
+		return nil
+	}
+	propCheckConstraintMemo.Store(norm, parsed)
+	return parsed
+}
+
+// memoVersion is memoConstraint's version-string counterpart.
+func memoVersion(raw string) *semver.Version {
+	if cached, ok := propCheckVersionMemo.Load(raw); ok {
+		if v, isVersion := cached.(*semver.Version); isVersion {
+			return v
+		}
+		return nil
+	}
+	parsed, err := semver.NewVersion(raw)
+	if err != nil {
+		return nil
+	}
+	propCheckVersionMemo.Store(raw, parsed)
+	return parsed
 }
 
 func (g generatedGraph) constraintViolation(res *Result) string {
