@@ -257,9 +257,6 @@ func validateRequirement(req CollectionRequirement, raw any) error {
 	if req.Name == "" {
 		return fmt.Errorf("%w: %v", helpers.ErrInvalidCollectionEntry, raw)
 	}
-	if req.Type == "git" || req.Type == "url" {
-		return fmt.Errorf("%w %q (only galaxy is supported)", helpers.ErrUnsupportedCollectionType, req.Type)
-	}
 	if req.Type != "" && req.Type != "galaxy" {
 		return fmt.Errorf("%w %q (only galaxy is supported)", helpers.ErrUnsupportedCollectionType, req.Type)
 	}
