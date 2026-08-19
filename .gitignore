@@ -48,5 +48,4 @@ go.work.sum
 
 .DS_Store
 
-.claude/plan.md
-.claude/settings.local.json
+.claude/
