@@ -1743,10 +1743,34 @@ ENV GO_GALAXY_CACHE_DIR=/var/cache/go-galaxy
 
 WORKDIR /src
 COPY requirements.yml requirements.lock.yml ./
-# A run needs the cache lock, so a job user that can only read the baked cache
-# fails to start with `cache backend cannot be used as configured` (exit 2).
-RUN go-galaxy warm --frozen && chmod -R a+rwX "$GO_GALAXY_CACHE_DIR"
+# The uid your jobs run as. A run needs the cache lock and writes the
+# snapshot back, so a job user that can only read the baked cache fails to
+# start with `cache backend cannot be used as configured` (exit 2) - and so
+# does a job whose uid is not the one named here.
+ARG JOB_UID=1001
+RUN go-galaxy warm --frozen && chown -R "$JOB_UID" "$GO_GALAXY_CACHE_DIR"
 ```
+
+`chown`, not `chmod -R a+rwX`: an install hardlinks its files out of the cache,
+so a cache file and the installed file that came from it are one inode - see
+[Differences a migration runs into](#differences-a-migration-runs-into) for what
+that costs an installed file's mode. Widening the cache's modes far enough for a
+job to link out of it is therefore the same act as making every installed file
+writable, and an edit to one of those installed files lands back in the shared
+cache for every later job built on that image. Ownership sidesteps that: with
+`fs.protected_hardlinks` set, the default on current distributions, Linux
+permits a hardlink to a file you do not own only when you may also write it,
+while a file you own you may always link - so handing the cache to the job's uid
+buys the link while leaving an installed file read-only and the cache writable
+by nothing but the job. That uid can still `chmod u+w` a cache file it owns and
+edit it, which is the ordinary standing of any single-user cache. Keep the
+`chown` chained onto the same `RUN`: a separate one rewrites every file's
+metadata into a new layer and copies the whole cache again. Where the job's uid
+cannot be known at build time, no setting keeps both properties - read-only
+cache files cost the hardlink, so jobs copy the bytes instead and a collection
+whose extracted tree is not already in the image fails outright (exit `5`),
+while `chmod -R a+rwX` keeps the hardlink and gives up both the read-only
+installed file and the private cache. Bake for a known uid where you can.
 
 Jobs built on that image are the case `--offline` is for, since the cache is
 part of the image rather than something a key might miss:
