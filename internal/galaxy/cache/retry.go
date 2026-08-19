@@ -51,8 +51,7 @@ func fetchRetryable(err error) bool {
 	if errors.Is(err, helpers.ErrResponseTooLarge) {
 		return false
 	}
-	var statusErr *HTTPStatusError
-	if errors.As(err, &statusErr) {
+	if statusErr, ok := errors.AsType[*HTTPStatusError](err); ok {
 		return helpers.IsRetryableHTTPStatus(statusErr.Code)
 	}
 	return false

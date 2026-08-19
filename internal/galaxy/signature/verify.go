@@ -750,7 +750,7 @@ func classify(err error) Status {
 // type, but ordering the sentinels first keeps that a property of classify
 // rather than of what go-crypto happens to declare.
 func isSignatureError(err error) bool {
-	var sigErr pgperrors.SignatureError
+	_, ok := errors.AsType[pgperrors.SignatureError](err)
 
-	return errors.As(err, &sigErr)
+	return ok
 }

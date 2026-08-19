@@ -770,8 +770,7 @@ func BenchmarkScanTree(b *testing.B) {
 	})
 	target := installTarget{root: osRoot, rel: ".", path: root}
 
-	b.ResetTimer()
-	for range b.N {
+	for b.Loop() {
 		if _, err := scanTree(target); err != nil {
 			b.Fatalf("scanTree: %v", err)
 		}

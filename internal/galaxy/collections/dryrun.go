@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"slices"
@@ -154,11 +155,7 @@ func classifyDryRun(
 	verbs dryRunVerbs,
 	probe dryRunProbe,
 ) failureSummary {
-	keys := make([]string, 0, len(collections))
-	for key := range collections {
-		keys = append(keys, key)
-	}
-	slices.Sort(keys)
+	keys := slices.Sorted(maps.Keys(collections))
 
 	// probe can cost a real Meta() round trip on the S3 backend
 	// (dryRunArtifactMeta) and, for install, a full filepath.WalkDir tally

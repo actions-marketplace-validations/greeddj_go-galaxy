@@ -72,9 +72,7 @@ func printTree(w io.Writer, reqPath string, lf *lockfile.File, roots []string) {
 	for _, e := range lf.Collections {
 		byFQDN[e.Name] = e
 	}
-	sortedRoots := make([]string, len(roots))
-	copy(sortedRoots, roots)
-	slices.Sort(sortedRoots)
+	sortedRoots := slices.Sorted(slices.Values(roots))
 
 	_, _ = fmt.Fprintln(w, reqPath)
 	for i, root := range sortedRoots {
@@ -102,9 +100,7 @@ func walkTree(w io.Writer, by map[string]lockfile.Entry, fqdn, prefix string, is
 	seen[fqdn] = true
 	_, _ = fmt.Fprintf(w, "%s%s%s %s\n", prefix, branch, fqdn, entry.Version)
 
-	deps := make([]string, len(entry.Deps))
-	copy(deps, entry.Deps)
-	slices.Sort(deps)
+	deps := slices.Sorted(slices.Values(entry.Deps))
 	for i, dep := range deps {
 		walkTree(w, by, dep, prefix+cont, i == len(deps)-1, seen)
 	}

@@ -45,8 +45,7 @@ func annotateOfflineConflict(cfg *config.Config, err error) error {
 	if err == nil || !cfg.Offline {
 		return err
 	}
-	var conflictErr *solver.ConflictError
-	if !errors.As(err, &conflictErr) {
+	if _, ok := errors.AsType[*solver.ConflictError](err); !ok {
 		return err
 	}
 	return &offlineConflictError{inner: err}

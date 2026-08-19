@@ -18,7 +18,7 @@ import (
 // for a live lock. O_NOFOLLOW rejects a symlink planted at the lock path
 // (e.g. inside a restored cache archive) rather than following it to another
 // target. The returned closure releases the lock and closes the file
-// descriptor exactly once.
+// descriptor exactly once; a repeat call returns the first call's result.
 func flockFile(lockPath string) (func() error, error) {
 	//nolint:gosec // G304: lockPath is derived from the configured cache dir and names the cache lock file.
 	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, helpers.FileMod)
@@ -35,17 +35,13 @@ func flockFile(lockPath string) (func() error, error) {
 		return nil, err
 	}
 
-	var once sync.Once
-	release := func() error {
-		var releaseErr error
-		once.Do(func() {
-			releaseErr = syscall.Flock(fd, syscall.LOCK_UN)
-			if closeErr := f.Close(); releaseErr == nil {
-				releaseErr = closeErr
-			}
-		})
+	release := sync.OnceValue(func() error {
+		releaseErr := syscall.Flock(fd, syscall.LOCK_UN)
+		if closeErr := f.Close(); releaseErr == nil {
+			releaseErr = closeErr
+		}
 		return releaseErr
-	}
+	})
 
 	return release, nil
 }

@@ -10,7 +10,7 @@ import (
 // retryableStatusError marks a per-verb HTTP failure as safe to retry, while
 // still carrying the original sentinel-wrapped error (e.g. errS3GetFailed
 // with its S3 <Error> code/message folded in) through Unwrap. s3Retryable
-// recognizes it via errors.As; every caller and test outside this package
+// recognizes it via errors.AsType; every caller and test outside this package
 // keeps matching the underlying sentinel via errors.Is exactly as before,
 // unaware that a retry ever happened.
 type retryableStatusError struct {
@@ -130,6 +130,6 @@ func s3Retryable(ctx context.Context, err error) bool {
 	if errors.Is(err, errS3TransportFailed) {
 		return ctx.Err() == nil
 	}
-	var statusErr *retryableStatusError
-	return errors.As(err, &statusErr)
+	_, ok := errors.AsType[*retryableStatusError](err)
+	return ok
 }

@@ -118,8 +118,7 @@ func isLateTerminalDownloadError(err error) bool {
 // all) or a retryable HTTP status. Any other error - including one that is
 // not a *downloadAttemptError at all - is not retryable.
 func isRetryableAttemptError(err error) bool {
-	var attemptErr *downloadAttemptError
-	if errors.As(err, &attemptErr) {
+	if attemptErr, ok := errors.AsType[*downloadAttemptError](err); ok {
 		if attemptErr.status == 0 {
 			return true
 		}

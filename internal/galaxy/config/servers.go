@@ -391,9 +391,8 @@ func resolveServerList(ansCfg ansibleConfig) []string {
 		return nil
 	}
 
-	parts := strings.Split(raw, ",")
-	ids := make([]string, 0, len(parts))
-	for _, p := range parts {
+	var ids []string
+	for p := range strings.SplitSeq(raw, ",") {
 		if p = strings.TrimSpace(p); p != "" {
 			ids = append(ids, p)
 		}

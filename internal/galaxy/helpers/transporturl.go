@@ -38,8 +38,8 @@ type TransportURLError struct {
 // http.Client.Do failure is re-rendered. What differs between callers is why
 // that value is worth cutting, which is what each call site states for itself.
 func CutTransportURL(rawURL string, err error) error {
-	var urlErr *url.Error
-	if !errors.As(err, &urlErr) {
+	urlErr, ok := errors.AsType[*url.Error](err)
+	if !ok {
 		return err
 	}
 

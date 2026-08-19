@@ -671,8 +671,8 @@ func (f *Fetcher) fetchHTTP(ctx context.Context, source, display string) (Blob, 
 // context.DeadlineExceeded all stay reachable through errors.Is, which is what
 // cmd/go-galaxy/exitcode classifies on.
 func transportCause(err error) error {
-	var urlErr *url.Error
-	if !errors.As(err, &urlErr) || urlErr.Err == nil {
+	urlErr, ok := errors.AsType[*url.Error](err)
+	if !ok || urlErr.Err == nil {
 		return err
 	}
 
