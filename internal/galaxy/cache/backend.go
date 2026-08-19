@@ -25,6 +25,11 @@ type ArtifactFile struct {
 	Cleanup func()
 	Meta    map[string]string
 	Path    string
+	// SHA is the hex sha256 the backend itself computed over the returned
+	// file's bytes while producing it. It is empty when the backend has only
+	// sidecar-derived knowledge of the digest: the local backend leaves it
+	// empty by design, reporting the sidecar's value through Meta instead.
+	SHA string
 }
 
 // ArtifactStore provides access to cached collection artifacts.

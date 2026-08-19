@@ -244,7 +244,7 @@ func TestS3RoundTripReservedCharKey(t *testing.T) {
 	payload := []byte("small body")
 
 	if err := b.client.putObject(ctx, key, bytes.NewReader(payload), int64(len(payload)),
-		"application/octet-stream", "", nil, putCondition{}, ""); err != nil {
+		putObjectAttrs{contentType: "application/octet-stream"}, putCondition{}); err != nil {
 		t.Fatalf("putObject(%q): %v", key, err)
 	}
 

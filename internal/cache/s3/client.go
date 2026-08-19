@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -304,7 +305,7 @@ func s3StatusError(sentinel error, resp *http.Response) error {
 func (c *Client) getObject(ctx context.Context, key string) (*http.Response, error) {
 	var success *http.Response
 	err := helpers.Retry(ctx, s3RetryPolicy(), func() error {
-		req, err := c.newRequest(ctx, http.MethodGet, key, nil, nil, emptySHA256, nil, putCondition{})
+		req, err := c.newReadRequest(ctx, http.MethodGet, key, nil)
 		if err != nil {
 			return err
 		}
@@ -337,7 +338,7 @@ func (c *Client) getObject(ctx context.Context, key string) (*http.Response, err
 func (c *Client) headObject(ctx context.Context, key string) (http.Header, error) {
 	var headers http.Header
 	err := helpers.Retry(ctx, s3RetryPolicy(), func() error {
-		req, err := c.newRequest(ctx, http.MethodHead, key, nil, nil, emptySHA256, nil, putCondition{})
+		req, err := c.newReadRequest(ctx, http.MethodHead, key, nil)
 		if err != nil {
 			return err
 		}
@@ -384,6 +385,18 @@ func (c putCondition) isConditional() bool {
 	return c.ifNoneMatch || c.ifMatch != ""
 }
 
+// putObjectAttrs groups the attributes one PUT carries alongside its body:
+// the Content-Type and Content-Encoding headers, the X-Amz-Meta-* user
+// metadata, and the payload's precomputed sha256 hex. The zero value carries
+// none of them - an empty string sets no header, nil meta writes no user
+// metadata, and an empty payloadHash makes putObject hash the body itself.
+type putObjectAttrs struct {
+	meta            map[string]string
+	contentType     string
+	contentEncoding string
+	payloadHash     string
+}
+
 // putObject uploads an object with optional metadata. A conditional PUT -
 // create-if-absent or compare-and-swap alike - is single-shot and never
 // retried, deliberately including a transport failure that never produced a
@@ -403,22 +416,20 @@ func (c *Client) putObject(
 	key string,
 	body io.ReadSeeker,
 	size int64,
-	contentType, contentEncoding string,
-	meta map[string]string,
+	attrs putObjectAttrs,
 	cond putCondition,
-	payloadHash string,
 ) error {
-	payloadHash, err := resolvePayloadHash(body, payloadHash)
+	payloadHash, err := resolvePayloadHash(body, attrs.payloadHash)
 	if err != nil {
 		return err
 	}
 	attempt := func() error {
-		req, err := c.newRequest(ctx, http.MethodPut, key, nil, body, payloadHash, meta, cond)
+		req, err := c.newRequest(ctx, http.MethodPut, key, nil, body, payloadHash, attrs.meta, cond)
 		if err != nil {
 			return err
 		}
 		req.ContentLength = size
-		applyContentHeaders(req, contentType, contentEncoding)
+		applyContentHeaders(req, attrs.contentType, attrs.contentEncoding)
 		resp, err := c.do(req)
 		if err != nil {
 			return err
@@ -444,7 +455,7 @@ func (c *Client) putObject(
 // S3's own idempotent DELETE semantics.
 func (c *Client) deleteObject(ctx context.Context, key string) error {
 	return helpers.Retry(ctx, s3RetryPolicy(), func() error {
-		req, err := c.newRequest(ctx, http.MethodDelete, key, nil, nil, emptySHA256, nil, putCondition{})
+		req, err := c.newReadRequest(ctx, http.MethodDelete, key, nil)
 		if err != nil {
 			return err
 		}
@@ -781,7 +792,7 @@ func (c *Client) ensureBucket(ctx context.Context) error {
 // transient failure like the other idempotent verbs.
 func (c *Client) headBucket(ctx context.Context) error {
 	return helpers.Retry(ctx, s3RetryPolicy(), func() error {
-		req, err := c.newRequest(ctx, http.MethodHead, "", nil, nil, emptySHA256, nil, putCondition{})
+		req, err := c.newReadRequest(ctx, http.MethodHead, "", nil)
 		if err != nil {
 			return err
 		}
@@ -854,7 +865,7 @@ func (c *Client) createBucket(ctx context.Context) error {
 // than nesting two. On a non-2xx it closes the response body and returns; on
 // 200 it returns the response with its body still open for the caller to read.
 func (c *Client) bucketRequest(ctx context.Context, method string, query url.Values) (*http.Response, error) {
-	req, err := c.newRequest(ctx, method, "", query, nil, emptySHA256, nil, putCondition{})
+	req, err := c.newReadRequest(ctx, method, "", query)
 	if err != nil {
 		return nil, err
 	}
@@ -874,19 +885,13 @@ func (c *Client) bucketRequest(ctx context.Context, method string, query url.Val
 	return resp, nil
 }
 
-// listBucketResult represents the S3 ListBucket XML response.
+// listBucketResult holds the three elements of the S3 ListObjectsV2 XML
+// response this client reads: the page's object entries and the two
+// pagination markers. encoding/xml ignores every element not mapped here.
 type listBucketResult struct {
-	NextContinuationToken  string              `xml:"NextContinuationToken"`
-	ContinuationToken      string              `xml:"ContinuationToken"`
-	Prefix                 string              `xml:"Prefix"`
-	Delimiter              string              `xml:"Delimiter"`
-	StartAfter             string              `xml:"StartAfter"`
-	ContinuationTokenStart string              `xml:"ContinuationTokenStart"`
-	Contents               []listBucketContent `xml:"Contents"`
-	CommonPrefixes         []listBucketPrefix  `xml:"CommonPrefixes"`
-	KeyCount               int                 `xml:"KeyCount"`
-	MaxKeys                int                 `xml:"MaxKeys"`
-	IsTruncated            bool                `xml:"IsTruncated"`
+	NextContinuationToken string              `xml:"NextContinuationToken"`
+	Contents              []listBucketContent `xml:"Contents"`
+	IsTruncated           bool                `xml:"IsTruncated"`
 }
 
 // listBucketContent represents an object entry in a ListBucket response.
@@ -894,9 +899,13 @@ type listBucketContent struct {
 	Key string `xml:"Key"`
 }
 
-// listBucketPrefix represents a common prefix entry in a ListBucket response.
-type listBucketPrefix struct {
-	Prefix string `xml:"Prefix"`
+// newReadRequest builds and signs a body-less request (GET, HEAD, DELETE, or
+// a query-only bucket call), binding the invariants every such request
+// carries: no body, the empty-payload sha256, no user metadata, and no write
+// precondition. A request that carries a body goes through newRequest
+// directly.
+func (c *Client) newReadRequest(ctx context.Context, method, key string, query url.Values) (*http.Request, error) {
+	return c.newRequest(ctx, method, key, query, nil, emptySHA256, nil, putCondition{})
 }
 
 // newRequest builds and signs a request for the given object key.
@@ -1054,11 +1063,7 @@ func canonicalizeHeaders(host string, headers http.Header) (string, string) {
 		}
 		entries[lower] = normalizeHeaderValue(values)
 	}
-	names := make([]string, 0, len(entries))
-	for name := range entries {
-		names = append(names, name)
-	}
-	slices.Sort(names)
+	names := slices.Sorted(maps.Keys(entries))
 
 	var canonical strings.Builder
 	for _, name := range names {
@@ -1088,11 +1093,7 @@ func canonicalizeQuery(values url.Values) string {
 	if len(values) == 0 {
 		return ""
 	}
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	slices.Sort(keys)
+	keys := slices.Sorted(maps.Keys(values))
 	pairs := make([]string, 0, len(values))
 	for _, key := range keys {
 		vals := values[key]

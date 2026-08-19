@@ -17,7 +17,7 @@ func seedDeleteTestObjects(ctx context.Context, t *testing.T, b *Backend, keys [
 	t.Helper()
 	for _, key := range keys {
 		if err := b.client.putObject(ctx, key, bytes.NewReader([]byte("x")), 1,
-			"application/octet-stream", "", nil, putCondition{}, ""); err != nil {
+			putObjectAttrs{contentType: "application/octet-stream"}, putCondition{}); err != nil {
 			t.Fatalf("seed object %q: %v", key, err)
 		}
 	}

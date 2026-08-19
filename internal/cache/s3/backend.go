@@ -195,7 +195,8 @@ func (b *Backend) SaveStore(ctx context.Context, st *store.Store) error {
 	}
 	key := b.key(statePrefix, storeObject)
 	reader := bytes.NewReader(buf.Bytes())
-	return b.client.putObject(ctx, key, reader, int64(buf.Len()), "application/json", "gzip", nil, putCondition{}, "")
+	return b.client.putObject(ctx, key, reader, int64(buf.Len()),
+		putObjectAttrs{contentType: "application/json", contentEncoding: "gzip"}, putCondition{})
 }
 
 // ClearFiles removes cached artifacts from S3, batching the deletes via
@@ -299,7 +300,7 @@ func (b *Backend) probeConditionalPut(ctx context.Context) error {
 	body := []byte("probe")
 
 	if err := b.client.putObject(ctx, key, bytes.NewReader(body), int64(len(body)),
-		"text/plain", "", nil, putCondition{ifNoneMatch: true}, ""); err != nil {
+		putObjectAttrs{contentType: "text/plain"}, putCondition{ifNoneMatch: true}); err != nil {
 		return err
 	}
 	//nolint:contextcheck // best-effort cleanup deliberately uses a fresh context, not ctx:
@@ -313,7 +314,7 @@ func (b *Backend) probeConditionalPut(ctx context.Context) error {
 	}()
 
 	switch putErr := b.client.putObject(ctx, key, bytes.NewReader(body), int64(len(body)),
-		"text/plain", "", nil, putCondition{ifNoneMatch: true}, ""); {
+		putObjectAttrs{contentType: "text/plain"}, putCondition{ifNoneMatch: true}); {
 	case putErr == nil:
 		return errS3ConditionalPutUnsupported
 	case errors.Is(putErr, errS3PreconditionFailed):
@@ -357,7 +358,7 @@ func (b *Backend) probeCompareAndSwap(ctx context.Context, key string, body []by
 	}
 
 	switch staleErr := b.client.putObject(ctx, key, bytes.NewReader(body), int64(len(body)),
-		"text/plain", "", nil, putCondition{ifMatch: staleProbeETag}, ""); {
+		putObjectAttrs{contentType: "text/plain"}, putCondition{ifMatch: staleProbeETag}); {
 	case staleErr == nil:
 		return errS3CompareAndSwapUnsupported
 	case errors.Is(staleErr, errS3PreconditionFailed):
@@ -367,7 +368,7 @@ func (b *Backend) probeCompareAndSwap(ctx context.Context, key string, body []by
 	}
 
 	switch currentErr := b.client.putObject(ctx, key, bytes.NewReader(body), int64(len(body)),
-		"text/plain", "", nil, putCondition{ifMatch: etag}, ""); {
+		putObjectAttrs{contentType: "text/plain"}, putCondition{ifMatch: etag}); {
 	case currentErr == nil:
 		return nil
 	case errors.Is(currentErr, errS3PreconditionFailed), errors.Is(currentErr, errS3NotFound):
@@ -501,7 +502,8 @@ func (b *Backend) saveProjectRegistry(ctx context.Context, registry *store.Proje
 	}
 	key := b.key(statePrefix, projectsObject)
 	reader := bytes.NewReader(payload)
-	return b.client.putObject(ctx, key, reader, int64(len(payload)), "application/json", "", nil, putCondition{}, "")
+	return b.client.putObject(ctx, key, reader, int64(len(payload)),
+		putObjectAttrs{contentType: "application/json"}, putCondition{})
 }
 
 // key builds a key under the configured S3 prefix.

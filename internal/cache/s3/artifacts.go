@@ -47,7 +47,10 @@ func (s *Artifacts) Has(ctx context.Context, key string) (bool, error) {
 	return found, err
 }
 
-// Fetch downloads an artifact from S3 into a temporary file.
+// Fetch downloads an artifact from S3 into a temporary file. The returned
+// file's SHA carries the sha256 this method computed over the downloaded
+// bytes while writing them - the same digest verifyArtifactSHA checks against
+// the object's metadata sidecar.
 func (s *Artifacts) Fetch(ctx context.Context, key string) (cacheManager.ArtifactFile, error) {
 	if s.client == nil {
 		return cacheManager.ArtifactFile{}, errS3ClientNil
@@ -70,7 +73,12 @@ func (s *Artifacts) Fetch(ctx context.Context, key string) (cacheManager.Artifac
 		cleanupIfNeeded(cleanup)
 		return cacheManager.ArtifactFile{}, err
 	}
-	return cacheManager.ArtifactFile{Path: tmpFile.Name(), Cleanup: cleanup, Meta: meta}, nil
+	return cacheManager.ArtifactFile{
+		Path:    tmpFile.Name(),
+		Cleanup: cleanup,
+		Meta:    meta,
+		SHA:     hex.EncodeToString(sum),
+	}, nil
 }
 
 // verifyArtifactSHA compares a fetched object's real sha256 (computed by this
@@ -173,7 +181,7 @@ func (s *Artifacts) Commit(ctx context.Context, key, tmpPath string, meta map[st
 		meta["sha256"] = hash
 	}
 	if err := s.client.putObject(ctx, s.objectKey(key), file, info.Size(),
-		"application/gzip", "", meta, putCondition{}, payloadHash); err != nil {
+		putObjectAttrs{contentType: "application/gzip", meta: meta, payloadHash: payloadHash}, putCondition{}); err != nil {
 		return cacheManager.ArtifactFile{}, err
 	}
 	cleanup := func() {

@@ -585,7 +585,7 @@ func TestReadObjectReclassifiesOversizedStateObject(t *testing.T) {
 	withinCapKey := b.key(statePrefix, "within-cap-state-object.json")
 	want := []byte(`{"projects":{}}`)
 	if err := b.client.putObject(ctx, withinCapKey, bytes.NewReader(want), int64(len(want)),
-		"application/json", "", nil, putCondition{}, ""); err != nil {
+		putObjectAttrs{contentType: "application/json"}, putCondition{}); err != nil {
 		t.Fatalf("putObject(within cap): %v", err)
 	}
 	got, err := b.readObject(ctx, withinCapKey)
@@ -645,7 +645,7 @@ func TestReadObjectReclassifiesAStateObjectThatWillNotInflate(t *testing.T) {
 	emptyMemberKey := b.key(statePrefix, "empty-member-state-object.json.gz")
 	member := emptyGzipMember()
 	if err := b.client.putObject(ctx, emptyMemberKey, bytes.NewReader(member), int64(len(member)),
-		"application/gzip", "", nil, putCondition{}, ""); err != nil {
+		putObjectAttrs{contentType: "application/gzip"}, putCondition{}); err != nil {
 		t.Fatalf("putObject(empty member): %v", err)
 	}
 
@@ -661,7 +661,7 @@ func TestReadObjectReclassifiesAStateObjectThatWillNotInflate(t *testing.T) {
 	want := []byte(`{"projects":{}}`)
 	body := gzipBytes(t, want)
 	if err := b.client.putObject(ctx, inflatableKey, bytes.NewReader(body), int64(len(body)),
-		"application/gzip", "", nil, putCondition{}, ""); err != nil {
+		putObjectAttrs{contentType: "application/gzip"}, putCondition{}); err != nil {
 		t.Fatalf("putObject(inflatable): %v", err)
 	}
 	got, err := b.readObject(ctx, inflatableKey)
@@ -704,7 +704,8 @@ func putProjectsObject(ctx context.Context, t *testing.T, b *Backend, data []byt
 
 	key := b.key(statePrefix, projectsObject)
 	reader := bytes.NewReader(data)
-	if err := b.client.putObject(ctx, key, reader, int64(len(data)), "application/json", "", nil, putCondition{}, ""); err != nil {
+	attrs := putObjectAttrs{contentType: "application/json"}
+	if err := b.client.putObject(ctx, key, reader, int64(len(data)), attrs, putCondition{}); err != nil {
 		t.Fatalf("putObject: %v", err)
 	}
 }
@@ -742,7 +743,8 @@ func putStoreObject(ctx context.Context, t *testing.T, b *Backend, schemaVersion
 
 	key := b.key(statePrefix, storeObject)
 	reader := bytes.NewReader(buf.Bytes())
-	if err := b.client.putObject(ctx, key, reader, int64(buf.Len()), "application/json", "gzip", nil, putCondition{}, ""); err != nil {
+	attrs := putObjectAttrs{contentType: "application/json", contentEncoding: "gzip"}
+	if err := b.client.putObject(ctx, key, reader, int64(buf.Len()), attrs, putCondition{}); err != nil {
 		t.Fatalf("putObject: %v", err)
 	}
 }
@@ -770,7 +772,8 @@ func putRawStoreObject(ctx context.Context, t *testing.T, b *Backend, rawJSON []
 
 	key := b.key(statePrefix, storeObject)
 	reader := bytes.NewReader(buf.Bytes())
-	if err := b.client.putObject(ctx, key, reader, int64(buf.Len()), "application/json", "gzip", nil, putCondition{}, ""); err != nil {
+	attrs := putObjectAttrs{contentType: "application/json", contentEncoding: "gzip"}
+	if err := b.client.putObject(ctx, key, reader, int64(buf.Len()), attrs, putCondition{}); err != nil {
 		t.Fatalf("putObject: %v", err)
 	}
 }

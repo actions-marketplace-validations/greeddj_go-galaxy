@@ -99,7 +99,7 @@ func TestPutObjectSurfacesXMLErrorDetails(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	payload := []byte("payload")
-	err := b.client.putObject(ctx, key, bytes.NewReader(payload), int64(len(payload)), "", "", nil, putCondition{}, "")
+	err := b.client.putObject(ctx, key, bytes.NewReader(payload), int64(len(payload)), putObjectAttrs{}, putCondition{})
 	if err == nil {
 		t.Fatal("expected an error, got nil")
 	}
@@ -215,7 +215,7 @@ func TestGetObjectRetriesTransientFailureThenSucceeds(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	if err := b.client.putObject(ctx, key, bytes.NewReader(payload), int64(len(payload)),
-		"text/plain", "", nil, putCondition{}, ""); err != nil {
+		putObjectAttrs{contentType: "text/plain"}, putCondition{}); err != nil {
 		t.Fatalf("seed object: %v", err)
 	}
 
@@ -253,7 +253,7 @@ func TestHeadObjectRetriesTransientFailureThenSucceeds(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	if err := b.client.putObject(ctx, key, bytes.NewReader(payload), int64(len(payload)),
-		"text/plain", "", nil, putCondition{}, ""); err != nil {
+		putObjectAttrs{contentType: "text/plain"}, putCondition{}); err != nil {
 		t.Fatalf("seed object: %v", err)
 	}
 
@@ -307,7 +307,7 @@ func TestPutObjectUnconditionalRetriesTransientFailureThenSucceeds(t *testing.T)
 	fake.failNext(key, http.MethodPut, http.StatusServiceUnavailable, 2)
 
 	if err := b.client.putObject(ctx, key, bytes.NewReader(payload), int64(len(payload)),
-		"text/plain", "", nil, putCondition{}, ""); err != nil {
+		putObjectAttrs{contentType: "text/plain"}, putCondition{}); err != nil {
 		t.Fatalf("expected putObject to recover after two transient failures, got %v", err)
 	}
 	if got := fake.requestCount(key, http.MethodPut); got != 3 {
@@ -352,7 +352,7 @@ func TestPutObjectConditionalDoesNotRetryOnTransientFailure(t *testing.T) {
 	fake.failNext(key, http.MethodPut, http.StatusServiceUnavailable, -1)
 
 	err := b.client.putObject(ctx, key, bytes.NewReader(payload), int64(len(payload)),
-		"text/plain", "", nil, putCondition{ifNoneMatch: true}, "")
+		putObjectAttrs{contentType: "text/plain"}, putCondition{ifNoneMatch: true})
 	if !errors.Is(err, errS3PutFailed) {
 		t.Fatalf("expected errors.Is(err, errS3PutFailed), got %v", err)
 	}
@@ -402,7 +402,7 @@ func TestPutObjectPreconditionFailedIsNotRetried(t *testing.T) {
 	fake.failNext(key, http.MethodPut, http.StatusPreconditionFailed, 1)
 
 	err := b.client.putObject(ctx, key, bytes.NewReader(payload), int64(len(payload)),
-		"text/plain", "", nil, putCondition{ifNoneMatch: true}, "")
+		putObjectAttrs{contentType: "text/plain"}, putCondition{ifNoneMatch: true})
 	if !errors.Is(err, errS3PreconditionFailed) {
 		t.Fatalf("expected errors.Is(err, errS3PreconditionFailed), got %v", err)
 	}

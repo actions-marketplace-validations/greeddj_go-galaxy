@@ -473,7 +473,8 @@ func (b *Backend) putLock(ctx context.Context, key, token string, deadline time.
 		return err // unreachable for this fixed four-string struct; kept as a defensive guard.
 	}
 	reader := bytes.NewReader(body)
-	return b.client.putObject(ctx, key, reader, int64(len(body)), "application/json", "", meta, cond, "")
+	return b.client.putObject(ctx, key, reader, int64(len(body)),
+		putObjectAttrs{contentType: "application/json", meta: meta}, cond)
 }
 
 // lockOwner identifies this process for the lock object's diagnostic Owner

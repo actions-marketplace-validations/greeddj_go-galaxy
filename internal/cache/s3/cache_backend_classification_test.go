@@ -234,9 +234,9 @@ func assertLiveTimeoutClassifiesAsCacheBackendUnavailable(
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}
-	req, err := client.newRequest(context.Background(), http.MethodGet, "some-key", nil, nil, emptySHA256, nil, putCondition{})
+	req, err := client.newReadRequest(context.Background(), http.MethodGet, "some-key", nil)
 	if err != nil {
-		t.Fatalf("newRequest: %v", err)
+		t.Fatalf("newReadRequest: %v", err)
 	}
 
 	// Precondition control: the raw transport failure, bypassing Client.do
@@ -315,9 +315,9 @@ func TestClientDoExcludesCallerCancellationFromCacheBackendUnavailable(t *testin
 	// returns once this context ends, so a t.Fatal between here and the explicit
 	// cancel() would leave the cleanup deadlocked on a request nobody cancels.
 	defer cancel()
-	req, err := client.newRequest(ctx, http.MethodGet, "some-key", nil, nil, emptySHA256, nil, putCondition{})
+	req, err := client.newReadRequest(ctx, http.MethodGet, "some-key", nil)
 	if err != nil {
-		t.Fatalf("newRequest: %v", err)
+		t.Fatalf("newReadRequest: %v", err)
 	}
 
 	errCh := make(chan error, 1)
