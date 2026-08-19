@@ -20,6 +20,16 @@ const (
 	// more specific class below.
 	ExitError = 1
 	// ExitUsage indicates invalid configuration, flags, or requirements input.
+	//
+	// It shares its number with the one exit this package does not choose: the
+	// Go runtime exits a fatal error - a stack overflow, an out-of-memory
+	// kill, a runtime throw - with status 2 as well, so a process that died
+	// that way is indistinguishable from a misconfigured run by exit code
+	// alone. What separates them is the output, not the code: a fatal error
+	// prints a line beginning "fatal error:" to stderr, followed by a
+	// goroutine dump, and runs no deferred function on the way out, so a run
+	// that ends this way also leaves whatever it held unreleased. A pipeline
+	// branching on 2 that needs to tell the two apart greps for that prefix.
 	ExitUsage = 2
 	// ExitResolution indicates dependency resolution failed (conflicts,
 	// missing candidates, or a cycle in the dependency graph).
@@ -83,10 +93,11 @@ const (
 	// about the acquisition producers.
 	ExitCacheBusy = 8
 	// ExitCacheCorrupt indicates the persisted cache state itself - a project
-	// registry that exists but fails to decode, a state object that could
-	// not be read within its declared size ceiling, or (local backend only)
-	// a Bolt snapshot file whose bytes fail one of bbolt's own corruption
-	// checks - cannot be used by anyone and must be discarded before the run
+	// registry that exists but fails to decode, a state object that could not
+	// be read within its declared size ceiling or could not be read back as
+	// what this program writes there at all, or (local backend only) a Bolt
+	// snapshot file whose bytes fail one of bbolt's own corruption checks -
+	// cannot be used by anyone and must be discarded before the run
 	// can proceed. The remedy is mechanical and safe to automate: delete the
 	// offending object (or the whole cache directory / bucket prefix) or
 	// rerun with --clear-cache, then rerun the command.
@@ -284,25 +295,32 @@ func isCanceled(err error) bool {
 // ability to reach it - cannot be used by anyone and must be discarded
 // before the run can proceed: a project registry that exists but fails to
 // decode (helpers.ErrCorruptProjectRegistry), a state object that could not
-// be read within its declared size ceiling (helpers.ErrStateObjectTooLarge),
-// or the local Bolt snapshot file itself failing one of bbolt's own
-// corruption checks (helpers.ErrCorruptSnapshotStore - see openBolt in
-// internal/galaxy/store for the closed set of bbolt sentinels this maps
-// from). helpers.ErrUnsupportedSchemaVersion is deliberately not a member: a
-// schema version newer than this binary understands means the snapshot was
-// written correctly by a newer binary, not that its bytes are damaged, so
+// be read within its declared size ceiling (helpers.ErrStateObjectTooLarge)
+// or could not be read back as what this program writes there at all
+// (helpers.ErrCorruptStateObject), or the local Bolt snapshot file itself
+// failing one of bbolt's own corruption checks (helpers.ErrCorruptSnapshotStore
+// - see openBolt in internal/galaxy/store for the closed set of bbolt
+// sentinels this maps from). helpers.ErrUnsupportedSchemaVersion is
+// deliberately not a member: a schema version newer than this binary
+// understands means the snapshot was written correctly by a newer binary, not
+// that its bytes are damaged, so
 // isRecordedStateUsageError classifies it instead - see that function's own
 // doc comment for the flip side of this distinction. This class is scoped to
 // the local backend only for helpers.ErrCorruptSnapshotStore specifically:
 // the S3 backend's state object is gzipped JSON with its own sentinels
-// (helpers.ErrCorruptProjectRegistry, helpers.ErrStateObjectTooLarge), so it
-// reaches this class through those two instead, never through
+// (helpers.ErrCorruptProjectRegistry, helpers.ErrStateObjectTooLarge and
+// helpers.ErrCorruptStateObject), so it reaches this class through those
+// three instead, never through
 // helpers.ErrCorruptSnapshotStore, which only ever originates from opening a
-// local Bolt file.
+// local Bolt file. helpers.ErrCorruptStateObject is that backend's own third
+// member and is produced at internal/cache/s3's readObject, which is what
+// keeps a sentinel carrying no exit class of its own - a gzip member producing
+// no bytes - from reaching this table unclassified.
 //
 // No error tree produced by this program carries both this class and the
-// network class today: a size-ceiling failure is only ever detected after
-// its GET has already answered with a 200 (Client.getObject returns a
+// network class today: a size-ceiling failure and a state object that will
+// not inflate are both only ever detected after
+// their GET has already answered with a 200 (Client.getObject returns a
 // response to readObject only on that status; every other status or
 // transport failure returns an error before readAllCapped ever runs), and
 // neither a decode failure nor a local Bolt file open ever touches the
@@ -311,11 +329,15 @@ func isCanceled(err error) bool {
 // cache.deadlineError (the StateObjectDeadline decorator's normalizer) never
 // relabels one into helpers.ErrStateObjectDeadline - its own precondition
 // requires the error being normalized to already carry one of those two
-// signals, which none of a size-cap rejection, a corrupt-registry decode
-// error, or a local Bolt open failure ever does.
+// signals, which none of these ever does. That holds for the inflate failure
+// as well as for the three older members: a cancellation observed mid-stream
+// is reported by internal/gzipstream as the context error itself, never as a
+// member that produced nothing, since a member reaches that verdict only by
+// ending cleanly.
 func isCacheCorruptError(err error) bool {
 	return errors.Is(err, helpers.ErrCorruptProjectRegistry) ||
 		errors.Is(err, helpers.ErrStateObjectTooLarge) ||
+		errors.Is(err, helpers.ErrCorruptStateObject) ||
 		errors.Is(err, helpers.ErrCorruptSnapshotStore)
 }
 

@@ -436,7 +436,7 @@ func verifyCollectionSignatures(ctx context.Context, deps installDeps, col colle
 		return nil
 	}
 	tarPath := payload.artifact.Path
-	manifestBytes, err := manifest.ReadFromTarGz(tarPath)
+	manifestBytes, err := manifest.ReadFromTarGz(ctx, tarPath)
 	if err != nil {
 		return err
 	}

@@ -466,7 +466,8 @@ func TestReadAllCappedRejectsOversizedRaw(t *testing.T) {
 	const compressedCap = 16
 	data := bytes.Repeat([]byte("x"), compressedCap*4)
 
-	_, err := readAllCapped(bytes.NewReader(data), http.Header{}, "state/store.json", compressedCap, helpers.StateObjectMaxDecompressedSize)
+	_, err := readAllCapped(t.Context(), bytes.NewReader(data), http.Header{}, "state/store.json",
+		compressedCap, helpers.StateObjectMaxDecompressedSize)
 	if !errors.Is(err, helpers.ErrResponseTooLarge) {
 		t.Fatalf("readAllCapped() error = %v, want ErrResponseTooLarge", err)
 	}
@@ -490,7 +491,8 @@ func TestReadAllCappedRejectsGzipBomb(t *testing.T) {
 	}
 
 	header := http.Header{"Content-Encoding": []string{"gzip"}}
-	_, err := readAllCapped(bytes.NewReader(gz), header, "state/store.json.gz", helpers.StateObjectMaxCompressedSize, decompressedCap)
+	_, err := readAllCapped(t.Context(), bytes.NewReader(gz), header, "state/store.json.gz",
+		helpers.StateObjectMaxCompressedSize, decompressedCap)
 	if !errors.Is(err, helpers.ErrResponseTooLarge) {
 		t.Fatalf("readAllCapped() error = %v, want ErrResponseTooLarge", err)
 	}
@@ -508,7 +510,7 @@ func TestReadAllCappedAcceptsNormal(t *testing.T) {
 		gz := gzipBytes(t, want)
 
 		header := http.Header{"Content-Encoding": []string{"gzip"}}
-		got, err := readAllCapped(bytes.NewReader(gz), header, "state/store.json.gz", 64, 64)
+		got, err := readAllCapped(t.Context(), bytes.NewReader(gz), header, "state/store.json.gz", 64, 64)
 		if err != nil {
 			t.Fatalf("readAllCapped() error = %v, want nil", err)
 		}
@@ -521,7 +523,7 @@ func TestReadAllCappedAcceptsNormal(t *testing.T) {
 		t.Parallel()
 		want := []byte("a small non-gzip payload")
 
-		got, err := readAllCapped(bytes.NewReader(want), http.Header{}, "state/store.json", 64, 64)
+		got, err := readAllCapped(t.Context(), bytes.NewReader(want), http.Header{}, "state/store.json", 64, 64)
 		if err != nil {
 			t.Fatalf("readAllCapped() error = %v, want nil", err)
 		}
@@ -592,6 +594,82 @@ func TestReadObjectReclassifiesOversizedStateObject(t *testing.T) {
 	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("readObject(within cap) = %q, want %q", got, want)
+	}
+}
+
+// emptyGzipMember is the smallest gzip member there is - the ten-byte header,
+// one fixed-Huffman final block carrying nothing, and an eight-byte trailer
+// over zero bytes - hand-spelled so the fixture is exactly the shape a hostile
+// writer of this bucket would put there rather than whatever a writer in this
+// process happens to emit.
+func emptyGzipMember() []byte {
+	member := make([]byte, 0, 20)
+	member = append(member, "\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff"...)
+	member = append(member, 0x03, 0x00)
+	return append(member, 0, 0, 0, 0, 0, 0, 0, 0)
+}
+
+// TestReadObjectReclassifiesAStateObjectThatWillNotInflate proves readObject's
+// second reclassification: a state object whose gzip stream produces no bytes
+// is helpers.ErrCorruptStateObject, so a pipeline branching on
+// ExitCacheCorrupt sees the object as one to discard rather than as the
+// unclassified generic failure the bare inflate verdict would have been.
+//
+// The bare verdict is what makes the wrap load-bearing rather than cosmetic:
+// helpers.ErrEmptyGzipMember belongs to no cmd/go-galaxy/exitcode predicate -
+// deliberately, since its other readers classify through their own wraps - so
+// without this one the same failure reaches FromError as ExitError. The cause
+// stays reachable underneath, which the second assertion pins: the wrap
+// reclassifies without hiding what happened.
+//
+// The positive control lives in the same test, against the same key suffix and
+// the same readObject call: an ordinary gzipped object at a neighboring key
+// round-trips its exact bytes with a nil error, so the refusal above is a real
+// one on the gzip path rather than evidence the fixture never reached it.
+//
+// Killing mutation, run: deleting the helpers.ErrEmptyGzipMember arm from
+// readObject, leaving the failure to be returned as it arrives, fails this
+// test with
+//
+//	backend_test.go:654: readObject(empty member) = gzip stream carries a member that produces no bytes, want ErrCorruptStateObject
+func TestReadObjectReclassifiesAStateObjectThatWillNotInflate(t *testing.T) {
+	t.Parallel()
+	b, _ := newTestBackendAndFake(t)
+	ctx := t.Context()
+	if err := b.Open(ctx); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	// The .gz suffix is what routes readAllCapped down its inflating arm, the
+	// same way the real snapshot object's own key does.
+	emptyMemberKey := b.key(statePrefix, "empty-member-state-object.json.gz")
+	member := emptyGzipMember()
+	if err := b.client.putObject(ctx, emptyMemberKey, bytes.NewReader(member), int64(len(member)),
+		"application/gzip", "", nil, putCondition{}, ""); err != nil {
+		t.Fatalf("putObject(empty member): %v", err)
+	}
+
+	_, err := b.readObject(ctx, emptyMemberKey)
+	if !errors.Is(err, helpers.ErrCorruptStateObject) {
+		t.Fatalf("readObject(empty member) = %v, want ErrCorruptStateObject", err)
+	}
+	if !errors.Is(err, helpers.ErrEmptyGzipMember) {
+		t.Fatalf("readObject(empty member) = %v, want its cause reachable", err)
+	}
+
+	inflatableKey := b.key(statePrefix, "inflatable-state-object.json.gz")
+	want := []byte(`{"projects":{}}`)
+	body := gzipBytes(t, want)
+	if err := b.client.putObject(ctx, inflatableKey, bytes.NewReader(body), int64(len(body)),
+		"application/gzip", "", nil, putCondition{}, ""); err != nil {
+		t.Fatalf("putObject(inflatable): %v", err)
+	}
+	got, err := b.readObject(ctx, inflatableKey)
+	if err != nil {
+		t.Fatalf("readObject(inflatable) error = %v, want nil", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("readObject(inflatable) = %q, want %q", got, want)
 	}
 }
 

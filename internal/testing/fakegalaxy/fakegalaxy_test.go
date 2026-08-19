@@ -1206,7 +1206,7 @@ func TestManifestJSONMatchesArtifactAndVerifiesChain(t *testing.T) {
 		t.Fatalf("write artifact to disk: %v", err)
 	}
 
-	fromArchive, err := manifest.ReadFromTarGz(tarPath)
+	fromArchive, err := manifest.ReadFromTarGz(t.Context(), tarPath)
 	if err != nil {
 		t.Fatalf("manifest.ReadFromTarGz() error = %v, want nil", err)
 	}

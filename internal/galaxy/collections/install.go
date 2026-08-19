@@ -1182,7 +1182,7 @@ func attemptDownloadToCache(
 	// and a gzip header read for a real artifact, bounded in the worst case by
 	// helpers.ArchiveProbeMaxBytes of decompressed bytes for one that buries
 	// its first tar header behind a meta-header chain.
-	if err := archive.ProbeTarGz(tmpPath); err != nil {
+	if err := archive.ProbeTarGz(ctx, tmpPath); err != nil {
 		cleanupIfNeeded(cleanup)
 		return downloadResult{}, err
 	}

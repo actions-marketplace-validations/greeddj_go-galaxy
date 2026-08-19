@@ -87,6 +87,36 @@ var (
 	// disagree about which entry a name meant.
 	ErrArchiveDuplicateEntry = errors.New("archive contains a duplicate entry")
 
+	// ErrEmptyGzipMember indicates a gzip stream presented a member that
+	// produced no bytes at all. Every gzip stream this program reads is either
+	// a collection artifact or its own persisted cache state, and a member
+	// contributing nothing cannot be part of either: the smallest tar stream
+	// there can be is the 1024-byte end marker its two zero blocks make, and
+	// store.Store.MarshalSnapshot never produces zero bytes. That is why the
+	// rule is a property of what such a member can be rather than a count of
+	// how many are too many - internal/gzipstream, its one producer, refuses
+	// the first one and never reaches the second.
+	//
+	// It is deliberately in no cmd/go-galaxy/exitcode predicate, and the
+	// reason is that every reader of it already classifies without one. The
+	// download path's shape probe wraps it in ErrArtifactNotTarGz, which
+	// isArtifactShapeError already covers; the extractor and the manifest
+	// readers reach ExitInstall through the per-collection aggregation behind
+	// ErrInstallationFailed, exactly as every other cause a worker hits does;
+	// and the S3 backend's state-object read is neither of those - adding this
+	// sentinel to isArtifactShapeError would newly report a corrupt snapshot
+	// object as an install failure, on a run that may have installed nothing
+	// at all.
+	//
+	// That third reader is handled by reclassification at its own producer
+	// rather than left unclassified: internal/cache/s3's readObject wraps this
+	// sentinel into ErrCorruptStateObject, which classifies ExitCacheCorrupt
+	// beside the object's other two unusable-state verdicts. The wrap keeps
+	// this sentinel reachable through errors.Is, which is safe precisely
+	// because it belongs to no predicate of its own and so can carry no second
+	// exit class into the tree.
+	ErrEmptyGzipMember = errors.New("gzip stream carries a member that produces no bytes")
+
 	// ErrArtifactNotTarGz indicates downloaded bytes do not have the outer
 	// shape of a collection artifact: they are not gzip, or nothing that looks
 	// like a tar stream begins inside the gzip. It says nothing about the
@@ -435,6 +465,26 @@ var (
 	// before a run can proceed; it is never retried, since the same bytes
 	// would overrun the same ceiling again.
 	ErrStateObjectTooLarge = errors.New("cache state object exceeds the maximum allowed size")
+	// ErrCorruptStateObject indicates a persisted cache-state object (the S3
+	// snapshot or project registry) could not be read back as the gzipped or
+	// plain JSON this program writes there. Like ErrStateObjectTooLarge, which
+	// it sits beside for the same reason, the object it names cannot be used
+	// by anyone and must be discarded - or replaced by clearing the cache -
+	// before a run can proceed, and it is never retried, since the same bytes
+	// decode the same way every time.
+	//
+	// It is the S3 backend's counterpart to ErrCorruptSnapshotStore rather
+	// than a second spelling of it: that one names a local Bolt file failing
+	// bbolt's own checks on open and originates nowhere else, while this one
+	// names the object an S3 read got back. The remedy is the same, which is
+	// why both classify alike; the producer and the evidence are not, which is
+	// why they are two sentinels.
+	//
+	// It is deliberately broader than the one shape that raises it today, a
+	// gzip member producing no bytes: what it asserts is that the object is
+	// not something this program can read back, which is a property of the
+	// bytes rather than of which check noticed.
+	ErrCorruptStateObject = errors.New("corrupt cache state object")
 
 	// ErrOfflineMode indicates a network operation was attempted in offline mode.
 	ErrOfflineMode = errors.New("offline mode is enabled, network access is forbidden")

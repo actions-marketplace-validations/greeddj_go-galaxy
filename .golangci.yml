@@ -27,9 +27,13 @@ linters:
             # (comments against the code they cite), internal/lockaudit (the
             # holder context's threading through each command's lifecycle),
             # internal/galaxy/store's own dirty-flag audit (every write-locked
-            # *Store method setting the dirty flag), and
+            # *Store method setting the dirty flag),
             # internal/galaxy/archive's probe-decompressor gate (ProbeTarGz
-            # reaching pgzip through NewReaderN, sized by its own constants).
+            # reaching gzipstream through NewReaderN, sized by its own
+            # constants), and internal/gzipstream's own monopoly gate (no
+            # package but that one naming klauspost/pgzip outside its writer
+            # constructors, resolved by import path so an alias cannot hide
+            # one).
             - go/ast
             - go/parser
             - go/token

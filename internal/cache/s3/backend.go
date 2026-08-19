@@ -31,7 +31,8 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
-	gzip "github.com/klauspost/pgzip"
+	"github.com/greeddj/go-galaxy/internal/gzipstream"
+	"github.com/klauspost/pgzip"
 )
 
 // Backend provides an S3-backed cache backend.
@@ -184,7 +185,7 @@ func (b *Backend) SaveStore(ctx context.Context, st *store.Store) error {
 		return err
 	}
 	var buf bytes.Buffer
-	zw := gzip.NewWriter(&buf)
+	zw := pgzip.NewWriter(&buf)
 	if _, err := zw.Write(payload); err != nil {
 		_ = zw.Close()
 		return err
@@ -390,7 +391,7 @@ func (b *Backend) readObject(ctx context.Context, key string) ([]byte, error) {
 	defer func() {
 		_ = resp.Body.Close()
 	}()
-	data, err := readAllCapped(resp.Body, resp.Header, key,
+	data, err := readAllCapped(ctx, resp.Body, resp.Header, key,
 		helpers.StateObjectMaxCompressedSize, helpers.StateObjectMaxDecompressedSize)
 	if err != nil {
 		// Reclassify the size ceiling into its own state-object sentinel,
@@ -414,6 +415,21 @@ func (b *Backend) readObject(ctx context.Context, key string) ([]byte, error) {
 			//nolint:errorlint // deliberately %v, not %w: see the comment above.
 			return nil, fmt.Errorf("%w: state object %s: %v", helpers.ErrStateObjectTooLarge, key, err)
 		}
+		// A gzip member producing no bytes says the object is not the gzipped
+		// JSON this backend writes, so it is reclassified here into the same
+		// unusable-state class the ceiling above lands in: a state object
+		// nobody can read back, whose remedy is discarding it. It is done at
+		// this producer rather than by adding helpers.ErrEmptyGzipMember to an
+		// exitcode predicate, because that sentinel's other readers - the
+		// download shape probe and the per-collection install aggregation -
+		// already classify correctly without one and would be dragged along
+		// (see the sentinel's own doc comment). The cause keeps its %w, unlike
+		// the ceiling above: helpers.ErrEmptyGzipMember belongs to no
+		// predicate, so leaving it reachable adds no second exit class to the
+		// tree and keeps the message's own cause matchable.
+		if errors.Is(err, helpers.ErrEmptyGzipMember) {
+			return nil, fmt.Errorf("%w: state object %s: %w", helpers.ErrCorruptStateObject, key, err)
+		}
 		return nil, err
 	}
 	return data, nil
@@ -426,7 +442,35 @@ func (b *Backend) readObject(ctx context.Context, key string) ([]byte, error) {
 // helpers.ErrResponseTooLarge. Gzip detection mirrors readObject's own
 // pre-cap logic (isGzip/isGzipStream), so the caps are layered on top of the
 // existing decision of whether to gunzip rather than changing it.
-func readAllCapped(body io.Reader, header http.Header, key string, compressedCap, decompressedCap int64) ([]byte, error) {
+//
+// It inflates through internal/gzipstream, the same seam the collection
+// artifact readers use, and this is the reader that made the shared seam worth
+// having: the state object is fetched with the distributed lock already held,
+// so a member-flood object crashing this read holds up every runner sharing
+// the bucket for a full lockTTL rather than failing one install. The
+// compressed cap is no defense against that shape, since it sits at 256 MiB
+// and the flood measured on go1.26.6, darwin/arm64 (Apple M3 Pro) needed only
+// 64 MB - see internal/gzipstream's own package comment.
+//
+// This package imports pgzip under its own name, and reaches only its writer
+// (SaveStore compressing the snapshot it is about to upload). The name is a
+// rule rather than a preference: an alias - `gzip "github.com/klauspost/pgzip"`
+// being the natural one - makes a pgzip reader on this seam read like the
+// standard library's, which is how the reader below stayed unnoticed through a
+// review that found every other one. internal/gzipstream's gate resolves the
+// import path rather than the identifier so that no alias can hide the next
+// one, and the plain name is what a human reading this file needs.
+//
+// ctx bounds the inflate on the compressed side. It is the caller's own
+// context rather than a budget of this function's making, so a state-object
+// read stays governed by helpers.StateObjectDeadline exactly as before.
+func readAllCapped(
+	ctx context.Context,
+	body io.Reader,
+	header http.Header,
+	key string,
+	compressedCap, decompressedCap int64,
+) ([]byte, error) {
 	limited := helpers.NewSizeLimitedReader(body, compressedCap)
 	shouldGzip := isGzip(header) || strings.HasSuffix(key, ".gz")
 	if !shouldGzip {
@@ -434,7 +478,7 @@ func readAllCapped(body io.Reader, header http.Header, key string, compressedCap
 	}
 	buffered := bufio.NewReader(limited)
 	if isGzipStream(buffered) {
-		gz, err := gzip.NewReader(buffered)
+		gz, err := gzipstream.NewReader(ctx, buffered)
 		if err != nil {
 			return nil, err
 		}

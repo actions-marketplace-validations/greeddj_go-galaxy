@@ -3,6 +3,7 @@ package manifest
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -10,7 +11,7 @@ import (
 	"path"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
-	"github.com/klauspost/pgzip"
+	"github.com/greeddj/go-galaxy/internal/gzipstream"
 )
 
 // errScanLimitReached is the verdict readFromTarGzStream's own limitReader
@@ -71,7 +72,13 @@ var errScanLimitReached = errors.New("manifest scan limit reached")
 // It never reports success with no bytes: every path returning a nil error
 // returns a manifest of at least one byte, so a caller cannot mistake "found
 // nothing" for "found an empty manifest".
-func ReadFromTarGz(artifactPath string) ([]byte, error) {
+//
+// ctx bounds the walk on both sides of the decompressor, so a canceled or
+// expired read stops at the next read of either kind rather than at the end of
+// the archive. A refusal carrying that cancellation is returned as the
+// cancellation rather than as a verdict on the artifact's shape - see
+// decompressorOpenError.
+func ReadFromTarGz(ctx context.Context, artifactPath string) ([]byte, error) {
 	//nolint:gosec // artifactPath names an artifact this run downloaded or produced.
 	file, err := os.Open(artifactPath)
 	if err != nil {
@@ -81,7 +88,7 @@ func ReadFromTarGz(artifactPath string) ([]byte, error) {
 		_ = file.Close()
 	}()
 
-	data, err := readFromTarGzStream(file)
+	data, err := readFromTarGzStream(ctx, file)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", artifactPath, err)
 	}
@@ -93,14 +100,16 @@ func ReadFromTarGz(artifactPath string) ([]byte, error) {
 // open so that the file handle's lifetime and the walk stay separate concerns,
 // and it does not close r.
 //
-// It reads with the decompressor the extractor uses rather than a second notion
-// of "gzip", so an artifact this walk accepts is one the extractor would also
-// have opened - the argument archive.ProbeTarGz makes for the same
-// decompressor, though that probe sizes its own smaller.
-func readFromTarGzStream(r io.Reader) ([]byte, error) {
-	uncompressed, err := pgzip.NewReader(r)
+// It reads through internal/gzipstream, the one seam this module opens a gzip
+// reader over foreign bytes through, rather than a second notion of "gzip" - so
+// an artifact this walk accepts is one the extractor would also have opened,
+// and the member rule that seam enforces (helpers.ErrEmptyGzipMember) bounds
+// this pass exactly as it bounds an unpack. archive.ProbeTarGz makes the same
+// argument for the same seam, sized smaller.
+func readFromTarGzStream(ctx context.Context, r io.Reader) ([]byte, error) {
+	uncompressed, err := gzipstream.NewReader(ctx, r)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", helpers.ErrArtifactNotTarGz, err)
+		return nil, decompressorOpenError(err)
 	}
 	defer func() {
 		_ = uncompressed.Close()
@@ -175,6 +184,38 @@ func readManifestBody(r io.Reader, size int64) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// decompressorOpenError names a decompressor that refused to open over an
+// artifact as the shape verdict it is - except when what refused it is the
+// caller's own cancellation, which is returned unchanged.
+//
+// The exception exists because the context now reaches the decompressor:
+// gzipstream observes ctx on the compressed side, so a canceled or expired
+// pass fails its constructor with ctx.Err() rather than with anything about
+// gzip. The exit class is right either way, since cmd/go-galaxy/exitcode
+// checks cancellation ahead of every other class, but the message would tell
+// an operator who pressed Ctrl-C that the artifact is not a tar.gz. Only the
+// two context values are excepted, so every genuine refusal this function is
+// reached with - an error page, an uncompressed tar - still carries the
+// sentinel. Both readers in this package share it, since both open the same
+// kind of stream over the same kind of bytes.
+//
+// A gzip member producing no bytes is not among them, and cannot be: opening a
+// stream parses its first member's gzip HEADER, which such a member has, so
+// the constructor succeeds and helpers.ErrEmptyGzipMember arrives from the
+// walk instead. Measured through ReadFromTarGz over a single twenty-byte empty
+// member, the verdict is walkError's - "failed to read the artifact's tar
+// stream: gzip stream carries a member that produces no bytes", with
+// errors.Is against helpers.ErrArtifactNotTarGz reporting false.
+// archive.notTarGzError states that same shape as covered rather than absent,
+// and is right to: ProbeTarGz routes its walk through that function as well as
+// its open, where this package routes only the open.
+func decompressorOpenError(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", helpers.ErrArtifactNotTarGz, err)
+}
+
 // walkError renders one failure from the tar walk: the scan bound reported as
 // the not-found verdict it means, anything else as itself.
 //
@@ -202,9 +243,11 @@ func walkError(err error) error {
 // decompressed-stream cap the extractor reports. One reader, a verdict per
 // caller, and no caller has to know another's.
 //
-// It wraps the decompressed side rather than the compressed source for the same
-// reason archive.decompressedLimitReader does: that is where the work being
-// stopped happens, and pgzip reads ahead on its own goroutines regardless.
+// It counts on the decompressed side rather than on the compressed source for
+// the same reason archive.decompressedLimitReader does: gzip input places no
+// bound at all on the tar stream it yields. Cancellation is a different
+// question and is watched on both sides - see internal/gzipstream for the one
+// this reader cannot see, a member spending wire bytes without producing any.
 type limitReader struct {
 	r    io.Reader
 	err  error

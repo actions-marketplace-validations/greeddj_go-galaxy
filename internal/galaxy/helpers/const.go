@@ -147,8 +147,10 @@ const (
 	// returning one, so "one Next call" bounds nothing by itself and the chain
 	// ahead of the first ordinary header is as long as the archive cares to
 	// make it. Work beneath archive/tar is a different question this counter
-	// answers nothing about - archive.ProbeTarGz's own doc comment names the
-	// decompressor shape this cap neither addresses nor bounds.
+	// answers nothing about, and it is answered elsewhere rather than left
+	// open: a gzip member producing no bytes at all reaches this counter with
+	// nothing to count, so internal/gzipstream refuses it at the member
+	// (ErrEmptyGzipMember) before this cap could apply.
 	//
 	// It counts bytes taken OUT of the decompressor, the same side
 	// ArchiveMaxDecompressedSize and ManifestScanMaxBytes are enforced on and
@@ -901,10 +903,10 @@ func FetchRetryPolicy() RetryPolicy {
 // enumerated: the list is not closed, since under --no-cache this pool takes
 // the artifact-download path itself, shape probe included, with no prefetcher
 // ahead of it. What the budget needs is the bound, and that is the largest
-// single reader, the unpack's: pgzip.NewReader eagerly fills a pool of
-// defaultBlocks (4) buffers of defaultBlockSize (1 MiB) before it reads a
-// byte, so a worker reserves 4 MiB for as long as a unit is running, and
-// 64 MiB / 4 MiB is 16 workers.
+// single reader, the unpack's: gzipstream.NewReader takes pgzip's own
+// defaults, and pgzip eagerly fills a pool of defaultBlocks (4) buffers of
+// defaultBlockSize (1 MiB) before it reads a byte, so a worker reserves 4 MiB
+// for as long as a unit is running, and 64 MiB / 4 MiB is 16 workers.
 //
 // The artifact-download pool holds a decompressor too, so this budget is not
 // the program's whole claim on one - but that one is sized for a shape probe

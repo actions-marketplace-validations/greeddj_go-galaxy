@@ -195,6 +195,24 @@ const (
 
 	// lockTTL is the lifetime a lock holder is granted before another
 	// acquirer is allowed to consider it dead and reclaim it.
+	//
+	// It is also the whole of what stands between a holder that dies without
+	// running its release and every other runner sharing the bucket. A Go
+	// fatal error - a stack overflow, an out-of-memory kill, a runtime
+	// throw - runs no deferred function, so releaseLock never executes and the
+	// lock object survives here until this deadline passes. The honest cost is
+	// larger than the wait itself while more than lockWaitCeiling of that
+	// deadline is left: a runner arriving then spends its whole wait contending
+	// and exits ExitCacheBusy without ever reaching the work, where one arriving
+	// later waits out what remains and proceeds. So one dead holder can cost
+	// another runner five minutes and a red build before the cache is usable
+	// again.
+	// Shortening this deadline is not the remedy - it would let a live but
+	// slow holder be reclaimed, which is the failure this value exists to
+	// prevent - so the remedy is upstream, in not dying: internal/gzipstream
+	// closes one such death that was measured, a gzip member flood exhausting
+	// the goroutine stack, and any other fatal-error path costs the bucket
+	// exactly this same wait.
 	lockTTL = 10 * time.Minute
 	// heartbeatInterval is how often a live holder refreshes the lock
 	// object's deadline in the background.

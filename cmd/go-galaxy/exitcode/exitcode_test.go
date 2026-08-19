@@ -293,6 +293,19 @@ var fromErrorCases = []exitCase{
 		wantCode: ExitCacheCorrupt,
 	},
 	{
+		// The production shape internal/cache/s3's readObject builds, cause
+		// and all, so the classification is asserted against the tree a run
+		// produces rather than the headline alone. The wrap decides the code
+		// - without it the tree falls through every class to ExitError - and
+		// the cause beside it is not decoration: it pins that
+		// helpers.ErrEmptyGzipMember joins no predicate checked above this
+		// class, since one that ever claimed it would flip this row's code.
+		name: "state object that will not inflate",
+		err: fmt.Errorf("%w: state object %s: %w",
+			helpers.ErrCorruptStateObject, "state/store.json.gz", helpers.ErrEmptyGzipMember),
+		wantCode: ExitCacheCorrupt,
+	},
+	{
 		// A newer-than-supported schema version describes this reader, not
 		// damaged bytes: see ExitCacheCorrupt's own doc comment for why this
 		// is ExitUsage rather than ExitCacheCorrupt.
@@ -554,7 +567,7 @@ func TestIntegritySentinelsMapToExitIntegrity(t *testing.T) {
 // moving the isIntegrityError entry of exitClasses below the isLockError
 // and isInstallError entries, which makes isInstallError claim the headline
 // first; verified, that mutation makes this test fail with:
-// "exitcode_test.go:564: FromError(integrity join) = 5, want 7".
+// "exitcode_test.go:577: FromError(integrity join) = 5, want 7".
 func TestIntegrityOutranksInstallFailureHeadline(t *testing.T) {
 	t.Parallel()
 	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
@@ -914,7 +927,7 @@ func TestStateObjectDeadlineClassification(t *testing.T) {
 // KILLING MUTATION, run and reverted: moving the isCacheBusyError entry of
 // exitClasses above its isInstallError entry makes this test fail with:
 //
-//	exitcode_test.go:923: FromError(joined) = 8, want 5
+//	exitcode_test.go:936: FromError(joined) = 8, want 5
 func TestCacheBusyFoldedBehindInstallFailureClassifiesAsInstall(t *testing.T) {
 	t.Parallel()
 	headline := fmt.Errorf("%w for 1 collections", helpers.ErrInstallationFailed)
@@ -1180,7 +1193,7 @@ func serverSuppliedURLPolicyCases() []serverSuppliedURLPolicyCase {
 // the two behind the install-failure headline stay green because isInstallError
 // claims that headline anyway:
 //
-//	exitcode_test.go:1194: FromError(collection download url must not contain
+//	exitcode_test.go:1207: FromError(collection download url must not contain
 //	userinfo: "https://h/a.tar.gz") = 1, want ExitInstall (5)
 //
 // and, on the outdated-shaped rows, the same assertion reporting = 4.
@@ -1234,8 +1247,8 @@ var wantExitClassOrder = []int{
 // KILLING MUTATION, run and reverted: swapping the isCacheBusyError and
 // isCacheCorruptError entries of exitClasses makes this test fail with:
 //
-//	exitcode_test.go:1246: exitClasses[7].code = 9, want 8
-//	exitcode_test.go:1246: exitClasses[8].code = 8, want 9
+//	exitcode_test.go:1259: exitClasses[7].code = 9, want 8
+//	exitcode_test.go:1259: exitClasses[8].code = 8, want 9
 func TestExitClassOrderIsPinned(t *testing.T) {
 	t.Parallel()
 	if len(exitClasses) != len(wantExitClassOrder) {
@@ -1372,7 +1385,7 @@ var adjacentExitPrecedenceCases = []exitPrecedenceCase{
 // isCacheCorruptError entries of exitClasses makes the "cache busy over cache
 // corrupt" row fail with:
 //
-//	exitcode_test.go:1383: FromError(joined) = 9, want 8
+//	exitcode_test.go:1396: FromError(joined) = 9, want 8
 func TestAdjacentExitClassPrecedence(t *testing.T) {
 	t.Parallel()
 	for _, tt := range adjacentExitPrecedenceCases {
@@ -1626,8 +1639,8 @@ var signatureExitCases = []exitCase{
 // KILLING MUTATION, run and reverted: moving the isSignatureError entry of
 // exitClasses below its isInstallError entry. Both aggregated rows fail:
 //
-//	exitcode_test.go:1637: FromError(signature verification failed, aggregated) = 5, want 10
-//	exitcode_test.go:1637: FromError(signature attribution mismatch, aggregated) = 5, want 10
+//	exitcode_test.go:1650: FromError(signature verification failed, aggregated) = 5, want 10
+//	exitcode_test.go:1650: FromError(signature attribution mismatch, aggregated) = 5, want 10
 func TestSignatureExitClassification(t *testing.T) {
 	t.Parallel()
 	for _, tt := range signatureExitCases {
@@ -1655,8 +1668,8 @@ func TestSignatureExitClassification(t *testing.T) {
 // KILLING MUTATION, run: deleting the helpers.ErrMetadataRequestBuildFailed
 // line from isMetadataFetchError. Both assertions fail:
 //
-//	exitcode_test.go:1664: FromError(bare) = 1, want 4
-//	exitcode_test.go:1668: FromError(wrapped) = 1, want 4
+//	exitcode_test.go:1677: FromError(bare) = 1, want 4
+//	exitcode_test.go:1681: FromError(wrapped) = 1, want 4
 func TestMetadataRequestBuildFailedClassifiesNetwork(t *testing.T) {
 	t.Parallel()
 

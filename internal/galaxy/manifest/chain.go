@@ -15,7 +15,7 @@ import (
 	"strings"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
-	"github.com/klauspost/pgzip"
+	"github.com/greeddj/go-galaxy/internal/gzipstream"
 )
 
 const (
@@ -128,8 +128,9 @@ const (
 // can point only at attested content or at nothing, and the rule that would
 // close it would refuse that legitimate collection.
 //
-// ctx is checked on every read taken out of the decompressor, so a canceled
-// check stops at the next read rather than at the end of the archive.
+// ctx is checked on every read taken out of the decompressor and on every read
+// taken off the compressed source, so a canceled check stops at the next read
+// of either kind rather than at the end of the archive.
 //
 // Every value it touches is local, one file is opened read-only, and nothing
 // anywhere is written, so it is safe to call concurrently. That is a claim
@@ -175,9 +176,9 @@ func verifyChainStream(ctx context.Context, r io.Reader, manifestJSON []byte, ma
 		return err
 	}
 
-	uncompressed, err := pgzip.NewReader(r)
+	uncompressed, err := gzipstream.NewReader(ctx, r)
 	if err != nil {
-		return fmt.Errorf("%w: %w", helpers.ErrArtifactNotTarGz, err)
+		return decompressorOpenError(err)
 	}
 	defer func() {
 		_ = uncompressed.Close()

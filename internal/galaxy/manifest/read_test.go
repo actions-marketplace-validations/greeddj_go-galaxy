@@ -168,7 +168,7 @@ func TestReadFromTarGzFindsFirstEntry(t *testing.T) {
 		[]testEntry{{name: helpers.ManifestFileName, content: []byte(testManifest)}},
 		nonManifestEntries()...))
 
-	got, err := ReadFromTarGz(artifact)
+	got, err := ReadFromTarGz(t.Context(), artifact)
 	if err != nil {
 		t.Fatalf("ReadFromTarGz(manifest first) error = %v, want the manifest", err)
 	}
@@ -184,7 +184,7 @@ func TestReadFromTarGzFindsLateEntry(t *testing.T) {
 		testEntry{name: helpers.ManifestFileName, content: []byte(testManifest)},
 		testEntry{name: "FILES.json", content: []byte(`{"files":[]}`)}))
 
-	got, err := ReadFromTarGz(artifact)
+	got, err := ReadFromTarGz(t.Context(), artifact)
 	if err != nil {
 		t.Fatalf("ReadFromTarGz(manifest fourth) error = %v, want the manifest", err)
 	}
@@ -201,13 +201,13 @@ func TestReadFromTarGzRejectsMissingManifest(t *testing.T) {
 	// manifest rather than the fixture being unreadable to begin with.
 	control := writeArtifact(t, append(nonManifestEntries(),
 		testEntry{name: helpers.ManifestFileName, content: []byte(testManifest)}))
-	got, err := ReadFromTarGz(control)
+	got, err := ReadFromTarGz(t.Context(), control)
 	if err != nil || string(got) != testManifest {
 		t.Fatalf("ReadFromTarGz(control with a manifest) = %q, %v, want the manifest and no error", got, err)
 	}
 
 	artifact := writeArtifact(t, nonManifestEntries())
-	if _, err := ReadFromTarGz(artifact); !errors.Is(err, helpers.ErrManifestNotFound) {
+	if _, err := ReadFromTarGz(t.Context(), artifact); !errors.Is(err, helpers.ErrManifestNotFound) {
 		t.Fatalf("ReadFromTarGz(no manifest) error = %v, want the not-found sentinel", err)
 	}
 }
@@ -230,13 +230,13 @@ func TestReadFromTarGzRejectsNestedManifest(t *testing.T) {
 		nested,
 		{name: helpers.ManifestFileName, content: []byte(testManifest)},
 	})
-	got, err := ReadFromTarGz(control)
+	got, err := ReadFromTarGz(t.Context(), control)
 	if err != nil || string(got) != testManifest {
 		t.Fatalf("ReadFromTarGz(nested entry ahead of the real one) = %q, want the top-level manifest (err: %v)", got, err)
 	}
 
 	artifact := writeArtifact(t, append(nonManifestEntries(), nested))
-	if _, err := ReadFromTarGz(artifact); !errors.Is(err, helpers.ErrManifestNotFound) {
+	if _, err := ReadFromTarGz(t.Context(), artifact); !errors.Is(err, helpers.ErrManifestNotFound) {
 		t.Fatalf("ReadFromTarGz(nested manifest only) error = %v, want the not-found sentinel", err)
 	}
 }
@@ -255,13 +255,13 @@ func TestReadFromTarGzRejectsOversizeEntry(t *testing.T) {
 	// left out, so the refusal below is the size check answering rather than
 	// the manifest sitting somewhere this walk never looks.
 	control := writeArtifact(t, []testEntry{{name: "small.bin", content: []byte("x")}, manifest})
-	got, err := ReadFromTarGz(control)
+	got, err := ReadFromTarGz(t.Context(), control)
 	if err != nil || string(got) != testManifest {
 		t.Fatalf("ReadFromTarGz(control without the over-declared entry) = %q, %v, want the manifest", got, err)
 	}
 
 	artifact := writeArtifact(t, []testEntry{oversize, manifest})
-	if _, err := ReadFromTarGz(artifact); !errors.Is(err, helpers.ErrArchiveEntryIsTooLarge) {
+	if _, err := ReadFromTarGz(t.Context(), artifact); !errors.Is(err, helpers.ErrArchiveEntryIsTooLarge) {
 		t.Fatalf("ReadFromTarGz(over-declared entry ahead of the manifest) error = %v, want the entry-size sentinel", err)
 	}
 }
@@ -282,14 +282,14 @@ func TestReadFromTarGzRejectsScanOverrun(t *testing.T) {
 	//
 	//	read_test.go:286: ReadFromTarGz(manifest past the scan bound) error = <nil>, want the not-found sentinel
 	beyond := writePaddedArtifact(t, helpers.ManifestScanMaxBytes+(1<<20))
-	if _, err := ReadFromTarGz(beyond); !errors.Is(err, helpers.ErrManifestNotFound) {
+	if _, err := ReadFromTarGz(t.Context(), beyond); !errors.Is(err, helpers.ErrManifestNotFound) {
 		t.Fatalf("ReadFromTarGz(manifest past the scan bound) error = %v, want the not-found sentinel", err)
 	}
 
 	// The control sits just under the same ceiling, so the refusal above is
 	// the bound answering rather than padding this walk cannot read through.
 	within := writePaddedArtifact(t, helpers.ManifestScanMaxBytes-(1<<20))
-	got, err := ReadFromTarGz(within)
+	got, err := ReadFromTarGz(t.Context(), within)
 	if err != nil || string(got) != testManifest {
 		t.Fatalf("ReadFromTarGz(manifest just inside the scan bound) = %q, %v, want the manifest", got, err)
 	}
@@ -302,20 +302,20 @@ func TestReadFromTarGzRejectsNonGzip(t *testing.T) {
 	// all, so the two refusals below are the gzip header answering rather than
 	// anything about how the fixture reached disk.
 	control := writeArtifact(t, []testEntry{{name: helpers.ManifestFileName, content: []byte(testManifest)}})
-	got, err := ReadFromTarGz(control)
+	got, err := ReadFromTarGz(t.Context(), control)
 	if err != nil || string(got) != testManifest {
 		t.Fatalf("ReadFromTarGz(control gzipped artifact) = %q, %v, want the manifest", got, err)
 	}
 
 	text := writeFile(t, "error-page.html", []byte("<html><body>404 Not Found</body></html>"))
-	if _, err := ReadFromTarGz(text); !errors.Is(err, helpers.ErrArtifactNotTarGz) {
+	if _, err := ReadFromTarGz(t.Context(), text); !errors.Is(err, helpers.ErrArtifactNotTarGz) {
 		t.Fatalf("ReadFromTarGz(an error page) error = %v, want the shape sentinel", err)
 	}
 
 	// A bare tar, never compressed: a well-formed archive of the right inner
 	// shape that is still not what this function reads.
 	bare := writeFile(t, "bare.tar", tarStream(t, []testEntry{{name: helpers.ManifestFileName, content: []byte(testManifest)}}))
-	if _, err := ReadFromTarGz(bare); !errors.Is(err, helpers.ErrArtifactNotTarGz) {
+	if _, err := ReadFromTarGz(t.Context(), bare); !errors.Is(err, helpers.ErrArtifactNotTarGz) {
 		t.Fatalf("ReadFromTarGz(an uncompressed tar) error = %v, want the shape sentinel", err)
 	}
 }
@@ -328,7 +328,7 @@ func TestReadFromTarGzRejectsEmptyManifest(t *testing.T) {
 	// only its length separates it from the refusal below.
 	control := writeArtifact(t, append(nonManifestEntries(),
 		testEntry{name: helpers.ManifestFileName, content: []byte("{")}))
-	got, err := ReadFromTarGz(control)
+	got, err := ReadFromTarGz(t.Context(), control)
 	if err != nil || string(got) != "{" {
 		t.Fatalf("ReadFromTarGz(one-byte manifest) = %q, %v, want that one byte", got, err)
 	}
@@ -345,7 +345,7 @@ func TestReadFromTarGzRejectsEmptyManifest(t *testing.T) {
 	//	read_test.go:349: ReadFromTarGz(zero-length manifest) error = <nil>, want the not-found sentinel
 	artifact := writeArtifact(t, append(nonManifestEntries(),
 		testEntry{name: helpers.ManifestFileName}))
-	if _, err := ReadFromTarGz(artifact); !errors.Is(err, helpers.ErrManifestNotFound) {
+	if _, err := ReadFromTarGz(t.Context(), artifact); !errors.Is(err, helpers.ErrManifestNotFound) {
 		t.Fatalf("ReadFromTarGz(zero-length manifest) error = %v, want the not-found sentinel", err)
 	}
 }
@@ -364,7 +364,7 @@ func TestReadFromTarGzNeverReportsAnEmptyManifest(t *testing.T) {
 	padded := writeArtifact(t, []testEntry{
 		{name: helpers.ManifestFileName, content: body, declaredSize: declared},
 	})
-	got, err := ReadFromTarGz(padded)
+	got, err := ReadFromTarGz(t.Context(), padded)
 	if err != nil || len(got) != declared {
 		t.Fatalf("ReadFromTarGz(header over a short body) = %d bytes, %v, want %d bytes and no error", len(got), err, declared)
 	}
@@ -392,7 +392,7 @@ func TestReadFromTarGzNeverReportsAnEmptyManifest(t *testing.T) {
 	}
 
 	truncated := writeFile(t, "truncated.tar.gz", compressed.Bytes())
-	got, err = ReadFromTarGz(truncated)
+	got, err = ReadFromTarGz(t.Context(), truncated)
 	if err == nil || len(got) != 0 {
 		t.Fatalf("ReadFromTarGz(stream ending inside the manifest) = %d bytes, %v, want no bytes and an error", len(got), err)
 	}
@@ -406,12 +406,12 @@ func TestReadFromTarGzRefusesAnArtifactItCannotOpen(t *testing.T) {
 	// be - evicted from the cache, or never written. The control is the same
 	// fixture at the path it really sits on.
 	artifact := writeArtifact(t, []testEntry{{name: helpers.ManifestFileName, content: []byte(testManifest)}})
-	got, err := ReadFromTarGz(artifact)
+	got, err := ReadFromTarGz(t.Context(), artifact)
 	if err != nil || string(got) != testManifest {
 		t.Fatalf("ReadFromTarGz(the fixture where it sits) = %q, %v, want the manifest", got, err)
 	}
 
-	if _, err := ReadFromTarGz(artifact + ".absent"); !errors.Is(err, os.ErrNotExist) {
+	if _, err := ReadFromTarGz(t.Context(), artifact+".absent"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("ReadFromTarGz(a path carrying no artifact) error = %v, want a missing-file error", err)
 	}
 }
@@ -605,5 +605,56 @@ func artifactStream(tb testing.TB, entries []testEntry) ([]byte, error) {
 	if err != nil {
 		tb.Fatalf("failed to read the fixture back: %v", err)
 	}
-	return readFromTarGzStream(bytes.NewReader(raw))
+	return readFromTarGzStream(tb.Context(), bytes.NewReader(raw))
+}
+
+// TestReadFromTarGzRefusesAGzipMemberProducingNoBytes pins the one refusal
+// decompressorOpenError names as arriving from somewhere else: a member whose
+// gzip HEADER is well-formed, so the decompressor opens over it and the
+// verdict comes from the walk behind it instead of from the open.
+//
+// The positive control is TestReadFromTarGzRejectsNonGzip's, which reads a
+// well-formed artifact back through this same ReadFromTarGz path out of a file
+// the same writeFile builder wrote. This fixture differs from it in what the
+// member carries and in nothing else.
+func TestReadFromTarGzRefusesAGzipMemberProducingNoBytes(t *testing.T) {
+	t.Parallel()
+
+	// Twenty bytes that are a whole gzip member: the ten-byte header, one
+	// fixed-Huffman final block carrying nothing, and an eight-byte trailer
+	// over zero bytes. Hand-spelled rather than produced by a writer, which
+	// pays 23 bytes for the same nothing - twenty is what one member of a
+	// flood costs its author on the wire.
+	member := make([]byte, 0, 20)
+	member = append(member, "\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff"...)
+	member = append(member, 0x03, 0x00)
+	member = append(member, 0, 0, 0, 0, 0, 0, 0, 0)
+
+	_, err := ReadFromTarGz(t.Context(), writeFile(t, "empty.tar.gz", member))
+
+	// Dropping the member rule - `if r.n == 0` in gzipstream.Reader.Read
+	// becoming `if false && r.n == 0`, applied through go test -overlay so no
+	// production file is edited - lets the Reset behind it run the stream out,
+	// leaving the walk to report an artifact that carried nothing:
+	//
+	//	read_test.go:646: ReadFromTarGz(an empty gzip member) error = .../empty.tar.gz: collection
+	//	artifact contains no MANIFEST.json: the tar stream ended after 0 bytes, want the empty-member sentinel
+	//
+	// Both quotes here carry the test's own temp directory elided to .../ and
+	// are wrapped, since neither fits this file's line width whole.
+	if !errors.Is(err, helpers.ErrEmptyGzipMember) {
+		t.Fatalf("ReadFromTarGz(an empty gzip member) error = %v, want the empty-member sentinel", err)
+	}
+
+	// And that verdict is the walk's rather than the open's, which is the whole
+	// of what this fixture separates. Rendering it as the open's - walkError
+	// replaced by decompressorOpenError at readFromTarGzStream's own
+	// tarReader.Next error arm, applied through an overlay too - leaves the
+	// sentinel above readable and puts the shape one on it as well:
+	//
+	//	read_test.go:658: ReadFromTarGz(an empty gzip member) error = .../empty.tar.gz: downloaded
+	//	artifact is not a gzip-compressed tar archive: gzip stream carries a member that produces no bytes, want no shape sentinel
+	if errors.Is(err, helpers.ErrArtifactNotTarGz) {
+		t.Fatalf("ReadFromTarGz(an empty gzip member) error = %v, want no shape sentinel", err)
+	}
 }

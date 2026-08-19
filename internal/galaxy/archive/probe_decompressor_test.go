@@ -33,20 +33,28 @@ func findFuncDecl(file *ast.File, name string) *ast.FuncDecl {
 	return nil
 }
 
-// pgzipCall is one pgzip call site: the constructor name, and how each
-// argument after the reader is spelled in the source.
-type pgzipCall struct {
+// gzipstreamSizingArgOffset is how many leading arguments every gzipstream
+// constructor takes before its sizing ones: the context, then the reader.
+const gzipstreamSizingArgOffset = 2
+
+// decompressorCall is one internal/gzipstream call site: the constructor
+// name, and how each sizing argument is spelled in the source.
+type decompressorCall struct {
 	name string
 	args []string
 }
 
-// pgzipCalls returns, in source order, every pgzip selector fn calls -
-// NewReader, NewReaderN, or anything a future edit reaches for - so an
+// decompressorCalls returns, in source order, every gzipstream selector fn
+// calls - NewReader, NewReaderN, or anything a future edit reaches for - so an
 // assertion can name both what it found and what it wanted. Each call carries
 // its own sizing arguments alongside its name, since the name on its own says
 // nothing about the budget the call was handed.
-func pgzipCalls(fn *ast.FuncDecl) []pgzipCall {
-	var found []pgzipCall
+//
+// The package audited is gzipstream rather than pgzip because that is the one
+// this file's own package may open a gzip reader through; internal/gzipstream
+// carries the gate that keeps pgzip's own constructors to itself.
+func decompressorCalls(fn *ast.FuncDecl) []decompressorCall {
+	var found []decompressorCall
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		call, isCall := n.(*ast.CallExpr)
 		if !isCall {
@@ -57,17 +65,17 @@ func pgzipCalls(fn *ast.FuncDecl) []pgzipCall {
 			return true
 		}
 		pkg, isIdent := sel.X.(*ast.Ident)
-		if !isIdent || pkg.Name != "pgzip" {
+		if !isIdent || pkg.Name != "gzipstream" {
 			return true
 		}
 		var args []string
 		for i, arg := range call.Args {
-			if i == 0 {
-				continue // the reader, not a sizing argument
+			if i < gzipstreamSizingArgOffset {
+				continue // the context and the reader, not sizing arguments
 			}
 			args = append(args, argSpelling(arg))
 		}
-		found = append(found, pgzipCall{name: sel.Sel.Name, args: args})
+		found = append(found, decompressorCall{name: sel.Sel.Name, args: args})
 		return true
 	})
 	return found
@@ -90,11 +98,11 @@ func argSpelling(expr ast.Expr) string {
 }
 
 // TestProbeTarGzUsesTheProbeSizedDecompressor parses this package's own
-// archive.go and asserts that ProbeTarGz reaches pgzip through NewReaderN,
-// through nothing else, and with both sizing arguments spelled as the
-// constants TestProbeGzipSizingStaysWithinItsBudget bounds. A ProbeTarGz this
-// gate cannot find is a failure rather than a silent pass, since a rename
-// would otherwise leave it auditing an empty set.
+// archive.go and asserts that ProbeTarGz reaches its decompressor through
+// gzipstream.NewReaderN, through nothing else, and with both sizing arguments
+// spelled as the constants TestProbeGzipSizingStaysWithinItsBudget bounds. A
+// ProbeTarGz this gate cannot find is a failure rather than a silent pass,
+// since a rename would otherwise leave it auditing an empty set.
 //
 // The constructor and the arguments are two assertions rather than one because
 // NewReaderN handed an inline 1 << 20 and 4 is the extractor's own 4 MiB
@@ -118,15 +126,15 @@ func argSpelling(expr ast.Expr) string {
 // arithmetic, so pinning it would freeze an accident into a contract.
 //
 // Killing mutations, both run. Reverting the constructor to
-// pgzip.NewReader(file) fails this test with
+// gzipstream.NewReader(ctx, file) fails this test with
 //
-//	probe_decompressor_test.go:149: ProbeTarGz builds its decompressor with [NewReader], want exactly [NewReaderN]
+//	probe_decompressor_test.go:157: ProbeTarGz builds its decompressor with [NewReader], want exactly [NewReaderN]
 //
 // and restoring the old reservation through the new constructor, as
-// pgzip.NewReaderN(file, 1<<20, 4), passes that first assertion and fails the
-// second with
+// gzipstream.NewReaderN(ctx, file, 1<<20, 4), passes that first assertion and
+// fails the second with
 //
-//	probe_decompressor_test.go:152: ProbeTarGz sizes its decompressor with [expression 4], want [probeGzipBlockSize probeGzipBlocks]
+//	probe_decompressor_test.go:160: ProbeTarGz sizes its decompressor with [expression 4], want [probeGzipBlockSize probeGzipBlocks]
 func TestProbeTarGzUsesTheProbeSizedDecompressor(t *testing.T) {
 	t.Parallel()
 
@@ -140,7 +148,7 @@ func TestProbeTarGzUsesTheProbeSizedDecompressor(t *testing.T) {
 		t.Fatalf("archive.go declares no top-level ProbeTarGz to audit")
 	}
 
-	calls := pgzipCalls(fn)
+	calls := decompressorCalls(fn)
 	names := make([]string, 0, len(calls))
 	for _, call := range calls {
 		names = append(names, call.name)
@@ -168,20 +176,20 @@ func TestProbeTarGzUsesTheProbeSizedDecompressor(t *testing.T) {
 // does not give for free: probeGzipBlockSize = 512 fails the first outright;
 // probeGzipBlocks = 0 satisfies the first and fails the second; and
 // probeGzipBlockSize = 1 << 20 with probeGzipBlocks = 4 - the sizing
-// extractTarGzStream's own pgzip.NewReader takes - satisfies both and fails
-// the third.
+// extractTarGzStream's own gzipstream.NewReader inherits from pgzip's own
+// defaults - satisfies both and fails the third.
 //
 // Killing mutations, all three run. probeGzipBlockSize = 512:
 //
-//	probe_decompressor_test.go:190: probeGzipBlockSize = 512, want above 512: pgzip.NewReaderN coerces anything smaller to 1 MiB
+//	probe_decompressor_test.go:198: probeGzipBlockSize = 512, want above 512: pgzip.NewReaderN coerces anything smaller to 1 MiB
 //
 // probeGzipBlocks = 0:
 //
-//	probe_decompressor_test.go:194: probeGzipBlocks = 0, want at least 1
+//	probe_decompressor_test.go:202: probeGzipBlocks = 0, want at least 1
 //
 // probeGzipBlockSize = 1 << 20 with probeGzipBlocks = 4:
 //
-//	probe_decompressor_test.go:197: the probe reserves 4194304 bytes per reader, want at most 262144
+//	probe_decompressor_test.go:205: the probe reserves 4194304 bytes per reader, want at most 262144
 func TestProbeGzipSizingStaysWithinItsBudget(t *testing.T) {
 	t.Parallel()
 
@@ -228,11 +236,11 @@ func TestProbeGzipSizingStaysWithinItsBudget(t *testing.T) {
 //
 // Killing mutations, both run. helpers.ArchiveProbeMaxBytes = int64(2 << 20):
 //
-//	probe_decompressor_test.go:244: ArchiveProbeMaxBytes = 2097152, want at least 4196352
+//	probe_decompressor_test.go:252: ArchiveProbeMaxBytes = 2097152, want at least 4196352
 //
 // helpers.ArchiveProbeMaxBytes = int64(32 << 20):
 //
-//	probe_decompressor_test.go:247: the probe reads up to 33554432 bytes before refusing, want at most 16777216
+//	probe_decompressor_test.go:255: the probe reads up to 33554432 bytes before refusing, want at most 16777216
 func TestArchiveProbeMaxBytesClearsTheMetaHeaderCeiling(t *testing.T) {
 	t.Parallel()
 

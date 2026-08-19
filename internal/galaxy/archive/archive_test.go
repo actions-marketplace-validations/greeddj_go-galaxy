@@ -1841,7 +1841,7 @@ func TestProbeTarGz(t *testing.T) {
 				}
 			}
 
-			assertProbeOutcome(t, tt, path, ProbeTarGz(path))
+			assertProbeOutcome(t, tt, path, ProbeTarGz(t.Context(), path))
 		})
 	}
 }
@@ -1913,14 +1913,26 @@ func multiEntryArchive(t *testing.T) []byte {
 // marker is written only after a successful unpack, and in the extracted store
 // the temp tree is removed on this very error before anything is promoted.
 //
-// TestExtractTarGzStreamExtractsFullyWithoutCancellation is the positive
-// control on the same archive: without it, "fewer files than entries" could
-// just as well mean the fixture never extracted anything.
+// It asserts on the error and on the tree being short of the archive, and no
+// longer that anything at all was written. Cancellation is observed on the
+// compressed side too now (internal/gzipstream), and canceling this early
+// lands before pgzip has filled its first block, so nothing has reached the
+// tar walk yet and an empty destination is the correct outcome rather than the
+// broken fixture the guard this test used to carry would have called it.
 //
-// Killing mutation, run: handing the tar reader the limit reader directly
-// instead of wrapping it in a contextReader fails this test with
-// `ExtractTarGzStream under a canceled context = <nil>, want errors.Is
-// context.Canceled` - the unpack runs to completion and reports success.
+// TestExtractTarGzStreamExtractsFullyWithoutCancellation is the positive
+// control on the same archive: without it, "the tree is short" could just as
+// well mean the fixture never extracts anything under any circumstances.
+//
+// What it does NOT pin is which of the two readers stopped the unpack, and
+// deliberately: either one satisfies the claim above, and
+// TestExtractTarGzStreamStopsOnTheDecompressedSideAlone below is what pins the
+// decompressed-side one on its own. Killing mutation, run: deleting BOTH
+// checks - handing the tar reader the limit reader directly and dropping
+// gzipstream's own contextReader from the source it hands pgzip - fails this
+// test with
+//
+//	archive_test.go:1951: ExtractTarGzStream under a canceled context = <nil>, want errors.Is context.Canceled
 func TestExtractTarGzStreamHonorsCancellation(t *testing.T) {
 	t.Parallel()
 
@@ -1942,11 +1954,62 @@ func TestExtractTarGzStreamHonorsCancellation(t *testing.T) {
 	if readErr != nil {
 		t.Fatalf("os.ReadDir(%q): %v", dst, readErr)
 	}
-	if len(written) == 0 {
-		t.Fatalf("extraction wrote nothing, so it stopped before starting and the assertion below proves nothing")
-	}
 	if len(written) >= 32 {
 		t.Fatalf("extraction wrote %d entries despite cancellation, want fewer than the archive's 32", len(written))
+	}
+}
+
+// cancelOnSourceDrained cancels ctx on the read that hands back the archive's
+// last byte, so the unpack is canceled with the compressed source already
+// exhausted and no later read ever taken off it.
+type cancelOnSourceDrained struct {
+	r      *bytes.Reader
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnSourceDrained) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if c.r.Len() == 0 {
+		c.cancel()
+	}
+	return n, err
+}
+
+// TestExtractTarGzStreamStopsOnTheDecompressedSideAlone pins the extractor's
+// own contextReader, the one wrapping the decompressed stream, by canceling
+// where nothing else can fire: the source's final read. Past that point the
+// compressed side is never asked for another byte - the member's own trailer
+// is already inside pgzip's buffer, and the walk ends at the tar trailer
+// without ever reaching the member boundary where gzipstream would take its
+// next read - so the only check left that can stop this unpack is the one this
+// test exists for.
+//
+// The ordering is a property of the fixture rather than a race. pgzip fills a
+// whole block before delivering it, and its default block is 1 MiB against
+// this archive's ~145 KiB of decompressed stream, so the readahead goroutine
+// has to consume the entire compressed source before the tar walk receives its
+// first byte - which means the cancellation above has always fired by then.
+//
+// TestExtractTarGzStreamExtractsFullyWithoutCancellation is this test's
+// positive control too: the same archive, uncanceled, extracts all 32 entries.
+//
+// Killing mutation, run: handing the tar reader the limit reader directly
+// instead of wrapping it in a contextReader fails this test with
+//
+//	archive_test.go:2012: ExtractTarGzStream canceled on the source's final read = <nil>, want errors.Is context.Canceled
+func TestExtractTarGzStreamStopsOnTheDecompressedSideAlone(t *testing.T) {
+	t.Parallel()
+
+	archiveBytes := multiEntryArchive(t)
+	dst := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	src := &cancelOnSourceDrained{r: bytes.NewReader(archiveBytes), cancel: cancel}
+
+	err := ExtractTarGzStream(ctx, src, dst)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ExtractTarGzStream canceled on the source's final read = %v, want errors.Is context.Canceled", err)
 	}
 }
 
@@ -2041,7 +2104,7 @@ func probeArchiveBytes(t *testing.T, archiveBytes []byte) error {
 	if err := os.WriteFile(path, archiveBytes, 0o600); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
-	return ProbeTarGz(path)
+	return ProbeTarGz(t.Context(), path)
 }
 
 // TestProbeTarGzRefusesAnUnboundedMetaHeaderChain drives the probe's scan
@@ -2075,7 +2138,7 @@ func TestProbeTarGzRefusesAnUnboundedMetaHeaderChain(t *testing.T) {
 	// tar.NewReader (deleting only the wrap leaves `limited` unused, which
 	// does not compile). This assertion then fails with
 	//
-	//	archive_test.go:2083: 10240-header chain: ProbeTarGz = <nil>, want artifact presents no tar header within the shape probe's scan bound
+	//	archive_test.go:2146: 10240-header chain: ProbeTarGz = <nil>, want artifact presents no tar header within the shape probe's scan bound
 	//
 	// a bare nil: with the walk uncounted the probe reads the whole chain and
 	// reports the ordinary header waiting behind it.
@@ -2087,7 +2150,7 @@ func TestProbeTarGzRefusesAnUnboundedMetaHeaderChain(t *testing.T) {
 	// wrap below it. The assertion above still passes, the sentinel remaining
 	// reachable underneath that wrap; this one then fails with
 	//
-	//	archive_test.go:2096: 10240-header chain: the refusal also reads as downloaded artifact is not a gzip-compressed tar archive
+	//	archive_test.go:2159: 10240-header chain: the refusal also reads as downloaded artifact is not a gzip-compressed tar archive
 	//
 	// which is the dishonest headline this arm exists to keep off the wire: an
 	// operator told the bytes are not a tar.gz goes looking for an error page
@@ -2152,5 +2215,56 @@ func TestProbeTarGzAcceptsARealPaxPrologue(t *testing.T) {
 
 	if err := probeArchiveBytes(t, buildProbePaxPrologueArchive(t, 1, []byte(record))); err != nil {
 		t.Fatalf("ProbeTarGz over a real PAX prologue = %v, want nil", err)
+	}
+}
+
+// TestProbeTarGzReportsCancellationAsItself pins notTarGzError's one exception:
+// a probe stopped by the caller's own cancellation is reported as that
+// cancellation and not as a verdict on the artifact's shape.
+//
+// It reaches the exception through the constructor arm, which is where a
+// pre-canceled probe fails now that the context reaches the decompressor:
+// gzipstream observes ctx on the compressed side, so the gzip header parse is
+// the first read to see it. The walk arm shares the same function, so covering
+// either covers the rule.
+//
+// The first probe is the positive control, on the very same file: an empty tar
+// is a shape this probe accepts, so a refusal on the second probe is the
+// cancellation rather than the fixture.
+//
+// Killing mutations, both run. Deleting the exception from notTarGzError - so
+// every failure is wrapped as a shape verdict - leaves the first assertion
+// passing, the cancellation staying reachable underneath a %w wrap, and fails
+// the second with
+//
+//	archive_test.go:2268: ProbeTarGz under a canceled context also reads as downloaded artifact is not a gzip-compressed tar archive
+//
+// Deleting the contextReader from gzipstream.NewReaderN alone - NewReader's
+// own left in place, which is what keeps internal/gzipstream itself green -
+// leaves the probe with nothing watching its compressed source, so it reads
+// the whole fixture and fails the first assertion with
+//
+//	archive_test.go:2265: ProbeTarGz under a canceled context = <nil>, want errors.Is context.Canceled
+func TestProbeTarGzReportsCancellationAsItself(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "artifact.tar.gz")
+	if err := os.WriteFile(path, buildTestArchive(t, nil), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	if err := ProbeTarGz(t.Context(), path); err != nil {
+		t.Fatalf("ProbeTarGz over an empty archive = %v, want nil", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := ProbeTarGz(ctx, path)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ProbeTarGz under a canceled context = %v, want errors.Is context.Canceled", err)
+	}
+	if errors.Is(err, helpers.ErrArtifactNotTarGz) {
+		t.Fatalf("ProbeTarGz under a canceled context also reads as %v", helpers.ErrArtifactNotTarGz)
 	}
 }
