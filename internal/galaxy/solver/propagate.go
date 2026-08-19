@@ -127,52 +127,42 @@ func (s *solveState) deriveOnce(term term, causeIdx int, changed map[string]bool
 	changed[term.Package] = true
 }
 
-// resolveAndDerive drives resolveConflict to completion starting from the
-// satisfied incompatibility at idx, deriving the resulting almost-satisfied
-// term's negation into changed.
+// resolveAndDerive runs resolveConflict on the satisfied incompatibility at
+// idx and derives the resulting root cause's almost-satisfied term's
+// negation into changed. Under signed exact terms the root cause a backjump
+// returns is ALMOST_SATISFIED by construction, exactly as the reference
+// algorithm states: the backtrack keeps every assignment at or below the
+// previous satisfier's level, which keeps every non-satisfier term
+// satisfied, while the satisfier's own term is neither satisfied (the
+// satisfier, the first assignment to complete it, is dropped) nor
+// contradicted (a prefix that contradicted it could never have been
+// completed into satisfaction without the accumulation reaching the
+// unsatisfiable P({}), which no derivation or decision can produce - a
+// derivation's negation is only ever folded into an accumulation it was
+// inconclusive against, and a decision is always drawn from the allowed
+// candidates).
 //
-// A single resolveConflict call is not always enough: the incompatibility a
-// backjump returns can come back CONTRADICTED (the backjump undid exactly
-// the assignment(s) that had made it satisfied, which can happen with a
-// per-version-singleton dependency incompatibility or a no-versions leaf)
-// or SATISFIED again. Neither is a bug: they are legitimate intermediate
-// states, and the loop below keeps calling resolveConflict until it lands
-// on ALMOST_SATISFIED (derive the negation) or CONTRADICTED (nothing to
-// derive - the backtrack alone resolved it). Only INCONCLUSIVE, or
-// exceeding the iteration cap, signals a genuine defect.
-//
-// A defect reaching either of those two arms is still presented as a clean
-// resolution failure rather than as a panic or a run that never ends:
-// buildConflictError hands back whatever invariant violation the report walk
-// recorded, and a plain *ConflictError when it recorded none, so the caller
-// sees a run that did not resolve. That is deliberate for the CI consumer
-// this tool serves - a loud refusal costs a pipeline one red run, while a
-// panic or a hang costs it the diagnosis - and either arm ends the run in an
-// error rather than in an install of something the solver never proved.
+// Any other relation therefore signals a defect in this package's own
+// bookkeeping, presented as a clean resolution failure rather than a panic
+// or a hang: buildConflictError hands back whatever invariant violation the
+// report walk recorded, and a plain *ConflictError when it recorded none.
+// That is deliberate for the CI consumer this tool serves - a loud refusal
+// costs a pipeline one red run, while a panic or a hang costs it the
+// diagnosis - and it ends the run in an error rather than in an install of
+// something the solver never proved.
 // TestNonConvergingConflictIsCleanFailure pins that presentation.
 func (s *solveState) resolveAndDerive(idx int, changed map[string]bool) error {
-	for guard := range 10_000 {
-		_ = guard
-		rootIdx, rootCause, err := s.resolveConflict(idx)
-		if err != nil {
-			return err
-		}
-		rel, t := relate(rootCause, s.ps)
-		switch rel {
-		case incAlmostSatisfied:
-			clear(changed)
-			s.deriveOnce(t.Negate(), rootIdx, changed)
-			return nil
-		case incContradicted:
-			clear(changed)
-			return nil
-		case incSatisfied:
-			idx = rootIdx
-		case incInconclusive:
-			return s.buildConflictError(rootCause)
-		}
+	rootIdx, rootCause, err := s.resolveConflict(idx)
+	if err != nil {
+		return err
 	}
-	return s.buildConflictError(s.store.all[idx])
+	rel, t := relate(rootCause, s.ps)
+	if rel != incAlmostSatisfied {
+		return s.buildConflictError(rootCause)
+	}
+	clear(changed)
+	s.deriveOnce(t.Negate(), rootIdx, changed)
+	return nil
 }
 
 // popSmallest removes and returns the lexicographically smallest key from
