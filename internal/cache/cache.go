@@ -12,18 +12,18 @@ import (
 	"github.com/greeddj/go-galaxy/internal/cache/s3"
 	cacheManager "github.com/greeddj/go-galaxy/internal/galaxy/cache"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
+	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 )
 
-var (
-	errConfigNil     = errors.New("config is nil")
-	errHTTPClientNil = errors.New("http client is nil")
-)
+var errHTTPClientNil = errors.New("http client is nil")
 
 // New selects and constructs a cache backend based on configuration.
+// A nil config is reported through helpers.ErrConfigIsNil so the failure
+// classifies into the same exit code as every other nil-config refusal.
 func New(cfg *config.Config, runtime *infra.Infra) (cacheManager.Backend, error) {
 	if cfg == nil {
-		return nil, errConfigNil
+		return nil, helpers.ErrConfigIsNil
 	}
 	if cfg.S3Cache.Enabled {
 		if runtime == nil || runtime.HTTP == nil {
