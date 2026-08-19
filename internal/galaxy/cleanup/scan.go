@@ -61,8 +61,8 @@ import (
 // further down this function. The %q on projectPath here, and on the path
 // in openProjectWorkspace's own wrapped error, additionally escapes \n for
 // those two operands specifically, before Clean ever sees it - the same
-// overlap reportOutdated's doc (outdated.go) already describes for its own
-// rendering. The residual that remains is Clean's own documented one: a
+// overlap reportOutdated's doc (internal/galaxy/collections/outdated.go)
+// already describes for its own rendering. The residual that remains is Clean's own documented one: a
 // *fs.PathError surfacing from the scan carries
 // ansible_collections/<ns>/<name>/MANIFEST.json with ns and name straight
 // off fs.ReadDir, and a \n in either survives Clean, so such a path can
@@ -214,7 +214,7 @@ func scanCollectionDir(
 	byKey map[string][]installedCollection,
 	deps map[string]map[string]string,
 ) error {
-	rel := path.Join("ansible_collections", ns, name, "MANIFEST.json")
+	rel := path.Join("ansible_collections", ns, name, helpers.ManifestFileName)
 	manifestPath := filepath.Join(ws.path, filepath.FromSlash(rel))
 
 	regular, err := manifestIsRegularFile(ws.root, rel)
