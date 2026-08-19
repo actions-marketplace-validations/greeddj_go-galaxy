@@ -92,19 +92,19 @@ func TestConservativeRelationFence(t *testing.T) {
 	}
 }
 
-// TestExtractResultGuardFiresOnIncompleteResolution pins the interim
-// fail-closed behavior of extractResult's completeness guard against a
-// known, separately-tracked solver defect: this exact input currently
-// backtracks from acme.foo@2.0.0 (whose only dependency, acme.bar>=5.0.0,
-// no registered acme.bar version satisfies) to acme.foo@1.0.0, but the
-// final result still carries a Graph edge to acme.bar without acme.bar
-// itself ever landing in Versions - the silent, incomplete resolution the
-// guard exists to catch. Once the underlying defect is fixed, this exact
-// input is expected to resolve cleanly instead (acme.foo@1.0.0 with
-// acme.bar@1.0.0 present in both Versions and Graph); this test should be
-// updated to assert that success at that point, not deleted, since the
-// guard itself must stay exercised by something.
-func TestExtractResultGuardFiresOnIncompleteResolution(t *testing.T) {
+// TestUnsatisfiableDependencyBacktrackResolves pins the backtrack this input
+// forces: acme.foo@2.0.0's only dependency (acme.bar>=5.0.0) is satisfied by
+// no registered acme.bar version, so the solver must learn "not
+// acme.foo@2.0.0", fall back to acme.foo@1.0.0, and resolve its "*"
+// dependency on acme.bar, with acme.bar present in both Versions and Graph.
+// A since-fixed defect once ended this exact input with a Graph edge to
+// acme.bar while acme.bar itself never landed in Versions; while that
+// defect lived, this test pinned extractResult's completeness guard
+// catching it as a loud errSolverBug rather than letting the incomplete
+// resolution under-install a real dependency. With the defect gone, the
+// test asserts the clean resolution; the guard itself stays exercised by
+// TestExtractResultGuardFiresOnConstructedIncompleteResolution.
+func TestUnsatisfiableDependencyBacktrackResolves(t *testing.T) {
 	t.Parallel()
 	p := newFakeProvider().
 		withVersions("acme.foo", "1.0.0", "2.0.0").
