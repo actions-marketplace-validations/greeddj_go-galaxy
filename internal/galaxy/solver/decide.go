@@ -147,41 +147,6 @@ func (s *solveState) countAllowed(pkg string, u *packageUniverse) int {
 	return count
 }
 
-// pickRequiredDependencyTarget is decision making's fallback for when the
-// positive-derivation candidate pool is empty: it returns the lowest-named
-// undecided package that a currently-decided parent depends on. Such a
-// package is required by that decided parent, yet can carry only a negative
-// assignment - a residual left by an earlier, backtracked parent version
-// whose own dependency on it had no matching version makes its later
-// dependency term read as already satisfied rather than deriving a fresh
-// positive requirement. Deciding it here honors the same dependency edges
-// the completeness guard enforces, and the store scan stays off the
-// decision hot path since it runs only once the ordinary candidate pool is
-// exhausted.
-func (s *solveState) pickRequiredDependencyTarget() (string, bool) {
-	best := ""
-	for _, inc := range s.store.all {
-		dep, ok := inc.Cause.(causeDependency)
-		if !ok {
-			continue
-		}
-		if best != "" && dep.Dep >= best {
-			continue
-		}
-		parent := s.ps.packages[dep.Parent]
-		if parent == nil || parent.decisionIdx == -1 ||
-			parent.decisionVersion.Original() != dep.ParentVersion.Original() {
-			continue
-		}
-		child := s.ps.packages[dep.Dep]
-		if child != nil && child.decisionIdx != -1 {
-			continue
-		}
-		best = dep.Dep
-	}
-	return best, best != ""
-}
-
 // decisionOutcome carries makeDecision's early-exit result: a fast-path
 // helper returns a non-nil outcome when the caller should return it as-is,
 // or nil when the caller should fall through to decideFromAllowed instead.
@@ -195,14 +160,17 @@ type decisionOutcome struct {
 // concrete version as cheaply as possible (the exact-pin and highest-probe
 // fast paths avoid ever fetching a universe when they can), and either
 // decide it or report an empty-candidate/unknown-package incompatibility so
-// the next propagation round can act on it.
+// the next propagation round can act on it. An empty candidate pool means
+// the solve is complete: under signed terms a package required by any
+// decided parent always carries a positive accumulation (the dependency
+// term is derivable against negative-only facts, never vacuously settled by
+// them), so every requirement either sits in the pool or is already
+// decided; extractResult's completeness guard stands behind that as the
+// fail-closed assertion.
 func (s *solveState) makeDecision(ctx context.Context) (string, bool, error) {
 	pkg, ok := s.pickPackage()
 	if !ok {
-		pkg, ok = s.pickRequiredDependencyTarget()
-		if !ok {
-			return "", true, nil
-		}
+		return "", true, nil
 	}
 	if out := s.tryFastDecide(ctx, pkg); out != nil {
 		return out.pkg, out.done, out.err
