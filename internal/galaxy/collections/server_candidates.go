@@ -199,11 +199,22 @@ func unpinnedServerCandidates(cfg *config.Config) []serverCandidate {
 	return out
 }
 
-// normalizeServerBase trims whitespace, strips one surrounding quote pair
-// (an ansible.cfg value quirk), and removes a trailing slash - the same
-// normalization apiRootCandidates applies before deriving API root variants.
+// normalizeServerBase trims surrounding whitespace, then strips exactly one
+// surrounding double-quote pair - only when the whitespace-trimmed value both
+// starts and ends with a double quote (an ansible.cfg value quirk) - and
+// finally removes any run of trailing slashes. Whitespace is trimmed before
+// the quotes are inspected, so a value quoted inside surrounding whitespace
+// still loses its quotes; an unbalanced quote (only one end quoted) is kept
+// as-is, and whatever the stripped pair enclosed is preserved untouched. It
+// is the same normalization apiRootCandidates applies before deriving API
+// root variants.
 func normalizeServerBase(value string) string {
-	trimmed := strings.TrimSpace(strings.Trim(value, "\""))
+	trimmed := strings.TrimSpace(value)
+	if inner, ok := strings.CutPrefix(trimmed, "\""); ok {
+		if inner, ok := strings.CutSuffix(inner, "\""); ok {
+			trimmed = inner
+		}
+	}
 	return strings.TrimRight(trimmed, "/")
 }
 

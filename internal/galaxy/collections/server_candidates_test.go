@@ -153,6 +153,41 @@ func TestAPIRootCandidates(t *testing.T) {
 	}
 }
 
+// TestNormalizeServerBase pins normalizeServerBase's declared order of
+// operations: whitespace is trimmed before the quotes are inspected (so a
+// value quoted inside surrounding whitespace still loses its quotes), exactly
+// one surrounding double-quote pair is stripped and only when both ends carry
+// one (an unbalanced quote is kept as-is), and trailing slashes are removed
+// last.
+func TestNormalizeServerBase(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct {
+		value string
+		want  string
+	}{
+		"plain":                     {value: "https://hub.example.com", want: "https://hub.example.com"},
+		"trailing slash":            {value: "https://hub.example.com/", want: "https://hub.example.com"},
+		"trailing slash run":        {value: "https://hub.example.com///", want: "https://hub.example.com"},
+		"surrounding whitespace":    {value: "  https://hub.example.com/  ", want: "https://hub.example.com"},
+		"quoted":                    {value: "\"https://hub.example.com/\"", want: "https://hub.example.com"},
+		"whitespace outside quotes": {value: " \"https://hub.example.com/\" ", want: "https://hub.example.com"},
+		"unbalanced leading quote":  {value: "\"https://hub.example.com", want: "\"https://hub.example.com"},
+		"unbalanced trailing quote": {value: "https://hub.example.com\"", want: "https://hub.example.com\""},
+		"single quote character":    {value: "\"", want: "\""},
+		"only one pair stripped":    {value: "\"\"https://hub.example.com\"\"", want: "\"https://hub.example.com\""},
+		"empty quoted pair":         {value: "\"\"", want: ""},
+		"empty":                     {value: "", want: ""},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := normalizeServerBase(tc.value); got != tc.want {
+				t.Fatalf("normalizeServerBase(%q) = %q, want %q", tc.value, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestServerCandidateLabel pins serverCandidate.label's own precedence: a
 // non-empty id always wins, else base.
 func TestServerCandidateLabel(t *testing.T) {
