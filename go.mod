@@ -1,13 +1,13 @@
 module github.com/greeddj/go-galaxy
 
-go 1.26.6
+go 1.26.7
 
 require (
 	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/ProtonMail/go-crypto v1.4.1
 	github.com/klauspost/pgzip v1.2.6
 	github.com/psvmcc/hub v0.0.12
-	github.com/urfave/cli/v3 v3.10.1
+	github.com/urfave/cli/v3 v3.11.0
 	go.etcd.io/bbolt v1.5.0
 	go.yaml.in/yaml/v3 v3.0.5
 )
