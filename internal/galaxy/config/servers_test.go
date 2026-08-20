@@ -315,7 +315,7 @@ func TestBuildServerEnvBeatsIniPerKey(t *testing.T) {
 		}
 	})
 
-	t.Run("id is used verbatim, no case or dash translation", func(t *testing.T) {
+	t.Run("a dash in the id is not translated", func(t *testing.T) {
 		t.Setenv("ANSIBLE_GALAXY_SERVER_MY-HUB_URL", "https://env.example")
 		server, _, err := buildServer("my-hub", map[string]string{"url": "https://ini.example"})
 		if err != nil {
@@ -323,6 +323,48 @@ func TestBuildServerEnvBeatsIniPerKey(t *testing.T) {
 		}
 		if server.URL != "https://env.example" {
 			t.Errorf("URL = %q, want %q", server.URL, "https://env.example")
+		}
+	})
+}
+
+// TestBuildServerEnvIDIsUpperCased pins the case half of the
+// ANSIBLE_GALAXY_SERVER_<ID>_<KEY> name, which envOrIni composes by
+// upper-casing the id - ansible's own rule, since its config manager builds
+// the same name from section.upper().
+//
+// It is read from both sides deliberately, and the second half is the
+// load-bearing one. Setting the upper-cased variable and asserting it wins
+// holds under either rule - upper-casing or no translation at all - so that
+// half alone measures nothing about case. Only the negative half separates
+// them, by pinning that the id as written names no variable this code reads.
+// A predecessor of this test asserted the positive half alone while its own
+// name claimed the opposite rule, and passed throughout.
+func TestBuildServerEnvIDIsUpperCased(t *testing.T) {
+	const (
+		fromEnv = "https://env.example"
+		fromIni = "https://ini.example"
+	)
+	ini := map[string]string{"url": fromIni}
+
+	t.Run("the upper-cased name is read", func(t *testing.T) {
+		t.Setenv("ANSIBLE_GALAXY_SERVER_MYHUB_URL", fromEnv)
+		server, _, err := buildServer("myHub", ini)
+		if err != nil {
+			t.Fatalf("buildServer() error = %v, want nil", err)
+		}
+		if server.URL != fromEnv {
+			t.Errorf("URL = %q, want %q", server.URL, fromEnv)
+		}
+	})
+
+	t.Run("the as-written name is not read", func(t *testing.T) {
+		t.Setenv("ANSIBLE_GALAXY_SERVER_myHub_URL", fromEnv)
+		server, _, err := buildServer("myHub", ini)
+		if err != nil {
+			t.Fatalf("buildServer() error = %v, want nil", err)
+		}
+		if server.URL != fromIni {
+			t.Errorf("URL = %q, want %q: the id as written must not name the variable", server.URL, fromIni)
 		}
 	})
 }

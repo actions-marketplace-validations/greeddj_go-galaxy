@@ -553,11 +553,20 @@ func parseAnsibleBool(raw string) (bool, bool) {
 }
 
 // envOrIni resolves one per-server key using "env beats ini" precedence:
-// ANSIBLE_GALAXY_SERVER_<ID>_<KEY> - id exactly as written in server_list,
-// key one of "URL", "TOKEN", "VALIDATE_CERTS", with no character
-// translation of either (ansible does not case- or dash-normalize the id,
-// so neither does this) - wins outright when the environment variable is
-// set at all, even to an empty string; otherwise iniValue is used.
+// ANSIBLE_GALAXY_SERVER_<ID>_<KEY> - the id upper-cased and otherwise
+// untranslated, with key one of "URL", "TOKEN", "VALIDATE_CERTS" - wins
+// outright when the environment variable is set at all, even to an empty
+// string; otherwise iniValue is used.
+//
+// The upper-casing is ansible's own rule rather than a convenience of this
+// implementation: its config manager composes the same name as
+// "ANSIBLE_GALAXY_SERVER_%s_%s" % (section.upper(), key.upper()), so an id
+// spelled myHub in server_list is read from ANSIBLE_GALAXY_SERVER_MYHUB_URL
+// by both tools. Nothing else about the id is translated, which is why a
+// dash survives into the variable name and leaves an id carrying one
+// unsettable by a plain shell export - reachable only through env(1) or a
+// container's own -e flag. validateServerIDs refuses two ids differing only
+// in case for exactly this reason: upper-casing folds them onto one prefix.
 //
 // The bool reports whether the environment supplied the value: buildServer
 // needs it alongside the value itself to record, for every key whose
