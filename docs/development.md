@@ -1,0 +1,333 @@
+# Development
+
+Everything here is reproducible from a checkout with a Go toolchain, `git` and
+[just](https://github.com/casey/just); `just lint` additionally needs
+golangci-lint installed at the pinned release. The test suite needs nothing
+else - no network, no container runtime, no Python. Only the benchmark harness
+does.
+
+## Running the tests
+
+```bash
+just test      # go test ./...
+just check     # go vet, staticcheck, govulncheck, fieldalignment
+just lint      # golangci-lint, at exactly the pinned release
+just fix       # go fix + fieldalignment -fix
+just deps      # go mod tidy && go mod vendor - after any dependency change
+just build     # check + lint + test, then dist/go-galaxy
+```
+
+To reproduce what CI runs:
+
+```bash
+go vet ./... && go tool staticcheck ./... && go tool govulncheck ./... && go tool fieldalignment ./...
+go test -v -race -coverprofile=coverage.txt ./...
+```
+
+The three `go tool` binaries come from the `tool` directive in `go.mod`, so
+neither the Justfile nor CI installs them separately. Run the suite with
+`-race` before considering any concurrency work done.
+
+One package, one test, one subtest:
+
+```bash
+go test ./internal/galaxy/archive/
+go test ./internal/galaxy/archive/ -run 'TestProbeTarGzUsesTheProbeSizedDecompressor'
+go test ./internal/gzipstream/ -run 'TestPgzipUsesSeeEveryConstructionThatReachesAReader/a_dot_import'
+```
+
+Go benchmarks live beside the code they measure, in `internal/galaxy/solver`,
+`internal/galaxy/archive`, `internal/galaxy/manifest` and
+`internal/galaxy/collections`:
+
+```bash
+go test ./internal/galaxy/solver -bench . -run '^$'
+```
+
+Four fuzz targets run their seed corpora under an ordinary `go test`; going
+past the seeds is manual, with no CI hook:
+
+```bash
+go test ./internal/galaxy/solver -fuzz FuzzSolve -fuzztime 60s
+```
+
+**Do not run the suite as root.** Several tests assert that a read, a write or
+a removal is refused by file permissions, and they skip rather than fail when
+the process is not bound by those permissions - so a root run, which is the
+normal case inside some CI containers, silently loses that coverage rather than
+reporting it.
+
+## CI
+
+`.github/workflows/ci.yml` runs on pushes and pull requests against `main`, and
+is callable so the release workflow gates a tag on the same checks rather than
+on a second, drifting copy of them. One job, six steps: checkout, set up Go from
+`go.mod`, the four `check` commands, golangci-lint at the pinned release,
+`go test -v -race -coverprofile=coverage.txt ./...`, and a coverage upload that
+does not fail the build.
+
+`.github/workflows/release.yml` fires on a `v*` tag, runs that same CI job
+first, then GoReleaser: per-platform binaries and archives, `checksums.txt`,
+keyless cosign signatures, SPDX SBOMs, multi-arch images, and a build-provenance
+attestation. See [Security](security.md#verifying-a-release) for the verifying
+side of that.
+
+## The repository audits itself
+
+Six gates are ordinary tests, run by `go test ./...` like anything else. Three
+live in test-only packages - `internal/proseaudit`, `internal/lockaudit`,
+`internal/ciaudit` - that hold no production code and that nothing imports; the
+other three are audit files sitting inside the package they gate. Either way
+they need no Justfile target and no CI step, and the only cost they carry is
+three depguard entries for `go/ast`, `go/parser` and `go/token`.
+
+They are also **anti-vacuous**: a gate that names a function or a file fails
+when it cannot find it, rather than skipping, so a rename can never quietly
+disable one. There is one deliberate exception - the dash gate skips when `git`
+cannot enumerate the tree, since a module extracted into the build cache has no
+committed text to check.
+
+These are the checks that fail a build in a way the error message alone does not
+explain, so each is worth knowing before it fires.
+
+### `internal/proseaudit` - hyphen-minus only
+
+No committed file may carry an em dash (U+2014) or an en dash (U+2013). The
+gate reads the contents of committed files; the same rule applies to commit
+messages as a house rule rather than as something it can check. Files are
+enumerated through `git ls-files` rather than by walking the filesystem, because
+the rule is about committed text: a walk would sweep in working files that are deliberately
+outside it, and would silently stop covering tracked prose under dot-directories.
+
+Everything tracked is in scope, `.github/`, `.golangci.yml` and every document
+in `docs/` included, and a new file enters scope the moment it is staged. The
+failure names each occurrence by file and line. To satisfy it, type `-`. A test
+that legitimately needs one of the two characters spells it as bytes or as a
+`\uXXXX` escape.
+
+### `internal/proseaudit` - comment line citations
+
+A comment anywhere in the module may cite a test file's line
+(`foo_test.go:NNN`) only when that line is one `go test` could attribute a
+failure to, and may never cite a production file's line at all - reference
+production code by identifier instead.
+
+A failure-attributable line is one of exactly three shapes: a call to
+`Fatal`/`Error`/`Log`/`Skip` and their formatting variants on a testing value,
+matched across the whole call so any line of a multi-line call qualifies; a call
+to a same-package helper that calls `t.Helper()`; or any function's declaration
+line.
+
+The consequence that catches contributors out: adding an import or a helper to a
+test file shifts its line numbers and breaks citations elsewhere in the same
+package. That is why `internal/galaxy/archive` keeps its probe tests in separate
+files - so an edit to one does not invalidate the other's citations. Either
+re-run and update the number, or replace the citation with an identifier.
+
+Note the interaction with `fieldalignment`: a `just fix` rewrite can reorder
+struct fields in a test file and shift the very lines other comments cite.
+
+### `internal/lockaudit` - the holder context
+
+Every command that takes the cache backend's exclusive lock must run its work
+under the holder context that lock returned, and must judge the outcome against
+that same context. The gate parses the source and requires, per command: exactly
+one lifecycle initialization, a holder context bound to a name rather than
+discarded into `_`, exactly one call to the work function, that context as the
+work call's first argument, the work call sitting inside the lock-loss verdict,
+and every return after initialization being either a bare `nil` or that verdict.
+
+A second table requires each collection command to go through the shared funnel
+rather than taking a backend lifecycle of its own.
+
+Both tables are closed: **adding or renaming such a command means editing them**.
+That is the gate's one acknowledged gap - nothing detects a third lifecycle
+function, or a fourth collection command, that was never added. It is
+deliberately not a general context-threading linter.
+
+### `internal/ciaudit` - workflows and the linter version
+
+Two references in a workflow file are resolved by GitHub and by nothing else, so
+a mistake in either produces no failing job to notice - a release workflow simply
+publishes nothing, silently. The gate resolves them: a job's `needs` must name a
+job defined in the same file, and a `uses: ./...` must name a workflow in this
+repository that declares the `workflow_call` trigger.
+
+It also gates one value that is spelled twice. The golangci-lint release lives
+in `.github/workflows/ci.yml` as the action step's `version` input and in the
+`Justfile` as `GOLANGCI_LINT_VERSION`. Nothing resolves those against each
+other, so a bump that edits one and forgets the other is silent - and under
+`default: all`, a release difference is a findings difference. CI's spelling is
+the one held to an exact `vMAJOR.MINOR.PATCH` - `latest` and a truncated `vX.Y`
+are both refused, because neither can disagree with anything while still
+changing what CI enforces - and the Justfile's is then held to equal it.
+**Bump both spellings in one commit.**
+
+### `internal/galaxy/store` - the dirty flag
+
+Every method on the snapshot value that takes the write lock must also set the
+dirty flag, so a run that changed nothing can skip its save. The gate parses the
+snapshot source; read-locked methods are out of scope. There is one exemption, a
+literal name rather than a pattern: unmarshalling is a load, not a write, and
+setting the flag there would make every S3-backed run dirty on arrival.
+
+Its scope is one file, which is stated rather than implied: a mutator added
+elsewhere is covered only by a hand-maintained table in the same package, so a
+new mutator needs a row there too.
+
+### `internal/galaxy/archive` - the probe decompressor
+
+The tar.gz shape probe must reach its decompressor through the bounded
+constructor and through nothing else, and must spell both sizing arguments as
+the named constants rather than as inline literals - a call handed literals is a
+call those constants no longer govern. One companion test bounds both constants,
+so what is gated is the byte budget rather than a constructor's name.
+
+### `internal/gzipstream` - the pgzip monopoly
+
+No non-test file outside `internal/gzipstream` may reach a pgzip member other
+than its writer API - test files, `vendor/` and dot-directories are out of scope
+deliberately. Resolution is by import path rather than by the identifier `pgzip`,
+so no alias can hide the next one - the defect that prompted the gate was an
+import aliased to `gzip`, which read like the standard library and which no
+search for the word could find.
+
+It is an allow-list of writer members rather than a blocklist of reader
+constructors, because a blocklist was measured missing two evasions: a
+constructor held as a function value, and a zero value turned into a reader by
+`Reset`. Open gzip readers through `internal/gzipstream` instead.
+
+## Lint
+
+`.golangci.yml` runs with `default: all` and a short disable list, so expect
+linters most projects leave off. Two settings matter beyond that.
+
+**depguard** carries an explicit import allow-list. Anything outside it is a
+lint error on import: the standard library, `go/ast`, `go/parser` and `go/token`
+(which the audit packages need and which the standard-library expansion does not
+cover), this module, and the seven direct dependencies -
+`Masterminds/semver/v3`, `ProtonMail/go-crypto`, `klauspost/pgzip`,
+`psvmcc/hub`, `urfave/cli/v3`, `go.etcd.io/bbolt` and `go.yaml.in/yaml/v3`.
+
+**No test-file exclusions.** Every linter applies to `_test.go` too.
+
+`fieldalignment` runs in both `just check` and CI, so struct field order is not
+a style choice: a layout that wastes memory through padding fails the build,
+test-only structs included. Run `just fix` to reorder in place, then re-run
+`just check`.
+
+Almost every `//nolint` in this codebase carries a reason after it, and the
+handful that do not are worth fixing rather than copying. Nothing enforces it:
+`nolintlint` is on under `default: all`, but its explanation requirement is not
+configured.
+
+## Test conventions
+
+Tests sit beside the code, in the same package by default. The exceptions are
+the `internal/galaxy/collections` end-to-end suite and a few files in
+`internal/galaxy/cache` and `internal/galaxy/fetch`, which are
+`package <pkg>_test` so they drive the public API from outside; the
+`testpackage` linter is disabled so both styles are legal.
+
+Test comments state the property being pinned, and often quote the killing
+mutation and the exact output it produced. Positive controls are treated as
+mandatory rather than optional - a detector that finds nothing passes a monopoly
+gate perfectly.
+
+**Nothing in the suite dials a real host.** Galaxy API paths go through
+`internal/testing/fakegalaxy`, an in-memory Galaxy v3 API double, while the S3,
+fetch and signature packages stand up `httptest` servers of their own. The
+double
+answers the same routes and JSON shapes the real API does, generates
+deterministic `tar.gz` artifacts with matching digests - fixed modes and a fixed
+modification time, never the clock - and offers:
+
+- **content**: add a version with its dependencies and get back the digest, so
+  no test hardcodes a checksum; render its manifest; sign it.
+- **fault injection**, per endpoint and per collection: a status code, a hang
+  until the request context ends, a stall after N bytes, or a byte-drip that
+  writes one byte per interval forever - which is how a read-inactivity
+  watchdog gets tested. A well-formed fault sets exactly one of those. A test
+  arming a hang, a stall or a drip must abort the request itself, or shutdown
+  blocks.
+- **request counting** per endpoint, which is how "this path makes no metadata
+  request" is asserted rather than assumed.
+- **auth**: require a value, choose the failure status, and capture the header
+  actually received.
+
+Its constructor takes a `testing.TB`, deliberately: that is the one interface
+implementable only by the standard testing package, so the double can never be
+reached from production code.
+
+There is exactly one `testdata` directory, under `internal/galaxy/signature`,
+holding keyrings and a family of detached signatures covering the valid,
+expired, revoked, outsider and malformed cases.
+
+## The benchmark harness
+
+`testing/bench.sh` measures `ansible-galaxy` against `go-galaxy` across
+`requirements-{1,10,100}.yml` in six scenarios: `cold`, `warm`, `frozen`
+(go-galaxy only) and their three S3 equivalents. Every measured command passes
+`--no-deps`, so what is compared is fetch plus extract.
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install ansible-core
+go build -o ./dist/go-galaxy ./cmd/go-galaxy
+docker compose -f testing/docker-compose.yaml up -d minio-svc   # for the s3-* scenarios
+testing/bench.sh
+```
+
+It needs `hyperfine` and `python3` on `PATH`, the built binary, and the
+virtualenv. The binary and the virtualenv are each reported with the command
+that supplies them; `hyperfine` and `python3` are reported by name only. The S3
+scenarios are dropped with a warning, rather than failing the run,
+when the endpoint does not answer, so the local scenarios still run on a machine
+with no container runtime.
+
+Knobs and defaults: `RUNS=5`, `WARMUP=1`, `SIZES="1 10 100"`,
+`SCENARIOS="cold warm frozen s3-cold s3-warm s3-frozen"`,
+`S3_ENDPOINT=http://127.0.0.1:9000`, plus the bucket and credentials.
+
+Every cache it wipes lives under `$TMPDIR` - never in `$HOME`, because a
+benchmark that wipes the caches it measures must not wipe the ones you use, and
+never inside the repository, because extracted third-party collections are Go
+source often enough that a tree-walking linter picks them up as this module's.
+
+Output lands in `dist/bench/`: `<scenario>-<N>.md` per scenario and size,
+`resources-<N>.md` with peak RSS and bytes downloaded from a separate single-run
+pass, and `summary.md` concatenating everything with the tool versions and host
+recorded. See [Benchmarks](benchmarks.md) for the published numbers.
+
+## Dependencies
+
+`vendor/` is **git-ignored, not committed**. It is regenerated locally by
+`just deps` and is absent in CI entirely, so a local build resolves through it
+while CI downloads modules. The practical consequence is local: Go selects
+vendor mode automatically when the directory exists and refuses to build when
+`vendor/modules.txt` disagrees with `go.mod`.
+
+Adding a dependency is therefore two steps, and skipping either fails in a
+different place:
+
+1. add the module path to the depguard `allow:` list in `.golangci.yml`, or
+   `just lint` and CI reject the import;
+2. run `just deps`, or Go's own vendor-consistency check fails the build and
+   names what is out of sync.
+
+`just check` deliberately does not depend on `just deps`: a gate that rewrites
+`go.mod`, `go.sum` and `vendor/` before reading them can only ever agree with
+itself.
+
+`govulncheck` runs in both `just check` and CI, so a vulnerable dependency fails
+the build. The release configuration deliberately omits `go mod tidy` from its
+hooks: a release must build the dependency set that was committed and reviewed,
+and tidy would rewrite it in the one build that gets published.
+
+## Conventions
+
+- Package doc comments here are load-bearing and unusually thorough. Read the
+  package comment before editing a package, and keep it true afterwards.
+- Comments state constraints and reasons, not narration.
+- Only hyphen-minus, everywhere, enforced by test.
+- `README.md` is an index; reference material lives in `docs/`. A behavior
+  change lands with the document that describes it.

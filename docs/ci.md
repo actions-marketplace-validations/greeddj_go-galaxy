@@ -1,0 +1,223 @@
+# Reproducible CI
+
+Pin transitive collections with a lockfile, then drive CI from it:
+
+```bash
+# once, when you change requirements.yml:
+go-galaxy lock             # writes requirements.lock.yml
+
+# in CI:
+go-galaxy install --frozen # install exactly the locked versions
+```
+
+A frozen install fails loudly if a cached or downloaded artifact does not match the
+lockfile's recorded SHA256, so a poisoned cache or a mutated upstream artifact cannot
+install silently; lockfiles with no recorded SHA (older lockfiles) are not pin-checked.
+
+`--frozen` decides *what* gets installed and needs no cache to do it. `--offline`
+is a separate, stronger promise: no network call at all, so an artifact that is
+not already cached is not a download but a failure. Against a cold cache the run
+exits `5` naming the collection it could not get. Add `--offline` only where the
+cache is known to be populated - a base image you baked it into ([container image
+bake](#container-image-bake) below), or a restored CI cache your job treats as
+mandatory. A restored CI cache is not that by default: the first run after any
+lockfile change misses by construction, because the key just changed.
+
+`go-galaxy hash` prints a deterministic `sha256:…` of the lockfile (or `requirements.yml`
+when no lockfile is present) - perfect as a CI cache key.
+
+## GitHub Actions
+
+```yaml
+name: ansible-collections
+on: [push, pull_request]
+
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install go-galaxy
+        run: |
+          curl -sSL https://github.com/greeddj/go-galaxy/releases/latest/download/go-galaxy-linux-amd64 \
+            -o /usr/local/bin/go-galaxy
+          chmod +x /usr/local/bin/go-galaxy
+
+      - name: Compute cache key
+        id: gg
+        run: echo "key=$(go-galaxy hash)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore go-galaxy cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/go-galaxy
+          key: go-galaxy-${{ runner.os }}-${{ steps.gg.outputs.key }}
+          restore-keys: |
+            go-galaxy-${{ runner.os }}-
+
+      # --frozen, not --frozen --offline: restore-keys can hand this job a
+      # cache from an older lockfile, and the run after a lockfile change gets
+      # no hit at all. Offline would make either a failure instead of a
+      # download; frozen alone still installs exactly what the lockfile pins.
+      - name: Install collections (frozen)
+        run: go-galaxy install --frozen -p ./collections
+```
+
+## GitLab CI
+
+```yaml
+stages: [install]
+
+variables:
+  GO_GALAXY_CACHE_DIR: "$CI_PROJECT_DIR/.cache/go-galaxy"
+
+install_collections:
+  stage: install
+  # Not ghcr.io/greeddj/go-galaxy: that image is distroless and carries no
+  # shell, and GitLab runs every job's script through one, so a job in it
+  # cannot start at all. Drop the static binary into an ordinary image.
+  image: alpine:3
+  cache:
+    # cache:key is expanded when the job is created, and the cache is restored
+    # before before_script runs, so a key computed by a script step is always
+    # too late: whatever it expands to is the same for every pipeline, which
+    # means one shared cache entry rather than one per lockfile. cache:key:files
+    # makes GitLab hash the lockfile itself - the same input `go-galaxy hash`
+    # reads.
+    key:
+      files:
+        - requirements.lock.yml
+      prefix: go-galaxy
+    paths:
+      - .cache/go-galaxy
+  before_script:
+    - apk add --no-cache ca-certificates curl
+    - curl -sSLf -o /usr/local/bin/go-galaxy https://github.com/greeddj/go-galaxy/releases/latest/download/go-galaxy-linux-amd64
+    - chmod +x /usr/local/bin/go-galaxy
+  script:
+    # --frozen without --offline: a cache miss is normal here - the first
+    # pipeline after a lockfile change gets one - and --offline would turn it
+    # into a failed job instead of a download.
+    - go-galaxy install --frozen -p ./collections
+```
+
+**Distributed runners.** GitLab's own `cache:` is per-runner unless the runner
+is configured with a distributed cache, so with several runners each one
+rebuilds its own copy. Pointing go-galaxy at its own S3 cache instead gives
+every runner one shared artifact cache: set `GO_GALAXY_S3_BUCKET`,
+`GO_GALAXY_S3_REGION` and `GO_GALAXY_S3_PREFIX` in `variables:`, and
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` as masked project variables,
+which go-galaxy reads directly. Keep the `cache:` block alongside it: the
+extracted-tree store stays local to `GO_GALAXY_CACHE_DIR` even with the S3
+backend, so the job cache is what saves re-extracting every collection.
+
+Two runtime consequences of a shared S3 cache are worth knowing before you
+enable it. Jobs sharing one bucket serialize: a run holds the backend's
+exclusive lock for its whole duration, so a `parallel:` matrix against one
+bucket runs one job at a time, and a job that gives up waiting on another's
+lock exits `8`. And a bucket is a trust boundary, not just storage: give jobs
+that build untrusted branches or forks their own bucket, and see [Security /
+Trust model](security.md#security--trust-model) for why a prefix alone is not a boundary.
+
+## Lockfile drift gate
+
+Fail a pull request when `requirements.lock.yml` no longer matches
+`requirements.yml` - a root added, removed, or repinned without regenerating
+the lockfile. `lock --frozen` reads the lockfile as the thing to check rather
+than as the answer, which is the opposite of what install/warm `--frozen` do -
+it still resolves fresh, and only a warm resolve cache lets that stay off the
+network - so this is a separate job from the install above, not a replacement
+for it. Add
+`--refresh` for a second, distinct gate on the same file: `lock --frozen`
+alone only catches a `requirements.yml` change, since it reuses the cached
+resolve; `lock --frozen --refresh` also catches a newer version simply
+having been published upstream, since `--refresh` makes the comparison's
+fresh resolve reach the live servers instead:
+
+```yaml
+name: lockfile-drift
+on: [pull_request]
+
+jobs:
+  lockfile-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install go-galaxy
+        run: |
+          curl -sSL https://github.com/greeddj/go-galaxy/releases/latest/download/go-galaxy-linux-amd64 \
+            -o /usr/local/bin/go-galaxy
+          chmod +x /usr/local/bin/go-galaxy
+
+      - name: Check requirements.lock.yml matches requirements.yml
+        run: go-galaxy lock --frozen
+
+      - name: Check requirements.lock.yml is not stale against upstream
+        run: go-galaxy lock --frozen --refresh
+```
+
+A nonzero exit from either step (code `6`, the lockfile class - see
+[Exit codes](exit-codes.md)) means the PR needs `go-galaxy lock` (optionally
+`--refresh`, to pick up the newer upstream version too) run and its updated
+`requirements.lock.yml` committed.
+
+## Container image bake
+
+Pre-warm caches in your CI base image so jobs only hardlink into place:
+
+```dockerfile
+FROM debian:stable-slim
+
+# The published image is distroless: one static binary at /go-galaxy, no shell
+# and no package manager. A COPY --from takes that binary and nothing else, so
+# the CA certificates it needs have to come from this base image - install them
+# here, or the first Galaxy request fails to verify its TLS certificate.
+COPY --from=ghcr.io/greeddj/go-galaxy:latest /go-galaxy /usr/local/bin/go-galaxy
+RUN apt-get update -qq \
+ && apt-get install -y -qq --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# Pin the cache somewhere that does not depend on who runs the job: the
+# default is $HOME/.cache/go-galaxy, and the warm below runs as root while
+# your jobs may not.
+ENV GO_GALAXY_CACHE_DIR=/var/cache/go-galaxy
+
+WORKDIR /src
+COPY requirements.yml requirements.lock.yml ./
+# The uid your jobs run as. A run needs the cache lock and writes the
+# snapshot back, so a job user that can only read the baked cache fails to
+# start with `cache backend cannot be used as configured` (exit 2) - and so
+# does a job whose uid is not the one named here.
+ARG JOB_UID=1001
+RUN go-galaxy warm --frozen && chown -R "$JOB_UID" "$GO_GALAXY_CACHE_DIR"
+```
+
+`chown`, not `chmod -R a+rwX`: an install hardlinks its files out of the cache,
+so a cache file and the installed file that came from it are one inode - see
+[Differences a migration runs into](ansible-galaxy-compat.md#differences-a-migration-runs-into) for what
+that costs an installed file's mode. Widening the cache's modes far enough for a
+job to link out of it is therefore the same act as making every installed file
+writable, and an edit to one of those installed files lands back in the shared
+cache for every later job built on that image. Ownership sidesteps that: with
+`fs.protected_hardlinks` set, the default on current distributions, Linux
+permits a hardlink to a file you do not own only when you may also write it,
+while a file you own you may always link - so handing the cache to the job's uid
+buys the link while leaving an installed file read-only and the cache writable
+by nothing but the job. That uid can still `chmod u+w` a cache file it owns and
+edit it, which is the ordinary standing of any single-user cache. Keep the
+`chown` chained onto the same `RUN`: a separate one rewrites every file's
+metadata into a new layer and copies the whole cache again. Where the job's uid
+cannot be known at build time, no setting keeps both properties - read-only
+cache files cost the hardlink, so jobs copy the bytes instead and a collection
+whose extracted tree is not already in the image fails outright (exit `5`),
+while `chmod -R a+rwX` keeps the hardlink and gives up both the read-only
+installed file and the private cache. Bake for a known uid where you can.
+
+Jobs built on that image are the case `--offline` is for, since the cache is
+part of the image rather than something a key might miss:
+
+```bash
+go-galaxy install --frozen --offline -p ./collections
+```

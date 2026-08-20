@@ -93,9 +93,9 @@ func (r *errRecorder) Write(p []byte) (int, error) {
 // the one field that reaches --help with them, since urfave renders a
 // DESCRIPTION block whenever it is non-empty.
 //
-// Each phrase below is the leading phrase of the matching row in README's
-// Exit codes table rather than a fresh wording, so the two cannot come to
-// describe the same number differently. The README rows carry the full
+// Each phrase below is the leading phrase of the matching row in docs/
+// exit-codes.md rather than a fresh wording, so the two cannot come to
+// describe the same number differently. Those rows carry the full
 // qualifications; this list is the index, not a replacement.
 func newRootCommand(onErr func(error), errOut io.Writer) (*cli.Command, *errRecorder) {
 	report := &errRecorder{w: errOut}

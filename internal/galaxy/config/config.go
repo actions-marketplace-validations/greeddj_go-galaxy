@@ -449,9 +449,9 @@ func discoverAnsibleConfigPath() (string, []string) {
 // all.
 //
 // That the exemption is intended rather than an oversight is grounded in this
-// repository rather than inferred: README instructs an operator whose
-// workspace is world-writable to name the file through --ansible-config or
-// $ANSIBLE_CONFIG, which is that path being prescribed rather than merely
+// repository rather than inferred: docs/configuration.md instructs an operator
+// whose workspace is world-writable to name the file through --ansible-config
+// or $ANSIBLE_CONFIG, which is that path being prescribed rather than merely
 // tolerated. Whether ansible's own find_ini_config_file scopes its check the
 // same way is a parity question this file does not answer - the paragraphs
 // here claim parity for the exception itself, not for its edges.

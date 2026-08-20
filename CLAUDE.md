@@ -4,7 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-go-galaxy is a fast Ansible Galaxy collections installer for CI, written in Go (module `github.com/greeddj/go-galaxy`). Collections only; roles are ignored with a warning. Dependencies are vendored (`vendor/` is committed).
+go-galaxy is a fast Ansible Galaxy collections installer for CI, written in Go (module `github.com/greeddj/go-galaxy`). Collections only; roles are ignored with a warning. `vendor/` is git-ignored, not committed: it is regenerated locally by `just deps` and is absent in CI, so a local build resolves through it while CI downloads modules.
+
+## Documentation
+
+`README.md` is a landing page and an index; the reference material lives in
+`docs/`. Keep them true after a behavior change - `docs/cli.md` (commands and
+options), `docs/configuration.md` (ansible.cfg and the environment surface),
+`docs/servers-and-auth.md`, `docs/signatures.md`,
+`docs/ansible-galaxy-compat.md` (every deliberate divergence),
+`docs/caching.md`, `docs/ci.md`, `docs/exit-codes.md`, `docs/metrics.md`,
+`docs/security.md`, `docs/benchmarks.md`, `docs/architecture.md` (how it
+works), `docs/development.md` (tests, gates, lint). `cmd/go-galaxy/main.go`'s
+`--help` exit-code index is generated from the same phrases as
+`docs/exit-codes.md` and must not drift from it.
 
 ## Commands
 
@@ -19,7 +32,7 @@ just deps          # go mod tidy && go mod vendor - run after any dependency cha
 just build         # runs check+lint+test, then builds ./dist/go-galaxy
 ```
 
-Single test: `go test ./internal/galaxy/archive/ -run 'TestName'` (standard Go; tests live beside the code, package names are not suffixed with `_test`).
+Single test: `go test ./internal/galaxy/archive/ -run 'TestName'` (standard Go; tests live beside the code, in-package by default - the exception is the `internal/galaxy/collections` e2e suite, which is `package collections_test` so it drives the public API from outside; the `testpackage` linter is disabled so both styles are legal).
 
 CI (`.github/workflows/ci.yml`) runs the same checks plus `go test -v -race -coverprofile=...`, so run tests with `-race` before considering concurrency work done.
 

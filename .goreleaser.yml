@@ -36,9 +36,12 @@ archives:
       {{- else if eq .Arch "386" }}i386
       {{- else }}{{ .Arch }}{{ end }}
       {{- if .Arm }}v{{ .Arm }}{{ end }}
+    # docs/ rides along with README.md because the README is an index: on its
+    # own it ships a page of links to files the archive would not contain.
     files:
       - LICENSE
       - README.md
+      - docs/*.md
   # The raw binaries the README's install snippet curls. An archive cannot
   # serve that flow: `releases/latest/download/<name>` resolves only a name
   # that does not carry the version, and a CI step dropping one file into
