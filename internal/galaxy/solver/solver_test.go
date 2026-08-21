@@ -85,8 +85,7 @@ func TestExactRelationDetectsDisjointRanges(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Solve: expected a conflict (foo cannot be both ^1.0.0 and ^2.0.0 at once)")
 	}
-	var conflictErr *ConflictError
-	if !errors.As(err, &conflictErr) {
+	if _, ok := errors.AsType[*ConflictError](err); !ok {
 		t.Fatalf("Solve error is not a *ConflictError: %v (%T)", err, err)
 	}
 }
@@ -266,7 +265,7 @@ func TestSolveStopsOnCanceledContext(t *testing.T) {
 		// running `go test ./internal/galaxy/solver/ -run
 		// TestSolveStopsOnCanceledContext -race -v -count=1` makes this exact
 		// assertion fail with:
-		// "solver_test.go:272: Solve returned a non-nil result on an
+		// "solver_test.go:271: Solve returned a non-nil result on an
 		// already-canceled context: map[acme.foo:2.0.0]"
 		if res != nil {
 			t.Fatalf("Solve returned a non-nil result on an already-canceled context: %v", res.Versions)

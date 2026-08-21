@@ -902,15 +902,24 @@ func TestBuiltDependenciesAreACopy(t *testing.T) {
 }
 
 // TestBuildGoldenDigest pins the sha256 of fixtureSource's artifact as a
-// literal. The build is deterministic by contract, so this value changes only
-// when the artifact's byte shape changes - a tar header field, the gzip
-// header, the entry order, the documents' encoding - which is exactly the
-// class of change a refactor of the writer must not make by accident. A
-// failure here says "the bytes moved"; whether they were meant to is the
-// reviewer's question, and the new literal is the answer once it is.
+// literal. The build is deterministic by contract under one toolchain, so
+// this value moves for one of two reasons. Either the artifact's byte shape
+// changed - a tar header field, the gzip header, the entry order, the
+// documents' encoding - which is exactly the class of change a refactor of
+// the writer must not make by accident; or the Go release named by go.mod's
+// go directive, the one CI builds with, changed what compress/flate emits
+// for the same input, which compress/gzip documents as outside the
+// compatibility promise. A failure here says "the bytes moved"; whether they
+// were meant to is the reviewer's question, and the new literal is the
+// answer once it is. What tells the two apart: a toolchain bump that moved
+// only the deflate bytes leaves TestBuildStructure (entry names and order,
+// typeflag, mode, owner, mtime, USTAR) and rolebuild's TestBuildArtifactShape
+// passing while this literal moves, whereas a writer change to any of those
+// fields fails them as well. The gzip header and the documents' encoding are
+// pinned by this literal alone.
 func TestBuildGoldenDigest(t *testing.T) {
 	t.Parallel()
-	const want = "4f304a45d4f7275a5eec4cadaa26cd07b39d4bed38da638a2bdd7b466a7abb28"
+	const want = "38564251bbd361a84da9a0bbdd480617506572830608866058183fda9695b4c1"
 	built := buildFrom(t, fixtureSource(), "")
 	if built.SHA256 != want {
 		t.Fatalf("SHA256 = %s, want %s", built.SHA256, want)

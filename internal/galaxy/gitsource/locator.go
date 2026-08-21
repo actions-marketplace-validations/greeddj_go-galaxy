@@ -72,12 +72,9 @@ func ParseLocator(s string) (Locator, error) {
 	if err != nil || u.String() != rawURL {
 		return Locator{}, fmt.Errorf("%w: url part is not canonical", helpers.ErrInvalidGitLocator)
 	}
-	subdir, commit := remainder, ""
-	if i := strings.LastIndex(remainder, locatorCommitSep); i >= 0 {
-		subdir, commit = remainder[:i], remainder[i+1:]
-		if !IsCommitHash(commit) {
-			return Locator{}, fmt.Errorf("%w: commit is not a lowercase 40-hex hash", helpers.ErrInvalidGitLocator)
-		}
+	subdir, commit, hasCommit := strings.CutLast(remainder, locatorCommitSep)
+	if hasCommit && !IsCommitHash(commit) {
+		return Locator{}, fmt.Errorf("%w: commit is not a lowercase 40-hex hash", helpers.ErrInvalidGitLocator)
 	}
 	if subdir != "" {
 		if _, err := ParseSubdir(subdir); err != nil {

@@ -653,11 +653,12 @@ func TestInstallCollectionSkipReleasesPrefetchedTempExactlyOnce(t *testing.T) {
 		ArtifactSHA256: installedSHA,
 		InstalledAt:    time.Now().UTC(),
 	})
-	deps := installDeps{collectionDeps: collectionDeps{
+	deps := installDeps{
 		cfg:     cfg,
 		runtime: infra.New(noopPrinter{}, http.DefaultClient),
 		st:      st,
-	}, root: target.root}
+		root:    target.root,
+	}
 
 	tempPath := filepath.Join(t.TempDir(), "prefetched.tar.gz")
 	if err := os.WriteFile(tempPath, []byte("prefetched tarball bytes"), helpers.FileMod); err != nil {

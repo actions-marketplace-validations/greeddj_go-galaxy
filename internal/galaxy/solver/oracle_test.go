@@ -129,8 +129,7 @@ func TestOracleMembership(t *testing.T) {
 			valid := g.bruteForceResolutions()
 			res, err := Solve(t.Context(), g.roots, g.provider())
 			if err != nil {
-				var ce *ConflictError
-				if !errors.As(err, &ce) {
+				if _, ok := errors.AsType[*ConflictError](err); !ok {
 					t.Fatalf("n=%d seed=%d: want *ConflictError, got %v", n, seed, err)
 				}
 				if len(valid) != 0 {

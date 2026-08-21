@@ -182,8 +182,7 @@ func TestOfflineConflictCarriesTheOfflineNote(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an offline conflict, got a successful install")
 	}
-	var conflictErr *solver.ConflictError
-	if !errors.As(err, &conflictErr) {
+	if _, ok := errors.AsType[*solver.ConflictError](err); !ok {
 		t.Fatalf("Start error is not a *solver.ConflictError: %v (%T)", err, err)
 	}
 	if !strings.Contains(err.Error(), "offline mode restricts resolution to cached metadata") {

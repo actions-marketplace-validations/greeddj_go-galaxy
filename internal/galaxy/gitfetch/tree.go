@@ -242,8 +242,8 @@ func joinPath(dir, name string) string {
 
 // splitPath splits path at its last slash into directory and entry name.
 func splitPath(path string) (string, string) {
-	if i := strings.LastIndex(path, "/"); i >= 0 {
-		return path[:i], path[i+1:]
+	if dir, name, ok := strings.CutLast(path, "/"); ok {
+		return dir, name
 	}
 	return "", path
 }

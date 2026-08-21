@@ -38,7 +38,8 @@ type Entry struct {
 // error, never a skipped entry); Open streams a file's or a symlink's blob,
 // capped by the implementation at the per-entry archive size; CommitTime is
 // the committer time of the commit, which the builder stamps on every
-// archive entry so two builds of one commit are byte-identical.
+// archive entry so two builds of one commit are byte-identical under one
+// toolchain.
 type Source interface {
 	ReadDir(path string) ([]Entry, error)
 	Open(path string) (io.ReadCloser, error)

@@ -27,8 +27,9 @@ type Document struct {
 // given, then the planned entries - digesting the compressed bytes as they
 // are written, and returns the lowercase hex sha256. Every entry is stamped
 // with the Source's committer time, truncated to the second, which is what
-// makes two builds of one commit byte-identical. The caller owns the file:
-// Write neither closes nor removes it.
+// makes two builds of one commit byte-identical under one toolchain (the
+// package comment says why the toolchain is part of that). The caller owns
+// the file: Write neither closes nor removes it.
 func (p *Plan) Write(ctx context.Context, file *os.File, lead []Document) (string, error) {
 	h := sha256.New()
 	gz := gzip.NewWriter(io.MultiWriter(file, h))

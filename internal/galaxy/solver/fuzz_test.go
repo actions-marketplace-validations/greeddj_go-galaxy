@@ -128,8 +128,7 @@ func checkFuzzConflict(t *testing.T, g generatedGraph, err error) {
 	if errors.Is(err, errSolverBug) {
 		t.Fatalf("internal-bug error on a fuzzed input: %v (roots=%v)", err, g.roots)
 	}
-	var ce *ConflictError
-	if !errors.As(err, &ce) {
+	if _, ok := errors.AsType[*ConflictError](err); !ok {
 		t.Fatalf("want success or *ConflictError, got %v (roots=%v)", err, g.roots)
 	}
 	if g.enumerationSpace() <= fuzzOracleCap {

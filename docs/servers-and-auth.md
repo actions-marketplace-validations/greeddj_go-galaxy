@@ -241,7 +241,17 @@ token would then cross a connection this run cannot authenticate).
 Prefer trusting a self-signed hub's CA over disabling verification at all:
 point `SSL_CERT_FILE` or `SSL_CERT_DIR` at it and leave `validate_certs`
 unset. That is the remedy that needs no `validate_certs` key at all, so
-nothing below ever applies to it.
+nothing below ever applies to it. Two things about those variables, both
+Go's rather than this tool's. They *replace* rather than extend: on Linux,
+`SSL_CERT_FILE` is read in place of the distribution's default bundle and
+`SSL_CERT_DIR` in place of its default certificate directories, each on its
+own; on macOS and Windows, setting either one sets the platform trust store
+aside entirely and the run trusts exactly what the file and directory hold.
+A bundle that is to stand alone must therefore also carry the public roots
+the same run needs - github.com's, for a Galaxy role. And on macOS and
+Windows they take effect in a go-galaxy built with Go 1.27 or later; an
+older build consulted the platform store and ignored them, while Linux
+builds have always honored them.
 
 When `validate_certs = false` genuinely has to stay, and the same server
 also carries a token you supply yourself (`--token`, `GO_GALAXY_TOKEN`, or
@@ -313,7 +323,8 @@ against `SSH_KNOWN_HOSTS` when that is set and against `~/.ssh/known_hosts`
 and `/etc/ssh/ssh_known_hosts` otherwise; a host that none of them vouches
 for, or whose key changed, fails the run - there is no trust-on-first-use,
 and there is no flag to add one. An https repository's certificate is always
-verified; `SSL_CERT_FILE`/`SSL_CERT_DIR` supply a private CA, and no
+verified; `SSL_CERT_FILE`/`SSL_CERT_DIR` supply a private CA (replacing the
+default trust store, see [TLS: validate_certs](#tls-validate_certs)), and no
 `validate_certs` equivalent exists for git. A redirect that would move the
 session to another scheme, host or port is refused rather than followed, so
 a credential never travels anywhere but the origin it was bound to; write

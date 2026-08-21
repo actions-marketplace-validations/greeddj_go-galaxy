@@ -17,7 +17,7 @@ LDFLAGS := "-s -w" \
 # internal/ciaudit gates the two against each other. Bumping the linter is
 # editing both spellings in one commit and fixing whatever the new release
 # reports.
-GOLANGCI_LINT_VERSION := "v2.11.4"
+GOLANGCI_LINT_VERSION := "v2.13.1"
 
 deps:
 	@echo "===== Check deps for {{PROJECT}} ====="

@@ -254,8 +254,7 @@ func TestLoadRootMetadataWalkUnaffectedByMetadataURLGuard(t *testing.T) {
 	if !errors.Is(err, helpers.ErrMetadataURLUserinfo) {
 		t.Fatalf("loadCollectionMetadata err = %v, want helpers.ErrMetadataURLUserinfo", err)
 	}
-	var statusErr *cacheManager.HTTPStatusError
-	if errors.As(err, &statusErr) {
+	if statusErr, ok := errors.AsType[*cacheManager.HTTPStatusError](err); ok {
 		t.Errorf("loadCollectionMetadata reported the first server's HTTP status (%d) instead of the guard's verdict: %v",
 			statusErr.Code, err)
 	}

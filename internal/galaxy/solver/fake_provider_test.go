@@ -82,6 +82,7 @@ func (f *fakeProvider) Universe(_ context.Context, pkg string) ([]Version, error
 	f.mu.Unlock()
 
 	raw := append([]string{}, f.versions[pkg]...)
+	//nolint:gosec // G404: shuffles a fixture's order, not security sensitive.
 	rand.Shuffle(len(raw), func(i, j int) { raw[i], raw[j] = raw[j], raw[i] })
 
 	out := make([]Version, 0, len(raw))

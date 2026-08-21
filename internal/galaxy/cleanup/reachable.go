@@ -261,8 +261,7 @@ func projectRequirementRoots(
 	// since an unknown set of role roots could have been protecting any of
 	// them; aborting the whole run here would let one such file poison every
 	// cleanup against a shared cache.
-	var rolesErr *requirements.RolesError
-	if errors.As(err, &rolesErr) {
+	if rolesErr, ok := errors.AsType[*requirements.RolesError](err); ok {
 		out.Warnf("project %q: the roles list of %q cannot be read (%v); its roles are kept this run",
 			projectPath, project.RequirementsFile, rolesErr.Err)
 		return file, true, nil

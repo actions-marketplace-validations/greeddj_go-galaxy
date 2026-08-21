@@ -339,8 +339,7 @@ func TestMultiServerAll404YieldsUnknownPackage(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error, got nil")
 	}
-	var conflictErr *solver.ConflictError
-	if !errors.As(err, &conflictErr) {
+	if _, ok := errors.AsType[*solver.ConflictError](err); !ok {
 		t.Fatalf("expected a *solver.ConflictError, got %T: %v", err, err)
 	}
 	if got := exitcode.FromError(err); got != exitcode.ExitResolution {
@@ -466,8 +465,7 @@ func TestMultiServerPinnedNeverFallsThrough(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error, got nil")
 	}
-	var conflictErr *solver.ConflictError
-	if !errors.As(err, &conflictErr) {
+	if _, ok := errors.AsType[*solver.ConflictError](err); !ok {
 		t.Fatalf("expected a *solver.ConflictError (unknown package), got %T: %v", err, err)
 	}
 	if got := srvB.Total(); got != 0 {

@@ -79,8 +79,9 @@ chmod +x /usr/local/bin/go-galaxy
 ```
 
 Substitute `linux-arm64`, `darwin-amd64` or `darwin-arm64` for another
-platform. Each release also carries a `.tar.gz` per platform with the same
-binary plus LICENSE and the documentation. See
+platform; the darwin binaries need macOS 13 or later, the floor of the Go
+toolchain they are built with. Each release also carries a `.tar.gz` per
+platform with the same binary plus LICENSE and the documentation. See
 [Verifying a release](docs/security.md#verifying-a-release) before trusting
 either.
 

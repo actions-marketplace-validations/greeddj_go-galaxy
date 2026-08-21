@@ -57,7 +57,7 @@ const (
 // The straddle is what makes the first assertion a measurement of a MAXIMUM
 // rather than of a builder that happens to emit 4,196,352 bytes: the same
 // composite with a sparse map one block longer is refused. Measured on
-// go1.26.6, the toolchain go.mod pins, that refusal reads "archive/tar: sparse
+// go1.27.0, the toolchain go.mod pins, that refusal reads "archive/tar: sparse
 // map too long" and arrives after the identical 4,196,352 bytes, archive/tar
 // refusing the longer map rather than reading it. The text is recorded rather
 // than asserted, so archive/tar's own wording stays free to change.

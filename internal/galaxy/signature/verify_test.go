@@ -824,8 +824,7 @@ func TestVerifyErrorNamesTheClauseThatFired(t *testing.T) {
 			// The test asks errors.As directly rather than through classify's
 			// own helper, which would agree with a broken join as readily as
 			// with a working one.
-			var sigErr pgperrors.SignatureError
-			if !errors.As(err, &sigErr) {
+			if _, ok := errors.AsType[pgperrors.SignatureError](err); !ok {
 				t.Fatalf("Verify(%s) error does not carry the joined cause:\n%v", tc.name, err)
 			}
 			if !strings.Contains(err.Error(), sigOverManifestB) {
@@ -1132,7 +1131,7 @@ func TestVerificationErrorBoundsWhatItRendersAndNotWhatItMatches(t *testing.T) {
 		// len(e.causes)`, so the message renders every cause and the cap does
 		// nothing. This assertion then fails with
 		//
-		//	verify_test.go:1141: verificationError() rendered the origin past the cap (origin-8):
+		//	verify_test.go:1140: verificationError() rendered the origin past the cap (origin-8):
 		//	collection signature verification failed: fewer valid signatures than required: got 0, need 1
 		//	BADSIG from "origin-0": verify_test: a signature that failed to verify
 		//	...
@@ -1151,7 +1150,7 @@ func TestVerificationErrorBoundsWhatItRendersAndNotWhatItMatches(t *testing.T) {
 		// rejected design where the render cap also bounds what errors.Is can
 		// reach. This assertion then fails with
 		//
-		//	verify_test.go:1160: verificationError() does not reach the cause past the render cap through errors.Is:
+		//	verify_test.go:1159: verificationError() does not reach the cause past the render cap through errors.Is:
 		//	collection signature verification failed: fewer valid signatures than required: got 0, need 1
 		//	BADSIG from "origin-0": verify_test: a signature that failed to verify
 		//	...
@@ -1181,7 +1180,7 @@ func TestVerificationErrorBoundsWhatItRendersAndNotWhatItMatches(t *testing.T) {
 		// constant - so the message now hides 7 of them, and this assertion
 		// fails on the first origin it does not find, with
 		//
-		//	verify_test.go:1190: verificationError() at the cap does not render origin origin-1:
+		//	verify_test.go:1189: verificationError() at the cap does not render origin origin-1:
 		//	collection signature verification failed: fewer valid signatures than required: got 0, need 1
 		//	BADSIG from "origin-0": verify_test: a signature that failed to verify
 		//	showing the first 1 of 8 signature failures; 7 not shown, carrying: BADSIG
@@ -1234,7 +1233,7 @@ func checkFooterNamesAHiddenStatus(t *testing.T, policy Policy) {
 	// which statuses its own render cap withheld. This assertion then
 	// fails with
 	//
-	//	verify_test.go:1239: footer does not name the hidden status BADSIG: "showing the first 8 of 9 signature failures"
+	//	verify_test.go:1238: footer does not name the hidden status BADSIG: "showing the first 8 of 9 signature failures"
 	if !strings.Contains(footer, string(StatusBadSig)) {
 		t.Fatalf("footer does not name the hidden status BADSIG: %q", footer)
 	}
@@ -1243,7 +1242,7 @@ func checkFooterNamesAHiddenStatus(t *testing.T, policy Policy) {
 	// walks every failure rather than only the ones the cap withheld.
 	// This assertion then fails with
 	//
-	//	verify_test.go:1249: footer names a status that was actually rendered: "showing the first 8 of 9 signature
+	//	verify_test.go:1248: footer names a status that was actually rendered: "showing the first 8 of 9 signature
 	//	    failures; 1 not shown, carrying: NO_PUBKEY, BADSIG"
 	if strings.Contains(footer, string(StatusNoPubKey)) {
 		t.Fatalf("footer names a status that was actually rendered: %q", footer)
@@ -1276,7 +1275,7 @@ func checkFooterNamesAHiddenStatus(t *testing.T, policy Policy) {
 	// than one hidden failure is named once per failure instead of once
 	// for the status. This assertion then fails with
 	//
-	//	verify_test.go:1286: footer names BADSIG 2 times, want exactly 1 (the dedupe): "showing the first 8 of 10
+	//	verify_test.go:1285: footer names BADSIG 2 times, want exactly 1 (the dedupe): "showing the first 8 of 10
 	//	    signature failures; 2 not shown, carrying: BADSIG, BADSIG"
 	dupStatuses := append(repeatedStatuses(StatusNoPubKey, 8), StatusBadSig, StatusBadSig)
 	dupErr := verificationError(policy, 0, buildStatusFailures(dupStatuses))

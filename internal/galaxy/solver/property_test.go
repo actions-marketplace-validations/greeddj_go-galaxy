@@ -195,8 +195,7 @@ func TestPropertyResolutionSatisfiesConstraints(t *testing.T) {
 			g := generateGraph(seed, n, 3)
 			res, err := Solve(t.Context(), g.roots, g.provider())
 			if err != nil {
-				var ce *ConflictError
-				if !errors.As(err, &ce) {
+				if _, ok := errors.AsType[*ConflictError](err); !ok {
 					t.Fatalf("n=%d seed=%d: want success or *ConflictError, got %v", n, seed, err)
 				}
 				conflicts++

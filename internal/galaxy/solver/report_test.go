@@ -131,8 +131,7 @@ func TestReportBuilderOutcomePrefersRecordedBug(t *testing.T) {
 		if !errors.Is(err, errSolverBug) {
 			t.Fatalf("outcome() = %v, want an error wrapping errSolverBug", err)
 		}
-		var ce *ConflictError
-		if errors.As(err, &ce) {
+		if _, ok := errors.AsType[*ConflictError](err); ok {
 			t.Fatalf("outcome() = %v, want not a *ConflictError", err)
 		}
 	})

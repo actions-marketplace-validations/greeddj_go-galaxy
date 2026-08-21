@@ -162,12 +162,15 @@ func TestSSHHostKeyPolicy(t *testing.T) {
 	}
 }
 
-func TestSSHConfigIsNotConsulted(t *testing.T) {
+// TestSSHIgnoresConfigUnderHOME runs the ssh path with a ~/.ssh/config under
+// a redirected HOME that would send the host to an unreachable address. It
+// is not what pins harden's switch-off of go-git's reader - that is
+// TestHardenRemovesFileAndGitTransports, whose comment says why a planted
+// file cannot do it.
+func TestSSHIgnoresConfigUnderHOME(t *testing.T) {
 	fx := newSSHFixture(t, "")
 	sshSrv := fx.sshSrv
 	pem := fx.pem
-	// A ~/.ssh/config rewriting the host to an unreachable address would
-	// redirect the run if go-git read it; harden() switches that reader off.
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	writeSSHConfig(t, home, "Host 127.0.0.1\n  Hostname 203.0.113.1\n  Port 1\n")

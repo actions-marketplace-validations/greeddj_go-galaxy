@@ -26,7 +26,8 @@ import (
 // (the project registry, which inherits CreateTemp's 0600) must not use this
 // helper as-is.
 //
-//nolint:nonamedreturns // the named err return lets the deferred cleanup see the final error and remove the temp file only on failure.
+// The named err return lets the deferred cleanup see the final error and
+// remove the temp file only on failure.
 func WriteFileAtomic(path string, data []byte) (err error) {
 	dir := filepath.Dir(path)
 	if err = os.MkdirAll(dir, DirMod); err != nil {

@@ -14,6 +14,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/transport/client"
+	gogitssh "github.com/go-git/go-git/v5/plumbing/transport/ssh"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/fetch"
 	"github.com/greeddj/go-galaxy/internal/galaxy/gitsource"
@@ -125,6 +126,13 @@ func assertBuiltCollection(t *testing.T, c gitsource.Collection, version string)
 	}
 }
 
+// TestHardenRemovesFileAndGitTransports pins both halves of harden by state:
+// the two transports are gone from go-git's registry, and go-git's
+// ~/.ssh/config reader is nil. The reader is pinned here rather than by a
+// hostile config file under a redirected HOME, because the reader locates
+// that file through os/user, which reads $HOME only when the uid is absent
+// from the password database, so on a developer machine or a CI runner a
+// planted file would never be read and would prove nothing.
 func TestHardenRemovesFileAndGitTransports(t *testing.T) {
 	t.Parallel()
 	newFetcher(t)
@@ -135,6 +143,9 @@ func TestHardenRemovesFileAndGitTransports(t *testing.T) {
 	}
 	if _, ok := client.Protocols[protocolHTTPS]; !ok {
 		t.Fatalf("go-git's default https transport was removed; only file and git must be")
+	}
+	if gogitssh.DefaultSSHConfig != nil {
+		t.Fatal("go-git's ~/.ssh/config reader is still installed; a Hostname or Port entry could redirect a run")
 	}
 }
 

@@ -169,7 +169,7 @@ const (
 	// than as a list of the functions performing them deliberately: a reading
 	// path this comment does not name is then covered by the sentence instead of
 	// missed by the list. Every archive/tar figure and message this comment
-	// states was measured on go1.26.6, the toolchain go.mod pins, so a bump to
+	// states was measured on go1.27.0, the toolchain go.mod pins, so a bump to
 	// that directive re-opens all of them at once.
 	//
 	// At most four of those reads can precede that first header - one body for

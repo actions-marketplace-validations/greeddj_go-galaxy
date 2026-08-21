@@ -145,8 +145,7 @@ func TestProviderMalformedDependencyKeyAborts(t *testing.T) {
 	if !errors.Is(solveErr, helpers.ErrInvalidDependencyKey) {
 		t.Fatalf("Solve error = %v, want errors.Is(err, ErrInvalidDependencyKey)", solveErr)
 	}
-	var conflictErr *solver.ConflictError
-	if errors.As(solveErr, &conflictErr) {
+	if _, ok := errors.AsType[*solver.ConflictError](solveErr); ok {
 		t.Fatalf("Solve error is a *solver.ConflictError, want a plain aborting error: %v", solveErr)
 	}
 }

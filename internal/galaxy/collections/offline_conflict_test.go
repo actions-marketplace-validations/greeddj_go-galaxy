@@ -33,8 +33,7 @@ func TestAnnotateOfflineConflictAddsNoteButStaysClassifiable(t *testing.T) {
 	if !strings.Contains(got.Error(), offlineConflictNote) {
 		t.Fatalf("Error() = %q, want it to contain the offline note %q", got.Error(), offlineConflictNote)
 	}
-	var conflictErr *solver.ConflictError
-	if !errors.As(got, &conflictErr) {
+	if _, ok := errors.AsType[*solver.ConflictError](got); !ok {
 		t.Fatalf("errors.As(got, &*solver.ConflictError) = false, want true")
 	}
 	if !errors.Is(got, helpers.ErrNoVersionSatisfiesConstraints) {

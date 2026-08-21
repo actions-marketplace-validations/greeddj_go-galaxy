@@ -205,9 +205,12 @@ linters most projects leave off. Two settings matter beyond that.
 **depguard** carries an explicit import allow-list. Anything outside it is a
 lint error on import: the standard library, `go/ast`, `go/parser` and `go/token`
 (which the audit packages need and which the standard-library expansion does not
-cover), this module, and the seven direct dependencies -
-`Masterminds/semver/v3`, `ProtonMail/go-crypto`, `klauspost/pgzip`,
-`psvmcc/hub`, `urfave/cli/v3`, `go.etcd.io/bbolt` and `go.yaml.in/yaml/v3`.
+cover), this module, and the ten direct dependencies -
+`Masterminds/semver/v3`, `ProtonMail/go-crypto`, `go-git/go-git/v5`,
+`go-git/go-billy/v5`, the `ssh` subtree of `golang.org/x/crypto` (the entry
+is a prefix: `ssh`, `ssh/knownhosts` and `ssh/agent` pass, the rest of the
+module does not), `klauspost/pgzip`, `psvmcc/hub`, `urfave/cli/v3`,
+`go.etcd.io/bbolt` and `go.yaml.in/yaml/v3`.
 
 **No test-file exclusions.** Every linter applies to `_test.go` too.
 

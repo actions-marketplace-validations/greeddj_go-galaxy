@@ -432,6 +432,7 @@ func newRedirectRefusalFixture(t *testing.T, redirect bool) (*Client, *atomic.In
 	frontSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		front.Add(1)
 		if redirect {
+			//nolint:gosec // G710: a test double redirecting to the in-process target server.
 			http.Redirect(w, r, targetSrv.URL+r.URL.Path, http.StatusFound)
 			return
 		}
@@ -544,6 +545,7 @@ func TestS3RedirectPolicyDoesNotAffectTheSharedClient(t *testing.T) {
 	t.Cleanup(targetSrv.Close)
 
 	frontSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		//nolint:gosec // G710: a test double redirecting to the in-process target server.
 		http.Redirect(w, r, targetSrv.URL+r.URL.Path, http.StatusFound)
 	}))
 	t.Cleanup(frontSrv.Close)

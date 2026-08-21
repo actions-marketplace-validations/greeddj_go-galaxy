@@ -28,7 +28,13 @@
 // The artifact is deterministic: every entry carries the commit's committer
 // time, fixed modes and no owner, the gzip header is left zeroed, and entries
 // follow the tree's own order behind the lead documents, so two builds of one
-// commit produce one byte sequence and one sha256. A symlink is written
+// commit by one toolchain produce one byte sequence and one sha256. The
+// toolchain is part of that because this package fixes only what goes into
+// the archive; how archive/tar encodes a header and what compress/flate
+// emits for the same input are the Go release's, and compress/gzip keeps its
+// exact bytes outside the compatibility promise - which is why a lockfile
+// pins a git-built collection or a role by its commit and not by a digest
+// (see internal/galaxy/lockfile). A symlink is written
 // pointing at the final entry its chain resolves to, relative to the link's
 // own directory, because internal/galaxy/manifest resolves a link against the
 // archive in one lookup per hop over real entries and the extractor refuses a

@@ -67,7 +67,9 @@ repository is reached with: `SSH_AUTH_SOCK` names the agent used when no key
 is bound, `SSH_KNOWN_HOSTS` names the known_hosts file (`~/.ssh/known_hosts`
 and `/etc/ssh/ssh_known_hosts` otherwise), and `SSL_CERT_FILE`/`SSL_CERT_DIR`
 supply a private CA for an https repository exactly as they do for a Galaxy
-server. `~/.ssh/config` is not read. A Galaxy role is fetched from
+server (replacing the default trust store, see
+[TLS: validate_certs](servers-and-auth.md#tls-validate_certs)).
+`~/.ssh/config` is not read. A Galaxy role is fetched from
 `https://github.com/<user>/<repo>` by the same git client, so a
 `GO_GALAXY_GIT_<ID>_URL=https://github.com` binding, when one is configured,
 applies to it as well; the Galaxy token never does.

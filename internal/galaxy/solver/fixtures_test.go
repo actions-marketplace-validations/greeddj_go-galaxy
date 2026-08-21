@@ -2,6 +2,7 @@ package solver
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -372,9 +373,9 @@ func requireContains(t *testing.T, haystack, needle string) {
 }
 
 func lastNonEmpty(lines []string) string {
-	for i := len(lines) - 1; i >= 0; i-- {
-		if strings.TrimSpace(lines[i]) != "" {
-			return lines[i]
+	for _, line := range slices.Backward(lines) {
+		if strings.TrimSpace(line) != "" {
+			return line
 		}
 	}
 	return ""

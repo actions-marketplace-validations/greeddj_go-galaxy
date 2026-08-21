@@ -50,6 +50,5 @@ func flockFile(lockPath string) (func() error, error) {
 // File descriptors are small non-negative values on unix, so this
 // conversion never overflows in practice despite the uintptr source type.
 func fd(f *os.File) int {
-	//nolint:gosec // G115: file descriptors are small non-negative values on unix.
 	return int(f.Fd())
 }
