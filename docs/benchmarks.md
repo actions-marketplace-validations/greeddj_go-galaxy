@@ -2,126 +2,119 @@
 
 `go-galaxy` vs `ansible-galaxy` on three requirements files (1 / 10 / 100 root
 collections, all without transitive deps for an apples-to-apples fetch+extract
-comparison). Numbers are mean ± σ from `hyperfine`, 5 measured runs with 1
-warmup where applicable.
+comparison), measured on Linux with an xfs filesystem, which is what CI
+overwhelmingly runs on.
 
-> **Read the σ, not just the mean.** The 100-collection cold figure for
-> `ansible-galaxy` varies by a factor of two between runs (min 496 s, max
-> 1019 s), so its speedup carries a correspondingly wide interval. The
-> `go-galaxy` figures are far tighter, but see [Conditions](#conditions) below
-> for what these particular numbers were measured on.
+Mean of 5 measured runs. The warm and frozen scenarios are preceded by one
+priming run that is not measured. Both tools are invoked with `--no-deps`.
 
 ## Local cache
 
-| Scenario             |     1 collection |    10 collections |   100 collections |
-|:---------------------|-----------------:|------------------:|------------------:|
-| **cold cache**       |                  |                   |                   |
-| ・ansible-galaxy      |   16.39 ± 6.22 s |    54.10 ± 5.48 s | 667.19 ± 216.73 s |
-| ・go-galaxy           |    5.86 ± 0.42 s |     6.91 ± 1.84 s |    32.83 ± 6.43 s |
-| ・**speedup**         | **2.80 ± 1.08×** |  **7.83 ± 2.23×** | **20.32 ± 7.71×** |
-| **warm cache**       |                  |                   |                   |
-| ・ansible-galaxy      |    5.06 ± 1.51 s |    28.84 ± 4.79 s |  448.94 ± 87.54 s |
-| ・go-galaxy           |    1.16 ± 0.01 s |     2.45 ± 0.29 s |    14.07 ± 0.23 s |
-| ・**speedup**         | **4.37 ± 1.31×** | **11.77 ± 2.40×** | **31.91 ± 6.24×** |
-| **frozen + offline** |                  |                   |                   |
-| ・go-galaxy           |    1.19 ± 0.03 s |     2.41 ± 0.19 s |    14.04 ± 0.30 s |
+| Scenario             | 1 collection | 10 collections | 100 collections |
+|:---------------------|-------------:|---------------:|----------------:|
+| **cold cache**       |              |                |                 |
+| ・ansible-galaxy      |       8.99 s |       152.28 s |        458.10 s |
+| ・go-galaxy           |       2.93 s |         7.71 s |         21.67 s |
+| ・**speedup**         |     **3.1x** |      **19.8x** |       **21.1x** |
+| **warm cache**       |              |                |                 |
+| ・ansible-galaxy      |       5.43 s |        36.67 s |        343.00 s |
+| ・go-galaxy           |      0.206 s |        0.292 s |          1.04 s |
+| ・**speedup**         |    **26.4x** |     **125.6x** |      **330.1x** |
+| **frozen + offline** |              |                |                 |
+| ・go-galaxy           |      0.217 s |        0.309 s |          1.13 s |
 
-## S3 cache backend
+**Read the warm row knowing what each tool caches.** `ansible-galaxy` keeps
+only an API response cache - a single `api.json` - and downloads every tarball
+into a temporary directory it deletes afterwards. Its warm run therefore still
+re-downloads all 100 collections, and saves only the metadata round trips.
+`go-galaxy` caches the tarballs and the extracted trees, and hardlinks the
+installed files out of that cache. The three-hundred-fold figure is the honest
+measurement of two different designs, not of the same design done faster.
 
-`go-galaxy` only - `ansible-galaxy` has no equivalent. `s3-warm` is the shape
-the S3 backend exists for: a fresh runner with an empty local cache against a
-warm shared bucket. The extracted-tree store stays local either way, so a warm
-bucket alone still costs an extraction, which is why `s3-warm` sits above the
-local `warm` row rather than matching it.
+The cold rows are network-bound and correspondingly noisy: `ansible-galaxy` at
+10 collections spread from 87 s to 229 s across five runs. The `go-galaxy` warm
+and frozen rows are the tight ones, within a few percent of their mean, because
+they touch no origin at all.
 
-| Scenario   |  1 collection | 10 collections | 100 collections |
-|:-----------|--------------:|---------------:|----------------:|
-| ・s3-cold   | 5.08 ± 1.03 s | 11.73 ± 1.61 s |  31.94 ± 3.20 s |
-| ・s3-warm   | 1.55 ± 0.04 s |  2.99 ± 0.02 s |  17.62 ± 0.25 s |
-| ・s3-frozen | 1.56 ± 0.05 s |  3.01 ± 0.04 s |  17.52 ± 0.31 s |
+## Disk
 
-`s3-frozen` is deliberately not `--offline`: reaching the bucket is a network
-call, so `--offline` refuses the S3 backend outright at its opening bucket HEAD.
+| After           | ansible-galaxy | go-galaxy |
+|:----------------|---------------:|----------:|
+| 1 collection    |        26.3 MB |   30.6 MB |
+| 10 collections  |        71.2 MB |   82.6 MB |
+| 100 collections |       458.1 MB |  536.9 MB |
 
-## Memory and bytes
+Cache plus installed collections, counted once. That qualification matters for
+`go-galaxy`: its installed files are hardlinks into its own cache, one inode
+under two names, so adding the two directories separately double-counts them.
+At 100 collections the cache holds 532.6 MB and the install tree adds only
+4.3 MB of genuinely new blocks - the directories, the `GALAXY.yml` sidecars and
+the extract markers, none of which are hardlinked.
 
-Measured in a separate single-run pass, 100 collections: peak RSS from
-`/usr/bin/time`, bytes from `go-galaxy`'s own `--metrics-file`, so the byte
-column reads `n/a` for `ansible-galaxy`, which has no metrics report.
+On a single project `ansible-galaxy` uses slightly less disk. The difference
+appears from the second project or the second run onward: another project
+wanting the same collections costs `ansible-galaxy` another 442 MB of real
+bytes and `go-galaxy` about 4 MB of directory entries.
 
-| Scenario                  | Peak RSS (MiB) | Bytes downloaded |
-|:--------------------------|---------------:|-----------------:|
-| ansible-galaxy, cold      |          808.4 |              n/a |
-| go-galaxy, cold           |          164.7 |         53.6 MiB |
-| ansible-galaxy, warm      |        1,104.1 |              n/a |
-| go-galaxy, warm           |           92.5 |                0 |
-| go-galaxy, frozen+offline |           93.7 |                0 |
-| go-galaxy, s3 warm        |          192.7 |                0 |
+## Filesystem sensitivity
 
-The memory gap widens rather than narrows with the collection count, and
-`ansible-galaxy` peaks *higher* on a warm cache than on a cold one.
+A `--frozen --offline` install creates about 66,000 filesystem objects for the
+100-collection set - 50,792 files and symlinks hardlinked out of the extracted
+store, plus 15,762 directories. That means the wall clock is dominated by the
+cost of creating an inode, and that cost varies enormously between filesystems:
 
-## Why it scales
+| 100 collections, frozen + offline | per object |  total |
+|:----------------------------------|-----------:|-------:|
+| Linux, xfs, 4 workers             |    17.1 us | 1.13 s |
+| macOS, APFS, 12 workers           |     213 us | 14.0 s |
 
-The speedup grows with the number of collections - `go-galaxy` parallelizes
-downloads and cache presence probes across `--download-workers` (network-bound,
-and always the larger default of the two) and extractions across `--workers`
-workers (CPU-bound, sized from the CPU this process is permitted to use rather
-than from the node's core count), uses hard links from a content-addressable
-cache on warm runs, and skips the network entirely under `--frozen --offline`.
-With a lockfile and warm caches, installing 100 collections takes ~14 s instead
-of ~7 minutes.
+The same binary doing the same work is **12.5x slower on APFS**. Two practical
+consequences. Numbers measured on a developer laptop do not describe what CI
+will see, and this page is measured on Linux for that reason. And `--workers`
+is worth tuning only where inode creation contends: on APFS the wall clock was
+lowest at 4 workers and degraded past that, while on xfs the derived default
+already performs well.
 
 ## Reproduce
+
+`testing/bench.sh` is the full harness, including the S3 cache backend and a
+peak-RSS pass; it needs `hyperfine`, a virtualenv with `ansible-core`, and
+`docker compose -f testing/docker-compose.yaml up -d minio-svc` for the S3
+scenarios. See [Development](development.md#the-benchmark-harness) for its
+knobs and outputs.
 
 ```bash
 brew install hyperfine
 python3 -m venv .venv && .venv/bin/pip install ansible-core
 go build -o ./dist/go-galaxy ./cmd/go-galaxy
-docker compose -f testing/docker-compose.yaml up -d minio-svc  # for the s3-* scenarios
 testing/bench.sh                   # all sizes, all scenarios
 SIZES=10 testing/bench.sh          # one file
 SCENARIOS="warm" testing/bench.sh  # one scenario
-RUNS=10 testing/bench.sh           # more measured runs than the default 5
 ```
 
-The defaults are `RUNS=5`, `WARMUP=1`, `SIZES="1 10 100"` and
-`SCENARIOS="cold warm frozen s3-cold s3-warm s3-frozen"` - so a bare
-`testing/bench.sh` benchmarks the S3 cache backend as well as the local one,
-which is what the `minio-svc` line above is for. The S3 scenarios are skipped
-with a warning, rather than failing the run, when `$S3_ENDPOINT` (default
-`http://127.0.0.1:9000`) does not answer, so the local scenarios still run on a
-machine with no container runtime. Every cache the script wipes lives under
-`$TMPDIR`, never in `$HOME` and never inside the repository, so benchmarking
-does not touch the caches you actually use.
-
-Budget about three hours for a full default run; the 100-collection
-`ansible-galaxy` scenarios are most of it.
-
-Each size writes three kinds of file under `dist/bench/`:
-`<scenario>-<N>.md` is hyperfine's own table, `resources-<N>.md` adds a
-`Peak RSS (MiB)` and a `Bytes downloaded` column measured in a separate
-single-run pass, and `summary.md` concatenates every table produced.
+Budget about three hours for a full default run against the public Galaxy; the
+100-collection `ansible-galaxy` scenarios are most of it. Every cache the
+script wipes lives under `$TMPDIR`, never in `$HOME` and never inside the
+repository. Point `$TMPDIR` at real storage: a `tmpfs` measures RAM rather than
+disk, which for a workload that is mostly inode creation describes nothing.
 
 ## Conditions
 
-- **Tools:** `ansible-galaxy [core 2.20.5]`, `go-galaxy` at commit `6608e79`
-  (344 commits after `v1.0.2`), `hyperfine 1.20.0`.
-- **Hardware:** single Apple Silicon laptop, `Darwin 25.6.0 arm64`, on home
-  Wi-Fi. Cold-cache numbers are network-bound; warm and frozen are CPU/IO-bound.
-- **The host was not idle during this run**, so the warm and frozen figures in
-  particular should be read as an upper bound rather than as this tool's best.
-  A quiescent machine is what the numbers above want and did not get.
-- **Both tools** invoked with `--no-deps` so the benchmark measures fetch +
-  extract. The dep-resolution paths in the two tools differ; in particular
-  `requirements-100.yml` has transitive constraint conflicts that
-  `ansible-galaxy` resolves leniently and `go-galaxy` rejects strictly, which is
-  a separate comparison.
-- **Cold cache:** both tools' cache directories and the install dir wiped
-  before each run. The script points each tool at a cache of its own under
-  `$TMPDIR` rather than at its default in `$HOME`, and sets
-  `ANSIBLE_COLLECTIONS_PATH=$TARGET` so `ansible-galaxy` does not see anything
-  pre-installed in `~/.ansible/collections`.
-- **Warm cache:** caches primed once, only the install dir wiped between runs.
-- **Frozen + offline:** `go-galaxy lock` once, then
-  `go-galaxy install --frozen --offline` - zero network calls.
+- **Tools:** `ansible-galaxy [core 2.21.3]`, `go-galaxy` at commit `826c765`,
+  built with go1.26.7.
+- **Host:** Linux 6.12.0 x86_64, 4 CPUs, xfs. The macOS figures in the
+  filesystem-sensitivity table above come from an Apple Silicon laptop with 12
+  CPUs on APFS, and are there for contrast rather than as a second data point.
+- **Both tools** run with `--no-deps`, so what is measured is fetch plus
+  extract. The dependency resolvers differ too much for a shared number to mean
+  anything: `requirements-100.yml` carries transitive constraint conflicts that
+  `ansible-galaxy` resolves leniently and `go-galaxy` rejects strictly.
+- **Cold cache:** both tools' caches and the install directory wiped before
+  every run. Each tool gets a cache of its own, and `ansible-galaxy` is given
+  `ANSIBLE_COLLECTIONS_PATH` and `ANSIBLE_LOCAL_TEMP` inside the same working
+  tree, so neither tool sees the other's state and both do their temporary work
+  on the same filesystem.
+- **Warm cache:** caches primed once, only the install directory wiped between
+  runs.
+- **Frozen + offline:** `go-galaxy lock` once, then `go-galaxy install --frozen
+  --offline` - zero network calls.
