@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
+	"github.com/greeddj/go-galaxy/internal/galaxy/treearchive"
 )
 
 const (
@@ -14,7 +15,7 @@ const (
 	ftypeFile      = "file"
 	ftypeDir       = "dir"
 	chksumSHA256   = "sha256"
-	rootRowName    = "."
+	rootRowName    = treearchive.RootName
 )
 
 // filesRow is one row of FILES.json, shaped as ansible's _make_entry shapes

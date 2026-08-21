@@ -5,14 +5,16 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/requirements"
 )
 
-// loadRequirements parses collection requirements into internal structs.
-func loadRequirements(path, defaultSource string) ([]collection, bool, error) {
-	reqs, rolesFound, err := requirements.LoadCollections(path, defaultSource)
+// loadRequirements parses the requirements file, turning its collection
+// entries into internal structs and handing its role entries and parse
+// warnings back as parsed.
+func loadRequirements(path, defaultSource string) ([]collection, requirements.File, error) {
+	file, err := requirements.Load(path, defaultSource)
 	if err != nil {
-		return nil, false, err
+		return nil, requirements.File{}, err
 	}
-	collections := make([]collection, 0, len(reqs))
-	for _, req := range reqs {
+	collections := make([]collection, 0, len(file.Collections))
+	for _, req := range file.Collections {
 		if req.IsGit() {
 			// The locator carries no commit yet; expandGitRoots pins it.
 			// Constraint holds the ref so the requirements signature and the
@@ -37,5 +39,5 @@ func loadRequirements(path, defaultSource string) ([]collection, bool, error) {
 			Type:       req.Type,
 		})
 	}
-	return collections, rolesFound, nil
+	return collections, file, nil
 }

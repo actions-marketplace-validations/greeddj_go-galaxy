@@ -101,8 +101,19 @@ func collectionPathFlags() []cli.Flag {
 			Sources: cli.EnvVars("GO_GALAXY_COLLECTIONS_PATH", "GO_GALAXY_DOWNLOAD_PATH", "ANSIBLE_COLLECTIONS_PATH"),
 		},
 		&cli.StringFlag{
-			Name:    "requirements-file",
-			Aliases: []string{"r"},
+			Name:  "roles-path",
+			Usage: "Path to install roles to",
+			Value: defaultRolesPath,
+			// Source order is precedence, for the reason given on the timeout
+			// flag above.
+			Sources: cli.EnvVars("GO_GALAXY_ROLES_PATH", "ANSIBLE_ROLES_PATH"),
+		},
+		&cli.StringFlag{
+			Name: "requirements-file",
+			// --role-file is ansible-galaxy's own spelling of this flag for
+			// the install command; one file names both collections and roles
+			// there as it does here.
+			Aliases: []string{"r", "role-file"},
 			Usage:   "Path to requirements.yml file",
 			Value:   defaultRequirementsFilePath,
 			Sources: cli.EnvVars("GO_GALAXY_REQUIREMENTS_FILE", envRequirementsFileAnsible),
@@ -208,7 +219,7 @@ func LockInspectFlags() []cli.Flag {
 	return []cli.Flag{
 		&cli.StringFlag{
 			Name:    "requirements-file",
-			Aliases: []string{"r"},
+			Aliases: []string{"r", "role-file"},
 			Usage:   "Path to requirements.yml",
 			Value:   defaultRequirementsFilePath,
 			Sources: cli.EnvVars("GO_GALAXY_REQUIREMENTS_FILE", envRequirementsFileAnsible),

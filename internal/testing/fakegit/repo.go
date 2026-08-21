@@ -20,18 +20,22 @@ import (
 	"github.com/go-git/go-git/v5/storage/memory"
 )
 
-// Names and values the collection fixture AddCollection writes. They are
-// spelled here as plain literals rather than imported from
-// internal/galaxy/collectionbuild, for the reason fakegalaxy gives for its own
-// MANIFEST.json literals: a double that took its shape from the code under
-// test could not catch that code drifting from what a real repository holds.
+// Names and values the collection fixture AddCollection and the role fixture
+// AddRole write. They are spelled here as plain literals rather than imported
+// from internal/galaxy/collectionbuild or internal/galaxy/rolebuild, for the
+// reason fakegalaxy gives for its own MANIFEST.json literals: a double that
+// took its shape from the code under test could not catch that code drifting
+// from what a real repository holds.
 const (
-	galaxyFileName  = "galaxy.yml"
-	readmeFileName  = "README.md"
-	runtimeFileName = "meta/runtime.yml"
-	moduleFileName  = "plugins/modules/hello.py"
-	fixtureAuthor   = "fakegit"
-	fixtureEmail    = "fakegit@example.invalid"
+	galaxyFileName       = "galaxy.yml"
+	readmeFileName       = "README.md"
+	runtimeFileName      = "meta/runtime.yml"
+	moduleFileName       = "plugins/modules/hello.py"
+	roleMetaFileName     = "meta/main.yml"
+	roleTasksFileName    = "tasks/main.yml"
+	roleDefaultsFileName = "defaults/main.yml"
+	fixtureAuthor        = "fakegit"
+	fixtureEmail         = "fakegit@example.invalid"
 	// fixtureFileMode is the mode AddCollection stamps on every file it
 	// writes, so a fixture's tree hash does not depend on a caller's umask.
 	fixtureFileMode os.FileMode = 0o644
@@ -294,6 +298,20 @@ func (r *Repo) AddCollection(dir, namespace, name, version string, deps map[stri
 	r.WriteFile(join(runtimeFileName), fixtureFileMode, []byte("---\nrequires_ansible: '>=2.15.0'\n"))
 }
 
+// AddRole writes a minimal role tree at the repository root and stages it:
+// meta/main.yml with galaxy_info naming the fixture author and, when roleName
+// is not empty, role_name, plus the dependencies as plain strings in the
+// order given; tasks/main.yml with one debug task; and an empty
+// defaults/main.yml. It does not commit, so a caller can add files before one
+// Commit. A role lives at the root alone, which is why there is no dir
+// parameter.
+func (r *Repo) AddRole(deps []string, roleName string) {
+	r.tb.Helper()
+	r.WriteFile(roleMetaFileName, fixtureFileMode, roleMetaYML(deps, roleName))
+	r.WriteFile(roleTasksFileName, fixtureFileMode, []byte("- debug: msg=hi\n"))
+	r.WriteFile(roleDefaultsFileName, fixtureFileMode, []byte("---\n"))
+}
+
 // stage adds p to the index. The caller holds r.mu.
 func (r *Repo) stage(p string) {
 	r.tb.Helper()
@@ -350,6 +368,26 @@ func galaxyYML(namespace, name, version string, deps map[string]string, buildIgn
 		for _, pattern := range buildIgnore {
 			fmt.Fprintf(&b, "  - %q\n", pattern)
 		}
+	}
+	return []byte(b.String())
+}
+
+// roleMetaYML renders the meta/main.yml AddRole writes. Dependencies are
+// quoted so a spec carrying a colon, such as a repository URL, stays one
+// YAML string.
+func roleMetaYML(deps []string, roleName string) []byte {
+	var b strings.Builder
+	fmt.Fprintf(&b, "galaxy_info:\n  author: %s\n", fixtureAuthor)
+	if roleName != "" {
+		fmt.Fprintf(&b, "  role_name: %s\n", roleName)
+	}
+	if len(deps) == 0 {
+		b.WriteString("dependencies: []\n")
+		return []byte(b.String())
+	}
+	b.WriteString("dependencies:\n")
+	for _, dep := range deps {
+		fmt.Fprintf(&b, "  - %q\n", dep)
 	}
 	return []byte(b.String())
 }

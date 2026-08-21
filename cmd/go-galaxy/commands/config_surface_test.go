@@ -128,6 +128,7 @@ func TestCollectionCommandConfigSurface(t *testing.T) {
 	args := []string{
 		"--server=https://explicit.example",
 		"--download-path=/explicit/collections",
+		"--roles-path=/explicit/roles",
 		"--requirements-file=req.yml",
 		"--lock-file=req.lock.yml",
 		"--timeout=45s",
@@ -145,6 +146,7 @@ func TestCollectionCommandConfigSurface(t *testing.T) {
 
 	assertConfigField(t, "Server", cfg.Server, "https://explicit.example")
 	assertConfigField(t, "DownloadPath", cfg.DownloadPath, "/explicit/collections")
+	assertConfigField(t, "RolesPath", cfg.RolesPath, "/explicit/roles")
 	assertConfigField(t, "RequirementsFile", cfg.RequirementsFile, "req.yml")
 	assertConfigField(t, "LockFile", cfg.LockFile, "req.lock.yml")
 	assertConfigField(t, "Timeout", cfg.Timeout, 45*time.Second)
@@ -198,7 +200,7 @@ func serverIDs(cfg *config.Config) []string {
 // KILLING MUTATION, run and reverted: restoring ANSIBLE_GALAXY_SERVER to the
 // server flag's Sources in cmd/go-galaxy/cliflags/flags.go. The first row fails:
 //
-//	config_surface_test.go:212: server ids = [], want [hub pub]
+//	config_surface_test.go:214: server ids = [], want [hub pub]
 func TestAnsibleGalaxyServerDoesNotCollapseServerList(t *testing.T) {
 	t.Run("the ansible env spelling leaves server_list intact", func(t *testing.T) {
 		ansibleCfgWithServerList(t)
@@ -269,7 +271,7 @@ func aliasCfg(t *testing.T) *config.Config {
 // timeout values must not be 30s, since that is helpers.FetchDefaultTimeout
 // and a row asserting it would pass with no env source read at all; the path
 // values must not be ".collections", the --download-path default, for the
-// identical reason, and must contain no ":", since firstCollectionsPath
+// identical reason, and must contain no ":", since splitSearchPath
 // POSIX-splits the resolved value and would keep only what precedes the
 // first one. t.TempDir() satisfies both.
 //
@@ -288,24 +290,24 @@ func aliasCfg(t *testing.T) *config.Config {
 // row pitting it against the ANSIBLE_ spelling loses to that spelling once
 // it is no longer a source at all:
 //
-//	config_surface_test.go:319: DownloadPath = .collections, want /tmp/TestFlagNameEnvAliases82068219/001/b
-//	config_surface_test.go:335: DownloadPath = /tmp/TestFlagNameEnvAliases82068219/001/c, want /tmp/TestFlagNameEnvAliases82068219/001/b
-//	config_surface_test.go:342: Timeout = 30s, want 1m30s
-//	config_surface_test.go:358: Timeout = 1m0s, want 1m30s
+//	config_surface_test.go:321: DownloadPath = .collections, want /tmp/TestFlagNameEnvAliases82068219/001/b
+//	config_surface_test.go:337: DownloadPath = /tmp/TestFlagNameEnvAliases82068219/001/c, want /tmp/TestFlagNameEnvAliases82068219/001/b
+//	config_surface_test.go:344: Timeout = 30s, want 1m30s
+//	config_surface_test.go:360: Timeout = 1m0s, want 1m30s
 //
 // M2, positions 1 and 2 swapped in both chains. Only the two rows pitting
 // the new name against the name that shipped first fail, which is what makes
 // them a pin on ordering rather than on membership:
 //
-//	config_surface_test.go:327: DownloadPath = /tmp/TestFlagNameEnvAliases3589060566/001/b, want /tmp/TestFlagNameEnvAliases3589060566/001/a
-//	config_surface_test.go:350: Timeout = 1m30s, want 45s
+//	config_surface_test.go:329: DownloadPath = /tmp/TestFlagNameEnvAliases3589060566/001/b, want /tmp/TestFlagNameEnvAliases3589060566/001/a
+//	config_surface_test.go:352: Timeout = 1m30s, want 45s
 //
 // M3, the new name demoted to last in both chains. Only the two rows pitting
 // it against the ANSIBLE_ spelling fail, so second position is pinned from
 // both sides and not merely membership in the chain:
 //
-//	config_surface_test.go:335: DownloadPath = /tmp/TestFlagNameEnvAliases4102758397/001/c, want /tmp/TestFlagNameEnvAliases4102758397/001/b
-//	config_surface_test.go:358: Timeout = 1m0s, want 1m30s
+//	config_surface_test.go:337: DownloadPath = /tmp/TestFlagNameEnvAliases4102758397/001/c, want /tmp/TestFlagNameEnvAliases4102758397/001/b
+//	config_surface_test.go:360: Timeout = 1m0s, want 1m30s
 func TestFlagNameEnvAliases(t *testing.T) {
 	base := t.TempDir()
 	pathA := filepath.Join(base, "a")
@@ -377,7 +379,7 @@ func TestFlagNameEnvAliases(t *testing.T) {
 // in cmd/go-galaxy/cliflags - drop envRequirementsFileAnsible from it, which is
 // exactly the "restore parity" edit this test exists to stop:
 //
-//	config_surface_test.go:400: RequirementsFile = requirements.yml, want /from-ansible.yml
+//	config_surface_test.go:402: RequirementsFile = requirements.yml, want /from-ansible.yml
 //
 // The second row survives that mutation, since GO_GALAXY_REQUIREMENTS_FILE is
 // untouched by it - which is why the first row, not the pair, is the pin.
@@ -466,14 +468,14 @@ func workersWarning(cfg *config.Config) string {
 // 0, which applyWorkers replaces with the same derived default the row already
 // wanted, so the warning is the only observable difference:
 //
-//	config_surface_test.go:500: warned about --workers = true, want false
+//	config_surface_test.go:502: warned about --workers = true, want false
 //
 // M-B, the `if !c.IsSet("workers")` branch deleted from applyWorkers
 // (internal/galaxy/config). Not one row of the table fails - none of them is
 // the unset shape - and the cleanup subtest at the end fails instead, which is
 // exactly the coverage that subtest exists to carry:
 //
-//	config_surface_test.go:521: warned about --workers, want no such warning
+//	config_surface_test.go:523: warned about --workers, want no such warning
 func TestWorkersEnvShapes(t *testing.T) {
 	derived := galaxyhelpers.DefaultInstallWorkers(runtime.GOMAXPROCS(0))
 	rows := []workersEnvRow{
@@ -520,5 +522,36 @@ func TestWorkersEnvShapes(t *testing.T) {
 		if workersWarning(cfg) != "" {
 			t.Fatalf("warned about --workers, want no such warning")
 		}
+	})
+}
+
+// TestRolesPathEnvAliases pins --roles-path's two env spellings and their
+// order: GO_GALAXY_ROLES_PATH first, ANSIBLE_ROLES_PATH last, the rule every
+// other GO_GALAXY_ name on a collection flag follows.
+func TestRolesPathEnvAliases(t *testing.T) {
+	base := t.TempDir()
+	pathB := filepath.Join(base, "b")
+	pathC := filepath.Join(base, "c")
+
+	t.Run("the flag-name spelling alone sets the roles path", func(t *testing.T) {
+		neutralizeAnsibleDiscovery(t)
+		t.Setenv("GO_GALAXY_ROLES_PATH", pathB)
+
+		assertConfigField(t, "RolesPath", aliasCfg(t).RolesPath, pathB)
+	})
+
+	t.Run("it outranks the ansible spelling for the roles path", func(t *testing.T) {
+		neutralizeAnsibleDiscovery(t)
+		t.Setenv("GO_GALAXY_ROLES_PATH", pathB)
+		t.Setenv("ANSIBLE_ROLES_PATH", pathC)
+
+		assertConfigField(t, "RolesPath", aliasCfg(t).RolesPath, pathB)
+	})
+
+	t.Run("the ansible spelling alone sets the roles path", func(t *testing.T) {
+		neutralizeAnsibleDiscovery(t)
+		t.Setenv("ANSIBLE_ROLES_PATH", pathC)
+
+		assertConfigField(t, "RolesPath", aliasCfg(t).RolesPath, pathC)
 	})
 }

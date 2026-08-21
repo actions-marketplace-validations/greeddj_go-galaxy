@@ -35,12 +35,19 @@ type collectionDeps struct {
 	// embed this struct, and a same-named field would shadow silently.
 	gitStore cacheManager.ArtifactStore
 	gitMemo  *gitDiscoveryMemo
+	// roleMemo is the run-wide table of discovered roles, the role
+	// counterpart of gitMemo: filled by the resolve phase, read by the
+	// install phase for a --no-cache build. Role artifacts share gitStore,
+	// since a role is built from a git tree exactly as a git collection is.
+	roleMemo *roleDiscoveryMemo
 }
 
-// withGit returns d with the run's git store and memo attached.
-func (d collectionDeps) withGit(gitStore cacheManager.ArtifactStore, memo *gitDiscoveryMemo) collectionDeps {
+// withGit returns d with the run's git store and the two discovery memos
+// attached.
+func (d collectionDeps) withGit(gitStore cacheManager.ArtifactStore, memo *gitDiscoveryMemo, roles *roleDiscoveryMemo) collectionDeps {
 	d.gitStore = gitStore
 	d.gitMemo = memo
+	d.roleMemo = roles
 	return d
 }
 
@@ -57,6 +64,12 @@ type installDeps struct {
 	// makes any accidental collections-tree call from that path fail closed
 	// rather than by convention.
 	root *os.Root
+	// rolesRoot is root's counterpart for the roles tree: the single os.Root
+	// every role write goes through, opened at cfg.RolesPath only when the
+	// plan holds a role (see installWithState), nil otherwise and for warm.
+	// newRoleTarget's nil-root guard makes a role install against a missing
+	// root fail closed rather than by convention.
+	rolesRoot *os.Root
 	// verify is this run's signature verification state, or nil for a run that
 	// verifies nothing - which is what every call site tests through
 	// verifyContext.enabled(), never by reading this field. It is shared by

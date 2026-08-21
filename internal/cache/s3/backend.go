@@ -23,9 +23,7 @@ import (
 	"net/http"
 	"os"
 	"path"
-	"path/filepath"
 	"strings"
-	"time"
 
 	cacheManager "github.com/greeddj/go-galaxy/internal/galaxy/cache"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
@@ -209,8 +207,10 @@ func (b *Backend) ClearFiles(ctx context.Context) error {
 	return b.client.deleteAllUnderPrefix(ctx, b.key(artifactsPrefix))
 }
 
-// RecordProject records the project metadata in S3.
-func (b *Backend) RecordProject(ctx context.Context, requirementsFile, downloadPath string) error {
+// RecordProject records the project metadata in S3. The record itself is
+// built by store.NewProjectRecord, the same function the local backend's
+// registry goes through, so the object and the file hold one shape.
+func (b *Backend) RecordProject(ctx context.Context, requirementsFile, downloadPath, rolesPath string) error {
 	if err := b.Open(ctx); err != nil {
 		return err
 	}
@@ -221,17 +221,8 @@ func (b *Backend) RecordProject(ctx context.Context, requirementsFile, downloadP
 	if registry.Projects == nil {
 		registry.Projects = make(map[string]store.ProjectRecord)
 	}
-	absReq, err := filepath.Abs(requirementsFile)
-	if err != nil {
-		absReq = requirementsFile
-	}
-	projectPath := filepath.Dir(absReq)
-	collectionsPath := resolveCollectionsPath(projectPath, downloadPath)
-	registry.Projects[projectPath] = store.ProjectRecord{
-		RequirementsFile: absReq,
-		CollectionsPath:  collectionsPath,
-		LastRun:          time.Now().UTC(),
-	}
+	projectPath, record := store.NewProjectRecord(requirementsFile, downloadPath, rolesPath)
+	registry.Projects[projectPath] = record
 	return b.saveProjectRegistry(ctx, registry)
 }
 
@@ -518,17 +509,6 @@ func (b *Backend) key(parts ...string) string {
 	all = append(all, b.prefix)
 	all = append(all, parts...)
 	return path.Join(all...)
-}
-
-// resolveCollectionsPath returns an absolute collections path for a project.
-func resolveCollectionsPath(projectPath, downloadPath string) string {
-	if downloadPath == "" {
-		return ""
-	}
-	if filepath.IsAbs(downloadPath) {
-		return downloadPath
-	}
-	return filepath.Join(projectPath, downloadPath)
 }
 
 // isGzip reports whether the headers indicate gzip encoding.

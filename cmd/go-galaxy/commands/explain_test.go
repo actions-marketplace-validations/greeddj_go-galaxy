@@ -22,7 +22,7 @@ func TestPrintExplainOrphan(t *testing.T) {
 	roots := map[string]bool{}
 
 	var buf strings.Builder
-	if err := printExplain(&buf, lf, "ns.orphan", roots); err != nil {
+	if err := printExplain(&buf, lf, "ns.orphan", roots, nil); err != nil {
 		t.Fatalf("printExplain() error = %v, want nil", err)
 	}
 
@@ -54,7 +54,7 @@ func TestPrintExplainRequiredByAndDepends(t *testing.T) {
 	roots := map[string]bool{"community.general": true}
 
 	var buf strings.Builder
-	if err := printExplain(&buf, lf, "community.general", roots); err != nil {
+	if err := printExplain(&buf, lf, "community.general", roots, nil); err != nil {
 		t.Fatalf("printExplain() error = %v, want nil", err)
 	}
 
@@ -101,7 +101,7 @@ func TestPrintExplainRequiredByIsNameSorted(t *testing.T) {
 	}
 
 	var buf strings.Builder
-	if err := printExplain(&buf, lf, "ns.target", map[string]bool{}); err != nil {
+	if err := printExplain(&buf, lf, "ns.target", map[string]bool{}, nil); err != nil {
 		t.Fatalf("printExplain() error = %v, want nil", err)
 	}
 	out := buf.String()
@@ -128,7 +128,7 @@ func TestPrintExplainNotFound(t *testing.T) {
 	t.Parallel()
 	lf := &lockfile.File{SchemaVersion: lockfile.SchemaVersion}
 	var buf strings.Builder
-	err := printExplain(&buf, lf, "ns.missing", map[string]bool{})
+	err := printExplain(&buf, lf, "ns.missing", map[string]bool{}, nil)
 	if err == nil {
 		t.Fatal("printExplain() error = nil, want non-nil")
 	}
@@ -162,7 +162,7 @@ func TestPrintExplainSanitizesLockfileText(t *testing.T) {
 	roots := map[string]bool{hostileLockfileName: true}
 
 	var buf strings.Builder
-	if err := printExplain(&buf, lf, hostileLockfileName, roots); err != nil {
+	if err := printExplain(&buf, lf, hostileLockfileName, roots, nil); err != nil {
 		t.Fatalf("printExplain() error = %v, want nil", err)
 	}
 	out := buf.String()

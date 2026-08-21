@@ -73,6 +73,7 @@ func Outdated(ctx context.Context, cfg *config.Config, runtime *infra.Infra) err
 	}
 
 	results := queryLatestVersions(ctx, cfg, runtime, lf)
+	results = append(results, queryLatestRoleVersions(ctx, newCollectionDeps(cfg, runtime, nil), lf)...)
 	// Sorted once, here, before both the report and the error build below, so
 	// the report's line order and the joined-cause order in the returned
 	// error agree with each other. reportOutdated itself mutates nothing.
@@ -94,7 +95,8 @@ func Outdated(ctx context.Context, cfg *config.Config, runtime *infra.Infra) err
 	// false, never cfg.Frozen: outdated never honors --frozen (see
 	// warnUnhonoredFlags), so passing cfg.Frozen through would re-commit the
 	// exact false claim already fixed for `lock`'s own report.
-	writeRunMetrics(cfg, runtime, "outdated", start, len(results), int(summary.count), false)
+	writeRunMetrics(cfg, runtime, "outdated", start,
+		runCounts{Collections: len(lf.Collections), Roles: len(lf.Roles), Failures: int(summary.count)}, false)
 	return summary.outdatedError()
 }
 

@@ -147,8 +147,8 @@ func (b *cleanSaveSkipBackend) ClearFiles(ctx context.Context) error {
 }
 
 // RecordProject passes through unmodified; only SaveStore is decided here.
-func (b *cleanSaveSkipBackend) RecordProject(ctx context.Context, requirementsFile, downloadPath string) error {
-	return b.inner.RecordProject(ctx, requirementsFile, downloadPath)
+func (b *cleanSaveSkipBackend) RecordProject(ctx context.Context, requirementsFile, downloadPath, rolesPath string) error {
+	return b.inner.RecordProject(ctx, requirementsFile, downloadPath, rolesPath)
 }
 
 // LoadProjectRegistry passes through unmodified; only SaveStore is decided

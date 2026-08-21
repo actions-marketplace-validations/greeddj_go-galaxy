@@ -20,6 +20,7 @@ import (
 type fakeGitRepo struct {
 	refs    map[string]string              // full ref name or "HEAD" -> commit
 	commits map[string][]fakeGitCollection // commit -> collections
+	roles   map[string]fakeGitRole         // commit -> the role at the repository root
 }
 
 type fakeGitCollection struct {
@@ -36,12 +37,13 @@ type fakeGitCollection struct {
 // end with no transport at all. It counts calls and captures the credential
 // presented per URL so a test can assert what the pipeline asked for.
 type fakeGitClient struct {
-	failWith   error
-	repos      map[string]*fakeGitRepo
-	seenAuth   map[string]gitsource.Credential
-	advertises int
-	acquires   int
-	mu         sync.Mutex
+	failWith     error
+	repos        map[string]*fakeGitRepo
+	seenAuth     map[string]gitsource.Credential
+	advertises   int
+	acquires     int
+	roleAcquires int
+	mu           sync.Mutex
 }
 
 func newFakeGitClient() *fakeGitClient {
@@ -57,7 +59,7 @@ var errFakeGitNoTempFile = errors.New("fake git client: no temp file supplier")
 func (r *fakeGitRepo) lookup(ref gitsource.Ref) (string, string, error) {
 	switch ref.Kind {
 	case gitsource.RefCommit:
-		if _, ok := r.commits[ref.Name]; !ok {
+		if !r.hasCommit(ref.Name) {
 			return "", "", fmt.Errorf("%w: %s", helpers.ErrGitCommitNotFound, ref.Name)
 		}
 		return ref.Name, ref.Name, nil
@@ -78,6 +80,14 @@ func (r *fakeGitRepo) lookup(ref gitsource.Ref) (string, string, error) {
 	default:
 		return "", "", fmt.Errorf("%w: unknown ref kind %d", helpers.ErrGitRefNotFound, ref.Kind)
 	}
+}
+
+// hasCommit reports whether the repository holds commit, as a collection
+// commit or a role commit.
+func (r *fakeGitRepo) hasCommit(commit string) bool {
+	_, col := r.commits[commit]
+	_, role := r.roles[commit]
+	return col || role
 }
 
 // lookupShortName resolves a bare ref name, heads before tags.

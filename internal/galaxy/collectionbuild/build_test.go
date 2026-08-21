@@ -21,6 +21,7 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/archive"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/manifest"
+	"github.com/greeddj/go-galaxy/internal/testing/faketree"
 )
 
 // archiveEntry is one tar entry read back from a built artifact.
@@ -96,22 +97,22 @@ func buildFrom(t *testing.T, src Source, subdir string) Built {
 
 // fixtureSource is the tree the structural tests build: a mix of kept,
 // ignored, executable and linked entries.
-func fixtureSource() *memSource {
-	return newMemSource().
-		file("galaxy.yml", minimalGalaxyYML+"build_ignore: ['*.bak']\nlicense_file: ''\ntags: [web]\n"+
+func fixtureSource() *faketree.Tree {
+	return faketree.New().
+		File("galaxy.yml", minimalGalaxyYML+"build_ignore: ['*.bak']\nlicense_file: ''\ntags: [web]\n"+
 			"dependencies: {acme.base: '>=1.0.0'}\n").
-		file("README.md", "# app\n").
-		file("notes.bak", "ignored").
-		file("acme-app-1.0.0.tar.gz", "ignored").
-		file("plugins/modules/run.py", "print()\n").
-		exec("plugins/modules/tool.sh", "#!/bin/sh\n").
-		file("plugins/modules/__pycache__/run.pyc", "ignored").
-		file("plugins/modules/run.pyc", "ignored").
-		file("tests/output/junit.xml", "ignored").
-		file("tests/unit/test_x.py", "assert True\n").
-		dir("empty").
-		symlink("docs/readme-link.md", "../README.md").
-		symlink("modules-link", "plugins/modules")
+		File("README.md", "# app\n").
+		File("notes.bak", "ignored").
+		File("acme-app-1.0.0.tar.gz", "ignored").
+		File("plugins/modules/run.py", "print()\n").
+		Exec("plugins/modules/tool.sh", "#!/bin/sh\n").
+		File("plugins/modules/__pycache__/run.pyc", "ignored").
+		File("plugins/modules/run.pyc", "ignored").
+		File("tests/output/junit.xml", "ignored").
+		File("tests/unit/test_x.py", "assert True\n").
+		Dir("empty").
+		Symlink("docs/readme-link.md", "../README.md").
+		Symlink("modules-link", "plugins/modules")
 }
 
 const (
@@ -169,8 +170,8 @@ func checkHeaders(t *testing.T, entries []archiveEntry) {
 		if h.Uid != 0 || h.Gid != 0 || h.Uname != "" || h.Gname != "" {
 			t.Errorf("%s: owner %d:%d %q:%q, want 0:0 with empty names", h.Name, h.Uid, h.Gid, h.Uname, h.Gname)
 		}
-		if !h.ModTime.Equal(fixedCommitTime()) {
-			t.Errorf("%s: mtime %v, want %v", h.Name, h.ModTime, fixedCommitTime())
+		if !h.ModTime.Equal(faketree.FixedCommitTime()) {
+			t.Errorf("%s: mtime %v, want %v", h.Name, h.ModTime, faketree.FixedCommitTime())
 		}
 		if !h.AccessTime.IsZero() || !h.ChangeTime.IsZero() {
 			t.Errorf("%s: atime/ctime set", h.Name)
@@ -401,12 +402,12 @@ func readExtracted(t *testing.T, dst string, parts ...string) string {
 
 func TestBuildFromSubdir(t *testing.T) {
 	t.Parallel()
-	src := newMemSource().
-		file("README.md", "top level, not part of the collection").
-		file("collections/app/galaxy.yml", minimalGalaxyYML).
-		file("collections/app/README.md", "inner").
-		symlink("collections/app/top", "../../README.md").
-		symlink("collections/app/self", "README.md")
+	src := faketree.New().
+		File("README.md", "top level, not part of the collection").
+		File("collections/app/galaxy.yml", minimalGalaxyYML).
+		File("collections/app/README.md", "inner").
+		Symlink("collections/app/top", "../../README.md").
+		Symlink("collections/app/self", "README.md")
 	built := buildFrom(t, src, "collections/app")
 	if built.Subdir != "collections/app" {
 		t.Fatalf("Subdir = %q", built.Subdir)
@@ -423,11 +424,11 @@ func TestBuildFromSubdir(t *testing.T) {
 
 func TestBuildFromManifestOnlyTree(t *testing.T) {
 	t.Parallel()
-	src := newMemSource().
-		file("MANIFEST.json", manifestOnlyJSON).
-		file("FILES.json", "stale").
-		file("README.md", "r").
-		file("plugins/x.py", "x")
+	src := faketree.New().
+		File("MANIFEST.json", manifestOnlyJSON).
+		File("FILES.json", "stale").
+		File("README.md", "r").
+		File("plugins/x.py", "x")
 	built := buildFrom(t, src, "")
 	if built.Namespace != "acme" || built.Name != "built" || built.Version != "3.0.0" {
 		t.Fatalf("identity = %+v", built)
@@ -444,7 +445,7 @@ func TestBuildFromManifestOnlyTree(t *testing.T) {
 
 type symlinkCase struct {
 	wantErr      error
-	source       func() *memSource
+	source       func() *faketree.Tree
 	name         string
 	wantWarning  string
 	wantLinkname string
@@ -453,8 +454,8 @@ type symlinkCase struct {
 }
 
 // symlinkBase is the tree every symlink case adds one or two links to.
-func symlinkBase() *memSource {
-	return newMemSource().file("galaxy.yml", minimalGalaxyYML).file("README.md", "r").file("d/f", "content")
+func symlinkBase() *faketree.Tree {
+	return faketree.New().File("galaxy.yml", minimalGalaxyYML).File("README.md", "r").File("d/f", "content")
 }
 
 func symlinkCases() []symlinkCase {
@@ -467,54 +468,54 @@ func symlinkWrittenCases() []symlinkCase {
 	return []symlinkCase{
 		{
 			name:         "relative in-tree file",
-			source:       func() *memSource { return base().symlink("a/l", "../d/f") },
+			source:       func() *faketree.Tree { return base().Symlink("a/l", "../d/f") },
 			wantEntries:  []string{"README.md", "a", "a/l", "d", "d/f"},
 			wantLinkname: "../d/f", wantFtype: "file",
 		},
 		{
 			name:         "dir symlink not descended",
-			source:       func() *memSource { return base().symlink("ld", "d") },
+			source:       func() *faketree.Tree { return base().Symlink("ld", "d") },
 			wantEntries:  []string{"README.md", "d", "d/f", "ld"},
 			wantLinkname: "d", wantFtype: "dir",
 		},
 		{
 			name:         "chain flattened to the final file",
-			source:       func() *memSource { return base().symlink("l1", "l2").symlink("l2", "d/l3").symlink("d/l3", "f") },
+			source:       func() *faketree.Tree { return base().Symlink("l1", "l2").Symlink("l2", "d/l3").Symlink("d/l3", "f") },
 			wantEntries:  []string{"README.md", "d", "d/f", "d/l3", "l1", "l2"},
 			wantLinkname: "d/f", wantFtype: "file",
 		},
 		{
 			name:         "through a directory symlink",
-			source:       func() *memSource { return base().symlink("dl", "d").symlink("x/l", "../dl/f") },
+			source:       func() *faketree.Tree { return base().Symlink("dl", "d").Symlink("x/l", "../dl/f") },
 			wantEntries:  []string{"README.md", "d", "d/f", "dl", "x", "x/l"},
 			wantLinkname: "../d/f", wantFtype: "file",
 		},
 		{
 			name:         "dir symlink to the parent directory",
-			source:       func() *memSource { return base().symlink("d/sub/up", "..") },
+			source:       func() *faketree.Tree { return base().Symlink("d/sub/up", "..") },
 			wantEntries:  []string{"README.md", "d", "d/f", "d/sub", "d/sub/up"},
 			wantLinkname: "..", wantFtype: "dir",
 		},
 		{
 			name: "chain of eight",
-			source: func() *memSource {
+			source: func() *faketree.Tree {
 				s := base()
 				for i := range 8 {
-					s.symlink("l"+string(rune('0'+i)), "l"+string(rune('1'+i)))
+					s.Symlink("l"+string(rune('0'+i)), "l"+string(rune('1'+i)))
 				}
-				return s.file("l8", "end")
+				return s.File("l8", "end")
 			},
 			wantEntries:  []string{"README.md", "d", "d/f", "l0", "l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8"},
 			wantLinkname: "l8", wantFtype: "file",
 		},
 		{
 			name:        "link named by a pattern is ignored silently",
-			source:      func() *memSource { return base().symlink("x.pyc", "README.md") },
+			source:      func() *faketree.Tree { return base().Symlink("x.pyc", "README.md") },
 			wantEntries: []string{"README.md", "d", "d/f"},
 		},
 		{
 			name:        "dir link with a pruned basename is ignored silently",
-			source:      func() *memSource { return base().symlink("a/__pycache__", "../d") },
+			source:      func() *faketree.Tree { return base().Symlink("a/__pycache__", "../d") },
 			wantEntries: []string{"README.md", "a", "d", "d/f"},
 		},
 	}
@@ -526,43 +527,43 @@ func symlinkSkippedCases() []symlinkCase {
 	return []symlinkCase{
 		{
 			name:        "dir symlink to an ancestor",
-			source:      func() *memSource { return base().symlink("d/sub/up", "../..") },
+			source:      func() *faketree.Tree { return base().Symlink("d/sub/up", "../..") },
 			wantEntries: []string{"README.md", "d", "d/f", "d/sub"},
 			wantWarning: "skipping symlink d/sub/up: target outside the collection",
 		},
 		{
 			name:        "outside the collection",
-			source:      func() *memSource { return base().symlink("l", "../etc/passwd") },
+			source:      func() *faketree.Tree { return base().Symlink("l", "../etc/passwd") },
 			wantEntries: []string{"README.md", "d", "d/f"},
 			wantWarning: "skipping symlink l: target outside the collection",
 		},
 		{
 			name:        "absolute",
-			source:      func() *memSource { return base().symlink("l", "/etc/passwd") },
+			source:      func() *faketree.Tree { return base().Symlink("l", "/etc/passwd") },
 			wantEntries: []string{"README.md", "d", "d/f"},
 			wantWarning: "skipping symlink l: target outside the collection",
 		},
 		{
 			name:        "chain leaving the collection",
-			source:      func() *memSource { return base().symlink("l", "l2").symlink("l2", "../out") },
+			source:      func() *faketree.Tree { return base().Symlink("l", "l2").Symlink("l2", "../out") },
 			wantEntries: []string{"README.md", "d", "d/f"},
 			wantWarning: "skipping symlink l: target outside the collection",
 		},
 		{
 			name:        "target excluded by the ignore rules",
-			source:      func() *memSource { return base().symlink("l", "galaxy.yml") },
+			source:      func() *faketree.Tree { return base().Symlink("l", "galaxy.yml") },
 			wantEntries: []string{"README.md", "d", "d/f"},
 			wantWarning: "skipping symlink l: target is excluded from the build",
 		},
 		{
 			name:        "target under an excluded directory",
-			source:      func() *memSource { return base().file("tests/output/x", "x").symlink("l", "tests/output/x") },
+			source:      func() *faketree.Tree { return base().File("tests/output/x", "x").Symlink("l", "tests/output/x") },
 			wantEntries: []string{"README.md", "d", "d/f", "tests"},
 			wantWarning: "target is excluded from the build",
 		},
 		{
 			name:        "own directory",
-			source:      func() *memSource { return base().symlink("d/l", ".") },
+			source:      func() *faketree.Tree { return base().Symlink("d/l", ".") },
 			wantEntries: []string{"README.md", "d", "d/f"},
 			wantWarning: "skipping symlink d/l: target resolves to its own directory",
 		},
@@ -575,48 +576,48 @@ func symlinkRefusedCases() []symlinkCase {
 	return []symlinkCase{
 		{
 			name:    "dangling",
-			source:  func() *memSource { return base().symlink("l", "missing") },
+			source:  func() *faketree.Tree { return base().Symlink("l", "missing") },
 			wantErr: helpers.ErrGitSymlinkUnresolvable,
 		},
 		{
 			name:    "through a file",
-			source:  func() *memSource { return base().symlink("l", "README.md/x") },
+			source:  func() *faketree.Tree { return base().Symlink("l", "README.md/x") },
 			wantErr: helpers.ErrGitSymlinkUnresolvable,
 		},
 		{
 			name:    "loop",
-			source:  func() *memSource { return base().symlink("a", "b").symlink("b", "a") },
+			source:  func() *faketree.Tree { return base().Symlink("a", "b").Symlink("b", "a") },
 			wantErr: helpers.ErrGitSymlinkUnresolvable,
 		},
 		{
 			name:    "self loop",
-			source:  func() *memSource { return base().symlink("a", "a") },
+			source:  func() *faketree.Tree { return base().Symlink("a", "a") },
 			wantErr: helpers.ErrGitSymlinkUnresolvable,
 		},
 		{
 			name: "chain of nine",
-			source: func() *memSource {
+			source: func() *faketree.Tree {
 				s := base()
 				for i := range 9 {
-					s.symlink("l"+string(rune('0'+i)), "l"+string(rune('1'+i)))
+					s.Symlink("l"+string(rune('0'+i)), "l"+string(rune('1'+i)))
 				}
-				return s.file("l9", "end")
+				return s.File("l9", "end")
 			},
 			wantErr: helpers.ErrGitSymlinkUnresolvable,
 		},
 		{
 			name:    "empty target",
-			source:  func() *memSource { return base().symlink("l", "") },
+			source:  func() *faketree.Tree { return base().Symlink("l", "") },
 			wantErr: helpers.ErrSymlinkTargetIsEmpty,
 		},
 		{
 			name:    "NUL in target",
-			source:  func() *memSource { return base().symlink("l", "a\x00b") },
+			source:  func() *faketree.Tree { return base().Symlink("l", "a\x00b") },
 			wantErr: helpers.ErrSymlinkTarget,
 		},
 		{
 			name:        "target to a submodule",
-			source:      func() *memSource { return base().submodule("sub").symlink("l", "sub") },
+			source:      func() *faketree.Tree { return base().Submodule("sub").Symlink("l", "sub") },
 			wantEntries: []string{"README.md", "d", "d/f"},
 			wantWarning: "target is a submodule",
 		},
@@ -694,7 +695,7 @@ func checkLinkRow(t *testing.T, entries []archiveEntry, linkname, ftype string) 
 
 func TestBuildSkipsSubmoduleWithWarning(t *testing.T) {
 	t.Parallel()
-	src := newMemSource().file("galaxy.yml", minimalGalaxyYML).submodule("vendor/lib").submodule("tests/output")
+	src := faketree.New().File("galaxy.yml", minimalGalaxyYML).Submodule("vendor/lib").Submodule("tests/output")
 	built := buildFrom(t, src, "")
 	want := []string{"MANIFEST.json", "FILES.json", "tests", "vendor"}
 	if got := entryNames(readArtifact(t, built.ArtifactPath)); strings.Join(got, "|") != strings.Join(want, "|") {
@@ -709,9 +710,9 @@ func TestBuildBudgets(t *testing.T) {
 	t.Parallel()
 	t.Run("entry count", func(t *testing.T) {
 		t.Parallel()
-		src := newMemSource().file("galaxy.yml", minimalGalaxyYML)
+		src := faketree.New().File("galaxy.yml", minimalGalaxyYML)
 		for i := range helpers.ArchiveMaxEntryCount {
-			src.entries["f"+strconv.Itoa(int(i))] = memEntry{kind: EntryFile, data: "x"}
+			src.File("f"+strconv.Itoa(int(i)), "x")
 		}
 		_, err := Build(context.Background(), src, candidateFor(t, src, ""), tempFileIn(t.TempDir()))
 		if !errors.Is(err, helpers.ErrArchiveTooManyEntries) {
@@ -720,22 +721,10 @@ func TestBuildBudgets(t *testing.T) {
 	})
 	t.Run("entry size declared", func(t *testing.T) {
 		t.Parallel()
-		src := newMemSource().file("galaxy.yml", minimalGalaxyYML).file("big", "small").declareSize("big", helpers.ArchiveMaxEntrySize+1)
+		src := faketree.New().File("galaxy.yml", minimalGalaxyYML).File("big", "small").DeclareSize("big", helpers.ArchiveMaxEntrySize+1)
 		_, err := Build(context.Background(), src, candidateFor(t, src, ""), tempFileIn(t.TempDir()))
 		if !errors.Is(err, helpers.ErrArchiveEntryIsTooLarge) {
 			t.Fatalf("error = %v", err)
-		}
-	})
-	t.Run("total size", func(t *testing.T) {
-		t.Parallel()
-		b := &builder{}
-		for b.total < helpers.ArchiveMaxTotalSize {
-			if err := b.chargeSize("a", helpers.ArchiveMaxEntrySize); err != nil {
-				t.Fatalf("charge at %d: %v", b.total, err)
-			}
-		}
-		if err := b.chargeSize("b", 1); !errors.Is(err, helpers.ErrArchiveExceedsMaxSize) {
-			t.Fatalf("charge past the cap: %v", err)
 		}
 	})
 }
@@ -744,7 +733,7 @@ func TestBuildShapeBudgets(t *testing.T) {
 	t.Parallel()
 	t.Run("name length", func(t *testing.T) {
 		t.Parallel()
-		src := newMemSource().file("galaxy.yml", minimalGalaxyYML).file(strings.Repeat("n", helpers.ArchiveMaxEntryNameLen+1), "x")
+		src := faketree.New().File("galaxy.yml", minimalGalaxyYML).File(strings.Repeat("n", helpers.ArchiveMaxEntryNameLen+1), "x")
 		_, err := Build(context.Background(), src, candidateFor(t, src, ""), tempFileIn(t.TempDir()))
 		if !errors.Is(err, helpers.ErrArchiveEntryNameTooLong) {
 			t.Fatalf("error = %v", err)
@@ -752,7 +741,7 @@ func TestBuildShapeBudgets(t *testing.T) {
 	})
 	t.Run("link target length", func(t *testing.T) {
 		t.Parallel()
-		src := newMemSource().file("galaxy.yml", minimalGalaxyYML).symlink("l", strings.Repeat("t", helpers.ArchiveMaxEntryNameLen+1))
+		src := faketree.New().File("galaxy.yml", minimalGalaxyYML).Symlink("l", strings.Repeat("t", helpers.ArchiveMaxEntryNameLen+1))
 		_, err := Build(context.Background(), src, candidateFor(t, src, ""), tempFileIn(t.TempDir()))
 		if !errors.Is(err, helpers.ErrArchiveEntryNameTooLong) {
 			t.Fatalf("error = %v", err)
@@ -761,7 +750,7 @@ func TestBuildShapeBudgets(t *testing.T) {
 	t.Run("depth", func(t *testing.T) {
 		t.Parallel()
 		deep := strings.TrimSuffix(strings.Repeat("d/", helpers.GitTreeMaxDepth), "/") + "/f"
-		src := newMemSource().file("galaxy.yml", minimalGalaxyYML).file(deep, "x")
+		src := faketree.New().File("galaxy.yml", minimalGalaxyYML).File(deep, "x")
 		_, err := Build(context.Background(), src, candidateFor(t, src, ""), tempFileIn(t.TempDir()))
 		if !errors.Is(err, helpers.ErrGitTreeTooDeep) {
 			t.Fatalf("error = %v", err)
@@ -769,7 +758,7 @@ func TestBuildShapeBudgets(t *testing.T) {
 	})
 	t.Run("blob shorter than declared", func(t *testing.T) {
 		t.Parallel()
-		src := newMemSource().file("galaxy.yml", minimalGalaxyYML).file("f", "abc").declareSize("f", 10)
+		src := faketree.New().File("galaxy.yml", minimalGalaxyYML).File("f", "abc").DeclareSize("f", 10)
 		_, err := Build(context.Background(), src, candidateFor(t, src, ""), tempFileIn(t.TempDir()))
 		if !errors.Is(err, helpers.ErrGitCommitMismatch) {
 			t.Fatalf("error = %v", err)
@@ -790,7 +779,7 @@ func TestBuildErrorsLeaveNoTempFile(t *testing.T) {
 			cancel()
 			return f, cleanup, err
 		}
-		src := newMemSource().file("galaxy.yml", minimalGalaxyYML).file("README.md", "r")
+		src := faketree.New().File("galaxy.yml", minimalGalaxyYML).File("README.md", "r")
 		_, err := Build(ctx, src, candidateFor(t, src, ""), tempFile)
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("error = %v, want context.Canceled", err)
@@ -801,8 +790,8 @@ func TestBuildErrorsLeaveNoTempFile(t *testing.T) {
 		t.Parallel()
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		src := newMemSource().file("galaxy.yml", minimalGalaxyYML).file("README.md", "r").file("b/c", "x")
-		src.onOpen = func(string) { cancel() }
+		src := faketree.New().File("galaxy.yml", minimalGalaxyYML).File("README.md", "r").File("b/c", "x")
+		src.SetOnOpen(func(string) { cancel() })
 		dir := t.TempDir()
 		_, err := Build(ctx, src, candidateFor(t, src, ""), tempFileIn(dir))
 		if !errors.Is(err, context.Canceled) {
@@ -812,16 +801,16 @@ func TestBuildErrorsLeaveNoTempFile(t *testing.T) {
 	})
 	t.Run("blob grows between passes", func(t *testing.T) {
 		t.Parallel()
-		src := newMemSource().file("galaxy.yml", minimalGalaxyYML).file("f", "abc")
+		src := faketree.New().File("galaxy.yml", minimalGalaxyYML).File("f", "abc")
 		opens := 0
-		src.onOpen = func(p string) {
+		src.SetOnOpen(func(p string) {
 			if p == "f" {
 				opens++
 				if opens == 2 {
-					src.entries["f"] = memEntry{kind: EntryFile, data: "abcdef"}
+					src.File("f", "abcdef")
 				}
 			}
-		}
+		})
 		dir := t.TempDir()
 		_, err := Build(context.Background(), src, candidateFor(t, src, ""), tempFileIn(dir))
 		if !errors.Is(err, helpers.ErrGitCommitMismatch) {
@@ -831,7 +820,7 @@ func TestBuildErrorsLeaveNoTempFile(t *testing.T) {
 	})
 	t.Run("nil temp file func", func(t *testing.T) {
 		t.Parallel()
-		src := newMemSource().file("galaxy.yml", minimalGalaxyYML)
+		src := faketree.New().File("galaxy.yml", minimalGalaxyYML)
 		if _, err := Build(context.Background(), src, candidateFor(t, src, ""), nil); !errors.Is(err, helpers.ErrConfigIsNil) {
 			t.Fatalf("error = %v", err)
 		}
@@ -846,7 +835,7 @@ func TestBuildErrorsLeaveNoTempFile(t *testing.T) {
 // and a few tens of thousands of them cross the cap.
 func TestBuildRefusesOversizedFilesManifest(t *testing.T) {
 	t.Parallel()
-	src := newMemSource().file("galaxy.yml", minimalGalaxyYML)
+	src := faketree.New().File("galaxy.yml", minimalGalaxyYML)
 	const rowOverhead = 150
 	rows := helpers.FilesManifestMaxBytes/(helpers.ArchiveMaxEntryNameLen+rowOverhead) + 1
 	if rows >= helpers.ArchiveMaxEntryCount {
@@ -854,7 +843,7 @@ func TestBuildRefusesOversizedFilesManifest(t *testing.T) {
 	}
 	prefix := strings.Repeat("n", helpers.ArchiveMaxEntryNameLen-8)
 	for i := range rows {
-		src.entries[prefix+fmt.Sprintf("%08d", i)] = memEntry{kind: EntryFile, data: "x"}
+		src.File(prefix+fmt.Sprintf("%08d", i), "x")
 	}
 	dir := t.TempDir()
 	_, err := Build(context.Background(), src, candidateFor(t, src, ""), tempFileIn(dir))
@@ -884,7 +873,7 @@ func assertEmptyDir(t *testing.T, dir string) {
 func TestBuiltCleanupIsIdempotent(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	src := newMemSource().file("galaxy.yml", minimalGalaxyYML)
+	src := faketree.New().File("galaxy.yml", minimalGalaxyYML)
 	built, err := Build(context.Background(), src, candidateFor(t, src, ""), tempFileIn(dir))
 	if err != nil {
 		t.Fatalf("Build: %v", err)
@@ -899,7 +888,7 @@ func TestBuiltCleanupIsIdempotent(t *testing.T) {
 
 func TestBuiltDependenciesAreACopy(t *testing.T) {
 	t.Parallel()
-	src := newMemSource().file("galaxy.yml", minimalGalaxyYML+"dependencies: {acme.base: '*'}\n")
+	src := faketree.New().File("galaxy.yml", minimalGalaxyYML+"dependencies: {acme.base: '*'}\n")
 	cand := candidateFor(t, src, "")
 	built, err := Build(context.Background(), src, cand, tempFileIn(t.TempDir()))
 	if err != nil {
@@ -912,19 +901,18 @@ func TestBuiltDependenciesAreACopy(t *testing.T) {
 	}
 }
 
-func TestRelativeLink(t *testing.T) {
+// TestBuildGoldenDigest pins the sha256 of fixtureSource's artifact as a
+// literal. The build is deterministic by contract, so this value changes only
+// when the artifact's byte shape changes - a tar header field, the gzip
+// header, the entry order, the documents' encoding - which is exactly the
+// class of change a refactor of the writer must not make by accident. A
+// failure here says "the bytes moved"; whether they were meant to is the
+// reviewer's question, and the new literal is the answer once it is.
+func TestBuildGoldenDigest(t *testing.T) {
 	t.Parallel()
-	for _, tt := range []struct{ from, to, want string }{
-		{".", "README.md", "README.md"},
-		{".", "d/f", "d/f"},
-		{"a", "d/f", "../d/f"},
-		{"a/b", "a/c", "../c"},
-		{"a/b", "a", ".."},
-		{"a/b", "a/b/c", "c"},
-		{"d/sub", "d/f", "../f"},
-	} {
-		if got := relativeLink(tt.from, tt.to); got != tt.want {
-			t.Errorf("relativeLink(%q, %q) = %q, want %q", tt.from, tt.to, got, tt.want)
-		}
+	const want = "4f304a45d4f7275a5eec4cadaa26cd07b39d4bed38da638a2bdd7b466a7abb28"
+	built := buildFrom(t, fixtureSource(), "")
+	if built.SHA256 != want {
+		t.Fatalf("SHA256 = %s, want %s", built.SHA256, want)
 	}
 }

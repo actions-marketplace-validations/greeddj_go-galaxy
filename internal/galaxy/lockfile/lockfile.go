@@ -4,15 +4,17 @@
 // CI runs are reproducible and hermetic: once a lockfile exists, install only
 // reads the cache, never the Galaxy API or the git remote.
 //
-// Two schema versions are written and both are read. Schema 1 is the
+// Three schema versions are written and all three are read. Schema 1 is the
 // Galaxy-only shape every lockfile had before git sources existed; schema 2
 // adds the git fields to an entry and is written exactly when a file carries
-// at least one git entry. canonicalize decides between them from the
-// entries alone, so a project with no git source keeps producing a schema-1
-// file that is byte-identical to what it produced before, and a project that
-// drops its last git source goes back to schema 1 on its next lock. An older
-// binary reading a schema-2 file refuses it loudly instead of installing a
-// git entry's source as if it were a Galaxy server.
+// at least one git entry; schema 3 adds the roles list and is written
+// exactly when a file carries at least one role. canonicalize decides among
+// them from the entries alone, so a project with no git source and no role
+// keeps producing a schema-1 file that is byte-identical to what it produced
+// before, and a project that drops its last git source or role goes back on
+// its next lock. An older binary reading a newer file refuses it loudly
+// instead of installing a git entry's source as if it were a Galaxy server,
+// or ignoring a roles list it does not know.
 package lockfile
 
 import (
@@ -74,10 +76,13 @@ type Entry struct {
 // IsGit reports whether the entry pins a git source.
 func (e Entry) IsGit() bool { return e.Type == TypeGit }
 
-// SchemaVersionFor returns the schema a file holding entries is written
-// with: SchemaVersionGit when any entry is a git entry, SchemaVersion
-// otherwise.
-func SchemaVersionFor(entries []Entry) int {
+// SchemaVersionFor returns the schema a file holding entries and roles is
+// written with: SchemaVersionRoles when there is any role, else
+// SchemaVersionGit when any entry is a git entry, else SchemaVersion.
+func SchemaVersionFor(entries []Entry, roles []RoleEntry) int {
+	if len(roles) > 0 {
+		return SchemaVersionRoles
+	}
 	for _, e := range entries {
 		if e.IsGit() {
 			return SchemaVersionGit
@@ -97,9 +102,13 @@ type File struct {
 	// server_list reorder or edit that changes the effective default server
 	// counts as drift the same way a changed pin does, even when every
 	// collection entry is otherwise untouched.
-	Server        string  `yaml:"server,omitempty"`
-	Collections   []Entry `yaml:"collections"`
-	SchemaVersion int     `yaml:"schema_version"`
+	Server      string  `yaml:"server,omitempty"`
+	Collections []Entry `yaml:"collections"`
+	// Roles is every role the run installs, pinned to its commit; absent
+	// from a file without roles, so such a file is byte-identical to one
+	// written before roles existed.
+	Roles         []RoleEntry `yaml:"roles,omitempty"`
+	SchemaVersion int         `yaml:"schema_version"`
 }
 
 // ResolveDefaultPath returns the lockfile path. If override is set, that
@@ -151,9 +160,9 @@ func Load(path string) (*File, error) {
 	if f.SchemaVersion == 0 {
 		return nil, fmt.Errorf("%w: missing schema_version", helpers.ErrLockfileInvalid)
 	}
-	if f.SchemaVersion != SchemaVersion && f.SchemaVersion != SchemaVersionGit {
-		return nil, fmt.Errorf("%w: schema_version=%d, supported=%d and %d",
-			helpers.ErrLockfileInvalid, f.SchemaVersion, SchemaVersion, SchemaVersionGit)
+	if f.SchemaVersion != SchemaVersion && f.SchemaVersion != SchemaVersionGit && f.SchemaVersion != SchemaVersionRoles {
+		return nil, fmt.Errorf("%w: schema_version=%d, supported=%d, %d and %d",
+			helpers.ErrLockfileInvalid, f.SchemaVersion, SchemaVersion, SchemaVersionGit, SchemaVersionRoles)
 	}
 	if err := f.validate(); err != nil {
 		return nil, err
@@ -201,6 +210,7 @@ func (f *File) canonicalClone() *File {
 		copy(deps, src)
 		clone.Collections[i].Deps = deps
 	}
+	clone.Roles = cloneRoles(f.Roles)
 	canonicalize(&clone)
 	return &clone
 }
@@ -255,14 +265,14 @@ func (f *File) validate() error {
 			return err
 		}
 	}
-	return nil
+	return f.validateRoles()
 }
 
 // validateEntryType judges the fields that distinguish a git entry from a
 // Galaxy one. A Galaxy entry may carry none of them; a git entry must carry a
 // canonical repository URL as its source, a valid ref, a full lowercase
 // commit and a valid subdir, and must not carry a SHA256 (see Entry for why),
-// and may only appear in a schema-2 file. The URL is re-parsed rather than
+// and may only appear in a schema-2 or later file. The URL is re-parsed rather than
 // trusted because the source is repository content: anything a later run
 // connects to has to pass the same grammar a requirements entry does.
 func validateEntryType(e Entry, schema int) error {
@@ -276,7 +286,7 @@ func validateEntryType(e Entry, schema int) error {
 	default:
 		return fmt.Errorf("%w: %s: unsupported entry type %q", helpers.ErrLockfileInvalid, e.Name, e.Type)
 	}
-	if schema != SchemaVersionGit {
+	if schema < SchemaVersionGit {
 		return fmt.Errorf("%w: %s: a git entry requires schema_version %d", helpers.ErrLockfileInvalid, e.Name, SchemaVersionGit)
 	}
 	if reason := gitEntryProblem(e); reason != "" {
@@ -375,11 +385,12 @@ func LoadRequired(path string) (*File, error) {
 // file at schema 1 and flips a file to schema 2 exactly when its first git
 // entry appears.
 func canonicalize(f *File) {
-	f.SchemaVersion = SchemaVersionFor(f.Collections)
+	f.SchemaVersion = SchemaVersionFor(f.Collections, f.Roles)
 	slices.SortFunc(f.Collections, func(a, b Entry) int {
 		return strings.Compare(a.Name, b.Name)
 	})
 	for i := range f.Collections {
 		slices.Sort(f.Collections[i].Deps)
 	}
+	canonicalizeRoles(f.Roles)
 }

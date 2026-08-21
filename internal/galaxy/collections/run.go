@@ -27,6 +27,7 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 	"github.com/greeddj/go-galaxy/internal/galaxy/lockfile"
+	"github.com/greeddj/go-galaxy/internal/galaxy/requirements"
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
 )
 
@@ -39,18 +40,24 @@ type installState struct {
 	// gitDiscoveryMemo. It lives on the state rather than on a phase's deps
 	// because the install phase reads what the resolve phase wrote.
 	gitMemo *gitDiscoveryMemo
+	// roleMemo is gitMemo's counterpart for roles: what the resolve phase
+	// learned about each role, read by the install phase.
+	roleMemo *roleDiscoveryMemo
 }
 
 // resolveDeps builds the dependency set a resolve runs with: the store, and
 // the git store and memo every phase shares.
 func (s *installState) resolveDeps(cfg *config.Config, runtime *infra.Infra) collectionDeps {
-	return newCollectionDeps(cfg, runtime, s.store).withGit(s.backend.Artifacts(), s.gitMemo)
+	return newCollectionDeps(cfg, runtime, s.store).withGit(s.backend.Artifacts(), s.gitMemo, s.roleMemo)
 }
 
 type installPlan struct {
 	collections map[string]collection
 	graph       map[string][]string
-	prefetch    *prefetcher
+	// roles is every role the requirements file and their dependencies
+	// resolved to, keyed by install name; see resolveRoles.
+	roles    roleResolution
+	prefetch *prefetcher
 	// verify is this run's signature verification state, nil when the run
 	// verifies nothing. It is resolved from the requirements roots, so it
 	// belongs to the plan rather than to the state initInstall builds before
@@ -120,6 +127,7 @@ func withBackend(ctx context.Context, cfg *config.Config, runtime *infra.Infra, 
 	// A --no-cache run hands git builds from discovery to the install phase
 	// through the memo; whatever no install worker took is removed here.
 	defer state.gitMemo.cleanup()
+	defer state.roleMemo.cleanup()
 
 	return cacheManager.LockLostError(ctx, lockCtx, work(lockCtx, cfg, runtime, state, start))
 }
@@ -240,6 +248,7 @@ func initInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) 
 		release:      releaseLock,
 		extractStore: extractStore,
 		gitMemo:      newGitDiscoveryMemo(),
+		roleMemo:     newRoleDiscoveryMemo(),
 	}, nil
 }
 
@@ -302,7 +311,7 @@ func recordProjectUnlessDryRun(ctx context.Context, cfg *config.Config, runtime 
 	if cfg.DryRun {
 		return
 	}
-	if err := backend.RecordProject(ctx, cfg.RequirementsFile, cfg.DownloadPath); err != nil {
+	if err := backend.RecordProject(ctx, cfg.RequirementsFile, cfg.DownloadPath, cfg.RolesPath); err != nil {
 		runtime.Output.Printf("⚠️ Failed to record project: %v", err)
 	}
 }
@@ -339,7 +348,7 @@ func sweepDeadRunTemps(ctx context.Context, runtime *infra.Infra, backend cacheM
 func prepareInstallPlan(
 	ctx context.Context, cfg *config.Config, runtime *infra.Infra, state *installState, root *os.Root,
 ) (*installPlan, error) {
-	roots, err := loadRoots(cfg, runtime)
+	roots, roleRoots, err := loadRoots(cfg, runtime)
 	if err != nil {
 		return nil, err
 	}
@@ -356,6 +365,16 @@ func prepareInstallPlan(
 	}
 
 	resolved, graph, err := resolveOrLoadLockfile(ctx, cfg, runtime, state, roots)
+	if err != nil {
+		return nil, err
+	}
+
+	// Roles are resolved here, beside the collections and ahead of the
+	// prefetcher, for the reason newVerifyContext runs where it does: a role
+	// that does not exist, or a repository that refuses, fails the run before
+	// a background download is scheduled. Under --frozen they come from the
+	// lockfile, with no network, as the collections did just above.
+	roles, err := resolveOrLoadRoles(ctx, cfg, runtime, state, roleRoots)
 	if err != nil {
 		return nil, err
 	}
@@ -382,17 +401,33 @@ func prepareInstallPlan(
 
 	prefetchStart := time.Now()
 	prefetchDeps := newPrefetchDeps(cfg, runtime, state.store, state.backend.Artifacts(), root)
-	prefetchDeps.collectionDeps = prefetchDeps.withGit(state.backend.Artifacts(), state.gitMemo)
+	prefetchDeps.collectionDeps = prefetchDeps.withGit(state.backend.Artifacts(), state.gitMemo, state.roleMemo)
 	prefetch := startPrefetcher(ctx, prefetchDeps, collections, levels)
 	runtime.Output.DebugSincef(prefetchStart, "%s", "prefetch schedule")
 
 	return &installPlan{
 		collections: collections,
 		graph:       graph,
+		roles:       roles,
 		levels:      levels,
 		prefetch:    prefetch,
 		verify:      verify,
 	}, nil
+}
+
+// resolveOrLoadRoles is resolveOrLoadLockfile for the roles list: under
+// --frozen every role comes from the lockfile, else from discovery.
+func resolveOrLoadRoles(
+	ctx context.Context, cfg *config.Config, runtime *infra.Infra, state *installState, roots []requirements.RoleRequirement,
+) (roleResolution, error) {
+	if cfg.Frozen {
+		lf, err := lockfile.LoadRequired(lockfile.ResolveDefaultPath(cfg.RequirementsFile, cfg.LockFile))
+		if err != nil {
+			return roleResolution{}, err
+		}
+		return resolveRolesFromLockfile(lf, roots)
+	}
+	return resolveRoles(ctx, state.resolveDeps(cfg, runtime), roots)
 }
 
 // resolveOrLoadLockfile chooses between lockfile-driven resolution (when
@@ -436,21 +471,21 @@ func resolveOrLoadLockfile(
 // empty Source ("" for defaultSource below), deliberately not defaulted to
 // cfg.Server here: an unpinned root walks the whole configured server list
 // at resolve time (see serverCandidates) instead of being nailed to one.
-func loadRoots(cfg *config.Config, runtime *infra.Infra) ([]collection, error) {
+func loadRoots(cfg *config.Config, runtime *infra.Infra) ([]collection, []requirements.RoleRequirement, error) {
 	runtime.Output.Printf("🗂️ load collections from requirements file")
-	collectionsDirect, rolesFound, err := loadRequirements(cfg.RequirementsFile, "")
+	collectionsDirect, file, err := loadRequirements(cfg.RequirementsFile, "")
 	if err != nil {
-		return nil, fmt.Errorf("failed to load requirements file: %w", err)
+		return nil, nil, fmt.Errorf("failed to load requirements file: %w", err)
 	}
-	if rolesFound {
-		runtime.Output.Printf("⚠️ requirements.yml contains roles, but roles are not supported.")
+	for _, w := range file.Warnings {
+		runtime.Output.Warnf("%s", w)
 	}
 	runtime.Output.Printf("🧩 prepare roots")
 	roots, err := prepareRoots(collectionsDirect)
 	if err != nil {
-		return nil, fmt.Errorf("failed to prepare requirements: %w", err)
+		return nil, nil, fmt.Errorf("failed to prepare requirements: %w", err)
 	}
-	return roots, nil
+	return roots, file.Roles, nil
 }
 
 // buildCollectionsMap folds the resolved requirements into a key-addressed

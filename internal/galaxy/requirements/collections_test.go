@@ -18,9 +18,10 @@ func TestParseCollectionsAcceptedCases(t *testing.T) {
 	for _, tc := range parseCollectionsAcceptedCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			collections, rolesFound, err := ParseCollections([]byte(tc.input), tc.source)
+			f, err := Parse([]byte(tc.input), tc.source)
+			collections, rolesFound := f.Collections, len(f.Roles) > 0
 			if err != nil {
-				t.Fatalf("ParseCollections error: %v", err)
+				t.Fatalf("Parse error: %v", err)
 			}
 			tc.check(t, collections, rolesFound)
 		})
@@ -312,7 +313,7 @@ func TestParseCollectionsRejectedCases(t *testing.T) {
 	for _, tc := range parseCollectionsRejectedCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, _, err := ParseCollections([]byte(tc.input), tc.source)
+			_, err := Parse([]byte(tc.input), tc.source)
 			if err == nil {
 				t.Fatalf("expected error")
 			}
@@ -554,9 +555,10 @@ func TestParseCollectionsNullValue(t *testing.T) {
 	for name, input := range inputs {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			collections, rolesFound, err := ParseCollections([]byte(input), "https://default")
+			f, err := Parse([]byte(input), "https://default")
+			collections, rolesFound := f.Collections, len(f.Roles) > 0
 			if err != nil {
-				t.Fatalf("ParseCollections error: %v", err)
+				t.Fatalf("Parse error: %v", err)
 			}
 			if rolesFound {
 				t.Fatalf("unexpected rolesFound")
@@ -583,9 +585,9 @@ func TestParseCollectionsNullValue(t *testing.T) {
 func TestParseCollectionsNamespaceWithThreePartNameIsRejectedAsAName(t *testing.T) {
 	t.Parallel()
 	input := "- namespace: foo\n  name: a.b.c\n"
-	_, _, err := ParseCollections([]byte(input), "https://default")
+	_, err := Parse([]byte(input), "https://default")
 	if !errors.Is(err, helpers.ErrInvalidCollectionName) {
-		t.Fatalf("ParseCollections error = %v, want errors.Is helpers.ErrInvalidCollectionName", err)
+		t.Fatalf("Parse error = %v, want errors.Is helpers.ErrInvalidCollectionName", err)
 	}
 	if errors.Is(err, helpers.ErrConflictingNamespaceName) {
 		t.Fatalf("a three-part name must not be reported as a namespace conflict: %v", err)
@@ -594,9 +596,10 @@ func TestParseCollectionsNamespaceWithThreePartNameIsRejectedAsAName(t *testing.
 	// Positive control on the same shape: an explicit namespace with a
 	// dot-free name is accepted, so the rejection above is the dots and not
 	// the explicit-namespace form itself.
-	collections, _, err := ParseCollections([]byte("- namespace: acme\n  name: widgets\n"), "https://default")
+	f, err := Parse([]byte("- namespace: acme\n  name: widgets\n"), "https://default")
+	collections := f.Collections
 	if err != nil {
-		t.Fatalf("ParseCollections with an explicit namespace and a plain name: %v", err)
+		t.Fatalf("Parse with an explicit namespace and a plain name: %v", err)
 	}
 	if len(collections) != 1 || collections[0].Namespace != "acme" || collections[0].Name != "widgets" {
 		t.Fatalf("unexpected collections: %#v", collections)
@@ -618,9 +621,9 @@ func TestParseCollectionsRejectsNamesOutsideTheAlphabet(t *testing.T) {
 	for _, tc := range rejectedRequirementNameCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, _, err := ParseCollections([]byte(tc.input), "https://default")
+			_, err := Parse([]byte(tc.input), "https://default")
 			if !errors.Is(err, helpers.ErrInvalidCollectionName) {
-				t.Fatalf("ParseCollections error = %v, want errors.Is helpers.ErrInvalidCollectionName", err)
+				t.Fatalf("Parse error = %v, want errors.Is helpers.ErrInvalidCollectionName", err)
 			}
 		})
 	}
@@ -638,12 +641,13 @@ func TestParseCollectionsRejectsNamesOutsideTheAlphabet(t *testing.T) {
 	for _, tc := range controls {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			collections, _, err := ParseCollections([]byte(tc.input), "https://default")
+			f, err := Parse([]byte(tc.input), "https://default")
+			collections := f.Collections
 			if err != nil {
-				t.Fatalf("ParseCollections(%q): %v", tc.input, err)
+				t.Fatalf("Parse(%q): %v", tc.input, err)
 			}
 			if len(collections) != 1 || collections[0].Namespace != "acme" || collections[0].Name != "widgets" {
-				t.Fatalf("ParseCollections(%q) = %#v", tc.input, collections)
+				t.Fatalf("Parse(%q) = %#v", tc.input, collections)
 			}
 		})
 	}

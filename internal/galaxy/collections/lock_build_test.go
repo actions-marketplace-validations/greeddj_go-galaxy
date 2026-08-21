@@ -104,7 +104,7 @@ func TestBuildLockfileRejectsNonCanonicalDigest(t *testing.T) {
 	const nonCanonical = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 	deps, resolved, graph := newBuildLockfileFixture(t, nonCanonical)
 
-	lf, err := buildLockfile(context.Background(), deps, resolved, graph)
+	lf, err := buildLockfile(context.Background(), deps, resolved, graph, roleResolution{})
 	if !errors.Is(err, helpers.ErrMalformedArtifactSHA256) {
 		t.Fatalf("buildLockfile error = %v, want errors.Is helpers.ErrMalformedArtifactSHA256", err)
 	}
@@ -152,7 +152,7 @@ func TestBuildLockfileRejectsNonExactVersion(t *testing.T) {
 	resolved := map[string]collection{testWidgetsFQDN: col}
 	graph := map[string][]string{col.key(): {}}
 
-	lf, err := buildLockfile(context.Background(), newCollectionDeps(cfg, runtime, st), resolved, graph)
+	lf, err := buildLockfile(context.Background(), newCollectionDeps(cfg, runtime, st), resolved, graph, roleResolution{})
 	if !errors.Is(err, helpers.ErrInvalidCollectionVersion) {
 		t.Fatalf("buildLockfile error = %v, want errors.Is helpers.ErrInvalidCollectionVersion", err)
 	}
@@ -172,7 +172,7 @@ func TestBuildLockfileAcceptsEmptyDigest(t *testing.T) {
 	t.Parallel()
 	deps, resolved, graph := newBuildLockfileFixture(t, "")
 
-	lf, err := buildLockfile(context.Background(), deps, resolved, graph)
+	lf, err := buildLockfile(context.Background(), deps, resolved, graph, roleResolution{})
 	if err != nil {
 		t.Fatalf("buildLockfile error = %v, want nil for an empty (unpublished) digest", err)
 	}

@@ -288,6 +288,25 @@ const (
 	// by something this tool chose rather than by the remote.
 	GitTreeMaxDepth = 64
 
+	// BuildMetadataMaxBytes caps a metadata file a builder reads out of a
+	// source tree - a collection's galaxy.yml or MANIFEST.json, a role's
+	// meta/main.yml or meta/requirements.yml - before it is decoded. A real
+	// one is a few kilobytes; the cap bounds what a hostile tree can make
+	// the decoder hold.
+	BuildMetadataMaxBytes = 1 << 20
+
+	// RoleVersionsMaxPages caps how many pages of a role's version list the
+	// Galaxy v1 API walk follows (page_size 50, so a thousand tags) before
+	// the walk is refused rather than silently cut short: a role with more
+	// tags than that is not one this tool can choose a version for honestly.
+	RoleVersionsMaxPages = 20
+
+	// RoleGraphMaxRoles caps how many roles one run may discover through
+	// requirements.yml and the dependencies of what it installs. A real
+	// dependency graph is a handful; a chain of repositories each naming
+	// the next is the shape this bounds.
+	RoleGraphMaxRoles = 1000
+
 	// ArtifactDownloadDeadline bounds the wall-clock time one artifact
 	// acquisition (a fetchArtifact/downloadCollectionToCache call) may take
 	// from start to finish: the response-header phase, the streamed body, the
@@ -808,7 +827,20 @@ const (
 	// drop-and-rebuild policy yields the only end state a migration could
 	// (an empty pin set the next resolve refills), and an older binary sharing
 	// an S3 cache would otherwise drop the bucket on its next save.
-	StoreSnapshotSchemaVersion = 7
+	//
+	// Bumped to 8 when the snapshot gained the role buckets
+	// (StoreBucketInstalledRoles, StoreBucketRolePins): which roles are
+	// installed where and from which artifact, which is what cleanup keeps
+	// their extracted trees by, and what commit each role requirement resolved
+	// to, which is what lets a rerun replay a role without touching the remote
+	// or the Galaxy API. The change is additive and the drop-and-rebuild
+	// policy again yields the only end state a migration could (empty role
+	// buckets the next install and resolve refill), but the bump is not
+	// optional: an older binary meeting a schema-8 snapshot on a shared cache
+	// must fail loudly with ErrUnsupportedSchemaVersion rather than drop both
+	// buckets on its next save and hand the next cleanup a snapshot that
+	// records no installed role at all.
+	StoreSnapshotSchemaVersion = 8
 
 	// CacheEntryMaxAge is the retention window for persisted cache entries
 	// (API responses, resolved versions lists, and dependency constraints).
@@ -883,6 +915,12 @@ const (
 	// StoreBucketGitPins is the bucket name for git source pins: the commit a
 	// (url, ref, subdir) requirement resolved to and the collections it held.
 	StoreBucketGitPins = "git_pins"
+	// StoreBucketInstalledRoles is the bucket name for installed roles, keyed
+	// by install name: where each was materialized and from which artifact.
+	StoreBucketInstalledRoles = "installed_roles"
+	// StoreBucketRolePins is the bucket name for role pins: the repository,
+	// commit and version a role requirement line resolved to.
+	StoreBucketRolePins = "role_pins"
 
 	// StoreMetaSchemaVersion is the metadata key for the snapshot schema version.
 	StoreMetaSchemaVersion = "schema_version"

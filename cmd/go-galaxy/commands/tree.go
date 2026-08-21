@@ -37,11 +37,12 @@ func Tree() *cli.Command {
 			if err != nil {
 				return err
 			}
-			roots, err := loadRootFQDNs(reqPath, lf)
+			roots, roleRoots, err := loadRootFQDNs(reqPath, lf)
 			if err != nil {
 				return err
 			}
 			printTree(os.Stdout, reqPath, lf, roots)
+			printRoleTree(os.Stdout, lf, roleRoots)
 			return nil
 		},
 	}
@@ -54,20 +55,24 @@ func Tree() *cli.Command {
 // the multi-collection shape) is a root, or just the one the entry named
 // explicitly. A git entry the lockfile holds nothing for is reported under
 // its locator text, so the tree shows it as missing rather than dropping it.
-func loadRootFQDNs(reqPath string, lf *lockfile.File) ([]string, error) {
-	reqs, _, err := requirements.LoadCollections(reqPath, "")
+func loadRootFQDNs(reqPath string, lf *lockfile.File) ([]string, []string, error) {
+	file, err := requirements.Load(reqPath, "")
 	if err != nil {
-		return nil, fmt.Errorf("load requirements %s: %w", reqPath, err)
+		return nil, nil, fmt.Errorf("load requirements %s: %w", reqPath, err)
 	}
-	out := make([]string, 0, len(reqs))
-	for _, r := range reqs {
+	out := make([]string, 0, len(file.Collections))
+	for _, r := range file.Collections {
 		if r.IsGit() {
 			out = append(out, gitRootFQDNs(r, lf)...)
 			continue
 		}
 		out = append(out, fmt.Sprintf("%s.%s", r.Namespace, r.Name))
 	}
-	return out, nil
+	roles := make([]string, 0, len(file.Roles))
+	for _, r := range file.Roles {
+		roles = append(roles, r.Name)
+	}
+	return out, roles, nil
 }
 
 func gitRootFQDNs(r requirements.CollectionRequirement, lf *lockfile.File) []string {
@@ -165,4 +170,59 @@ func gitOrigin(entry lockfile.Entry) string {
 		subdir = "#" + entry.Subdir
 	}
 	return fmt.Sprintf(" (git %s%s @%s)", entry.Source, subdir, entry.Commit)
+}
+
+// printRoleTree writes the roles half of the tree under its own "roles:"
+// header, one tree per requirements root through the dependencies the
+// lockfile recorded. Nothing is printed for a file without roles, so a
+// collections-only tree reads exactly as it did before roles existed. The
+// writer is wrapped in safeout.NewWriter for the reason printTree's is.
+func printRoleTree(w io.Writer, lf *lockfile.File, roots []string) {
+	if len(lf.Roles) == 0 && len(roots) == 0 {
+		return
+	}
+	w = safeout.NewWriter(w)
+	byName := make(map[string]lockfile.RoleEntry, len(lf.Roles))
+	for _, e := range lf.Roles {
+		byName[e.Name] = e
+	}
+	sortedRoots := slices.Sorted(slices.Values(roots))
+	_, _ = fmt.Fprintln(w, "roles:")
+	for i, root := range sortedRoots {
+		walkRoleTree(w, byName, root, "", i == len(sortedRoots)-1, make(map[string]bool))
+	}
+}
+
+func walkRoleTree(w io.Writer, by map[string]lockfile.RoleEntry, name, prefix string, isLast bool, seen map[string]bool) {
+	branch := "├── "
+	cont := "│   "
+	if isLast {
+		branch = "└── "
+		cont = "    "
+	}
+	entry, ok := by[name]
+	if !ok {
+		_, _ = fmt.Fprintf(w, "%s%s%s (missing in lockfile)\n", prefix, branch, name)
+		return
+	}
+	if seen[name] {
+		_, _ = fmt.Fprintf(w, "%s%s%s %s (*)\n", prefix, branch, name, entry.Version)
+		return
+	}
+	seen[name] = true
+	_, _ = fmt.Fprintf(w, "%s%s%s %s%s\n", prefix, branch, name, entry.Version, roleOrigin(entry))
+	deps := slices.Sorted(slices.Values(entry.Deps))
+	for i, dep := range deps {
+		walkRoleTree(w, by, dep, prefix+cont, i == len(deps)-1, seen)
+	}
+}
+
+// roleOrigin renders a role entry's provenance for the tree: the repository
+// and commit for a git role, the Galaxy name and the repository it was
+// imported from for a Galaxy role.
+func roleOrigin(entry lockfile.RoleEntry) string {
+	if entry.IsGit() {
+		return fmt.Sprintf(" (git %s @%s)", entry.Source, entry.Commit)
+	}
+	return fmt.Sprintf(" (galaxy %s via %s @%s)", entry.Galaxy, entry.Repository, entry.Commit)
 }

@@ -72,7 +72,7 @@ type dirtyMutatorCase struct {
 	name string
 }
 
-// dirtyMutatorCases lists every one of Store's 14 write-locked mutators, one
+// dirtyMutatorCases lists every one of Store's 19 write-locked mutators, one
 // row each, so a fresh call to each is proven to flip Dirty to true. This is
 // the closed table dirty_audit_test.go's AST gate cross-checks structurally;
 // keeping the two in sync is manual, which is exactly why that gate exists as
@@ -90,6 +90,18 @@ func dirtyMutatorCases() []dirtyMutatorCase {
 		}},
 		{name: "SetGitPin", call: func(st *Store) {
 			st.SetGitPin(testGitPinKey, GitPinEntry{Commit: testGitPinCommit})
+		}},
+		{name: "SetInstalledRole", call: func(st *Store) {
+			st.SetInstalledRole(testRoleName, InstalledRoleEntry{ArtifactSHA256: testRoleArtifactSHA})
+		}},
+		{name: "DeleteInstalledRole", call: func(st *Store) {
+			st.DeleteInstalledRole(testRoleName)
+		}},
+		{name: "SetRolePin", call: func(st *Store) {
+			st.SetRolePin(testRolePinKey, RolePinEntry{Commit: testGitPinCommit})
+		}},
+		{name: "DeleteRolePin", call: func(st *Store) {
+			st.DeleteRolePin(testRolePinKey)
 		}},
 		{name: "SetDepsCache", call: func(st *Store) {
 			st.SetDepsCache("deps", map[string]string{"a.b": testDepsConstraint})
@@ -127,9 +139,10 @@ func dirtyMutatorCases() []dirtyMutatorCase {
 	}
 }
 
-// TestEveryMutatorMarksDirty proves each of Store's 14 write-locked mutators
+// TestEveryMutatorMarksDirty proves each of Store's 19 write-locked mutators
 // sets Dirty to true, on a fresh store, from a single call - including
-// DeleteInstalled and DeleteGraph deleting a key that was never present,
+// DeleteInstalled, DeleteGraph, DeleteInstalledRole and DeleteRolePin
+// deleting a key that was never present,
 // which pins that the flag is set unconditionally rather than only when the
 // value actually changed.
 func TestEveryMutatorMarksDirty(t *testing.T) {

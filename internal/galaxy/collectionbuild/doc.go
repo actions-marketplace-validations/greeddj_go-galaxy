@@ -15,25 +15,17 @@
 // classification refuses it too, but only for a path source), and a symlink
 // the extractor would refuse or the chain check could not follow.
 //
-// The tree is read through Source, never from the filesystem, so nothing here
-// opens a path, follows a real symlink or execs anything: a git tree at one
-// commit is the production Source, and every name it hands over is already
-// validated by that implementation. The builder's own boundaries are the
-// archive caps declared in internal/galaxy/helpers - entry count, per-entry
-// size, total declared size, name length, tree depth - applied during the
-// walk so an oversized tree is refused before its first byte is written, and
-// re-checked by the extractor on the way out.
-//
-// The artifact is deterministic: every entry carries the commit's committer
-// time, fixed modes and no owner, the gzip header is left zeroed, and entries
-// follow the tree's own order behind MANIFEST.json and FILES.json, so two
-// builds of one commit produce one byte sequence and one sha256. A symlink is
-// written pointing at the final entry its chain resolves to, relative to the
-// link's own directory, because internal/galaxy/manifest resolves a link
-// against the archive in one lookup per hop over real entries and the
-// extractor refuses a path whose component is a link. Every artifact is read
-// back through manifest.ReadFromTarGz and manifest.VerifyChain before it is
-// handed over; a failure there is a defect of this package, reported under
-// its own sentinel with the cause as text so it never classifies as an
-// integrity failure of the remote.
+// The tree is read through treearchive.Source, never from the filesystem, so
+// nothing here opens a path, follows a real symlink or execs anything: a git
+// tree at one commit is the production Source, and every name it hands over
+// is already validated by that implementation. The walk, the archive caps,
+// the symlink policy and the deterministic tar.gz shape belong to
+// internal/galaxy/treearchive, which this package drives with what makes the
+// result a collection: the ignore rules, the two documents that lead the
+// archive - FILES.json listing every planned row and MANIFEST.json binding
+// the listing by digest - and the identity read from galaxy.yml. Every
+// artifact is read back through manifest.ReadFromTarGz and
+// manifest.VerifyChain before it is handed over; a failure there is a defect
+// of this package, reported under its own sentinel with the cause as text so
+// it never classifies as an integrity failure of the remote.
 package collectionbuild

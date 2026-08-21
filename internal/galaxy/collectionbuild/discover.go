@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
+	"github.com/greeddj/go-galaxy/internal/galaxy/treearchive"
 	"github.com/greeddj/go-galaxy/internal/safeout"
 )
 
@@ -37,7 +38,7 @@ func Discover(src Source, subdir string) ([]Candidate, []string, error) {
 	}
 	if len(dirs) == 0 {
 		return nil, nil, fmt.Errorf("%w: %s carries no %s or %s, and neither does any of its immediate subdirectories",
-			helpers.ErrGitCollectionNotFound, displayDir(base), galaxyYMLName, helpers.ManifestFileName)
+			helpers.ErrGitCollectionNotFound, treearchive.DisplayPath(base), galaxyYMLName, helpers.ManifestFileName)
 	}
 
 	candidates := make([]Candidate, 0, len(dirs))
@@ -51,11 +52,11 @@ func Discover(src Source, subdir string) ([]Candidate, []string, error) {
 		fqcn := cand.Meta.Namespace + "." + cand.Meta.Name
 		if first, dup := seen[fqcn]; dup {
 			return nil, nil, fmt.Errorf("%w: %s is declared by both %s and %s",
-				helpers.ErrGitDuplicateCollection, fqcn, displayDir(first), displayDir(dir))
+				helpers.ErrGitDuplicateCollection, fqcn, treearchive.DisplayPath(first), treearchive.DisplayPath(dir))
 		}
 		seen[fqcn] = dir
 		for _, w := range warns {
-			warnings = append(warnings, displayDir(dir)+": "+w)
+			warnings = append(warnings, treearchive.DisplayPath(dir)+": "+w)
 		}
 		candidates = append(candidates, cand)
 	}
@@ -77,7 +78,7 @@ func candidateDirs(src Source, base string, entries []Entry) ([]string, error) {
 		if e.Kind != EntryDir || strings.HasPrefix(e.Name, ".") {
 			continue
 		}
-		child := joinPath(base, e.Name)
+		child := treearchive.JoinPath(base, e.Name)
 		childEntries, err := src.ReadDir(child)
 		if err != nil {
 			return nil, err
@@ -110,7 +111,7 @@ func classify(entries []Entry, dir string) (metaKind, error) {
 	switch {
 	case hasGalaxy && hasManifest:
 		return metaNone, fmt.Errorf("%w: %s has both a %s and a %s",
-			helpers.ErrGalaxyYMLInvalid, displayDir(dir), helpers.ManifestFileName, galaxyYMLName)
+			helpers.ErrGalaxyYMLInvalid, treearchive.DisplayPath(dir), helpers.ManifestFileName, galaxyYMLName)
 	case hasManifest:
 		return metaManifest, nil
 	case hasGalaxy:
@@ -152,16 +153,16 @@ func resolveSubdir(src Source, subdir string) (string, []Entry, error) {
 			}
 			if e.Kind != EntryDir {
 				return "", nil, fmt.Errorf("%w: %s is not a directory",
-					helpers.ErrGitCollectionNotFound, displayDir(joinPath(cur, component)))
+					helpers.ErrGitCollectionNotFound, treearchive.DisplayPath(treearchive.JoinPath(cur, component)))
 			}
 			found = true
 			break
 		}
 		if !found {
 			return "", nil, fmt.Errorf("%w: %s does not exist",
-				helpers.ErrGitCollectionNotFound, displayDir(joinPath(cur, component)))
+				helpers.ErrGitCollectionNotFound, treearchive.DisplayPath(treearchive.JoinPath(cur, component)))
 		}
-		cur = joinPath(cur, component)
+		cur = treearchive.JoinPath(cur, component)
 		entries, err = src.ReadDir(cur)
 		if err != nil {
 			return "", nil, err
@@ -186,20 +187,20 @@ func readCandidate(src Source, dir string) (Candidate, []string, error) {
 	if kind == metaManifest {
 		name = helpers.ManifestFileName
 	}
-	data, err := readMetadataFile(src, joinPath(dir, name))
+	data, err := readMetadataFile(src, treearchive.JoinPath(dir, name))
 	if err != nil {
 		return Candidate{}, nil, err
 	}
 	if kind == metaManifest {
 		meta, err := parseManifestInfo(data)
 		if err != nil {
-			return Candidate{}, nil, fmt.Errorf("%s: %w", displayDir(dir), err)
+			return Candidate{}, nil, fmt.Errorf("%s: %w", treearchive.DisplayPath(dir), err)
 		}
 		return Candidate{Meta: meta, Subdir: dir, FromManifest: true}, nil, nil
 	}
 	meta, warnings, err := ParseGalaxyYML(data)
 	if err != nil {
-		return Candidate{}, nil, fmt.Errorf("%s: %w", displayDir(dir), err)
+		return Candidate{}, nil, fmt.Errorf("%s: %w", treearchive.DisplayPath(dir), err)
 	}
 	return Candidate{Meta: meta, Subdir: dir}, warnings, nil
 }
@@ -215,32 +216,10 @@ func readMetadataFile(src Source, p string) ([]byte, error) {
 	defer func() { _ = r.Close() }()
 	data, err := io.ReadAll(io.LimitReader(r, metadataMaxBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("reading %s: %w", displayDir(p), err)
+		return nil, fmt.Errorf("reading %s: %w", treearchive.DisplayPath(p), err)
 	}
 	if len(data) > metadataMaxBytes {
-		return nil, fmt.Errorf("%w: %s is larger than %d bytes", helpers.ErrGalaxyYMLInvalid, displayDir(p), metadataMaxBytes)
+		return nil, fmt.Errorf("%w: %s is larger than %d bytes", helpers.ErrGalaxyYMLInvalid, treearchive.DisplayPath(p), metadataMaxBytes)
 	}
 	return data, nil
-}
-
-// joinPath joins two "/"-separated path pieces, either of which may be "".
-func joinPath(dir, name string) string {
-	switch {
-	case dir == "":
-		return name
-	case name == "":
-		return dir
-	default:
-		return dir + "/" + name
-	}
-}
-
-// displayDir renders a repository path for a message: the root gets a name,
-// and anything else is cleaned of control runes and bounded, since the
-// subdir half of it was typed by whoever wrote requirements.yml.
-func displayDir(p string) string {
-	if p == "" {
-		return "the repository root"
-	}
-	return helpers.TruncateForMessage(string(safeout.Clean(p)))
 }

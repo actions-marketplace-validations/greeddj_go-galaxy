@@ -39,6 +39,27 @@ func extractCollection(
 	artifactSHA string,
 	artifactSHAComputed bool,
 ) error {
+	return extractTree(ctx, col.Namespace+"/"+col.Name, tarPath, target, runtime, extractStore, artifactSHA, artifactSHAComputed, nil)
+}
+
+// extractTree is the tree materialization both a collection and a role go
+// through: the reset, the unpack (straight or through the extracted store)
+// and the extract marker. display names the tree in the skip line.
+// postExtract, when set, runs after the unpack and before the marker is
+// written, so whatever it adds to the tree - a role's
+// meta/.galaxy_install_info - is counted by the marker's tally rather than
+// read as drift on the next run.
+func extractTree(
+	ctx context.Context,
+	display string,
+	tarPath string,
+	target installTarget,
+	runtime *infra.Infra,
+	extractStore *extracted.Store,
+	artifactSHA string,
+	artifactSHAComputed bool,
+	postExtract func(installTarget) error,
+) error {
 	if artifactSHA == "" {
 		hash, err := archive.FileHashSHA256(tarPath)
 		if err != nil {
@@ -59,7 +80,7 @@ func extractCollection(
 		return fmt.Errorf("%w: %q", helpers.ErrMalformedArtifactSHA256, artifactSHA)
 	}
 	if verifyExtractMarker(runtime.Output, target, artifactSHA) {
-		runtime.Output.Printf("⏭️ Skipping extraction, already done: %s/%s", col.Namespace, col.Name)
+		runtime.Output.Printf("⏭️ Skipping extraction, already done: %s", display)
 		return nil
 	}
 
@@ -78,6 +99,11 @@ func extractCollection(
 
 	if err := unpack(ctx, tarPath, target.path, extractStore, artifactSHA, artifactSHAComputed); err != nil {
 		return err
+	}
+	if postExtract != nil {
+		if err := postExtract(target); err != nil {
+			return err
+		}
 	}
 
 	return writeExtractMarker(target, artifactSHA)

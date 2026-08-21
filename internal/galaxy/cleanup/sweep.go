@@ -173,6 +173,7 @@ func sweepExtractedStore(
 	st *store.Store,
 	reachable map[string]bool,
 	installedByKey map[string][]installedCollection,
+	roles roleReachability,
 ) {
 	if cfg == nil || cfg.CacheDir == "" || st == nil || !st.HasRecordedContent() {
 		return
@@ -182,6 +183,7 @@ func sweepExtractedStore(
 		return
 	}
 	keep := extractedKeepSet(st, reachable, installedByKey)
+	maps.Copy(keep, roleKeepSHAs(st, roles.reachable, roles.byName))
 
 	if cfg.DryRun {
 		reportExtractedSweepPlan(runtime, extractedStore, keep)

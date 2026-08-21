@@ -2,8 +2,10 @@
 // It implements gitsource.Client on top of go-git's plumbing: one advertised
 // references round trip per acquisition, a pack fetched straight through that
 // same upload-pack session into a bare on-disk object store, the requested
-// commit's tree read object by object, and the collections it holds handed to
-// internal/galaxy/collectionbuild to become artifacts.
+// commit's tree read object by object, and - the one step where Acquire and
+// AcquireRole differ - the collections it holds handed to
+// internal/galaxy/collectionbuild, or the role its root is handed to
+// internal/galaxy/rolebuild, to become artifacts.
 //
 // The fetch is driven at the session level rather than through go-git's
 // Remote, for three reasons that are each a boundary of this package. The

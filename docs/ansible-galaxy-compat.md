@@ -1,8 +1,8 @@
 # Compatibility with ansible-galaxy
 
 Drop-in means the same `requirements.yml`, the same `ansible.cfg` keys and the
-same `ANSIBLE_*` environment variables, for the collections subset the
-README's [Scope](../README.md#scope) names. It does not mean identical
+same `ANSIBLE_*` environment variables, for the `install` subset - collections
+and roles - the README's [Scope](../README.md#scope) names. It does not mean identical
 behavior everywhere: each deliberate difference is called out below rather
 than left to be discovered in CI.
 
@@ -317,6 +317,140 @@ does not define is a usage error naming the flag and exits `2`, which is how
   makes the next install re-extract the collection over it; an edit that
   preserves the edited file's exact byte length does not, and survives.
 
+## Roles
+
+Roles are installed from the same `requirements.yml` by the same `install`,
+as `ansible-galaxy install -r` does, and land under `roles_path` one
+directory per role with `meta/.galaxy_install_info` written beside the
+role's meta, so `ansible-galaxy role list` reads the result. The mechanism
+differs from ansible's at the root - ansible downloads a Galaxy role as a
+GitHub tarball of the tag and clones a git role with the `git` binary, while
+this tool fetches both through its own git client and builds a deterministic
+artifact it caches, pins and extracts like a collection's - and every
+consequence of that, and every other deliberate difference, is listed here.
+"ansible does X" is read against ansible-core 2.21.2.
+
+- **The `roles:` grammar is ansible's, judged stricter at load.** The string
+  form `src[,version[,name]]`, the mapping form with `src:`, `scm:`,
+  `version:` and `name:`, the old-style `role:` key, the `scm+url` prefix
+  and `*` for "no version" are all read as `role_yaml_parse` reads them.
+  What ansible would accept and this tool refuses at load, with the usage
+  code (`2`) and before any request: `include:` of a second file, an `scm`
+  other than `git` (ansible shells out to `hg` for the other value; this tool
+  executes no process), a tarball URL, any other non-git URL or a local path
+  as `src:`, a `#subdir` fragment on a git role, a `source:`, `signatures:`
+  or `type:` key on a role entry (each would silently change what the entry
+  means), two entries installing into one directory (ansible installs the
+  second over the first), and a credential in a repository URL. A key ansible
+  drops without a word is dropped here with a warning.
+- **A Galaxy role name has exactly one dot.** ansible splits `owner.role` at
+  the *last* dot and lets the owner carry dots of its own; no GitHub login
+  can, so this tool asks for the one unambiguous spelling, each half matching
+  `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`, and refuses the rest rather than
+  guessing which dot was meant. A three-part `namespace.collection.role`
+  named as a dependency is a collection's role and is skipped with a warning,
+  as ansible skips it; a dependency with no dot and no scm is a local role
+  ansible never looks up either, and is skipped the same way.
+- **The github.com special case matches the host, not the string.** ansible
+  promotes an http(s) `src:` to a git repository when the text contains
+  `github.com` anywhere and does not end in `.tar.gz`; this tool requires the
+  parsed host to be exactly `github.com`, so a tarball host that merely
+  mentions it is not promoted.
+- **A Galaxy role is fetched by git at the tag, not as the GitHub tarball.**
+  The v1 API is asked the same two questions ansible asks - the role record,
+  then its version list - on the configured server list in order (a server
+  without v1, such as an Automation Hub, is skipped; no v1 anywhere exits
+  `2` naming the servers; a role no v1 server knows exits `3`). The record's
+  `github_user` and `github_repo` are validated and composed into
+  `https://github.com/<user>/<repo>`; its `download_url` is never read.
+  The repository is then fetched at the chosen tag through the git client,
+  as `refs/tags/<tag>` spelled in full - so a branch that happens to share a
+  tag's name can never be fetched in its place, where the tarball URL ansible
+  builds from the bare name leaves that choice to GitHub - and from there the
+  role is a git role: built into an artifact, cached under its commit, pinned
+  in the lockfile by commit. An all-digit tag (a date) is a tag here as it
+  is for ansible; only the unqualified spelling in a `roles:` entry reads
+  seven to thirty-nine hex digits as an abbreviated commit. Two consequences are
+  visible. The Galaxy token configured for the server never reaches
+  github.com (ansible sends none there either, but reaches it through the
+  tarball URL the server supplied); a `GO_GALAXY_GIT_*` binding for
+  github.com applies when one is configured. And files a repository marks
+  `export-ignore` in `.gitattributes` **are** installed here, where ansible's
+  tarball - produced by GitHub's `git archive` - honors the attribute, because
+  nothing here reads attributes.
+- **Version selection is ansible's, with one leniency and one tightening.**
+  No version asked for: the highest tag under distutils' `LooseVersion`
+  order, where ansible's tie between equal tags falls to server order and
+  this tool's to the lexicographically greater name; two tags `LooseVersion`
+  cannot compare (a number against a word) fail with ansible's own remedy,
+  "specify an explicit version" (exit `3`). No tags: the record's
+  `github_branch`, else `master`. A version asked for must be a listed tag,
+  or the default branch itself - ansible accepts only the literal `master`
+  unlisted, this tool accepts the branch the record names as well as
+  `master`; and when the server lists no tags at all, any version asked for
+  is passed to the repository as a ref. A version that is not listed exits
+  `3` naming what was listed. A `commit_sha` the v1 API recorded for the tag
+  that disagrees with what the repository advertises is a warning, and the
+  repository wins; ansible never compares the two.
+- **The repository root is the role, and only the root.** `meta/main.yml`,
+  else `meta/main.yaml`, each a regular file, marks it; a tree carrying both
+  is refused rather than read through the first, `meta/main.json` is not
+  read, and a nested `meta/main.yml` is never searched for - ansible's
+  shortest-parent scan exists for archives built by hand. A repository with
+  no meta at its root fails the run as not a role (exit `2`). A
+  `meta/.galaxy_install_info` a repository committed by accident is left out
+  of the artifact: the install writes its own after materialization, where
+  ansible extracts the committed one and then overwrites it.
+- **Dependencies are walked breadth-first, first wins, and the loser is named.**
+  `dependencies:` in `meta/main.yml` plus `meta/requirements.yml` are
+  installed transitively in every shape ansible reads them, and the first
+  request for an install name wins, as in ansible; a later request for the
+  same name with a different source or version is ignored *with a warning*
+  where ansible is silent. Which request is first is decided by the file's
+  and the meta's declaration order, never by which fetch finished. `--no-deps`
+  stops the walk. One run may discover at most 1000 roles.
+- **An existing role directory is converged, not skipped.** ansible skips an
+  already-installed role at a different version with a warning unless
+  `--force`; this tool replaces a directory it installed itself (its extract
+  marker) when the source changed, replaces one `ansible-galaxy` installed
+  (`meta/.galaxy_install_info` without the marker) with a warning, and
+  refuses one that carries neither - "appears to already exist", ansible's
+  own refusal - with the install-failure code (`5`), because replacing it
+  could destroy a role somebody wrote by hand.
+- **The installed tree looks like ansible's, with this tool's marker and
+  modes.** Entries sit at the top level of the role directory with no
+  `MANIFEST.json` or `FILES.json` (a role has neither), `.galaxy_install_info`
+  carries `install_date` in ansible's `%c` format (UTC wall clock) and
+  `version` as the tag, branch or commit asked for (`HEAD` resolves to the
+  branch name), and the directory also carries the `.extract-done.<sha256>`
+  marker and the read-only file modes described under [Differences a
+  migration runs into](#differences-a-migration-runs-into), which is what
+  marks it as this tool's for `cleanup`.
+- **The pin is a commit, and the lockfile is schema 3.** `lock` records each
+  role as `type: galaxy` or `type: git` with the version as asked (a tag, a
+  branch or a commit - not a semver), the ref, the commit, the repository,
+  the Galaxy name and server for a Galaxy role, and the install names of its
+  dependencies, and no `sha256`, for the reason a git collection has none. A
+  file holding a role is written as `schema_version: 3`; one without roles
+  is byte-identical to what it was before roles existed. ansible has no
+  lockfile for roles at all.
+- **`roles_path` is one path, not a search list, and its default is
+  project-local.** As with `collections_path`: the first entry of
+  `[defaults] roles_path`, `ANSIBLE_ROLES_PATH` or `--roles-path` is used,
+  the rest are named in a warning, and the default is `.roles` rather than
+  ansible's `~/.ansible/roles`.
+- **Roles have no signatures and no `sha256`.** The v1 API offers none and
+  ansible verifies none; here the commit check at every rebuild - a
+  repository that serves a different commit for a pinned role fails with the
+  integrity code (`7`) - stands in for attribution.
+- **`ansible-galaxy role` subcommands have no counterpart.** There is no
+  `role init`, `role remove`, `role search`, `role import` or `role list`;
+  `install` installs, `cleanup` removes what no project reaches, and
+  `tree`/`explain`/`outdated` read the lockfile. `--force` is not a flag this
+  tool defines, and `-p` means something else here: it is `--download-path`,
+  the collections path, where `ansible-galaxy role install -p` names the
+  roles path - that is `--roles-path` here.
+
 ## Notes
 
 Two shapes ansible accepts are handled here in opposite ways, which is worth
@@ -332,10 +466,11 @@ knowing before a `requirements.yml` written for ansible is pointed at this tool.
   type "url" (only galaxy and git are supported)` and `unsupported collection
   source "..." (only Galaxy API and git sources are supported)`. ansible
   installs these; here the run does not start.
-- **`roles` are ignored, and the run still succeeds.** A file declaring
-  `roles:` draws one warning naming them and everything else proceeds. A file
-  declaring `roles:` and no `collections:` is therefore a successful run that
-  installs nothing and exits `0` - and nothing about that exit code
-  distinguishes it from a real install, so a pipeline pointed at a roles-only
-  requirements file goes green while installing nothing. The warning on stderr
-  is the only signal.
+- **A bare top-level list is a list of collections, not ansible's legacy
+  roles file.** `ansible-galaxy install -r` reads a file that is a bare list
+  as roles; here it is read as collections, and a `src:` or `scm:` key inside
+  a collection entry is refused naming the `roles:` key, so a legacy roles
+  file pointed at this tool fails at load rather than installing the wrong
+  kind of thing. Roles always go under `roles:`. Earlier versions of this
+  tool ignored that key with a warning and exited `0`; a `roles:` list is
+  now decoded, installed, and a malformed entry in it fails the file.

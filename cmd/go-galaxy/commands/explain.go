@@ -19,7 +19,7 @@ const requirementsYAML = "requirements.yml"
 
 var (
 	errExplainNoTarget = errors.New("explain: collection name (ns.name) is required")
-	errExplainNotFound = errors.New("collection not found in lockfile")
+	errExplainNotFound = errors.New("collection or role not found in lockfile")
 )
 
 // Explain returns the CLI command that prints why a particular collection
@@ -28,8 +28,8 @@ func Explain() *cli.Command {
 	return &cli.Command{
 		Name:      "explain",
 		Aliases:   []string{"why"},
-		Usage:     "Explain why a collection was resolved to its locked version",
-		ArgsUsage: "<namespace.name>",
+		Usage:     "Explain why a collection or role was resolved to its locked version",
+		ArgsUsage: "<namespace.name | role name>",
 		Flags:     cliflags.LockInspectFlags(),
 		Action: func(_ context.Context, c *cli.Command) error {
 			if c.NArg() < 1 {
@@ -42,18 +42,25 @@ func Explain() *cli.Command {
 			if err != nil {
 				return err
 			}
-			roots, _ := loadRootFQDNs(reqPath, lf)
+			roots, roleRoots, _ := loadRootFQDNs(reqPath, lf)
 			rootSet := make(map[string]bool, len(roots))
 			for _, r := range roots {
 				rootSet[r] = true
 			}
-			return printExplain(os.Stdout, lf, target, rootSet)
+			roleRootSet := make(map[string]bool, len(roleRoots))
+			for _, r := range roleRoots {
+				roleRootSet[r] = true
+			}
+			return printExplain(os.Stdout, lf, target, rootSet, roleRootSet)
 		},
 	}
 }
 
 // printExplain writes why target was resolved to its locked version and
-// which other collections depend on it.
+// which other collections depend on it. A target may name a collection, a
+// role (by install name or Galaxy name), or both - the two are different
+// objects and neither outranks the other, so both sections are printed, the
+// collection first.
 //
 // w is wrapped in safeout.NewWriter as the first statement so every write
 // this function and the helpers it calls (printEntryHeader,
@@ -61,16 +68,81 @@ func Explain() *cli.Command {
 // lockfile entry's Name/Version/Source/SHA256/Deps contain - a lockfile
 // can be edited by hand or reach this command from an untrusted source,
 // and its fields are otherwise printed verbatim.
-func printExplain(w io.Writer, lf *lockfile.File, target string, roots map[string]bool) error {
+func printExplain(w io.Writer, lf *lockfile.File, target string, roots, roleRoots map[string]bool) error {
 	w = safeout.NewWriter(w)
 	entry, rdeps, found := findExplainTarget(lf, target)
-	if !found {
+	role, roleRdeps, roleFound := findExplainRole(lf, target)
+	if !found && !roleFound {
 		return fmt.Errorf("%w: %s", errExplainNotFound, target)
 	}
-	printEntryHeader(w, entry)
-	printRequiredBy(w, target, rdeps, roots)
-	printDepends(w, entry)
+	if found {
+		printEntryHeader(w, entry)
+		printRequiredBy(w, target, rdeps, roots)
+		printDepends(w, entry)
+	}
+	if roleFound {
+		printRoleHeader(w, role)
+		printRoleRequiredBy(w, role, roleRdeps, roleRoots)
+		printRoleDepends(w, role)
+	}
 	return nil
+}
+
+// findExplainRole matches target against the roles list by install name or
+// Galaxy name, and collects the roles whose deps name it.
+func findExplainRole(lf *lockfile.File, target string) (lockfile.RoleEntry, []lockfile.RoleEntry, bool) {
+	var entry lockfile.RoleEntry
+	found := false
+	rdeps := make([]lockfile.RoleEntry, 0)
+	for _, e := range lf.Roles {
+		if e.Name == target || e.Galaxy == target {
+			entry = e
+			found = true
+		}
+		if slices.Contains(e.Deps, target) {
+			rdeps = append(rdeps, e)
+		}
+	}
+	return entry, rdeps, found
+}
+
+func printRoleHeader(w io.Writer, entry lockfile.RoleEntry) {
+	_, _ = fmt.Fprintf(w, "role %s %s\n", entry.Name, entry.Version)
+	_, _ = fmt.Fprintf(w, "  type       : %s\n", entry.Type)
+	if entry.Galaxy != "" {
+		_, _ = fmt.Fprintf(w, "  galaxy     : %s\n", entry.Galaxy)
+	}
+	_, _ = fmt.Fprintf(w, "  source     : %s\n", entry.Source)
+	if entry.Repository != "" {
+		_, _ = fmt.Fprintf(w, "  repository : %s\n", entry.Repository)
+	}
+	_, _ = fmt.Fprintf(w, "  ref        : %s\n", entry.Ref)
+	_, _ = fmt.Fprintf(w, "  commit     : %s\n", entry.Commit)
+}
+
+func printRoleRequiredBy(w io.Writer, entry lockfile.RoleEntry, rdeps []lockfile.RoleEntry, roots map[string]bool) {
+	_, _ = fmt.Fprintln(w, "  required by:")
+	if roots[entry.Name] {
+		_, _ = fmt.Fprintln(w, "    - "+requirementsYAML+" (root)")
+	}
+	slices.SortFunc(rdeps, func(a, b lockfile.RoleEntry) int { return strings.Compare(a.Name, b.Name) })
+	for _, r := range rdeps {
+		_, _ = fmt.Fprintf(w, "    - role %s %s\n", r.Name, r.Version)
+	}
+	if !roots[entry.Name] && len(rdeps) == 0 {
+		_, _ = fmt.Fprintln(w, "    - (no parents - orphan in lockfile)")
+	}
+}
+
+func printRoleDepends(w io.Writer, entry lockfile.RoleEntry) {
+	if len(entry.Deps) == 0 {
+		return
+	}
+	deps := slices.Sorted(slices.Values(entry.Deps))
+	_, _ = fmt.Fprintln(w, "  depends on:")
+	for _, d := range deps {
+		_, _ = fmt.Fprintf(w, "    - role %s\n", d)
+	}
 }
 
 func findExplainTarget(lf *lockfile.File, target string) (lockfile.Entry, []lockfile.Entry, bool) {

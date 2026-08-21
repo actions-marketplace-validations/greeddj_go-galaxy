@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
+	"github.com/greeddj/go-galaxy/internal/testing/faketree"
 )
 
 const manifestOnlyJSON = `{"collection_info": {"namespace": "acme", "name": "built", "version": "3.0.0",
@@ -18,7 +19,7 @@ func galaxyYMLFor(name string) string {
 
 type discoverCase struct {
 	wantErr      error
-	source       func() *memSource
+	source       func() *faketree.Tree
 	name         string
 	subdir       string
 	wantMessage  string
@@ -35,41 +36,43 @@ func discoverCases() []discoverCase {
 func discoverFoundCases() []discoverCase {
 	return []discoverCase{
 		{
-			name:        "root galaxy.yml",
-			source:      func() *memSource { return newMemSource().file("galaxy.yml", minimalGalaxyYML).file("README.md", "r") },
+			name: "root galaxy.yml",
+			source: func() *faketree.Tree {
+				return faketree.New().File("galaxy.yml", minimalGalaxyYML).File("README.md", "r")
+			},
 			wantSubdirs: []string{""},
 		},
 		{
 			name: "root galaxy.yml wins over children",
-			source: func() *memSource {
-				return newMemSource().file("galaxy.yml", minimalGalaxyYML).file("child/galaxy.yml", galaxyYMLFor("child"))
+			source: func() *faketree.Tree {
+				return faketree.New().File("galaxy.yml", minimalGalaxyYML).File("child/galaxy.yml", galaxyYMLFor("child"))
 			},
 			wantSubdirs: []string{""},
 		},
 		{
 			name:        "subdir",
-			source:      func() *memSource { return newMemSource().file("collections/app/galaxy.yml", minimalGalaxyYML) },
+			source:      func() *faketree.Tree { return faketree.New().File("collections/app/galaxy.yml", minimalGalaxyYML) },
 			subdir:      "collections/app",
 			wantSubdirs: []string{"collections/app"},
 		},
 		{
 			name: "immediate children in tree order",
-			source: func() *memSource {
-				return newMemSource().
-					file("README.md", "top").
-					file("zeta/galaxy.yml", galaxyYMLFor("zeta")).
-					file("alpha/galaxy.yml", galaxyYMLFor("alpha")).
-					file("plain/README.md", "no metadata").
-					file(".hidden/galaxy.yml", galaxyYMLFor("hidden"))
+			source: func() *faketree.Tree {
+				return faketree.New().
+					File("README.md", "top").
+					File("zeta/galaxy.yml", galaxyYMLFor("zeta")).
+					File("alpha/galaxy.yml", galaxyYMLFor("alpha")).
+					File("plain/README.md", "no metadata").
+					File(".hidden/galaxy.yml", galaxyYMLFor("hidden"))
 			},
 			wantSubdirs: []string{"alpha", "zeta"},
 		},
 		{
 			name: "children under a subdir",
-			source: func() *memSource {
-				return newMemSource().
-					file("ns/a/galaxy.yml", galaxyYMLFor("a")).
-					file("ns/b/MANIFEST.json", manifestOnlyJSON)
+			source: func() *faketree.Tree {
+				return faketree.New().
+					File("ns/a/galaxy.yml", galaxyYMLFor("a")).
+					File("ns/b/MANIFEST.json", manifestOnlyJSON)
 			},
 			subdir:       "ns",
 			wantSubdirs:  []string{"ns/a", "ns/b"},
@@ -77,15 +80,15 @@ func discoverFoundCases() []discoverCase {
 		},
 		{
 			name: "manifest only",
-			source: func() *memSource {
-				return newMemSource().file("MANIFEST.json", manifestOnlyJSON).file("FILES.json", "{}")
+			source: func() *faketree.Tree {
+				return faketree.New().File("MANIFEST.json", manifestOnlyJSON).File("FILES.json", "{}")
 			},
 			wantSubdirs:  []string{""},
 			wantManifest: []string{""},
 		},
 		{
 			name:         "warnings carry the directory",
-			source:       func() *memSource { return newMemSource().file("c/galaxy.yml", minimalGalaxyYML+"extra: 1\n") },
+			source:       func() *faketree.Tree { return faketree.New().File("c/galaxy.yml", minimalGalaxyYML+"extra: 1\n") },
 			wantSubdirs:  []string{"c"},
 			wantWarnings: []string{"c: Found unknown keys in galaxy.yml: extra"},
 		},
@@ -97,39 +100,39 @@ func discoverNotFoundCases() []discoverCase {
 	return []discoverCase{
 		{
 			name:    "grandchild only is not found",
-			source:  func() *memSource { return newMemSource().file("ns/app/galaxy.yml", minimalGalaxyYML) },
+			source:  func() *faketree.Tree { return faketree.New().File("ns/app/galaxy.yml", minimalGalaxyYML) },
 			wantErr: helpers.ErrGitCollectionNotFound,
 		},
 		{
 			name:    "nothing at all",
-			source:  func() *memSource { return newMemSource().file("README.md", "r") },
+			source:  func() *faketree.Tree { return faketree.New().File("README.md", "r") },
 			wantErr: helpers.ErrGitCollectionNotFound,
 		},
 		{
 			name:    "galaxy.yaml spelling is not metadata",
-			source:  func() *memSource { return newMemSource().file("galaxy.yaml", minimalGalaxyYML) },
+			source:  func() *faketree.Tree { return faketree.New().File("galaxy.yaml", minimalGalaxyYML) },
 			wantErr: helpers.ErrGitCollectionNotFound,
 		},
 		{
 			name:    "galaxy.yml as a directory is not metadata",
-			source:  func() *memSource { return newMemSource().dir("galaxy.yml") },
+			source:  func() *faketree.Tree { return faketree.New().Dir("galaxy.yml") },
 			wantErr: helpers.ErrGitCollectionNotFound,
 		},
 		{
 			name:    "subdir missing",
-			source:  func() *memSource { return newMemSource().file("galaxy.yml", minimalGalaxyYML) },
+			source:  func() *faketree.Tree { return faketree.New().File("galaxy.yml", minimalGalaxyYML) },
 			subdir:  "nope/deeper",
 			wantErr: helpers.ErrGitCollectionNotFound, wantMessage: "nope does not exist",
 		},
 		{
 			name:    "subdir component is a file",
-			source:  func() *memSource { return newMemSource().file("README.md", "r") },
+			source:  func() *faketree.Tree { return faketree.New().File("README.md", "r") },
 			subdir:  "README.md",
 			wantErr: helpers.ErrGitCollectionNotFound, wantMessage: "not a directory",
 		},
 		{
 			name:    "subdir with dot-dot",
-			source:  func() *memSource { return newMemSource().file("galaxy.yml", minimalGalaxyYML) },
+			source:  func() *faketree.Tree { return faketree.New().File("galaxy.yml", minimalGalaxyYML) },
 			subdir:  "../x",
 			wantErr: helpers.ErrGitCollectionNotFound,
 		},
@@ -141,40 +144,42 @@ func discoverRefusedCases() []discoverCase {
 	return []discoverCase{
 		{
 			name: "both metadata files",
-			source: func() *memSource {
-				return newMemSource().file("galaxy.yml", minimalGalaxyYML).file("MANIFEST.json", manifestOnlyJSON)
+			source: func() *faketree.Tree {
+				return faketree.New().File("galaxy.yml", minimalGalaxyYML).File("MANIFEST.json", manifestOnlyJSON)
 			},
 			wantErr: helpers.ErrGalaxyYMLInvalid, wantMessage: "has both a MANIFEST.json and a galaxy.yml",
 		},
 		{
 			name: "both metadata files in a child",
-			source: func() *memSource {
-				return newMemSource().file("c/galaxy.yml", minimalGalaxyYML).file("c/MANIFEST.json", manifestOnlyJSON)
+			source: func() *faketree.Tree {
+				return faketree.New().File("c/galaxy.yml", minimalGalaxyYML).File("c/MANIFEST.json", manifestOnlyJSON)
 			},
 			wantErr: helpers.ErrGalaxyYMLInvalid,
 		},
 		{
 			name: "duplicate identity",
-			source: func() *memSource {
-				return newMemSource().file("a/galaxy.yml", minimalGalaxyYML).file("b/galaxy.yml", minimalGalaxyYML)
+			source: func() *faketree.Tree {
+				return faketree.New().File("a/galaxy.yml", minimalGalaxyYML).File("b/galaxy.yml", minimalGalaxyYML)
 			},
 			wantErr: helpers.ErrGitDuplicateCollection, wantMessage: "acme.app is declared by both a and b",
 		},
 		{
 			name:    "invalid galaxy.yml names its directory",
-			source:  func() *memSource { return newMemSource().file("c/galaxy.yml", "namespace: acme\n") },
+			source:  func() *faketree.Tree { return faketree.New().File("c/galaxy.yml", "namespace: acme\n") },
 			wantErr: helpers.ErrGalaxyYMLInvalid, wantMessage: "c: ",
 		},
 		{
 			name: "version not exact",
-			source: func() *memSource {
-				return newMemSource().file("galaxy.yml", strings.Replace(minimalGalaxyYML, "1.2.3", "1.x", 1))
+			source: func() *faketree.Tree {
+				return faketree.New().File("galaxy.yml", strings.Replace(minimalGalaxyYML, "1.2.3", "1.x", 1))
 			},
 			wantErr: helpers.ErrGitCollectionVersionNotExact,
 		},
 		{
-			name:    "metadata over the cap",
-			source:  func() *memSource { return newMemSource().file("galaxy.yml", strings.Repeat("#", metadataMaxBytes+1)) },
+			name: "metadata over the cap",
+			source: func() *faketree.Tree {
+				return faketree.New().File("galaxy.yml", strings.Repeat("#", metadataMaxBytes+1))
+			},
 			wantErr: helpers.ErrGalaxyYMLInvalid, wantMessage: "larger than",
 		},
 	}
@@ -224,7 +229,7 @@ func assertRefused(t *testing.T, err, want error, fragment string) {
 
 func TestDiscoverControlRunesInSubdirAreCleaned(t *testing.T) {
 	t.Parallel()
-	_, _, err := Discover(newMemSource().file("galaxy.yml", minimalGalaxyYML), "a\x1b[31mb")
+	_, _, err := Discover(faketree.New().File("galaxy.yml", minimalGalaxyYML), "a\x1b[31mb")
 	if !errors.Is(err, helpers.ErrGitCollectionNotFound) {
 		t.Fatalf("error = %v", err)
 	}

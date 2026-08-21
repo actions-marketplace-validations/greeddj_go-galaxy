@@ -1,9 +1,10 @@
 # Caching
 
-A run keeps four things between invocations: cached Galaxy API responses and
-resolved dependency graphs (the snapshot), downloaded tarballs (the artifact
-cache), unpacked collection trees (the extracted store), and a registry of the
-projects that have run against this cache. What each is keyed by, and why the
+A run keeps four things between invocations: cached Galaxy API responses,
+resolved dependency graphs and git and role pins (the snapshot), downloaded
+and built tarballs (the artifact cache), unpacked collection and role trees
+(the extracted store), and a registry of the projects that have run against
+this cache. What each is keyed by, and why the
 artifact cache is scoped by server rather than by content, is described in
 [How it works](architecture.md).
 
@@ -21,11 +22,12 @@ installed files read-only. See
 `go-galaxy hash` prints a deterministic `sha256:...` of the lockfile, or of
 `requirements.yml` when no lockfile is present, for use as a CI cache key.
 `go-galaxy warm` populates the caches without installing anything, and
-`go-galaxy cleanup` removes cached collections no registered project reaches
-any more - both are described in the [CLI reference](cli.md#commands), whose
-[cleanup options](cli.md#cleanup-options) section carries the reachability
-rules and the 30-day retention the extracted-cache sweep applies to warmed
-entries.
+`go-galaxy cleanup` removes cached collections and roles no registered project
+reaches any more - both are described in the [CLI reference](cli.md#commands),
+whose [cleanup options](cli.md#cleanup-options) section carries the
+reachability rules (for roles: only a recorded roles path is scanned, only a
+directory carrying this tool's extract marker counts) and the 30-day retention
+the extracted-cache sweep applies to warmed entries.
 
 Two caches must not be shared between principals holding different Galaxy
 credentials; see [Security](security.md#security--trust-model) for why.
@@ -48,6 +50,49 @@ install phase without committing it. `warm` records a git collection under
 `namespace.name@version` like any other, so two commits of a branch that did
 not bump the collection's version share one warmed entry; the artifact cache
 itself keeps both.
+
+A role lives in the same caches by the same rules, with a role-shaped key. Its
+artifact - the deterministic `tar.gz` built from the repository tree - is
+keyed by the locator `git+<url>#@<commit>` (no subdir: the repository root is
+the role) and the filename `role.<name>-<version>.tar.gz`, so a role and a
+collection built from one repository and commit share a scope without
+colliding, and a role installed under two names or at two versions is two
+artifacts. The snapshot carries two role buckets. `installed_roles`, keyed by
+install name, records where each role was materialized, the locator it was
+built from, its artifact digest, its version, its Galaxy name and the install
+names of its dependencies; it is a record of content on disk, like the
+installed-collections bucket, and is what `cleanup` keeps a role's extracted
+tree by and purges a removed role's artifact through. `role_pins`, keyed by
+the requirement line, records what that line resolved to: for a git role the
+key is the repository URL and ref and the pin carries the commit, the concrete
+version and the dependencies the meta declared; for a Galaxy role a second pin
+keyed by the Galaxy name and the version asked for carries the repository and
+tag the v1 API pointed at, the commit it recorded, and sits over a git pin
+for that repository and tag. A rerun replays both without touching the v1 API
+or the remote. A pin is invalidated by editing its own line (a new key), by
+`--refresh` - which re-asks the v1 API and re-advertises the ref, keeping the
+pin when the commit is unchanged and the artifact still cached - and by
+`--clear-cache`, which drops every role pin but leaves the installed-roles
+records alone; never by age. `--offline` needs a recorded pin and the cached
+artifact, else exits `4`; `--no-cache` fetches and builds once at discovery
+and hands the build straight to the install phase. `warm` caches a role's
+artifact and its extracted tree and records the warmed key as
+`role:<name>@<version>`, kept apart from the collection keys so a role and a
+collection sharing a `name@version` cannot overwrite each other's entry; the
+extracted-store sweep keeps the trees of every installed role that is not
+being removed, plus the warmed ones within their retention window. The
+resolve-side snapshot reuse that replays a collection resolution while
+`requirements.yml`, the server list and `--no-deps` are unchanged is not
+involved in roles at all: a `roles:` list is replayed through its pins, entry
+by entry, so editing a role line re-resolves that role and nothing else.
+
+Adding the two role buckets bumped the snapshot schema to version 8. The
+policy is drop-and-rebuild, so the first run of this version against an
+existing cache rebuilds its metadata caches cold (the artifact and extracted
+stores are untouched), and an older binary sharing the same cache refuses the
+snapshot with `unsupported snapshot schema version` (exit `2`) rather than
+dropping the role buckets on its next save and leaving a later `cleanup` with
+no record of any installed role.
 
 ## S3 Cache (optional)
 

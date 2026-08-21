@@ -121,7 +121,7 @@ func (s *stubStateBackend) ClearFiles(ctx context.Context) error {
 
 // RecordProject blocks on ctx until it ends and returns ctx.Err() when
 // blocking is set; otherwise it returns nil immediately.
-func (s *stubStateBackend) RecordProject(ctx context.Context, _, _ string) error {
+func (s *stubStateBackend) RecordProject(ctx context.Context, _, _, _ string) error {
 	if s.blocking {
 		<-ctx.Done()
 		return ctx.Err()
@@ -172,7 +172,7 @@ func TestWithStateDeadlineBoundsEveryStateOperation(t *testing.T) {
 			return err
 		}},
 		{name: "RecordProject", call: func() error {
-			return wrapped.RecordProject(context.Background(), "requirements.yml", "collections")
+			return wrapped.RecordProject(context.Background(), "requirements.yml", "collections", "")
 		}},
 	}
 	for _, tc := range cases {
@@ -226,7 +226,7 @@ func assertStateDeadlinePositiveControl(t *testing.T) {
 	if err != nil || gotRegistry != wantRegistry {
 		t.Fatalf("positive control: LoadProjectRegistry = (%v, %v), want (%v, nil)", gotRegistry, err, wantRegistry)
 	}
-	if err := wrappedOK.RecordProject(context.Background(), "requirements.yml", "collections"); err != nil {
+	if err := wrappedOK.RecordProject(context.Background(), "requirements.yml", "collections", ""); err != nil {
 		t.Fatalf("positive control: RecordProject = %v, want nil", err)
 	}
 }
@@ -287,7 +287,7 @@ func TestWithStateDeadlineIsInertForTheLocalBackend(t *testing.T) {
 		t.Fatalf("write requirements.yml: %v", err)
 	}
 
-	if err := wrapped.RecordProject(context.Background(), reqPath, cacheDir); err != nil {
+	if err := wrapped.RecordProject(context.Background(), reqPath, cacheDir, ""); err != nil {
 		t.Fatalf("RecordProject: %v, want nil (the local backend ignores its context parameter)", err)
 	}
 	if _, err := wrapped.LoadProjectRegistry(context.Background()); err != nil {

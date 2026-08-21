@@ -54,6 +54,7 @@ type Report struct {
 	CacheMisses     int64         `json:"cache_misses"`
 	BytesDownloaded int64         `json:"bytes_downloaded"`
 	Collections     int           `json:"collections"`
+	Roles           int           `json:"roles"`
 	Failures        int           `json:"failures"`
 	Frozen          bool          `json:"frozen,omitempty"`
 	Offline         bool          `json:"offline,omitempty"`

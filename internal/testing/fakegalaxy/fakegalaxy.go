@@ -38,17 +38,21 @@ import (
 // injection (Fail) and request counting (Count).
 type Endpoint int
 
-// The four routes the fake server answers.
+// The routes the fake server answers: the four v3 collection routes, and
+// the two v1 role routes served only once AddRole has registered a role (a
+// server without roles answers 404 for them, as an Automation Hub does).
 const (
 	EndpointRootMetadata Endpoint = iota
 	EndpointVersionsList
 	EndpointVersionDetail
 	EndpointArtifact
+	EndpointRoleLookup
+	EndpointRoleVersions
 )
 
 // endpointCount is the number of distinct Endpoint values, sizing Server's
 // per-endpoint counters array.
-const endpointCount = 4
+const endpointCount = 6
 
 // Path segment names used by ServeHTTP's routing and the URLs this package
 // builds. Named rather than repeated string literals, since "api" alone
@@ -56,6 +60,8 @@ const endpointCount = 4
 const (
 	apiSegment         = "api"
 	v3Segment          = "v3"
+	v1Segment          = "v1"
+	rolesSegment       = "roles"
 	collectionsSegment = "collections"
 	versionsSegment    = "versions"
 	downloadSegment    = "download"
@@ -125,6 +131,8 @@ type Server struct {
 	srv            *httptest.Server
 	collections    map[string]*fakeCollection
 	artifacts      map[string]fakeArtifact
+	roles          map[string]*fakeRole
+	rolesByID      map[int64]*fakeRole
 	baseURL        string
 	basePathPrefix string
 	apiRootPrefix  string
@@ -340,6 +348,8 @@ func newServer(tb testing.TB, basePath string, apiRoot []string) *Server {
 	s := &Server{
 		collections:    make(map[string]*fakeCollection),
 		artifacts:      make(map[string]fakeArtifact),
+		roles:          make(map[string]*fakeRole),
+		rolesByID:      make(map[int64]*fakeRole),
 		basePath:       segments,
 		basePathPrefix: prefix,
 		apiRoot:        apiRoot,
@@ -588,6 +598,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// it is matched before the API root is stripped.
 	if isDownloadPath(segments) {
 		s.dispatchArtifact(w, r, segments[1])
+		return
+	}
+
+	if roleSegments, ok := s.roleRouteSegments(segments); ok {
+		s.dispatchRoles(w, r, roleSegments)
 		return
 	}
 

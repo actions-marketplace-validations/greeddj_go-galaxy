@@ -1,20 +1,34 @@
 // Package requirements parses an ansible-style requirements.yml into the
-// collection entries the resolver works from. It accepts both shapes ansible
-// writes - a bare list, or a mapping carrying a collections: key - with each
-// item either a "namespace.name" string, a git pointer string ("git+<url>" or
-// "git@host:path"), or a mapping, reports separately whether the file
-// declared roles (which this tool does not install), and refuses any other
-// shape rather than guessing at it.
+// collection entries the resolver works from and the role entries the role
+// pipeline installs. It accepts both shapes ansible writes - a bare list, or
+// a mapping carrying a collections: key and/or a roles: key - and refuses
+// any other shape rather than guessing at it. A bare list is a list of
+// collections here, where ansible reads it as the legacy roles format; a
+// collection entry spelled with a role's keys (src:, scm:) is refused with
+// a message pointing at roles:, so that one misfire is a named refusal
+// rather than a silent non-install.
+//
+// A collection item is a "namespace.name" string, a git pointer string
+// ("git+<url>" or "git@host:path"), or a mapping. A role item is ansible's
+// "src[,version[,name]]" string or a mapping with src:, scm:, version:,
+// name: (or the old-style role:), and is either a Galaxy role - src: is
+// owner.role - or a git role - src: is a git pointer, an scm: git URL, or
+// ansible's github.com special case. What ansible would install from and
+// this tool does not - a tarball URL, a local path, an scm other than git,
+// an include: of a second file - is refused at load.
 //
 // This is one of the boundaries an untrusted identifier enters the program
 // through, so an entry is validated here rather than downstream:
-// parseCollectionItem is where both item shapes converge on the collection
-// name alphabet, validateRequirement rejects a type: that is neither galaxy
-// nor git and a source: embedding URL userinfo before anything can print or
-// request it, and parseGitRequirement judges a git entry's URL, ref and
-// subdir through internal/galaxy/gitsource's grammar, which is where a
-// credential in a repository URL is refused. A git entry has no identity at
-// parse time unless the file names one (name: namespace.name beside a git
+// parseCollectionItem is where both collection item shapes converge on the
+// collection name alphabet, validateRequirement rejects a type: that is
+// neither galaxy nor git and a source: embedding URL userinfo before
+// anything can print or request it, parseGitRequirement judges a git
+// entry's URL, ref and subdir through internal/galaxy/gitsource's grammar,
+// which is where a credential in a repository URL is refused, and
+// finishRole applies the role alphabets (helpers.IsRoleName,
+// helpers.IsRoleInstallName, helpers.IsRoleVersion) and the same git
+// grammar to a role entry. A git collection entry has no identity at parse
+// time unless the file names one (name: namespace.name beside a git
 // source:), exactly as in ansible, where the repository's own galaxy.yml is
 // what says which collection it holds; the alphabet check is therefore
 // applied to a git entry only when it carries a name to check.
@@ -61,46 +75,65 @@ const (
 // IsGit reports whether the requirement names a git source.
 func (r CollectionRequirement) IsGit() bool { return r.Type == TypeGit }
 
-// LoadCollections reads and parses requirements from a file.
-func LoadCollections(path, defaultSource string) (Collections, bool, error) {
+// File is everything a requirements file declares: its collections, its
+// roles, and the warnings parsing raised (a key on a role entry ansible
+// would drop without a word), for the caller to print.
+type File struct {
+	Collections Collections
+	Roles       []RoleRequirement
+	Warnings    []string
+}
+
+// Load reads and parses a requirements file.
+func Load(path, defaultSource string) (File, error) {
 	//nolint:gosec // path is user-provided requirements file.
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, false, err
+		return File{}, err
 	}
-	return ParseCollections(data, defaultSource)
+	return Parse(data, defaultSource)
 }
 
-// ParseCollections parses requirements data and returns collections and roles flag.
-func ParseCollections(data []byte, defaultSource string) (Collections, bool, error) {
+// Parse parses requirements data.
+func Parse(data []byte, defaultSource string) (File, error) {
 	var raw any
 	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return nil, false, err
+		return File{}, err
 	}
-	return parseCollectionsRaw(raw, defaultSource)
+	return parseRaw(raw, defaultSource)
 }
 
-// parseCollectionsRaw parses a decoded requirements payload.
-func parseCollectionsRaw(raw any, defaultSource string) (Collections, bool, error) {
+// parseRaw parses a decoded requirements payload. A mapping needs at least
+// one of the two keys; a bare list is a collections list.
+func parseRaw(raw any, defaultSource string) (File, error) {
 	switch v := raw.(type) {
 	case map[string]any:
-		rolesFound := false
-		if _, ok := v["roles"]; ok {
-			rolesFound = true
+		collectionsRaw, hasCollections := v["collections"]
+		rolesRaw, hasRoles := v["roles"]
+		if !hasCollections && !hasRoles {
+			return File{}, helpers.ErrUnsupportedRequirementsFormat
 		}
-		if collectionsRaw, ok := v["collections"]; ok {
-			cols, err := parseCollectionList(collectionsRaw, defaultSource)
-			return cols, rolesFound, err
+		var f File
+		var err error
+		if f.Collections, err = parseCollectionList(collectionsRaw, defaultSource); err != nil {
+			return File{}, err
 		}
-		if rolesFound {
-			return nil, rolesFound, nil
+		if f.Roles, f.Warnings, err = parseRoleList(rolesRaw); err != nil {
+			// The collections are handed back beside the refusal: a reader
+			// that only needs them (cleanup's reachability walk) can keep
+			// what it can still judge rather than treat the whole project as
+			// unknown, while every other caller sees the error as before.
+			return File{Collections: f.Collections}, &RolesError{Err: err}
 		}
-		return nil, rolesFound, helpers.ErrUnsupportedRequirementsFormat
+		return f, nil
 	case []any:
 		cols, err := parseCollectionList(v, defaultSource)
-		return cols, false, err
+		if err != nil {
+			return File{}, err
+		}
+		return File{Collections: cols}, nil
 	default:
-		return nil, false, helpers.ErrUnsupportedRequirementsFormat
+		return File{}, helpers.ErrUnsupportedRequirementsFormat
 	}
 }
 
@@ -194,6 +227,12 @@ func parseCollectionStringItem(value string, defaultSource string) (CollectionRe
 }
 
 func parseCollectionMapItem(value map[string]any, defaultSource string) (CollectionRequirement, error) {
+	for _, key := range []string{"src", "scm"} {
+		if _, ok := value[key]; ok {
+			return CollectionRequirement{}, fmt.Errorf("%w: %s is a role key; a roles list goes under the roles key",
+				helpers.ErrInvalidCollectionEntry, key)
+		}
+	}
 	req := parseCollectionMapFields(value)
 	if req.Type == TypeGit || (req.Type == "" && gitsource.IsPointer(req.Name)) {
 		return parseGitMapItem(req, value)
@@ -585,3 +624,17 @@ func looksLikeSourceName(value string) bool {
 	}
 	return false
 }
+
+// RolesError reports that the collections: list parsed and the roles: list
+// did not. Load and Parse return it with File.Collections filled, so a
+// caller that can act on the collections alone may, after deciding that a
+// roles list it cannot read is a warning rather than an unknown project;
+// every other caller treats it as the load failure it wraps.
+type RolesError struct {
+	Err error
+}
+
+func (e *RolesError) Error() string { return e.Err.Error() }
+
+// Unwrap exposes the role sentinel the refusal classifies by.
+func (e *RolesError) Unwrap() error { return e.Err }

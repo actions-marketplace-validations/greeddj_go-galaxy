@@ -58,8 +58,9 @@ import (
 //     registry in the order that exposes it.
 func buildReachable(
 	runtime *infra.Infra, registry *store.ProjectRegistry, st *store.Store,
-) (map[string]bool, map[string][]installedCollection, error) {
+) (map[string]bool, map[string][]installedCollection, roleReachability, error) {
 	reachable := make(map[string]bool)
+	roles := roleReachability{reachable: make(map[string]bool), byName: make(rolesByName)}
 	installedIndex := make(map[string][]installedCollection)
 	depsByKey := make(map[string]map[string]string)
 	// installedByKey accumulates every on-disk copy of a given key
@@ -82,30 +83,67 @@ func buildReachable(
 		if err := scanProjectWorkspace(
 			runtime.Output, projectPath, registry.Projects[projectPath], installedIndex, installedByKey, depsByKey,
 		); err != nil {
-			return nil, nil, err
+			return nil, nil, roleReachability{}, err
+		}
+		if err := scanProjectRoles(runtime.Output, projectPath, registry.Projects[projectPath], st, roles.byName); err != nil {
+			return nil, nil, roleReachability{}, err
 		}
 	}
 
 	// Phase 2: every recorded project's roots, against the complete index.
 	for _, projectPath := range projectPaths {
-		roots, err := projectRequirementRoots(runtime.Output, projectPath, registry.Projects[projectPath])
+		file, rolesUnread, err := projectRequirementRoots(runtime.Output, projectPath, registry.Projects[projectPath])
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, roleReachability{}, err
 		}
-		for _, root := range roots {
-			if root.IsGit() {
-				for _, key := range gitRootKeys(st, installedByKey, root) {
-					markReachable(key, reachable, depsByKey, installedIndex, constraints)
-				}
-				continue
+		if rolesUnread {
+			keepProjectRoles(registry.Projects[projectPath], roles)
+		}
+		markReachableRoles(roleRootNames(file), roles.byName, roles.reachable)
+		markCollectionRoots(st, file.Collections, reachable, installedByKey, installedIndex, depsByKey, constraints)
+	}
+	return reachable, installedByKey, roles, nil
+}
+
+// markCollectionRoots marks every installed collection one project's
+// collection roots reach.
+func markCollectionRoots(
+	st *store.Store,
+	roots []requirements.CollectionRequirement,
+	reachable map[string]bool,
+	installedByKey, installedIndex map[string][]installedCollection,
+	depsByKey map[string]map[string]string,
+	constraints map[string]*semver.Constraints,
+) {
+	for _, root := range roots {
+		if root.IsGit() {
+			for _, key := range gitRootKeys(st, installedByKey, root) {
+				markReachable(key, reachable, depsByKey, installedIndex, constraints)
 			}
-			fqdn := fmt.Sprintf("%s.%s", root.Namespace, root.Name)
-			for _, inst := range selectInstalled(installedIndex, constraints, fqdn, root.Version) {
-				markReachable(inst.Key, reachable, depsByKey, installedIndex, constraints)
-			}
+			continue
+		}
+		fqdn := fmt.Sprintf("%s.%s", root.Namespace, root.Name)
+		for _, inst := range selectInstalled(installedIndex, constraints, fqdn, root.Version) {
+			markReachable(inst.Key, reachable, depsByKey, installedIndex, constraints)
 		}
 	}
-	return reachable, installedByKey, nil
+}
+
+// roleReachability is the roles half of what buildReachable computed: every
+// role name some project reaches, and every installed copy by name.
+type roleReachability struct {
+	reachable map[string]bool
+	byName    rolesByName
+}
+
+// roleRootNames lists the install names a requirements file's roles: entries
+// ask for.
+func roleRootNames(file requirements.File) []string {
+	names := make([]string, 0, len(file.Roles))
+	for _, r := range file.Roles {
+		names = append(names, r.Name)
+	}
+	return names
 }
 
 // gitRootKeys returns the installed keys a git requirement keeps alive. A git
@@ -206,17 +244,45 @@ func gitSubdirWithin(entrySubdir, rootSubdir string) bool {
 // this one's.
 func projectRequirementRoots(
 	out output.Printer, projectPath string, project store.ProjectRecord,
-) ([]requirements.CollectionRequirement, error) {
-	roots, err := loadRequirements(project.RequirementsFile, "")
+) (requirements.File, bool, error) {
+	file, err := loadRequirements(project.RequirementsFile, "")
 	if err == nil {
-		return roots, nil
+		return file, false, nil
 	}
 	if errors.Is(err, fs.ErrNotExist) {
 		out.Warnf("project %q: requirements file %q no longer exists; it contributes no reachability roots this run",
 			projectPath, project.RequirementsFile)
-		return nil, nil
+		return requirements.File{}, false, nil
 	}
-	return nil, fmt.Errorf("%w: %s: %w", helpers.ErrProjectRequirementsUnreadable, project.RequirementsFile, err)
+	// A roles: list this tool cannot read - one ansible accepts and this
+	// tool refuses, or one written for a newer grammar - leaves the project's
+	// collections fully known and its role roots unknown. The collections are
+	// judged as usual and every role under the project's roles path is kept,
+	// since an unknown set of role roots could have been protecting any of
+	// them; aborting the whole run here would let one such file poison every
+	// cleanup against a shared cache.
+	var rolesErr *requirements.RolesError
+	if errors.As(err, &rolesErr) {
+		out.Warnf("project %q: the roles list of %q cannot be read (%v); its roles are kept this run",
+			projectPath, project.RequirementsFile, rolesErr.Err)
+		return file, true, nil
+	}
+	return requirements.File{}, false, fmt.Errorf("%w: %s: %w", helpers.ErrProjectRequirementsUnreadable, project.RequirementsFile, err)
+}
+
+// keepProjectRoles marks every role installed under the project's roles
+// path reachable, for a project whose role roots could not be read.
+func keepProjectRoles(project store.ProjectRecord, roles roleReachability) {
+	if project.RolesPath == "" {
+		return
+	}
+	for name, copies := range roles.byName {
+		for _, inst := range copies {
+			if inst.RolesDir == project.RolesPath {
+				roles.reachable[name] = true
+			}
+		}
+	}
 }
 
 // selectInstalled filters installed collections by constraint. constraints

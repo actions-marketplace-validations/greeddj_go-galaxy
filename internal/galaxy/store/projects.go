@@ -11,10 +11,24 @@ import (
 )
 
 // ProjectRecord describes a project and its last run metadata.
+//
+// The registry JSON carries no schema version and is decoded by
+// encoding/json, which ignores a field it does not know, so a binary
+// predating a field reads a registry that carries it without complaint.
+// The cost runs the other way: that older binary re-recording the same
+// project writes the record without the field, and the field's reader must
+// treat its absence as the conservative answer.
 type ProjectRecord struct {
 	LastRun          time.Time `json:"last_run"`
 	RequirementsFile string    `json:"requirements_file"`
 	CollectionsPath  string    `json:"collections_path"`
+	// RolesPath is the absolute directory the project's roles install into,
+	// or "" when the run configured none. omitempty keeps a collections-only
+	// record byte-identical to what every earlier binary wrote. An older
+	// binary re-recording this project drops the field, which cleanup reads
+	// as "no roles path recorded, do not scan it" - the direction that can
+	// only make a destructive pass do less, never more.
+	RolesPath string `json:"roles_path,omitempty"`
 }
 
 // ProjectRegistry stores known projects keyed by path.
@@ -23,16 +37,11 @@ type ProjectRegistry struct {
 }
 
 // RecordProject records or updates a project entry in the registry.
-func RecordProject(cacheDir, requirementsFile, downloadPath string) error {
+func RecordProject(cacheDir, requirementsFile, downloadPath, rolesPath string) error {
 	if cacheDir == "" {
 		return nil
 	}
-	absReq, err := filepath.Abs(requirementsFile)
-	if err != nil {
-		absReq = requirementsFile
-	}
-	projectPath := filepath.Dir(absReq)
-	collectionsPath := resolveCollectionsPath(projectPath, downloadPath)
+	projectPath, record := NewProjectRecord(requirementsFile, downloadPath, rolesPath)
 
 	registry, err := LoadProjectRegistry(cacheDir)
 	if err != nil {
@@ -43,12 +52,30 @@ func RecordProject(cacheDir, requirementsFile, downloadPath string) error {
 	// to write into. It is kept so this function stands on its own rather than
 	// resting on that postcondition holding forever.
 	registry.Projects = ensureMap(registry.Projects)
-	registry.Projects[projectPath] = ProjectRecord{
+	registry.Projects[projectPath] = record
+	return saveProjectRegistry(cacheDir, registry)
+}
+
+// NewProjectRecord builds the registry entry a run records, stamped with the
+// current time, and returns it with the project path it is keyed by: the
+// directory of the absolute requirements file. The collections and roles
+// paths are resolved against that directory by one rule (see
+// resolveProjectPath), so the two cannot drift. Both backends build their
+// record through this function rather than each assembling its own, which
+// is what keeps the local registry file and the S3 registry object the same
+// shape.
+func NewProjectRecord(requirementsFile, downloadPath, rolesPath string) (string, ProjectRecord) {
+	absReq, err := filepath.Abs(requirementsFile)
+	if err != nil {
+		absReq = requirementsFile
+	}
+	projectPath := filepath.Dir(absReq)
+	return projectPath, ProjectRecord{
 		RequirementsFile: absReq,
-		CollectionsPath:  collectionsPath,
+		CollectionsPath:  resolveProjectPath(projectPath, downloadPath),
+		RolesPath:        resolveProjectPath(projectPath, rolesPath),
 		LastRun:          time.Now().UTC(),
 	}
-	return saveProjectRegistry(cacheDir, registry)
 }
 
 // LoadProjectRegistry loads the project registry from cacheDir. A missing
@@ -116,13 +143,17 @@ func projectRegistryPath(cacheDir string) string {
 	return filepath.Join(cacheDir, helpers.StoreDBProjects)
 }
 
-// resolveCollectionsPath returns an absolute collections path for a project.
-func resolveCollectionsPath(projectPath, downloadPath string) string {
-	if downloadPath == "" {
+// resolveProjectPath returns p as an absolute path for a project: an
+// absolute p is returned as is, a relative one is joined under projectPath,
+// and an empty one stays empty so "not configured" survives the round trip
+// rather than turning into the project directory itself. The collections
+// path and the roles path both go through it.
+func resolveProjectPath(projectPath, p string) string {
+	if p == "" {
 		return ""
 	}
-	if filepath.IsAbs(downloadPath) {
-		return downloadPath
+	if filepath.IsAbs(p) {
+		return p
 	}
-	return filepath.Join(projectPath, downloadPath)
+	return filepath.Join(projectPath, p)
 }

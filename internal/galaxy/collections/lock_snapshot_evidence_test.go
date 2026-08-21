@@ -93,7 +93,7 @@ func TestLockOnAColdCacheLeavesNoEvidenceForCleanupToActOn(t *testing.T) {
 	// warm-only shape: its workspace is skipped, it contributes no installed
 	// key, and the sweep therefore runs with an empty keep set - the exact
 	// state that decides whether the snapshot's silence is read as evidence.
-	if err := state.backend.RecordProject(context.Background(), reqPath, cfg.DownloadPath); err != nil {
+	if err := state.backend.RecordProject(context.Background(), reqPath, cfg.DownloadPath, ""); err != nil {
 		t.Fatalf("RecordProject: %v", err)
 	}
 

@@ -22,8 +22,13 @@ func buildLockfile(
 	deps collectionDeps,
 	resolved map[string]collection,
 	graph map[string][]string,
+	roles roleResolution,
 ) (*lockfile.File, error) {
 	cfg := deps.cfg
+	roleEntries, err := roleLockfileEntries(cfg, roles)
+	if err != nil {
+		return nil, err
+	}
 	entries := make([]lockfile.Entry, 0, len(resolved))
 	for fqdn, col := range resolved {
 		// col.Version crosses the identical snapshot trust boundary the sha
@@ -83,9 +88,10 @@ func buildLockfile(
 		})
 	}
 	return &lockfile.File{
-		SchemaVersion: lockfile.SchemaVersionFor(entries),
+		SchemaVersion: lockfile.SchemaVersionFor(entries, roleEntries),
 		Server:        cfg.Server,
 		Collections:   entries,
+		Roles:         roleEntries,
 	}, nil
 }
 
@@ -413,6 +419,7 @@ func reportLockfileDiff(runtime *infra.Infra, lf *lockfile.File, path, prefix st
 	for _, e := range diff.Removed {
 		runtime.Output.Okf("Would remove: %s@%s", e.Name, e.Version)
 	}
+	reportRoleDiff(runtime, lf, prefix, diff)
 	unchanged := len(lf.Collections) - len(diff.Added) - len(diff.Updated)
 	verdict := "lockfile would change"
 	if diff.Empty() {
@@ -421,6 +428,31 @@ func reportLockfileDiff(runtime *infra.Infra, lf *lockfile.File, path, prefix st
 	runtime.Output.PersistentPrintf(
 		"%s: %s; %d would be added, %d would be updated, %d would be removed, %d unchanged (%s)",
 		prefix, verdict, len(diff.Added), len(diff.Updated), len(diff.Removed), unchanged, path,
+	)
+}
+
+// reportRoleDiff renders the roles half of a diff - one line per role, and
+// a roles summary - only when the file or the diff has a role, so a
+// collections-only run reads exactly as it did before roles existed. The
+// unchanged count derives the way the collection count does: lf's roles
+// come from a name-keyed map, so each is counted once.
+func reportRoleDiff(runtime *infra.Infra, lf *lockfile.File, prefix string, diff lockfile.Diff) {
+	if len(lf.Roles) == 0 && !diff.HasRoles() {
+		return
+	}
+	for _, e := range diff.RolesAdded {
+		runtime.Output.Okf("Would add role: %s@%s", e.Name, e.Version)
+	}
+	for _, c := range diff.RolesUpdated {
+		runtime.Output.Okf("Would update role: %s (%s)", c.To.Name, renderFieldChanges(c.Fields()))
+	}
+	for _, e := range diff.RolesRemoved {
+		runtime.Output.Okf("Would remove role: %s@%s", e.Name, e.Version)
+	}
+	unchanged := len(lf.Roles) - len(diff.RolesAdded) - len(diff.RolesUpdated)
+	runtime.Output.PersistentPrintf(
+		"%s: roles: %d would be added, %d would be updated, %d would be removed, %d unchanged",
+		prefix, len(diff.RolesAdded), len(diff.RolesUpdated), len(diff.RolesRemoved), unchanged,
 	)
 }
 

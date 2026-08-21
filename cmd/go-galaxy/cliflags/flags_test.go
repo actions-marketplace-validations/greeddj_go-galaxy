@@ -90,7 +90,7 @@ func TestLockInspectFlags(t *testing.T) {
 				//
 				//	flags_test.go:113: Value = "", want "requirements.yml"
 				value:   "requirements.yml",
-				aliases: []string{"r"},
+				aliases: []string{"r", "role-file"},
 				usage:   "Path to requirements.yml",
 				envKeys: []string{"GO_GALAXY_REQUIREMENTS_FILE", "ANSIBLE_GALAXY_REQUIREMENTS_FILE"},
 			},

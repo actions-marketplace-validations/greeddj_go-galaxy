@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -638,7 +639,7 @@ func emptyGzipMember() []byte {
 // readObject, leaving the failure to be returned as it arrives, fails this
 // test with
 //
-//	backend_test.go:661: readObject(empty member) = gzip stream carries a member that produces no bytes, want ErrCorruptStateObject
+//	backend_test.go:662: readObject(empty member) = gzip stream carries a member that produces no bytes, want ErrCorruptStateObject
 func TestReadObjectReclassifiesAStateObjectThatWillNotInflate(t *testing.T) {
 	t.Parallel()
 	b, _ := newTestBackendAndFake(t)
@@ -782,5 +783,46 @@ func putRawStoreObject(ctx context.Context, t *testing.T, b *Backend, rawJSON []
 	attrs := putObjectAttrs{contentType: "application/json", contentEncoding: "gzip"}
 	if err := b.client.putObject(ctx, key, reader, int64(buf.Len()), attrs, putCondition{}); err != nil {
 		t.Fatalf("putObject: %v", err)
+	}
+}
+
+// TestRecordProjectRoundTripsRolesPath proves the S3 registry object carries
+// the roles path the run recorded, resolved against the project directory
+// by store.NewProjectRecord exactly as the local registry file is, and that
+// a run recording no roles path leaves the key out of the object.
+func TestRecordProjectRoundTripsRolesPath(t *testing.T) {
+	t.Parallel()
+	b := newTestBackend(t)
+	ctx := t.Context()
+
+	projectDir := t.TempDir()
+	reqPath := filepath.Join(projectDir, "requirements.yml")
+	if err := b.RecordProject(ctx, reqPath, "collections", "roles"); err != nil {
+		t.Fatalf("RecordProject: %v", err)
+	}
+	registry, err := b.LoadProjectRegistry(ctx)
+	if err != nil {
+		t.Fatalf("LoadProjectRegistry: %v", err)
+	}
+	record, ok := registry.Projects[projectDir]
+	if !ok {
+		t.Fatalf("no record under %q, got %#v", projectDir, registry.Projects)
+	}
+	if want := filepath.Join(projectDir, "roles"); record.RolesPath != want {
+		t.Fatalf("RolesPath = %q, want %q", record.RolesPath, want)
+	}
+	if want := filepath.Join(projectDir, "collections"); record.CollectionsPath != want {
+		t.Fatalf("CollectionsPath = %q, want %q", record.CollectionsPath, want)
+	}
+
+	if err := b.RecordProject(ctx, reqPath, "collections", ""); err != nil {
+		t.Fatalf("RecordProject without a roles path: %v", err)
+	}
+	data, err := b.readObject(ctx, b.key(statePrefix, projectsObject))
+	if err != nil {
+		t.Fatalf("readObject: %v", err)
+	}
+	if bytes.Contains(data, []byte("roles_path")) {
+		t.Fatalf("a record without a roles path carries roles_path: %s", data)
 	}
 }

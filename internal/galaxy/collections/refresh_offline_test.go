@@ -69,7 +69,7 @@ func TestRefreshOfflinePreservesResolveWithStaleMetadataCaches(t *testing.T) {
 	cfg.Offline = true
 	runtime := infra.New(noopPrinter{}, fetch.NewOffline(0))
 
-	roots, err := loadRoots(cfg, runtime)
+	roots, _, err := loadRoots(cfg, runtime)
 	if err != nil {
 		t.Fatalf("loadRoots: %v", err)
 	}

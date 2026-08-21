@@ -938,7 +938,7 @@ func buildNonRegularRequirementsFixture(
 // end to end through Start: a recorded project's requirements file that is a
 // named pipe rather than a real file must abort the whole run with
 // helpers.ErrProjectRequirementsUnreadable rather than blocking forever in
-// requirements.LoadCollections's own os.ReadFile open() call - see
+// requirements.Load's own os.ReadFile open() call - see
 // loadRequirements's own doc comment (requirements.go) for the full hazard,
 // including the S3 backend's lock-heartbeat consequence. The bound
 // (startBoundedErr) exists for the identical reason
@@ -1299,7 +1299,7 @@ func recordAbsentWorkspaceProject(t *testing.T, cfg *config.Config, runtime *inf
 			t.Errorf("failed to close backend after recording project: %v", err)
 		}
 	}()
-	if err := backend.RecordProject(t.Context(), reqPath, downloadPath); err != nil {
+	if err := backend.RecordProject(t.Context(), reqPath, downloadPath, ""); err != nil {
 		t.Fatalf("failed to record project: %v", err)
 	}
 }
@@ -3483,7 +3483,7 @@ func TestSweepExtractedStoreNoopWhenCacheDirEmpty(t *testing.T) {
 	runtime := newTestRuntime()
 	st := store.New()
 
-	sweepExtractedStore(t.Context(), cfg, runtime, st, map[string]bool{}, map[string][]installedCollection{})
+	sweepExtractedStore(t.Context(), cfg, runtime, st, map[string]bool{}, map[string][]installedCollection{}, roleReachability{})
 }
 
 // TestStartLeavesExtractedCacheWhenNoSnapshotPersisted is THE regression test

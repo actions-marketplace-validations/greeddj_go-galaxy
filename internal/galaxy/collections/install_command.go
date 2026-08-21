@@ -72,17 +72,42 @@ func installWithState(ctx context.Context, cfg *config.Config, runtime *infra.In
 	// no-op against a prefetcher that was never armed.
 	defer plan.prefetch.Close()
 
+	// The roles root is opened only when the plan holds a role: a
+	// collections-only project must not grow an empty roles directory on
+	// every run. Unlike the collections root it can wait until the plan is
+	// built, since no prefetcher reads it. create follows !cfg.DryRun for the
+	// same reason openCollectionsRoot's does.
+	rolesRoot, err := openRolesRootIfNeeded(cfg, plan)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if rolesRoot != nil {
+			_ = rolesRoot.Close()
+		}
+	}()
+
 	if cfg.DryRun {
-		return installDryRun(ctx, cfg, runtime, state, plan, start, root)
+		return installDryRun(ctx, cfg, runtime, state, plan, start, root, rolesRoot)
 	}
 
 	depsCtx := newInstallDeps(
 		cfg, runtime, state.store, state.backend.Artifacts(), state.extractStore, root, plan.prefetch.cachedArtifacts(), plan.verify,
 	)
-	depsCtx.collectionDeps = depsCtx.withGit(state.backend.Artifacts(), state.gitMemo)
+	depsCtx.collectionDeps = depsCtx.withGit(state.backend.Artifacts(), state.gitMemo, state.roleMemo)
+	depsCtx.rolesRoot = rolesRoot
 	summary, err := installLevels(ctx, depsCtx, plan)
 	if err != nil {
 		return err
+	}
+	// Roles install after the collections and only when every collection
+	// level went through: a level loop that broke on a failure has already
+	// decided the run's outcome, and the roles that were never attempted must
+	// not be reported as failed or, worse, installed against a half-done tree.
+	if summary.count == 0 {
+		var roleFailures failureRecorder
+		installRoles(ctx, depsCtx, plan.roles, &roleFailures)
+		summary = summary.join(roleFailures.summary())
 	}
 
 	// Reported after every worker has joined and before the run's own tail, so
@@ -91,8 +116,22 @@ func installWithState(ctx context.Context, cfg *config.Config, runtime *infra.In
 	plan.verify.reportSkippedUnverified(runtime)
 
 	finalErr := finalizeInstall(ctx, runtime, state.backend, state.store, summary, start)
-	writeRunMetrics(cfg, runtime, "install", start, len(plan.collections), int(summary.count), cfg.Frozen)
+	writeRunMetrics(cfg, runtime, "install", start, plan.counts(int(summary.count)), cfg.Frozen)
 	return finalErr
+}
+
+// openRolesRootIfNeeded opens the roles root when the plan holds a role and
+// returns nil otherwise.
+func openRolesRootIfNeeded(cfg *config.Config, plan *installPlan) (*os.Root, error) {
+	if len(plan.roles.order) == 0 {
+		return nil, nil //nolint:nilnil // no roles in the plan is "no roles tree to open", not a failure.
+	}
+	return openRolesRoot(cfg.RolesPath, !cfg.DryRun)
+}
+
+// counts is the plan's size with the run's failure count, for the report.
+func (p *installPlan) counts(failures int) runCounts {
+	return runCounts{Collections: len(p.collections), Roles: len(p.roles.roles), Failures: failures}
 }
 
 // installDryRun is installLevels' dry-run substitute: instead of downloading,
@@ -138,12 +177,15 @@ func installDryRun(
 	plan *installPlan,
 	start time.Time,
 	root *os.Root,
+	rolesRoot *os.Root,
 ) error {
 	summary := classifyDryRun(
 		ctx, runtime, cfg, plan.collections, installDryRunVerbs, installDryRunProbe(cfg, state.store, state.backend.Artifacts(), root),
 	)
+	summary = summary.join(classifyRolesDryRun(ctx, runtime, cfg, plan.roles, installRolesDryRunVerbs,
+		installRoleDryRunProbe(cfg, state.store, state.backend.Artifacts(), rolesRoot)))
 	saveErr := saveDryRunSnapshotIfPersisted(ctx, runtime, state)
-	writeRunMetrics(cfg, runtime, "install", start, len(plan.collections), int(summary.count), cfg.Frozen)
+	writeRunMetrics(cfg, runtime, "install", start, plan.counts(int(summary.count)), cfg.Frozen)
 	if summary.count > 0 {
 		return annotateSaveFailure(summary.installError(), saveErr)
 	}

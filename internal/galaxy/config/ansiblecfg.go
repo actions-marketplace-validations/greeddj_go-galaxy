@@ -50,6 +50,7 @@ type ansibleGalaxyConfig struct {
 // ansibleDefaultsConfig maps the [defaults] section from ansible.cfg (INI).
 type ansibleDefaultsConfig struct {
 	CollectionsPath string
+	RolesPath       string
 }
 
 // ansibleConfig represents the subset of ansible.cfg (INI) sections this
@@ -153,9 +154,7 @@ const galaxyServerSectionPrefix = "galaxy_server."
 func assignAnsibleValue(cfg *ansibleConfig, section, key, value string) {
 	switch section {
 	case "defaults":
-		if key == "collections_path" {
-			cfg.Defaults.CollectionsPath = value
-		}
+		assignDefaultsValue(&cfg.Defaults, key, value)
 	case "galaxy":
 		switch key {
 		case "cache_dir":
@@ -206,4 +205,16 @@ func assignGalaxyServerValue(cfg *ansibleConfig, id, key, value string) {
 		cfg.GalaxyServers[id] = make(map[string]string)
 	}
 	cfg.GalaxyServers[id][key] = value
+}
+
+// assignDefaultsValue records a [defaults] key this tool reads: the two
+// install roots, each a search list ansible walks and this tool takes the
+// first entry of.
+func assignDefaultsValue(cfg *ansibleDefaultsConfig, key, value string) {
+	switch key {
+	case "collections_path":
+		cfg.CollectionsPath = value
+	case "roles_path":
+		cfg.RolesPath = value
+	}
 }

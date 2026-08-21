@@ -1179,3 +1179,91 @@ var (
 	// classify as an integrity failure of the remote's bytes.
 	ErrGitArtifactSelfCheck = errors.New("built git artifact failed its self-check")
 )
+
+// Role requirement errors. Every one of them is raised at the boundary a
+// roles: entry enters through - the requirements parser or the root
+// preparation that follows it - before any request is made, and every one
+// classifies as usage: the remedy is an edit to the file.
+var (
+	// ErrInvalidRolesList reports a roles: value that is neither a list nor
+	// absent.
+	ErrInvalidRolesList = errors.New("roles must be a list")
+	// ErrInvalidRoleEntry reports a roles: item of a shape ansible would not
+	// accept either, or one carrying a key a role cannot take (source:,
+	// signatures:, type:); the message names the defect.
+	ErrInvalidRoleEntry = errors.New("invalid role entry")
+	// ErrInvalidRoleName reports a Galaxy role name outside IsRoleName:
+	// anything but owner.role with both halves in the role alphabet.
+	ErrInvalidRoleName = errors.New("invalid role name")
+	// ErrInvalidRoleInstallName reports a name: (or a name derived from a
+	// repository URL) that IsRoleInstallName refuses as a directory under
+	// roles_path.
+	ErrInvalidRoleInstallName = errors.New("invalid role install name")
+	// ErrInvalidRoleVersion reports a version: that neither the ref grammar
+	// nor IsRoleVersion accepts.
+	ErrInvalidRoleVersion = errors.New("invalid role version")
+	// ErrUnsupportedRoleSource reports a src: this tool does not install
+	// from: a tarball or any other non-git URL, a local path, or a git
+	// pointer carrying a #subdir fragment. Only a Galaxy role name and a git
+	// repository are supported.
+	ErrUnsupportedRoleSource = errors.New("unsupported role source")
+	// ErrUnsupportedRoleScm reports an scm: other than git; ansible shells
+	// out to hg for the other value and this tool executes no process.
+	ErrUnsupportedRoleScm = errors.New("unsupported role scm")
+	// ErrUnsupportedRoleInclude reports an include: entry, which ansible
+	// reads another requirements file through; list the included roles
+	// inline instead.
+	ErrUnsupportedRoleInclude = errors.New("role include is not supported")
+	// ErrDuplicateRoleRequirement reports two roles: entries that would
+	// install into one directory under roles_path.
+	ErrDuplicateRoleRequirement = errors.New("duplicate role requirement")
+)
+
+// Role build and install errors.
+var (
+	// ErrRoleMetaNotFound reports that the repository root carries no
+	// meta/main.yml (nor meta/main.yaml), so it is not an Ansible role.
+	// Usage class, like ErrGitCollectionNotFound: the remedy is to point the
+	// entry at the role's own repository.
+	ErrRoleMetaNotFound = errors.New("no role found in git repository")
+	// ErrRoleMetaInvalid names a meta/main.yml or meta/requirements.yml this
+	// tool cannot read dependencies from: not a mapping, larger than the cap,
+	// both .yml and .yaml present, or a dependency of a shape ansible would
+	// not accept either. The message names the specific defect.
+	ErrRoleMetaInvalid = errors.New("invalid role meta")
+	// ErrRoleDirectoryForeign reports that the directory a role would install
+	// into already exists and was installed neither by this tool (no extract
+	// marker) nor by ansible-galaxy (no meta/.galaxy_install_info): replacing
+	// it could destroy a role somebody wrote by hand, so the install stops,
+	// as ansible-galaxy's does.
+	ErrRoleDirectoryForeign = errors.New("role directory exists and was not installed by a Galaxy client")
+	// ErrRoleArtifactIdentityMismatch reports that rebuilding a pinned role
+	// from its commit produced a different commit than the pin records.
+	ErrRoleArtifactIdentityMismatch = errors.New("rebuilt role artifact is not the pinned role")
+)
+
+// Galaxy role API errors.
+var (
+	// ErrGalaxyRoleAPIUnavailable reports that no configured Galaxy server
+	// serves the v1 role API: a Galaxy role needs galaxy.ansible.com or a
+	// standalone Galaxy NG, and an Automation Hub has no v1. Usage class: no
+	// retry helps, the remedy is configuration.
+	ErrGalaxyRoleAPIUnavailable = errors.New("no configured Galaxy server serves the v1 role API")
+	// ErrRoleNotFound reports that every configured server with a v1 role API
+	// answered, and none knows the role. Resolution class, like a collection
+	// no server has.
+	ErrRoleNotFound = errors.New("role not found on any configured Galaxy server")
+	// ErrRoleVersionNotFound reports that the version asked for is not among
+	// the versions the Galaxy server lists for the role.
+	ErrRoleVersionNotFound = errors.New("role version not found")
+	// ErrRoleVersionsIncomparable reports that the role's version names
+	// cannot be ordered (a numeric component against a textual one), so no
+	// highest version can be chosen; ansible fails the same way and gives
+	// the same remedy, an explicit version.
+	ErrRoleVersionsIncomparable = errors.New("role versions cannot be compared")
+	// ErrGalaxyRoleInvalid names a v1 role record this tool refuses to build
+	// a repository URL from: a GitHub user or repository outside the alphabet,
+	// or a branch that is not a ref name. Usage class: the server's record is
+	// not one this tool can act on.
+	ErrGalaxyRoleInvalid = errors.New("invalid role record from the Galaxy server")
+)

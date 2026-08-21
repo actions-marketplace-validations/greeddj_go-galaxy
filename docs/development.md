@@ -235,9 +235,9 @@ mandatory rather than optional - a detector that finds nothing passes a monopoly
 gate perfectly.
 
 **Nothing in the suite dials a real host.** Galaxy API paths go through
-`internal/testing/fakegalaxy`, an in-memory Galaxy v3 API double, while the S3,
-fetch and signature packages stand up `httptest` servers of their own. The
-double
+`internal/testing/fakegalaxy`, an in-memory Galaxy v3 API double that also
+serves the v1 role API, while the S3, fetch and signature packages stand up
+`httptest` servers of their own. The double
 answers the same routes and JSON shapes the real API does, generates
 deterministic `tar.gz` artifacts with matching digests - fixed modes and a fixed
 modification time, never the clock - and offers:
@@ -254,6 +254,16 @@ modification time, never the clock - and offers:
   request" is asserted rather than assumed.
 - **auth**: require a value, choose the failure status, and capture the header
   actually received.
+- **roles**: `AddRole` registers `owner.name` as imported from a GitHub user
+  and repository with a default branch and a version list (tag names with an
+  optional `commit_sha`, listed in registration order, oldest first as
+  galaxy.ansible.com lists them), after which the double answers the v1
+  routes - `roles/?owner__username=&name=` and the paginated
+  `roles/<id>/versions/` with `next_link` - under the v1 root matching the
+  shape the double was mounted with (`/api/v1` for galaxy.ansible.com's, `/v1`
+  for a Galaxy NG base path). Before the first `AddRole` it answers 404 for
+  them, which is how a server without a role API (an Automation Hub) is
+  modeled.
 
 Its constructor takes a `testing.TB`, deliberately: that is the one interface
 implementable only by the standard testing package, so the double can never be
@@ -268,14 +278,31 @@ grammar (status, hang, stall, plus a pack built from another commit and a
 redirect to another server), request counting per endpoint and auth capture
 (the Basic header over http, the key fingerprint over ssh). It also hands out
 generated client keys, an in-process ssh-agent on a unix socket, and a
-known_hosts file for the listener. Its own tests drive the stock go-git client
+known_hosts file for the listener, and its `AddRole` stages a minimal role
+tree at a repository root (`meta/main.yml` with the dependencies given,
+`tasks/main.yml`, `defaults/main.yml`) beside `AddCollection`. Its own tests drive the stock go-git client
 against every shape, which is what keeps the wire framing honest. A test that
 uses the ssh half sets `SSH_KNOWN_HOSTS`, `SSH_AUTH_SOCK` or `HOME` through
 `t.Setenv` and therefore runs serially; the agent socket lives in a short
 `os.MkdirTemp` directory rather than under `t.TempDir`, because darwin caps a
 unix socket path at 104 bytes. The collections suite drives its pipeline
-through an in-memory `gitsource.Client` double with no transport at all, and
-leaves the transport to `internal/galaxy/gitfetch`'s own tests against fakegit.
+through an in-memory `gitsource.Client` double with no transport at all
+(`git_fake_client_test.go`, with `git_fake_roles_test.go` supplying
+`AcquireRole` over role trees built from `internal/testing/faketree`), and
+leaves the transport to `internal/galaxy/gitfetch`'s own tests against fakegit,
+`role_test.go` among them for the role half. The role pipeline's end-to-end
+coverage is `roles_e2e_test.go` in that suite: Galaxy and git roles through
+install, warm, lock, `--frozen`, `--offline`, `--refresh`, `--no-cache`,
+`--dry-run`, the dependency walk, the directory policy and cleanup, against
+fakegalaxy's v1 routes and the client double.
+
+`internal/testing/faketree` is the in-memory `treearchive.Source` the builder
+packages and the client double build from: files, executables, directories,
+symlinks and submodule entries with a fixed commit time, plus a declared-size
+override for the budget tests. `internal/galaxy/treearchive`,
+`internal/galaxy/collectionbuild`, `internal/galaxy/rolebuild` and
+`internal/galaxy/galaxyv1` each carry their own tests beside the code; none of
+the six source audits changed for roles.
 
 There is exactly one `testdata` directory, under `internal/galaxy/signature`,
 holding keyrings and a family of detached signatures covering the valid,
@@ -285,7 +312,10 @@ expired, revoked, outsider and malformed cases.
 
 `testing/bench.sh` measures `ansible-galaxy` against `go-galaxy` across
 `requirements-{1,10,100}.yml` in six scenarios: `cold`, `warm`, `frozen`
-(go-galaxy only) and their three S3 equivalents. Every measured command passes
+(go-galaxy only) and their three S3 equivalents, and across
+`requirements-roles.yml` (ten Galaxy roles with no dependencies between them)
+in two more: `roles-cold` and `roles-warm`, `ansible-galaxy role install`
+against `go-galaxy install --roles-path`. Every measured command passes
 `--no-deps`, so what is compared is fetch plus extract.
 
 ```bash
@@ -303,7 +333,7 @@ when the endpoint does not answer, so the local scenarios still run on a machine
 with no container runtime.
 
 Knobs and defaults: `RUNS=5`, `WARMUP=1`, `SIZES="1 10 100"`,
-`SCENARIOS="cold warm frozen s3-cold s3-warm s3-frozen"`,
+`SCENARIOS="cold warm frozen s3-cold s3-warm s3-frozen roles-cold roles-warm"`,
 `S3_ENDPOINT=http://127.0.0.1:9000`, plus the bucket and credentials.
 
 Every cache it wipes lives under `$TMPDIR` - never in `$HOME`, because a
@@ -312,6 +342,7 @@ never inside the repository, because extracted third-party collections are Go
 source often enough that a tree-walking linter picks them up as this module's.
 
 Output lands in `dist/bench/`: `<scenario>-<N>.md` per scenario and size,
+`roles-cold.md` and `roles-warm.md` for the role scenarios,
 `resources-<N>.md` with peak RSS and bytes downloaded from a separate single-run
 pass, and `summary.md` concatenating everything with the tool versions and host
 recorded. See [Benchmarks](benchmarks.md) for the published numbers.

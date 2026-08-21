@@ -48,6 +48,8 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	assertVersions(t, loaded)
 	assertWarmed(t, loaded)
 	assertGitPin(t, loaded)
+	assertInstalledRole(t, loaded)
+	assertRolePin(t, loaded)
 }
 
 func openTestDBs(t *testing.T) *DBs {
@@ -68,9 +70,10 @@ func buildTestStore(fixed time.Time) *Store {
 }
 
 // populateTestStore writes a fixed, known fixture into every one of Store's
-// nine map buckets via their normal mutators (SetAPICache, SetDepsCache,
+// eleven map buckets via their normal mutators (SetAPICache, SetDepsCache,
 // SetInstalled, SetGraph, SetRequirements, SetResolvedAll, SetVersionsCache,
-// SetWarmed, SetGitPin). It is factored out of buildTestStore so a test can also apply
+// SetWarmed, SetGitPin, SetInstalledRole, SetRolePin). It is factored out of
+// buildTestStore so a test can also apply
 // this same fixture to a store obtained some other way (e.g. one just
 // decoded from JSON), then reuse the assert* helpers below to verify it
 // without duplicating the fixture values.
@@ -116,13 +119,66 @@ func populateTestStore(st *Store, fixed time.Time) *Store {
 			Dependencies: map[string]string{"a.b": testDepsConstraint},
 		}},
 	})
+	st.SetInstalledRole(testRoleName, InstalledRoleEntry{
+		InstallPath:    "/tmp/roles/" + testRoleName,
+		Source:         testRoleSource,
+		ArtifactSHA256: testRoleArtifactSHA,
+		Version:        "v1.2.3",
+		GalaxyName:     "acme.nginx",
+		InstalledAt:    fixed,
+		Deps:           []string{"common"},
+	})
+	st.SetRolePin(testRolePinKey, RolePinEntry{
+		Repository:     testRoleRepository,
+		Commit:         testGitPinCommit,
+		Version:        "v1.2.3",
+		GalaxySHA:      testGitPinCommit,
+		GalaxyRoleName: "nginx",
+		Deps:           []RolePinDep{{Src: "acme.common", Version: "v2.0.0", Name: "common"}},
+	})
 	return st
 }
 
 const (
 	testGitPinKey    = "https://github.com/acme/app.git\nmain\n"
 	testGitPinCommit = "0123456789abcdef0123456789abcdef01234567"
+
+	testRoleName        = "nginx"
+	testRoleRepository  = "https://github.com/acme/ansible-role-nginx.git"
+	testRoleSource      = "git+" + testRoleRepository + "#@" + testGitPinCommit
+	testRoleArtifactSHA = "role-sha"
+	testRolePinKey      = "acme.nginx,v1.2.3"
 )
+
+func assertInstalledRole(t *testing.T, loaded *Store) {
+	t.Helper()
+	role, ok := loaded.GetInstalledRole(testRoleName)
+	if !ok || role.ArtifactSHA256 != testRoleArtifactSHA || role.Source != testRoleSource ||
+		role.Version != "v1.2.3" || role.GalaxyName != "acme.nginx" || role.InstallPath != "/tmp/roles/"+testRoleName {
+		t.Fatalf("unexpected installed role: %#v (ok=%t)", role, ok)
+	}
+	if len(role.Deps) != 1 || role.Deps[0] != "common" {
+		t.Fatalf("unexpected installed role deps: %#v", role.Deps)
+	}
+	if role.InstalledAt.IsZero() {
+		t.Fatalf("installed role InstalledAt was lost")
+	}
+}
+
+func assertRolePin(t *testing.T, loaded *Store) {
+	t.Helper()
+	pin, ok := loaded.GetRolePin(testRolePinKey)
+	if !ok || pin.Repository != testRoleRepository || pin.Commit != testGitPinCommit || pin.Version != "v1.2.3" ||
+		pin.GalaxySHA != testGitPinCommit || pin.GalaxyRoleName != "nginx" {
+		t.Fatalf("unexpected role pin: %#v (ok=%t)", pin, ok)
+	}
+	if len(pin.Deps) != 1 || pin.Deps[0] != (RolePinDep{Src: "acme.common", Version: "v2.0.0", Name: "common"}) {
+		t.Fatalf("unexpected role pin deps: %#v", pin.Deps)
+	}
+	if pin.FetchedAt.IsZero() {
+		t.Fatalf("role pin FetchedAt was not stamped")
+	}
+}
 
 func assertGitPin(t *testing.T, loaded *Store) {
 	t.Helper()
@@ -243,7 +299,7 @@ func assertWarmed(t *testing.T, loaded *Store) {
 }
 
 // TestSaveRollsBackWholeTransactionOnMidSaveFailure proves that Save writes
-// the meta bucket and all eight data buckets inside a single Bolt
+// the meta bucket and all eleven data buckets inside a single Bolt
 // transaction: a failure partway through (here, an oversized key in the
 // installed bucket, which the fixed save order writes after api_cache)
 // must roll back the entire attempt, leaving the previously committed
@@ -974,7 +1030,7 @@ func TestWarmedArtifactSHAByKeyReturnsIndependentMap(t *testing.T) {
 }
 
 // assertStoreMapsNonNil fails (via Error, not Fatal) for every one of
-// Store's eight map fields that is still nil. It never stops early: the
+// Store's eleven map fields that is still nil. It never stops early: the
 // caller relies on every field being checked even if an earlier one already
 // failed, since the point of the test calling this is to then go on and
 // exercise the mutators regardless.
@@ -993,6 +1049,8 @@ func assertStoreMapsNonNil(t *testing.T, st *Store) {
 		{"Versions", st.Versions == nil},
 		{"GitPins", st.GitPins == nil},
 		{"Warmed", st.Warmed == nil},
+		{"InstalledRoles", st.InstalledRoles == nil},
+		{"RolePins", st.RolePins == nil},
 	}
 	for _, f := range fields {
 		if f.isNil {
@@ -1002,7 +1060,7 @@ func assertStoreMapsNonNil(t *testing.T, st *Store) {
 }
 
 // TestUnmarshalJSONRestoresEveryNilMap proves that decoding a payload where
-// every one of Store's eight map fields is an explicit JSON null still
+// every one of Store's eleven map fields is an explicit JSON null still
 // leaves every field writable afterward. It reuses populateTestStore - the
 // exact same mutator calls (SetAPICache, SetDepsCache, SetInstalled,
 // SetGraph, SetVersionsCache, SetWarmed, plus the two wholesale replacers
@@ -1024,7 +1082,9 @@ func TestUnmarshalJSONRestoresEveryNilMap(t *testing.T) {
 		"resolved": null,
 		"versions_cache": null,
 		"warmed": null,
-		"git_pins": null
+		"git_pins": null,
+		"installed_roles": null,
+		"role_pins": null
 	}`, helpers.StoreSnapshotSchemaVersion)
 
 	st := New()
@@ -1044,6 +1104,8 @@ func TestUnmarshalJSONRestoresEveryNilMap(t *testing.T) {
 	assertVersions(t, st)
 	assertWarmed(t, st)
 	assertGitPin(t, st)
+	assertInstalledRole(t, st)
+	assertRolePin(t, st)
 }
 
 // TestUnmarshalJSONKeepsDecodedData proves ensureMaps only fills in a field a

@@ -128,7 +128,7 @@ func cleanupWithState(ctx context.Context, cfg *config.Config, runtime *infra.In
 	}
 	warnIfSnapshotNotPersisted(runtime, state.store)
 
-	reachable, installedByKey, err := buildReachable(runtime, state.registry, state.store)
+	reachable, installedByKey, roles, err := buildReachable(runtime, state.registry, state.store)
 	if err != nil {
 		return err
 	}
@@ -136,6 +136,11 @@ func cleanupWithState(ctx context.Context, cfg *config.Config, runtime *infra.In
 	if err != nil {
 		return err
 	}
+	removedRoles, err := removeUnusedRoles(ctx, cfg, runtime, state.backend, state.store, roles.reachable, roles.byName)
+	if err != nil {
+		return err
+	}
+	removed += removedRoles
 	// removeUnused returning cleanly means it deleted every unreachable
 	// collection it found, not that this run still owns the cache: the last
 	// key's own check passed before that key was removed, and the holder
@@ -146,7 +151,7 @@ func cleanupWithState(ctx context.Context, cfg *config.Config, runtime *infra.In
 		return fmt.Errorf("cleanup stopped before sweeping cached artifacts: %w", err)
 	}
 	sweepLegacyArtifacts(ctx, cfg, runtime, state.backend, installedByKey)
-	sweepExtractedStore(ctx, cfg, runtime, state.store, reachable, installedByKey)
+	sweepExtractedStore(ctx, cfg, runtime, state.store, reachable, installedByKey, roles)
 	return finalizeCleanup(ctx, cfg, runtime, state.backend, state.store, removed)
 }
 

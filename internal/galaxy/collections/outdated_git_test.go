@@ -42,6 +42,10 @@ func (c *stubGitClient) Acquire(context.Context, gitsource.Request) (gitsource.R
 	return gitsource.Result{}, errStubGitAcquire
 }
 
+func (c *stubGitClient) AcquireRole(context.Context, gitsource.RoleRequest) (gitsource.RoleResult, error) {
+	return gitsource.RoleResult{}, errStubGitAcquire
+}
+
 type lookupGitOutdatedCase struct {
 	client         *stubGitClient
 	wantErr        error

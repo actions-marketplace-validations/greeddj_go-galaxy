@@ -364,7 +364,8 @@ func isIntegrityError(err error) bool {
 		errors.Is(err, helpers.ErrMalformedArtifactSHA256) ||
 		errors.Is(err, helpers.ErrManifestChainMismatch) ||
 		errors.Is(err, helpers.ErrGitCommitMismatch) ||
-		errors.Is(err, helpers.ErrGitArtifactIdentityMismatch)
+		errors.Is(err, helpers.ErrGitArtifactIdentityMismatch) ||
+		errors.Is(err, helpers.ErrRoleArtifactIdentityMismatch)
 }
 
 // isSignatureError reports whether err carries one collection's signature
@@ -469,7 +470,8 @@ func isServerSuppliedURLPolicyError(err error) bool {
 // same sentinel set.
 func isInstallError(err error) bool {
 	return isFileIntegrityError(err) || isArchiveError(err) ||
-		isSymlinkError(err) || isArtifactShapeError(err) || isGitBuildError(err)
+		isSymlinkError(err) || isArtifactShapeError(err) || isGitBuildError(err) ||
+		errors.Is(err, helpers.ErrRoleDirectoryForeign)
 }
 
 // isGitBuildError reports whether err says a git tree could not be turned
@@ -808,7 +810,10 @@ func isResolutionError(err error) bool {
 func isNoCandidateError(err error) bool {
 	return errors.Is(err, helpers.ErrNoSemverCandidates) ||
 		errors.Is(err, helpers.ErrGitRefNotFound) ||
-		errors.Is(err, helpers.ErrGitCommitNotFound)
+		errors.Is(err, helpers.ErrGitCommitNotFound) ||
+		errors.Is(err, helpers.ErrRoleNotFound) ||
+		errors.Is(err, helpers.ErrRoleVersionNotFound) ||
+		errors.Is(err, helpers.ErrRoleVersionsIncomparable)
 }
 
 // isUsageError reports whether err is a configuration or CLI-input sentinel
@@ -821,7 +826,48 @@ func isUsageError(err error) bool {
 		isCollectionNameUsageError(err) ||
 		isCollectionListUsageError(err) ||
 		isSignatureConfigError(err) ||
-		isGitUsageError(err)
+		isGitUsageError(err) ||
+		isRoleUsageError(err)
+}
+
+// isRoleUsageError reports whether err says a roles: entry, as written in
+// requirements.yml, cannot be used as given: a value that is not a list, an
+// entry of a shape ansible would not take either or carrying a collection
+// key, a name, install name or version outside the role alphabets, a source
+// this tool does not install from (a tarball, a local path, an scm other
+// than git, an include: of a second file), or two entries sharing one
+// install directory; and, past load, the answers no retry could change: no
+// configured server serves the v1 role API, a v1 record this tool cannot
+// build a repository URL from, and a repository that is not a role or whose
+// meta this tool cannot read. The remedy is an edit to the file or the
+// configuration.
+func isRoleUsageError(err error) bool {
+	return isRoleEntryUsageError(err) || isRoleSourceUsageError(err)
+}
+
+// isRoleEntryUsageError is the half of isRoleUsageError about the shape of
+// a roles: entry as written.
+func isRoleEntryUsageError(err error) bool {
+	return errors.Is(err, helpers.ErrInvalidRolesList) ||
+		errors.Is(err, helpers.ErrInvalidRoleEntry) ||
+		errors.Is(err, helpers.ErrInvalidRoleName) ||
+		errors.Is(err, helpers.ErrInvalidRoleInstallName) ||
+		errors.Is(err, helpers.ErrInvalidRoleVersion) ||
+		errors.Is(err, helpers.ErrDuplicateRoleRequirement)
+}
+
+// isRoleSourceUsageError is the half of isRoleUsageError about where a role
+// would come from: a source this tool does not install from, a server with
+// no v1 role API, a v1 record it cannot act on, a repository that is not a
+// role.
+func isRoleSourceUsageError(err error) bool {
+	return errors.Is(err, helpers.ErrUnsupportedRoleSource) ||
+		errors.Is(err, helpers.ErrUnsupportedRoleScm) ||
+		errors.Is(err, helpers.ErrUnsupportedRoleInclude) ||
+		errors.Is(err, helpers.ErrGalaxyRoleAPIUnavailable) ||
+		errors.Is(err, helpers.ErrGalaxyRoleInvalid) ||
+		errors.Is(err, helpers.ErrRoleMetaNotFound) ||
+		errors.Is(err, helpers.ErrRoleMetaInvalid)
 }
 
 // isGitUsageError reports whether err says a git source, as written in

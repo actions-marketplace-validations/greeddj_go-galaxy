@@ -131,9 +131,7 @@ func (i *Infra) DebugAnsibleConfig(cfg *config.Config) {
 		return
 	}
 	if cfg.AnsibleConfigPath != "" {
-		if cfg.AnsibleCollectionsPathUsed {
-			i.Output.Debugf("ansible.cfg %s: defaults.collections_path=%s", cfg.AnsibleConfigPath, cfg.DownloadPath)
-		}
+		i.debugAnsiblePaths(cfg)
 		if cfg.AnsibleCacheDirUsed {
 			i.Output.Debugf("ansible.cfg %s: galaxy.cache_dir=%s", cfg.AnsibleConfigPath, cfg.CacheDir)
 		}
@@ -190,5 +188,16 @@ func (i *Infra) debugGitCredentials(creds []config.GitCredential) {
 			kind = "ssh-key"
 		}
 		i.Output.Debugf("git credential %q: url=%s kind=%s", c.ID, c.URL.String(), kind)
+	}
+}
+
+// debugAnsiblePaths logs the two [defaults] install roots when ansible.cfg
+// supplied them.
+func (i *Infra) debugAnsiblePaths(cfg *config.Config) {
+	if cfg.AnsibleCollectionsPathUsed {
+		i.Output.Debugf("ansible.cfg %s: defaults.collections_path=%s", cfg.AnsibleConfigPath, cfg.DownloadPath)
+	}
+	if cfg.AnsibleRolesPathUsed {
+		i.Output.Debugf("ansible.cfg %s: defaults.roles_path=%s", cfg.AnsibleConfigPath, cfg.RolesPath)
 	}
 }

@@ -13,6 +13,9 @@ go-galaxy install --frozen # install exactly the locked versions
 A frozen install fails loudly if a cached or downloaded artifact does not match the
 lockfile's recorded SHA256, so a poisoned cache or a mutated upstream artifact cannot
 install silently; lockfiles with no recorded SHA (older lockfiles) are not pin-checked.
+A role is pinned by commit rather than by digest: a frozen install serves it from the
+cache, and on a miss fetches exactly the pinned commit and refuses a repository that
+serves another one (exit `7`).
 
 `--frozen` decides *what* gets installed and needs no cache to do it. `--offline`
 is a separate, stronger promise: no network call at all, so an artifact that is
@@ -25,6 +28,34 @@ lockfile change misses by construction, because the key just changed.
 
 `go-galaxy hash` prints a deterministic `sha256:…` of the lockfile (or `requirements.yml`
 when no lockfile is present) - perfect as a CI cache key.
+
+## Roles
+
+A `roles:` list in the same `requirements.yml` is installed by the same `install`,
+locked by the same `lock` and warmed by the same `warm`; nothing in the jobs below
+changes for it except where the roles land and how the playbook step finds them.
+Roles install under `--roles-path` (`GO_GALAXY_ROLES_PATH`, `ANSIBLE_ROLES_PATH`,
+`[defaults] roles_path`), `.roles` beside the working directory by default, so a
+later `ansible-playbook` step needs the same directory on its search path - set
+`ANSIBLE_ROLES_PATH` once for the job and both tools read it, exactly as
+`ANSIBLE_COLLECTIONS_PATH` serves the collections:
+
+```yaml
+env:
+  ANSIBLE_COLLECTIONS_PATH: ./collections
+  ANSIBLE_ROLES_PATH: ./roles
+
+steps:
+  - run: go-galaxy install --frozen
+  - run: ansible-playbook site.yml
+```
+
+A lockfile that holds a role is written as `schema_version: 3`, which a
+go-galaxy binary predating roles refuses to load (exit `6`) rather than
+installing the collections and silently skipping the roles list; pin the
+binary version across the jobs that share the lockfile. A file without roles is
+byte-identical to what earlier versions wrote, so adding this version to a
+collections-only pipeline changes no cache key.
 
 ## GitHub Actions
 

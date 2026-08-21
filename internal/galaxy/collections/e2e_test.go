@@ -109,7 +109,7 @@ func newE2EFixture(t *testing.T) *e2eFixture {
 }
 
 // writeRequirements writes a minimal requirements.yml at path requiring name
-// at version "*", the map-item shape requirements.LoadCollections parses.
+// at version "*", the map-item shape requirements.Load parses.
 func writeRequirements(t *testing.T, path, name string) {
 	t.Helper()
 	content := "collections:\n  - name: " + name + "\n    version: \"*\"\n"

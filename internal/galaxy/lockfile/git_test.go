@@ -54,7 +54,7 @@ func TestSchemaFollowsTheEntries(t *testing.T) {
 	if loaded.SchemaVersion != SchemaVersion {
 		t.Fatalf("schema after removing the git entry = %d, want %d", loaded.SchemaVersion, SchemaVersion)
 	}
-	if SchemaVersionFor(nil) != SchemaVersion || SchemaVersionFor([]Entry{gitEntry()}) != SchemaVersionGit {
+	if SchemaVersionFor(nil, nil) != SchemaVersion || SchemaVersionFor([]Entry{gitEntry()}, nil) != SchemaVersionGit {
 		t.Fatalf("SchemaVersionFor disagrees with the round trip")
 	}
 }

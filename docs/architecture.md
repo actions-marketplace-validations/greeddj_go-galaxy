@@ -17,8 +17,9 @@ cmd/go-galaxy            main, signal handling, exit-code decision
   exitcode               sentinel errors and signals -> exit codes
   buildinfo              version string
 
-internal/galaxy/collections   the resolve-download-verify-extract-record pipeline
-internal/galaxy/cleanup       reachability and removal
+internal/galaxy/collections   the resolve-download-verify-extract-record pipeline,
+                              for collections and (role_*.go) for roles
+internal/galaxy/cleanup       reachability and removal, collections and roles
 internal/cache                the only factory choosing a concrete backend
   local                       BoltDB snapshot + JSON registry + flock
   s3                          gzipped-JSON objects, hand-rolled SigV4, distributed lock
@@ -30,7 +31,17 @@ internal/galaxy/archive       tar.gz extraction with the refusal rules
 internal/galaxy/extracted     the content-addressed tree store
 internal/galaxy/manifest      MANIFEST.json / FILES.json, read-only
 internal/galaxy/signature     OpenPGP verification, read-only
-internal/galaxy/requirements  requirements.yml parsing
+internal/galaxy/gitsource     the git grammar (URL, ref, subdir, locator, credentials)
+                              and the Client seam; imports no go-git
+internal/galaxy/gitfetch      the only go-git importer: advertise, fetch by hash,
+                              read the tree; implements Client for collections and roles
+internal/galaxy/treearchive   the only production tar writer: a tree -> a deterministic tar.gz
+internal/galaxy/collectionbuild  what makes a tree a collection: ignore rules, MANIFEST.json,
+                              FILES.json, identity from galaxy.yml; drives treearchive
+internal/galaxy/rolebuild     what makes a tree a role: meta/main.yml, its dependencies,
+                              no lead documents; drives treearchive
+internal/galaxy/galaxyv1      the Galaxy v1 role API client and ansible's version selection
+internal/galaxy/requirements  requirements.yml parsing, collections and roles
 internal/galaxy/config        flags + ansible.cfg + environment -> one Config
 internal/galaxy/lockfile      requirements.lock.yml
 internal/galaxy/infra         the per-run DI container
@@ -52,8 +63,12 @@ even by accident, and everything it learns arrives through its `Provider` seam.
 **`internal/galaxy/helpers` sits at the bottom**, above only `internal/safeout`.
 It owns the sentinel errors that `errors.Is` matches across every layer, the
 size caps and tuning constants, and the validation predicates - `IsPathElement`,
-`IsCollectionName`, `IsSHA256Hex`, `IsExactVersion`. A value's shape is judged
-by one rule at the boundary it enters through, never re-derived downstream.
+`IsCollectionName`, `IsSHA256Hex`, `IsExactVersion`, and for roles `IsRoleName`,
+`IsRoleInstallName` and `IsRoleVersion`, which are deliberately not derived
+from the collection alphabet (real role names carry hyphens, upper-case
+letters and leading digits) nor from `IsPathElement` alone. A value's shape is
+judged by one rule at the boundary it enters through, never re-derived
+downstream.
 
 `internal/galaxy/infra` is the per-run container: the printer, the shared HTTP
 client, the clock, the temp-dir accessor, the metrics counters, and four
@@ -273,24 +288,102 @@ server is ever asked about a git collection, and a Galaxy dependency that
 constrains it is satisfied or refused with a proof. The requirements signature
 is computed over the expanded roots, so it covers the commit, not just the ref.
 
+### Roles
+
+A role is the other thing a git tree can be, and the pipeline treats it as
+such: one more kind of git source, with the Galaxy v1 API as a name service in
+front of it. Nothing about a role goes through the solver - a role has no
+version constraints, only a ref - so roles are resolved beside the collections
+rather than inside them.
+
+**Discovery.** `resolveRoles` walks the `roles:` entries and then, level by
+level, the dependencies each fetched role's `meta/main.yml` and
+`meta/requirements.yml` declare, breadth-first. Each level is resolved on the
+download-worker pool and merged in input order, so which requirement wins an
+install name is decided by the file's and the meta's declaration order, never
+by which fetch finished first - ansible's first-wins, made deterministic; a
+loser with a different source or version is reported. A dependency ansible
+would not look up (no dot and no scm: a local role; three parts: a
+collection's role) is skipped; one it would refuse is a usage error naming
+the role that declared it. `--no-deps` stops the walk at the file's entries;
+the walk is capped at 1000 roles. Per role: a git role replays its recorded
+pin when the cache policy allows and the artifact is still in the store,
+re-advertises under `--refresh` and keeps the pin if the commit is unchanged,
+and otherwise fetches the repository through the same session as a collection
+(advertise once, fetch by hash into a byte-capped store, read the tree without
+a checkout) and hands the tree to `rolebuild`, which finds `meta/main.yml` at
+the root, reads the dependencies as written, and drives `treearchive` into a
+`tar.gz` with no lead documents and every entry at the top level. A Galaxy
+role first asks `galaxyv1` - the record by owner and name, then the version
+list, on the configured servers in order, skipping one without a v1 API -
+which validates every field, composes the GitHub URL, and selects the tag as
+ansible's `GalaxyRole.install` would (LooseVersion highest, the default branch
+when there are no tags); from there it is a git role for that repository and
+tag, with a second pin keyed by the Galaxy name and the version asked for so a
+rerun skips the v1 round trips. What discovery learns is a `resolvedRole`: the
+install name, the locator `git+<url>#@<commit>` (the one string its artifact
+key, its installed record and its lockfile entry all key on), the repository,
+the ref, the concrete version (the tag, the branch, or what `HEAD` resolved
+to), the Galaxy name, and the install names of its dependencies.
+
+**Install.** Roles install after the collections, and only when every
+collection level went through, on the `--workers` pool and flat - each role is
+its own directory, so no order between them is load-bearing. The roles root is
+an `os.Root` opened at `roles_path` only when the plan holds a role, so a
+collections-only project never grows a roles directory; under `--dry-run` it
+is opened without being created. Per role, in order: the skip check (record,
+marker and tally agree), then the directory policy - this tool's extract
+marker or ansible's `meta/.galaxy_install_info` may be replaced, anything else
+is refused before a byte is fetched - then the artifact (a `--no-cache` build
+left by discovery, else a cache hit, else a fetch by the pinned commit that
+refuses a remote serving another), then extraction through the extracted
+store into `<roles_path>/<name>/` with `meta/.galaxy_install_info` written
+through the root ahead of the marker so the marker's tally counts it, then the
+`installed_roles` record.
+
+**Lock and frozen.** `lock` resolves roles in the same run and renders each as
+a `RoleEntry` pinned by commit; under `--frozen` an `install` or `warm` takes
+its roles from the lockfile with no network, checking each `roles:` entry as
+written against its locked line (same source - the Galaxy name or the
+repository - and same ref, and for a Galaxy role with a version asked for, that
+version), and `lock --frozen` diffs the fresh role list against the file.
+`outdated` asks the remote what a git role's ref points at now, and asks the
+v1 API which tag is highest for a Galaxy role, comparing by name.
+
+**Cleanup.** The registry records each project's `roles_path`; `cleanup`
+scans only that directory, through an `os.Root` at it, and indexes only a role
+directory carrying the extract marker, joined with the `installed_roles`
+record for its path when one exists. Reachability is the project's `roles:`
+roots plus, transitively, the recorded dependencies of every installed copy;
+an unreachable role is removed through a fresh root at its roles path, its
+artifact and record with it, and the extracted keep set takes the digests of
+every installed role that stays.
+
 ### Plan construction
 
 Order is load-bearing:
 
-1. Load `requirements.yml`; roles are warned about and ignored.
+1. Load `requirements.yml`: the `collections:` list and the `roles:` list,
+   both judged at load, with the parse warnings (an unknown key on a role
+   entry) printed.
 2. Build the verification context. This runs **ahead of the prefetcher**, so an
    unreadable keyring, or requirements declaring `signatures:` with none
    configured, fails the run before a single background download is scheduled.
-3. Resolve - from the lockfile under `--frozen`, which touches no network at
-   all, otherwise through the solver.
-4. Fold the resolved set into a key-addressed map, rejecting an unsafe
+3. Resolve the collections - from the lockfile under `--frozen`, which touches
+   no network at all, otherwise through the solver.
+4. Resolve the roles (see [Roles](#roles)) - from the lockfile under
+   `--frozen`, otherwise through the dependency walk. This too runs ahead of
+   the prefetcher, so a role no server knows, or a repository that refuses,
+   fails the run before a background download is scheduled.
+5. Fold the resolved set into a key-addressed map, rejecting an unsafe
    identifier, a non-exact version, or a duplicate key.
-5. Check the post-condition that every requirements root came back resolved,
+6. Check the post-condition that every requirements root came back resolved,
    which is what catches a solve silently dropping one.
-6. Compute install levels by topological layering. This happens **before** the
+7. Compute install levels by topological layering. This happens **before** the
    prefetcher starts, so a dependency cycle surfaces before any prefetch worker
    exists, and the level assignment can order the prefetch queue.
-7. Start the prefetcher.
+8. Start the prefetcher. Roles are not prefetched: discovery has normally
+   already committed their artifacts, as it has a git collection's.
 
 ### Two pools, two resources
 
@@ -419,6 +512,12 @@ lets cleanup delete the right artifact, without any of those consumers
 knowing what a git source is: they compare sources, and a locator is a
 source.
 
+A role's scope is the same locator with no subdir, `git+<url>#@<commit>`, and
+its filename is `role.<name>-<version>.tar.gz`. The `role.` prefix is what
+keeps a role and a collection built from one repository and commit apart
+inside one scope: the text before the first `-` of a collection filename is a
+namespace, whose alphabet has no dot, and here it always carries one.
+
 ### Extracted store: content-addressed, materialized by hardlink
 
 Unpacked trees live under a per-digest directory and are materialized into a
@@ -442,11 +541,16 @@ over exactly those bytes does not.
 
 One value holds the cached API responses, version lists, dependency maps,
 install records, the dependency graph, the requirements spec, the last
-resolution, the warmed set, and the git pins - per `(url, ref, subdir)`, the
-commit a git requirement resolved to and the collections it held. The local
-backend bucket-maps it into a single BoltDB file - one atomic transaction
-rather than ten file writes - and the S3 backend marshals it as one gzipped
-JSON object.
+resolution, the warmed set, the git pins - per `(url, ref, subdir)`, the
+commit a git requirement resolved to and the collections it held - and the
+two role buckets: `installed_roles`, by install name, the record of each
+role on disk (install path, locator, artifact digest, version, Galaxy name,
+dependencies), and `role_pins`, by requirement line (`url\nref\n`, the git pin key with an empty subdir, for a git
+role, `galaxy\nname\nrequested-version` for a Galaxy role), what that line
+resolved to (repository, commit, version, the commit the v1 API recorded, the
+dependencies the meta declared). The local backend bucket-maps it into a
+single BoltDB file - one atomic transaction rather than twelve file writes -
+and the S3 backend marshals it as one gzipped JSON object.
 
 Retention and redaction are applied at persist time, in the single copy path, so
 both backends inherit one set of rules rather than each implementing its own.
@@ -462,8 +566,11 @@ skip the save entirely. Every write-locked method must set it, which
 
 ### Project registry
 
-Keyed by project directory, recording the requirements file and collections path
-of every project that has run against this cache. `cleanup` computes reachability
+Keyed by project directory, recording the requirements file, the collections
+path and the roles path of every project that has run against this cache. The
+roles path is `omitempty`: a record written by a binary that predates roles
+carries none, and cleanup reads its absence as "do not scan", the direction
+that can only make a destructive pass do less. `cleanup` computes reachability
 from it, which is why a registry that exists and fails to decode is an error
 rather than an empty registry: reading it as empty would mean nothing is
 reachable, and delete everything. A missing registry is simply empty.
@@ -561,3 +668,50 @@ of reading its repository URL as a Galaxy server. Under `--frozen` a git root
 is checked against the entries locked from its repository under its subdir
 (the root's own directory or an immediate child): zero such entries, or a
 different ref, is a mismatch.
+
+A role is listed under its own key and pins a commit the same way:
+
+```yaml
+roles:
+  - name: docker
+    type: galaxy
+    version: 7.4.1
+    galaxy: geerlingguy.docker
+    source: https://galaxy.ansible.com
+    repository: https://github.com/geerlingguy/ansible-role-docker
+    ref: refs/tags/7.4.1
+    commit: 0123456789abcdef0123456789abcdef01234567
+  - name: app
+    type: git
+    version: main
+    source: https://git.example.internal/platform/ansible-role-app.git
+    ref: main
+    commit: 89abcdef0123456789abcdef0123456789abcdef
+    deps: [base]
+schema_version: 3
+```
+
+`name` is the install directory under `roles_path`; `version` is the tag,
+branch or commit the requirement asked for (for `HEAD`, the branch it resolved
+to) and is deliberately not held to semver, since a branch is a legal role
+version - the commit is the pin. For a Galaxy role `galaxy` is the Galaxy
+name, `source` the Galaxy server whose v1 API answered for it (recorded as
+provenance the way the file-level `server` is, and the server `outdated`
+asks; a pin replayed from a snapshot written before the server was recorded
+falls back to the run's first effective server) and `repository` the GitHub
+repository the v1 API pointed at, and `ref` the qualified ref the tag or
+branch was fetched as (`refs/tags/<tag>`, or `refs/heads/<branch>` for a
+role the server lists no tags for), so a branch sharing a tag's name can
+never be fetched in its place; for a git role `source` is the repository
+and `ref` is the ref as the requirement spelled it. `deps` are the install names
+of the roles the run installed for its meta. No `sha256`, for the reason a
+git entry has none. Roles are sorted by name and each `deps` list sorted, like
+the collections. A file holding at least one role is `schema_version: 3`, one
+holding a git entry and no role stays `2`, one with neither stays `1`, decided
+from the entries alone, so a project without roles keeps producing a
+byte-identical lockfile and an older binary meeting a role refuses the file
+rather than installing the collections and silently skipping the roles. Every
+role field is re-parsed on load rather than trusted - the repository through
+the git URL grammar, the ref through the ref grammar, the commit as forty hex
+digits, the names through the role alphabets - since a lockfile is repository
+content.

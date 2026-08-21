@@ -75,6 +75,37 @@ is worth tuning only where inode creation contends: on APFS the wall clock was
 lowest at 4 workers and degraded past that, while on xfs the derived default
 already performs well.
 
+## Roles
+
+`testing/bench.sh` also measures a roles install, in two scenarios over
+`testing/requirements-roles.yml` - ten widely used Galaxy roles with no
+dependencies between them, so a `--no-deps` run measures fetch plus extract
+over one flat set, as the collection files do:
+
+- `roles-cold` - both tools' caches and the roles directory wiped before each
+  run: `ansible-galaxy role install --no-deps -r requirements-roles.yml -p
+  <dir>` against `go-galaxy install --no-deps -r requirements-roles.yml
+  --roles-path <dir>`.
+- `roles-warm` - go-galaxy's caches primed once, only the roles directory
+  wiped between runs.
+
+No figures are published here yet; the numbers come from running the script,
+which writes `roles-cold.md` and `roles-warm.md` into `dist/bench/` and
+appends them to `summary.md`:
+
+```bash
+SCENARIOS="roles-cold roles-warm" testing/bench.sh
+```
+
+Read a warm result knowing what each tool caches, as with the collection rows
+above: `ansible-galaxy` keeps no cache for a role at all and downloads the
+GitHub archive of the tag on every run, while `go-galaxy` caches the artifact
+it built from the tag and the extracted tree, and hardlinks the installed
+files out of that cache. The two tools also fetch differently on a cold run -
+`ansible-galaxy` the tarball GitHub serves, `go-galaxy` a pack of the tagged
+commit through the git protocol - so a cold figure compares two transports,
+not one transport done faster.
+
 ## Reproduce
 
 `testing/bench.sh` is the full harness, including the S3 cache backend and a
@@ -90,6 +121,7 @@ go build -o ./dist/go-galaxy ./cmd/go-galaxy
 testing/bench.sh                   # all sizes, all scenarios
 SIZES=10 testing/bench.sh          # one file
 SCENARIOS="warm" testing/bench.sh  # one scenario
+SCENARIOS="roles-cold roles-warm" testing/bench.sh  # the role scenarios only
 ```
 
 Budget about three hours for a full default run against the public Galaxy; the

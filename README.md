@@ -1,35 +1,49 @@
 # go-galaxy
 
-Fast Ansible Galaxy collections installer for CI.
+Fast Ansible Galaxy collections and roles installer for CI.
 
 > **Note:** This project was created in collaboration with the Claude Code.
 
-CI pipelines often spend minutes downloading and unpacking Galaxy collections.
-go-galaxy resolves, downloads and extracts them in parallel, hardlinks out of a
-content-addressed cache on warm runs, and skips the network entirely under
-`--frozen --offline`. With a lockfile and warm caches, installing 100
-collections takes seconds rather than minutes - see
+CI pipelines often spend minutes downloading and unpacking Galaxy collections
+and roles. go-galaxy resolves, downloads and extracts them in parallel,
+hardlinks out of a content-addressed cache on warm runs, and skips the network
+entirely under `--frozen --offline`. With a lockfile and warm caches,
+installing 100 collections takes seconds rather than minutes - see
 [Benchmarks](docs/benchmarks.md).
 
-It is a drop-in for the collections subset of `ansible-galaxy`: the same
-`requirements.yml`, the same `ansible.cfg` keys, the same `ANSIBLE_*`
-environment variables. Where it deliberately behaves differently - one server
-per collection rather than a union, a fail-closed 401/5xx, a resolver that
-refuses an unsatisfiable constraint set instead of picking leniently - every
-difference is written down in
+It is a drop-in for the `install` subset of `ansible-galaxy`: the same
+`requirements.yml` (collections and roles in one file), the same `ansible.cfg`
+keys, the same `ANSIBLE_*` environment variables. Where it deliberately
+behaves differently - one server per collection rather than a union, a
+fail-closed 401/5xx, a resolver that refuses an unsatisfiable constraint set
+instead of picking leniently, a role fetched by git at its tag rather than as
+a GitHub tarball - every difference is written down in
 [Compatibility with ansible-galaxy](docs/ansible-galaxy-compat.md).
 
 ## Scope
 
-- Collections only, from Galaxy API servers and from git repositories (https,
-  ssh, public or private). `url`, `file` and `dir` sources are not supported,
-  and `roles` entries are ignored with a warning.
-- `requirements.yml` is either a mapping carrying a `collections` list or a
-  bare top-level list of collection entries; anything else is refused.
-- `ansible.cfg` is read for `[defaults] collections_path`, `[galaxy] server`,
-  `[galaxy] server_list`, `[galaxy] cache_dir`, and `[galaxy_server.<id>]`
-  sections (`url`, `token`, `validate_certs`). Everything else in that file is
-  ignored or refused - see [Configuration](docs/configuration.md).
+- Collections from Galaxy API servers and from git repositories (https, ssh,
+  public or private). `url`, `file` and `dir` sources are not supported.
+- Roles from the Galaxy v1 role API (`owner.role`, resolved on
+  galaxy.ansible.com or a standalone Galaxy NG - Automation Hub has no role
+  API) and from git repositories (`git+<url>`, `git@host:path`, `scm: git`,
+  or a bare `https://github.com/<owner>/<repo>` URL). A Galaxy role is fetched
+  by git at the tag the v1 API names, never as a GitHub tarball, so its
+  lockfile pin is a commit. A role's `meta/main.yml` and `meta/requirements.yml`
+  dependencies are installed transitively. Tarball and local-path role
+  sources, `scm` other than `git`, and `include:` are refused at load.
+- Roles install under `roles_path` (`--roles-path`, default `.roles`,
+  project-local like `.collections`), one directory per role, with ansible's
+  `meta/.galaxy_install_info` written beside the role's meta so
+  `ansible-galaxy role list` reads it.
+- `requirements.yml` is either a mapping carrying a `collections` list, a
+  `roles` list, or both, or a bare top-level list of collection entries;
+  anything else is refused.
+- `ansible.cfg` is read for `[defaults] collections_path`,
+  `[defaults] roles_path`, `[galaxy] server`, `[galaxy] server_list`,
+  `[galaxy] cache_dir`, and `[galaxy_server.<id>]` sections (`url`, `token`,
+  `validate_certs`). Everything else in that file is ignored or refused - see
+  [Configuration](docs/configuration.md).
 - A token you supply is never paired with a server address, or a relaxed TLS
   policy, that an `ansible.cfg` file chose rather than you. See
   [Galaxy servers and authentication](docs/servers-and-auth.md).
@@ -37,12 +51,14 @@ difference is written down in
 ## Features
 
 - Dependency resolution with snapshot reuse.
-- API and tarball caches, local or shared over S3.
+- API and tarball caches, local or shared over S3; role artifacts and their
+  extracted trees share them.
 - Skip install if already extracted.
 - Parallel downloads and extraction.
-- Lockfile pinning every transitive collection to an exact version + SHA256.
+- Lockfile pinning every transitive collection to an exact version + SHA256,
+  and every role to a commit.
 - OpenPGP signature verification, in pure Go, with no `gpg` process.
-- `cleanup` command to remove unreachable collections.
+- `cleanup` command to remove unreachable collections and roles.
 
 ## Install
 
@@ -83,14 +99,16 @@ go build -o ./dist/go-galaxy ./cmd/go-galaxy
 ## Usage
 
 ```bash
-go-galaxy install -r requirements.yml -p ./collections
+go-galaxy install -r requirements.yml -p ./collections --roles-path ./roles
 ```
 
 Running `go-galaxy` with no command runs `install`, so a bare invocation
-performs a full install rather than printing help.
+performs a full install rather than printing help. One `install` handles the
+`collections:` and the `roles:` lists of the same file, as `ansible-galaxy
+install -r` does; there is no separate role subcommand.
 
-For reproducible CI, pin every transitive collection once and install from the
-lockfile thereafter:
+For reproducible CI, pin every transitive collection and role once and install
+from the lockfile thereafter:
 
 ```bash
 go-galaxy lock                 # writes requirements.lock.yml

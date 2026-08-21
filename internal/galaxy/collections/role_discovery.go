@@ -1,0 +1,97 @@
+package collections
+
+import (
+	"sync"
+
+	"github.com/greeddj/go-galaxy/internal/galaxy/gitsource"
+)
+
+// rolePin is what discovery learned about one role, in the shape the install
+// phase consumes: the pinned locator (git+<url>#@<commit>), the repository
+// it names, the ref the requirement asked for, the concrete version (a tag,
+// a branch name, or what HEAD resolved to), the Galaxy server that answered
+// for a Galaxy role, the dependencies its meta declared for the dependency
+// walk, and - under --no-cache only - the artifact discovery built, handed to
+// the install phase so the repository is not fetched a second time.
+type rolePin struct {
+	prebuilt   *downloadResult
+	locator    string
+	commit     string
+	repository string
+	ref        string
+	version    string
+	galaxyName string
+	galaxySHA  string
+	server     string
+	roleName   string
+	kind       string
+	deps       []gitsource.RoleDependency
+}
+
+// roleDiscoveryMemo is the run-wide table of discovered roles, keyed by
+// install name. It is created once per run (initInstall) and shared by the
+// resolve and install phases, which is what lets the install phase pick up a
+// --no-cache build the resolve phase left for it.
+type roleDiscoveryMemo struct {
+	pins map[string]rolePin
+	mu   sync.Mutex
+}
+
+func newRoleDiscoveryMemo() *roleDiscoveryMemo {
+	return &roleDiscoveryMemo{pins: make(map[string]rolePin)}
+}
+
+func (m *roleDiscoveryMemo) put(name string, pin rolePin) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pins[name] = pin
+}
+
+func (m *roleDiscoveryMemo) get(name string) (rolePin, bool) {
+	if m == nil {
+		return rolePin{}, false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pin, ok := m.pins[name]
+	return pin, ok
+}
+
+// takePrebuilt hands out a --no-cache build exactly once: the install worker
+// that takes it owns its cleanup from then on.
+func (m *roleDiscoveryMemo) takePrebuilt(name string) (downloadResult, bool) {
+	if m == nil {
+		return downloadResult{}, false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pin, ok := m.pins[name]
+	if !ok || pin.prebuilt == nil {
+		return downloadResult{}, false
+	}
+	result := *pin.prebuilt
+	pin.prebuilt = nil
+	m.pins[name] = pin
+	return result, true
+}
+
+// cleanup removes every --no-cache build no install worker took. It runs
+// when the run ends, from withBackend's defer, so a build left behind by a
+// failed or dry run is not leaked.
+func (m *roleDiscoveryMemo) cleanup() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for name, pin := range m.pins {
+		if pin.prebuilt != nil {
+			cleanupIfNeeded(pin.prebuilt.Cleanup)
+			pin.prebuilt = nil
+			m.pins[name] = pin
+		}
+	}
+}

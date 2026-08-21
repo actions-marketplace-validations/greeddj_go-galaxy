@@ -150,6 +150,34 @@ no packaging that clears that flag on your behalf.
   `galaxy.yml` it was built from, compared against the collection being installed; a
   signature can vouch for none of it, so a verifying run reports a git collection as the
   vacuous pass it is.
+- A role is held to the same boundaries, one level over. A `roles:` entry is repository
+  content and is judged at the boundary like a collection entry: its Galaxy name, install
+  name and version are held to their own alphabets at load, a git role's URL passes the
+  same grammar (no credential, the conservative path alphabet, no `#subdir`), and the
+  dependencies a fetched role's `meta/main.yml` and `meta/requirements.yml` declare pass
+  that same grammar before anything is fetched for them, with a cap of 1000 roles per run
+  on the walk and a 1 MiB cap on each meta file before it is decoded. Every role write
+  goes through an `os.Root` established at `roles_path`, with the install name validated
+  before it is joined, so a role named to escape the directory, or a role directory
+  replaced by a symlink between runs, is refused by the kernel rather than by a check
+  that raced it; `meta/.galaxy_install_info` is written through that same root. What a
+  Galaxy server can do through its v1 role API is bounded too: a record's `github_user`
+  and `github_repo` are held to the GitHub name alphabet and composed into an
+  `https://github.com/<user>/<repo>` URL rather than copied from one the server sent
+  (`download_url` is never read), its `github_branch` and every version name must pass
+  the ref grammar, a `commit_sha` is kept only when it has the shape of one, and a
+  pagination link is followed only within the server's own origin and for at most 20
+  pages. The v1 requests carry the token configured for that server and no other; the
+  repository fetch that follows runs on the credential-free git client, so the Galaxy
+  token never reaches github.com and a `GO_GALAXY_GIT_*` binding, matched by origin as
+  for any git source, is the only credential that can. A role has no signature (the v1
+  API offers none) and no `sha256`; what stands in for attribution is the commit: a
+  frozen install that has to rebuild a role fetches its pinned commit and refuses a
+  repository that serves another. `cleanup` removes a role directory only under a roles
+  path a project's registry record names, and only when the directory carries this
+  tool's own extract marker - a role `ansible-galaxy` installed or somebody wrote by hand
+  is never evidence for a delete, and a record written by a binary that predates roles
+  carries no roles path and is never scanned.
 - Pinned (`--frozen`) installs are already immune to a poisoned snapshot: for a
   lockfile-pinned collection, go-galaxy hashes the actually downloaded (or on-disk)
   bytes and compares them to the sha256 recorded in the in-repo lockfile, not to the

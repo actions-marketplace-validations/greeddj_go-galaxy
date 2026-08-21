@@ -42,7 +42,7 @@ func runWarm(ctx context.Context, cfg *config.Config, runtime *infra.Infra) erro
 // holds that lifecycle - so it never touches state.release or
 // state.backend.Close itself.
 func warmWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra, state *installState, start time.Time) error {
-	roots, err := loadRoots(cfg, runtime)
+	roots, roleRoots, err := loadRoots(cfg, runtime)
 	if err != nil {
 		return err
 	}
@@ -63,12 +63,20 @@ func warmWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra
 	if err != nil {
 		return err
 	}
+	roles, err := resolveOrLoadRoles(ctx, cfg, runtime, state, roleRoots)
+	if err != nil {
+		return err
+	}
+	counts := runCounts{Collections: len(collections), Roles: len(roles.roles)}
 
 	if cfg.DryRun {
-		return warmDryRun(ctx, cfg, runtime, state, collections, start)
+		return warmDryRun(ctx, cfg, runtime, state, collections, roles, start)
 	}
 
 	summary := warmCollections(ctx, cfg, runtime, state, collections, verify)
+	if summary.count == 0 {
+		summary = warmRoles(ctx, cfg, runtime, state, roles)
+	}
 	// Same tail contract as finalizeInstall (see its doc comment): the save is
 	// attempted first but does not short-circuit, writeRunMetrics always runs
 	// regardless of whether it succeeded, and a nonzero collection-failure
@@ -76,14 +84,72 @@ func warmWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra
 	// together via annotateSaveFailure so errors.Is still matches
 	// ErrInstallationFailed instead of degrading to the save error's own class.
 	saveErr := state.backend.SaveStore(ctx, state.store)
-	writeRunMetrics(cfg, runtime, "warm", start, len(collections), int(summary.count), cfg.Frozen)
+	counts.Failures = int(summary.count)
+	writeRunMetrics(cfg, runtime, "warm", start, counts, cfg.Frozen)
 	if summary.count > 0 {
 		return annotateSaveFailure(summary.warmError(), saveErr)
 	}
 	if saveErr != nil {
 		return saveErr
 	}
-	runtime.Output.PersistentPrintf("🔥 Warm complete: %d collections cached", len(collections))
+	runtime.Output.PersistentPrintf("🔥 Warm complete: %s cached", counts.describe())
+	return nil
+}
+
+// warmRoles fills the artifact cache and the extracted store with every
+// resolved role, on the Workers-bounded pool: the same two halves warm
+// produces for a collection, with no roles tree touched (rolesRoot stays
+// nil). It runs after the collections, so a collection failure's summary is
+// not diluted by roles that were never attempted.
+func warmRoles(ctx context.Context, cfg *config.Config, runtime *infra.Infra, state *installState, roles roleResolution) failureSummary {
+	var failures failureRecorder
+	depsCtx := newInstallDeps(cfg, runtime, state.store, state.backend.Artifacts(), state.extractStore, nil, nil, nil)
+	depsCtx.collectionDeps = depsCtx.withGit(state.backend.Artifacts(), state.gitMemo, state.roleMemo)
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, max(cfg.Workers, 1))
+	for _, name := range roles.order {
+		if ctx.Err() != nil {
+			break
+		}
+		role := roles.roles[name]
+		sem <- struct{}{}
+		wg.Go(func() {
+			defer func() { <-sem }()
+			if err := warmRole(ctx, depsCtx, role); err != nil {
+				runtime.Output.Errorf("Failed: role %s error: %s", role.Name, err)
+				failures.record(err)
+			} else {
+				runtime.Output.Okf("Cached: role %s", role.key())
+			}
+		})
+	}
+	wg.Wait()
+	return failures.summary()
+}
+
+// warmRole acquires one role's artifact into the cache and its tree into the
+// extracted store, recording the warmed entry under a "role:" key so a role
+// and a collection that happen to share a name@version never overwrite each
+// other's record.
+func warmRole(ctx context.Context, deps installDeps, r resolvedRole) error {
+	artifact, err := fetchRoleArtifact(ctx, deps, r)
+	if err != nil {
+		return err
+	}
+	defer cleanupIfNeeded(artifact.Cleanup)
+	sha, computed, err := resolveArtifactSHA(artifact.Path, nil, artifact.Meta, artifact.SHA, "")
+	if err != nil {
+		return err
+	}
+	if deps.extractStore == nil {
+		return nil
+	}
+	if _, err := deps.extractStore.Ensure(ctx, sha, artifact.Path, shaProvenance(computed)); err != nil {
+		return err
+	}
+	if deps.st != nil {
+		deps.st.SetWarmed("role:"+r.key(), sha)
+	}
 	return nil
 }
 
@@ -124,13 +190,17 @@ func warmDryRun(
 	runtime *infra.Infra,
 	state *installState,
 	collections map[string]collection,
+	roles roleResolution,
 	start time.Time,
 ) error {
 	warmed := state.store.WarmedArtifactSHAByKey()
 	probe := warmDryRunProbe(cfg, state.backend.Artifacts(), state.extractStore, warmed)
 	summary := classifyDryRun(ctx, runtime, cfg, collections, warmDryRunVerbs, probe)
+	summary = summary.join(classifyRolesDryRun(ctx, runtime, cfg, roles, warmRolesDryRunVerbs,
+		warmRoleDryRunProbe(state.backend.Artifacts(), state.extractStore, warmed)))
 	saveErr := saveDryRunSnapshotIfPersisted(ctx, runtime, state)
-	writeRunMetrics(cfg, runtime, "warm", start, len(collections), int(summary.count), cfg.Frozen)
+	counts := runCounts{Collections: len(collections), Roles: len(roles.roles), Failures: int(summary.count)}
+	writeRunMetrics(cfg, runtime, "warm", start, counts, cfg.Frozen)
 	if summary.count > 0 {
 		return annotateSaveFailure(summary.warmError(), saveErr)
 	}
@@ -162,7 +232,7 @@ func warmCollections(
 	// joins every prefetch worker and reclaims any unclaimed temp inside
 	// warmWithState's own frame, so no download outlives the backend lock.
 	prefetchDeps := newPrefetchDeps(cfg, runtime, state.store, state.backend.Artifacts(), nil)
-	prefetchDeps.collectionDeps = prefetchDeps.withGit(state.backend.Artifacts(), state.gitMemo)
+	prefetchDeps.collectionDeps = prefetchDeps.withGit(state.backend.Artifacts(), state.gitMemo, state.roleMemo)
 	prefetch := startPrefetcher(ctx, prefetchDeps, collections, nil)
 	defer prefetch.Close()
 	// warm never touches the collections tree at all - it only downloads and
@@ -173,7 +243,7 @@ func warmCollections(
 	depsCtx := newInstallDeps(
 		cfg, runtime, state.store, state.backend.Artifacts(), state.extractStore, nil, prefetch.cachedArtifacts(), verify,
 	)
-	depsCtx.collectionDeps = depsCtx.withGit(state.backend.Artifacts(), state.gitMemo)
+	depsCtx.collectionDeps = depsCtx.withGit(state.backend.Artifacts(), state.gitMemo, state.roleMemo)
 	var wg sync.WaitGroup
 	// max(cfg.Workers, 1): a zero Workers would make sem unbuffered, and the
 	// first send would block forever since no worker has started to drain it

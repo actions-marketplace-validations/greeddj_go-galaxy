@@ -17,6 +17,14 @@
 #               reaching the bucket is a network call, so --offline refuses
 #               the S3 backend outright, at its opening bucket HEAD.
 #
+# Roles, local cache backend, ansible-galaxy vs go-galaxy over
+# requirements-roles.yml (ten Galaxy roles, no dependencies between them):
+#   roles-cold - caches and the roles dir wiped before each run
+#   roles-warm - caches primed once, only the roles dir wiped between runs.
+#               ansible-galaxy caches nothing for a role (it downloads the
+#               GitHub archive every time); go-galaxy caches the artifact it
+#               built from the tag and the extracted tree.
+#
 # Wall time comes from hyperfine. Peak RSS and bytes downloaded do not - so a
 # separate single-run pass per scenario records those, reading bytes from
 # go-galaxy's own --metrics-file and RSS from /usr/bin/time. ansible-galaxy
@@ -34,7 +42,7 @@
 #   RUNS=5         number of measured runs per command (hyperfine --runs)
 #   WARMUP=1       hyperfine warmup runs for warm/frozen scenarios
 #   SIZES="1 10 100"  which requirements files to bench (space-separated)
-#   SCENARIOS="cold warm frozen s3-cold s3-warm s3-frozen"
+#   SCENARIOS="cold warm frozen s3-cold s3-warm s3-frozen roles-cold roles-warm"
 #   S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY, S3_SECRET_KEY
 #
 # The S3 scenarios need a bucket to talk to; the repo ships one:
@@ -64,7 +72,7 @@ AG_CACHE="$WORK/cache/ansible"
 RUNS="${RUNS:-5}"
 WARMUP="${WARMUP:-1}"
 SIZES="${SIZES:-1 10 100}"
-SCENARIOS="${SCENARIOS:-cold warm frozen s3-cold s3-warm s3-frozen}"
+SCENARIOS="${SCENARIOS:-cold warm frozen s3-cold s3-warm s3-frozen roles-cold roles-warm}"
 
 S3_ENDPOINT="${S3_ENDPOINT:-http://127.0.0.1:9000}"
 S3_BUCKET="${S3_BUCKET:-go-galaxy-bench}"
@@ -291,6 +299,37 @@ run_resources() {
   rm -f "$metrics"
 }
 
+# ROLES_TARGET is where both tools install roles: ansible-galaxy's role
+# install takes it as -p, go-galaxy as --roles-path. ansible-galaxy keeps no
+# cache for a role at all, so the roles scenarios wipe only go-galaxy's.
+ROLES_TARGET="$WORK/roles"
+ROLES_REQ="$ROOT/testing/requirements-roles.yml"
+
+ag_roles_env() {
+  printf '%s ' "ANSIBLE_ROLES_PATH=$ROLES_TARGET"
+}
+
+run_roles_cold() {
+  echo "=== roles, cold cache: requirements-roles.yml ==="
+  hyperfine --runs "$RUNS" \
+    --prepare "rm -rf '$ROLES_TARGET' '$GG_CACHE'" \
+    --export-markdown "$OUT/roles-cold.md" \
+    -n "ansible-galaxy" "env $(ag_roles_env) $AG role install --no-deps -r $ROLES_REQ -p $ROLES_TARGET" \
+    -n "go-galaxy"      "env $(gg_env) $GG install --no-deps -r $ROLES_REQ --roles-path $ROLES_TARGET"
+}
+
+run_roles_warm() {
+  echo "=== roles, warm cache: requirements-roles.yml ==="
+  rm -rf "$ROLES_TARGET" "$GG_CACHE"
+  env $(gg_env) "$GG" install --no-deps -r "$ROLES_REQ" --roles-path "$ROLES_TARGET" >/dev/null 2>&1 || true
+  rm -rf "$ROLES_TARGET"
+  hyperfine --runs "$RUNS" --warmup "$WARMUP" \
+    --prepare "rm -rf '$ROLES_TARGET'" \
+    --export-markdown "$OUT/roles-warm.md" \
+    -n "ansible-galaxy" "env $(ag_roles_env) $AG role install --no-deps -r $ROLES_REQ -p $ROLES_TARGET" \
+    -n "go-galaxy"      "env $(gg_env) $GG install --no-deps -r $ROLES_REQ --roles-path $ROLES_TARGET"
+}
+
 main() {
   if ! s3_reachable; then
     for scenario in s3-cold s3-warm s3-frozen; do
@@ -315,7 +354,10 @@ main() {
     run_resources "$n" "$REQ"
   done
 
-  rm -rf "$TARGET"
+  scenario_in_list roles-cold && run_roles_cold
+  scenario_in_list roles-warm && run_roles_warm
+
+  rm -rf "$TARGET" "$ROLES_TARGET"
 
   {
     echo "# Benchmark summary"
@@ -341,6 +383,15 @@ main() {
         echo "### resources"
         echo
         cat "$OUT/resources-${n}.md"
+        echo
+      fi
+    done
+    for kind in roles-cold roles-warm; do
+      f="$OUT/${kind}.md"
+      if [ -f "$f" ]; then
+        echo "## requirements-roles.yml: ${kind#roles-}"
+        echo
+        cat "$f"
         echo
       fi
     done

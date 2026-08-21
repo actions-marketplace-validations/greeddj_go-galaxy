@@ -520,7 +520,7 @@ func TestInstallDryRunDriftedOfflineEvictedReportsWouldFailAndFails(t *testing.T
 	// installDryRun's own error-wrap must classify identically to a real
 	// failed install.
 	plan := &installPlan{collections: cols}
-	err := installDryRun(context.Background(), cfg, reportRuntime, state, plan, time.Now(), installRoot)
+	err := installDryRun(context.Background(), cfg, reportRuntime, state, plan, time.Now(), installRoot, nil)
 	assertFailsOfflineClosed(t, err)
 }
 
@@ -761,7 +761,7 @@ func TestWriteRunMetricsDryRunSkipsAndWarns(t *testing.T) {
 	printer := &capturingPrinter{}
 	runtime := infra.New(printer, http.DefaultClient)
 
-	writeRunMetrics(cfg, runtime, "install", time.Now(), 1, 0, false)
+	writeRunMetrics(cfg, runtime, "install", time.Now(), runCounts{Collections: 1}, false)
 
 	if _, statErr := os.Stat(metricsPath); !os.IsNotExist(statErr) {
 		t.Errorf("expected no metrics file written by a dry run, stat error = %v", statErr)

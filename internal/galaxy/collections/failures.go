@@ -73,6 +73,14 @@ type failureSummary struct {
 	count int32
 }
 
+// join folds another summary into this one: the counts add and the causes
+// are joined, so a run that records collection failures and role failures
+// separately reports one summary. A nil cause on either side is left out,
+// as errors.Join leaves nil out.
+func (s failureSummary) join(other failureSummary) failureSummary {
+	return failureSummary{count: s.count + other.count, cause: errors.Join(s.cause, other.cause)}
+}
+
 // installError builds the run's headline error for the install command. The
 // literal "%w for %d collections" wording is part of the run's user-facing
 // output and must stay stable: changing it would change what operators and

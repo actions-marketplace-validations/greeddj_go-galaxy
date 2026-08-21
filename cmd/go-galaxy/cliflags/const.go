@@ -14,12 +14,15 @@ const (
 	defaultTimeout              = galaxyhelpers.FetchDefaultTimeout
 	defaultServerURL            = "https://galaxy.ansible.com"
 	defaultCollectionsPath      = ".collections"
+	defaultRolesPath            = ".roles"
 	defaultRequirementsFilePath = "requirements.yml"
 	// envRequirementsFileAnsible occupies ansible's namespace without being a
 	// name ansible defines. The prefix promises drop-in fidelity, and this one
 	// has nothing to be faithful to: ansible-core declares no
 	// requirements-file option at all, and ansible-galaxy takes that path only
-	// as -r/--role-file. It is kept
+	// as -r/--role-file (which is why --role-file is accepted here as an alias
+	// of --requirements-file: the flag ports, the variable never had an
+	// original). It is kept
 	// regardless: pipelines already set it, and dropping it would not fail
 	// them, it would silently install whatever requirements.yml the working
 	// directory happens to hold. Nor could a run warn about the change, since

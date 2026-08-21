@@ -20,6 +20,7 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/collectionbuild"
 	"github.com/greeddj/go-galaxy/internal/galaxy/gitsource"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
+	"github.com/greeddj/go-galaxy/internal/galaxy/rolebuild"
 )
 
 const (
@@ -94,6 +95,28 @@ func (f *Fetcher) Advertise(ctx context.Context, u gitsource.URL, ref gitsource.
 	return commit.String(), refName, nil
 }
 
+// fetchSpec is what both request kinds hand the fetch: the ref asked for,
+// the commit pinned ("" when none), and the remote and credential the search
+// fallback reopens a session with.
+type fetchSpec struct {
+	url    gitsource.URL
+	ref    gitsource.Ref
+	commit string
+	auth   gitsource.Credential
+}
+
+// fetched is one commit brought to disk: the tree to build from, the commit
+// and the ref name the request resolved to, the advertisement's warnings,
+// and the object store the tree reads from, which the caller closes once its
+// build is done.
+type fetched struct {
+	src      *treeSource
+	store    *objectStore
+	refName  string
+	warnings []string
+	commit   plumbing.Hash
+}
+
 // Acquire fetches the commit req names, reads its tree and builds the
 // collections under req.Subdir. See the package comment for the shape of the
 // fetch; the wants are always hashes learned from the advertisement.
@@ -102,41 +125,88 @@ func (f *Fetcher) Acquire(ctx context.Context, req gitsource.Request) (gitsource
 		return gitsource.Result{}, fmt.Errorf("%w: no temp file supplier", helpers.ErrConfigIsNil)
 	}
 	display := req.URL.String()
-	sess, adv, err := f.openAndAdvertise(ctx, req.URL, req.Auth)
+	fd, err := f.fetch(ctx, fetchSpec{url: req.URL, ref: req.Ref, commit: req.Commit, auth: req.Auth})
 	if err != nil {
 		return gitsource.Result{}, err
 	}
-	defer func() { _ = sess.Close() }()
+	defer fd.store.Close()
 
-	target, refName, warnings, err := chooseTarget(adv, req, display)
-	if err != nil {
-		return gitsource.Result{}, err
-	}
-	store, err := newObjectStore(storageDirFor(f.tempDir), f.maxPack)
-	if err != nil {
-		return gitsource.Result{}, err
-	}
-	defer store.Close()
-
-	commit, err := f.fetchCommit(ctx, sess, adv, store, target, req, display)
-	if err != nil {
-		return gitsource.Result{}, err
-	}
-	src, err := newTreeSource(store.storer, commit)
-	if err != nil {
-		return gitsource.Result{}, err
-	}
-	collections, buildWarnings, err := buildAll(ctx, src, req, display)
+	collections, buildWarnings, err := buildAll(ctx, fd.src, req, display)
 	if err != nil {
 		return gitsource.Result{}, err
 	}
 	return gitsource.Result{
-		Commit:       target.String(),
-		RefName:      refName,
+		Commit:       fd.commit.String(),
+		RefName:      fd.refName,
 		Collections:  collections,
-		Warnings:     append(warnings, buildWarnings...),
-		BytesFetched: store.bytes(),
+		Warnings:     append(fd.warnings, buildWarnings...),
+		BytesFetched: fd.store.bytes(),
 	}, nil
+}
+
+// AcquireRole fetches the commit req names and builds the role its tree
+// root is. The fetch is the one Acquire does; only the build differs, and a
+// tree that is not a role is refused by it under helpers.ErrRoleMetaNotFound.
+func (f *Fetcher) AcquireRole(ctx context.Context, req gitsource.RoleRequest) (gitsource.RoleResult, error) {
+	if req.TempFile == nil {
+		return gitsource.RoleResult{}, fmt.Errorf("%w: no temp file supplier", helpers.ErrConfigIsNil)
+	}
+	display := req.URL.String()
+	fd, err := f.fetch(ctx, fetchSpec{url: req.URL, ref: req.Ref, commit: req.Commit, auth: req.Auth})
+	if err != nil {
+		return gitsource.RoleResult{}, err
+	}
+	defer fd.store.Close()
+
+	built, err := rolebuild.Build(ctx, fd.src, rolebuild.TempFileFunc(req.TempFile))
+	if err != nil {
+		return gitsource.RoleResult{}, fmt.Errorf("%s: %w", display, err)
+	}
+	return gitsource.RoleResult{
+		Cleanup:        built.Cleanup,
+		Dependencies:   built.Meta.Dependencies,
+		Commit:         fd.commit.String(),
+		RefName:        fd.refName,
+		GalaxyRoleName: built.Meta.RoleName,
+		ArtifactPath:   built.ArtifactPath,
+		ArtifactSHA:    built.SHA256,
+		Warnings:       append(fd.warnings, built.Warnings...),
+		BytesFetched:   fd.store.bytes(),
+	}, nil
+}
+
+// fetch does the acquisition up to the tree: one advertisement, the target
+// decided from it, an object store created, the commit fetched into it and
+// its root tree read. The session is closed before it returns; the tree is
+// read from the store, not the wire. On success the store is the caller's
+// to close.
+func (f *Fetcher) fetch(ctx context.Context, spec fetchSpec) (*fetched, error) {
+	display := spec.url.String()
+	sess, adv, err := f.openAndAdvertise(ctx, spec.url, spec.auth)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = sess.Close() }()
+
+	target, refName, warnings, err := chooseTarget(adv, spec, display)
+	if err != nil {
+		return nil, err
+	}
+	store, err := newObjectStore(storageDirFor(f.tempDir), f.maxPack)
+	if err != nil {
+		return nil, err
+	}
+	commit, err := f.fetchCommit(ctx, sess, adv, store, target, spec, display)
+	if err != nil {
+		store.Close()
+		return nil, err
+	}
+	src, err := newTreeSource(store.storer, commit)
+	if err != nil {
+		store.Close()
+		return nil, err
+	}
+	return &fetched{src: src, store: store, refName: refName, warnings: warnings, commit: target}, nil
 }
 
 // openAndAdvertise opens an upload-pack session to u and reads its
@@ -300,18 +370,18 @@ func (a *advertisement) lookup(name string) (plumbing.Hash, bool) {
 
 // chooseTarget decides which commit the acquisition is for: the requested
 // commit when one is pinned, else whatever the ref resolves to now.
-func chooseTarget(adv *advertisement, req gitsource.Request, display string) (plumbing.Hash, string, []string, error) {
-	if req.Commit != "" {
-		if !gitsource.IsCommitHash(req.Commit) {
-			return plumbing.ZeroHash, "", nil, fmt.Errorf("%w: %q", helpers.ErrInvalidGitLocator, req.Commit)
+func chooseTarget(adv *advertisement, spec fetchSpec, display string) (plumbing.Hash, string, []string, error) {
+	if spec.commit != "" {
+		if !gitsource.IsCommitHash(spec.commit) {
+			return plumbing.ZeroHash, "", nil, fmt.Errorf("%w: %q", helpers.ErrInvalidGitLocator, spec.commit)
 		}
-		name := req.Ref.Name
+		name := spec.ref.Name
 		if name == "" {
-			name = req.Commit
+			name = spec.commit
 		}
-		return plumbing.NewHash(req.Commit), name, nil, nil
+		return plumbing.NewHash(spec.commit), name, nil, nil
 	}
-	return resolve(adv, req.Ref, display)
+	return resolve(adv, spec.ref, display)
 }
 
 // fetchCommit brings target into store by the cheapest route the remote
@@ -323,7 +393,7 @@ func chooseTarget(adv *advertisement, req gitsource.Request, display string) (pl
 // after all that is helpers.ErrGitCommitNotFound when the remote never
 // advertised it and helpers.ErrGitCommitMismatch when it did.
 func (f *Fetcher) fetchCommit(ctx context.Context, sess transport.UploadPackSession, adv *advertisement,
-	store *objectStore, target plumbing.Hash, req gitsource.Request, display string,
+	store *objectStore, target plumbing.Hash, spec fetchSpec, display string,
 ) (*object.Commit, error) {
 	want := adv.wantFor(target)
 	advertised := adv.advertised(want)
@@ -331,7 +401,7 @@ func (f *Fetcher) fetchCommit(ctx context.Context, sess transport.UploadPackSess
 		if err := fetchPack(ctx, sess, adv, store, []plumbing.Hash{want}, shallowDepthIf(adv.shallow), display); err != nil {
 			return nil, err
 		}
-	} else if err := f.fetchBySearch(ctx, sess, adv, store, target, req, display); err != nil {
+	} else if err := f.fetchBySearch(ctx, sess, adv, store, target, spec, display); err != nil {
 		return nil, err
 	}
 	commit, err := object.GetCommit(store.storer, target)
@@ -355,11 +425,11 @@ func (f *Fetcher) fetchCommit(ctx context.Context, sess transport.UploadPackSess
 // Opening again costs one more advertisement on a path that is already the
 // expensive fallback.
 func (f *Fetcher) fetchBySearch(ctx context.Context, sess transport.UploadPackSession, adv *advertisement,
-	store *objectStore, target plumbing.Hash, req gitsource.Request, display string,
+	store *objectStore, target plumbing.Hash, spec fetchSpec, display string,
 ) error {
 	hinted := false
-	if req.Ref.Kind != gitsource.RefCommit {
-		if tip, _, _, err := resolve(adv, req.Ref, display); err == nil {
+	if spec.ref.Kind != gitsource.RefCommit {
+		if tip, _, _, err := resolve(adv, spec.ref, display); err == nil {
 			hinted = true
 			if err := fetchPack(ctx, sess, adv, store, []plumbing.Hash{adv.wantFor(tip)}, 0, display); err != nil {
 				return err
@@ -370,7 +440,7 @@ func (f *Fetcher) fetchBySearch(ctx context.Context, sess transport.UploadPackSe
 		return nil
 	}
 	if hinted {
-		fresh, freshAdv, err := f.openAndAdvertise(ctx, req.URL, req.Auth)
+		fresh, freshAdv, err := f.openAndAdvertise(ctx, spec.url, spec.auth)
 		if err != nil {
 			return err
 		}

@@ -1,6 +1,7 @@
 package collections
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
@@ -45,12 +46,30 @@ import (
 // there, unlike every other caller of this function. Offline stays
 // cfg-derived ON PURPOSE - it governs the HTTP transport for every command,
 // lock and outdated included - so cfg.Offline is always the truth there.
+// runCounts is what a run was about: how many collections and roles its
+// plan held and how many of either failed. The report carries all three;
+// describe renders the two sizes for a completion line, naming roles only
+// when the run had any so a collections-only run reads as it always did.
+type runCounts struct {
+	Collections int
+	Roles       int
+	Failures    int
+}
+
+// describe renders "N collections" or "N collections, M roles".
+func (c runCounts) describe() string {
+	if c.Roles == 0 {
+		return fmt.Sprintf("%d collections", c.Collections)
+	}
+	return fmt.Sprintf("%d collections, %d roles", c.Collections, c.Roles)
+}
+
 func writeRunMetrics(
 	cfg *config.Config,
 	runtime *infra.Infra,
 	command string,
 	start time.Time,
-	collections, failures int,
+	counts runCounts,
 	frozen bool,
 ) {
 	if cfg == nil || cfg.MetricsFile == "" {
@@ -78,8 +97,9 @@ func writeRunMetrics(
 		CacheHits:       totals.CacheHits,
 		CacheMisses:     totals.CacheMisses,
 		BytesDownloaded: totals.BytesDownloaded,
-		Collections:     collections,
-		Failures:        failures,
+		Collections:     counts.Collections,
+		Roles:           counts.Roles,
+		Failures:        counts.Failures,
 		Server:          cfg.Server,
 		Frozen:          frozen,
 		Offline:         cfg.Offline,

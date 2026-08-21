@@ -257,7 +257,7 @@ func prefetchOne(
 ) (*types.GalaxyCollectionVersionInfo, downloadResult, error) {
 	if col.isGit() {
 		gitDeps := newInstallDeps(deps.cfg, deps.runtime, deps.st, deps.artifacts, nil, nil, nil, nil)
-		gitDeps.collectionDeps = gitDeps.withGit(deps.gitStore, deps.gitMemo)
+		gitDeps.collectionDeps = gitDeps.withGit(deps.gitStore, deps.gitMemo, deps.roleMemo)
 		result, err := gitFetchToCache(ctx, gitDeps, col, true)
 		return nil, result, err
 	}
@@ -284,7 +284,7 @@ func prefetchOne(
 	// for the reason stated on prefetchDeps itself: this worker fills a
 	// policy-free shared cache and installs nothing.
 	downloadDeps := newInstallDeps(deps.cfg, deps.runtime, deps.st, deps.artifacts, nil, nil, nil, nil)
-	downloadDeps.collectionDeps = downloadDeps.withGit(deps.gitStore, deps.gitMemo)
+	downloadDeps.collectionDeps = downloadDeps.withGit(deps.gitStore, deps.gitMemo, deps.roleMemo)
 	result, err := downloadCollectionToCache(ctx, downloadDeps, artifactKey(col), col.Source, meta, true)
 	if err != nil {
 		return meta, downloadResult{}, err

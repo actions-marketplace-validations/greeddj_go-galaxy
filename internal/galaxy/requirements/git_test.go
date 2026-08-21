@@ -108,15 +108,16 @@ func TestParseCollectionsAcceptsGitShapes(t *testing.T) {
 	for _, tc := range gitAcceptedCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			collections, rolesFound, err := ParseCollections([]byte(tc.input), "https://default")
+			f, err := Parse([]byte(tc.input), "https://default")
+			collections, rolesFound := f.Collections, len(f.Roles) > 0
 			if err != nil {
-				t.Fatalf("ParseCollections error: %v", err)
+				t.Fatalf("Parse error: %v", err)
 			}
 			if rolesFound || len(collections) != 1 {
 				t.Fatalf("unexpected result: roles=%t collections=%#v", rolesFound, collections)
 			}
 			if got := collections[0]; !sameGitRequirement(got, tc.want) || !got.IsGit() {
-				t.Fatalf("ParseCollections = %#v, want %#v", got, tc.want)
+				t.Fatalf("Parse = %#v, want %#v", got, tc.want)
 			}
 		})
 	}
@@ -197,9 +198,9 @@ func TestParseCollectionsRejectsGitShapes(t *testing.T) {
 	for _, tc := range gitRejectedCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, _, err := ParseCollections([]byte(tc.input), "https://default")
+			_, err := Parse([]byte(tc.input), "https://default")
 			if !errors.Is(err, tc.wantErr) {
-				t.Fatalf("ParseCollections error = %v, want %v", err, tc.wantErr)
+				t.Fatalf("Parse error = %v, want %v", err, tc.wantErr)
 			}
 			if tc.mustNotContain != "" && strings.Contains(err.Error(), tc.mustNotContain) {
 				t.Fatalf("error echoes the credential: %q", err.Error())

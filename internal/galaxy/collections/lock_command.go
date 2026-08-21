@@ -53,7 +53,7 @@ func runLock(ctx context.Context, cfg *config.Config, runtime *infra.Infra) erro
 // saveLockSnapshot), the stricter of the two verdicts winning by construction
 // rather than by which branch happens to run first.
 func lockWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra, state *installState, start time.Time) error {
-	roots, err := loadRoots(cfg, runtime)
+	roots, roleRoots, err := loadRoots(cfg, runtime)
 	if err != nil {
 		return err
 	}
@@ -62,7 +62,11 @@ func lockWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra
 	if err != nil {
 		return fmt.Errorf("failed to resolve dependencies: %w", err)
 	}
-	lf, err := buildLockfile(ctx, deps, resolved, graph)
+	roles, err := resolveRoles(ctx, deps, roleRoots)
+	if err != nil {
+		return err
+	}
+	lf, err := buildLockfile(ctx, deps, resolved, graph, roles)
 	if err != nil {
 		return err
 	}
@@ -83,7 +87,7 @@ func lockWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra
 	// after the write it describes so the operator is told the file landed
 	// instead of guessing from a nonzero exit code alone; the run still exits
 	// nonzero when the save fails.
-	runtime.Output.PersistentPrintf("✅ Lockfile written to %s (%d collections)", path, len(lf.Collections))
+	runtime.Output.PersistentPrintf("✅ Lockfile written to %s (%s)", path, lockCounts(lf).describe())
 	saveErr := state.backend.SaveStore(ctx, state.store)
 	// writeRunMetrics runs unconditionally, after the save, so its recorded
 	// duration includes the save: the report describes the run's work, not
@@ -98,7 +102,7 @@ func lockWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra
 	// above returns through lockFrozen otherwise), so the value read here is
 	// always false in practice, but it is read as the truth rather than
 	// asserted as one.
-	writeRunMetrics(cfg, runtime, "lock", start, len(lf.Collections), 0, cfg.Frozen)
+	writeRunMetrics(cfg, runtime, "lock", start, lockCounts(lf), cfg.Frozen)
 	return saveErr
 }
 
@@ -135,7 +139,7 @@ func lockDryRun(
 ) error {
 	reportLockfileDiff(runtime, lf, path, dryRunDiffPrefix, lockfile.Compare(lockDryRunBaseline(runtime, path), lf))
 	saveErr := saveLockSnapshot(ctx, cfg, runtime, state)
-	writeRunMetrics(cfg, runtime, "lock", start, len(lf.Collections), 0, cfg.Frozen)
+	writeRunMetrics(cfg, runtime, "lock", start, lockCounts(lf), cfg.Frozen)
 	return saveErr
 }
 
@@ -204,7 +208,7 @@ func lockFrozen(
 	diff := lockfile.Compare(existing, lf)
 	reportLockfileDiff(runtime, lf, path, frozenDiffPrefix, diff)
 	saveErr := saveLockSnapshot(ctx, cfg, runtime, state)
-	writeRunMetrics(cfg, runtime, "lock", start, len(lf.Collections), 0, cfg.Frozen)
+	writeRunMetrics(cfg, runtime, "lock", start, lockCounts(lf), cfg.Frozen)
 	if !diff.Empty() {
 		return annotateSaveFailure(
 			fmt.Errorf("%w: %s: run `go-galaxy lock` to update it", helpers.ErrLockfileDrift, path),
@@ -227,4 +231,9 @@ func saveLockSnapshot(ctx context.Context, cfg *config.Config, runtime *infra.In
 		return saveDryRunSnapshotIfPersisted(ctx, runtime, state)
 	}
 	return state.backend.SaveStore(ctx, state.store)
+}
+
+// lockCounts is the lockfile's size for the report and the announcement.
+func lockCounts(lf *lockfile.File) runCounts {
+	return runCounts{Collections: len(lf.Collections), Roles: len(lf.Roles)}
 }

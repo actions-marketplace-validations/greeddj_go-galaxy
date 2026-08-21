@@ -12,10 +12,9 @@ import (
 )
 
 const (
-	// metadataMaxBytes caps a galaxy.yml or a MANIFEST.json read from a
-	// source tree. A real one is a few hundred bytes; the cap exists so a
-	// hostile tree cannot make the parser hold an arbitrary blob.
-	metadataMaxBytes = 1 << 20
+	// metadataMaxBytes is helpers.BuildMetadataMaxBytes, the cap every
+	// builder applies to a metadata file before decoding it.
+	metadataMaxBytes = helpers.BuildMetadataMaxBytes
 	// buildIgnoreMaxLen caps one build_ignore pattern. The matcher is linear
 	// in pattern length times name length, so the bound on the pattern is
 	// what keeps a crafted galaxy.yml from turning the walk quadratic.

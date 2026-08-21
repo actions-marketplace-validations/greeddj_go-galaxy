@@ -155,6 +155,11 @@ func TestParseAnsibleConfigSections(t *testing.T) {
 			input: "[Defaults]\ncollections_path = x",
 			want:  ansibleConfig{},
 		},
+		{
+			name:  "roles_path beside collections_path",
+			input: "[defaults]\ncollections_path = /c\nroles_path = /r:/r2\n",
+			want:  ansibleConfig{Defaults: ansibleDefaultsConfig{CollectionsPath: "/c", RolesPath: "/r:/r2"}},
+		},
 	})
 }
 

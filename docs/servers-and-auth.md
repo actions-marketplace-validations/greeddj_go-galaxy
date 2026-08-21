@@ -188,6 +188,48 @@ network origin (so `source: https://hub.example.internal/content/published/`
 still gets that server's own token and TLS policy, even though the path differs
 from the configured `url`).
 
+## Roles and the v1 role API
+
+A Galaxy role (`owner.role` in the `roles:` list) is looked up through the
+Galaxy **v1** role API, which is a different API from the v3 collection API
+and is not served everywhere. galaxy.ansible.com serves it under
+`<url>/api/v1/`, and a standalone Galaxy NG under `<url>/v1/`; both shapes are
+probed, in that order, exactly as the v3 root is. Automation Hub serves no v1
+API at all, and neither does a Galaxy NG behind the hub's API paths.
+
+The walk is the collection walk: the effective server list in order, with the
+first server that knows the role owning it. Two answers let the walk move on
+to the next server - a 404 on every v1 root, meaning the server has no role
+API, and an empty result, meaning it has one and does not list the role.
+Everything else aborts the run as it does for a collection: a 401/403 and a
+retryable 5xx that survives the retry budget name the server and exit `4`, any
+other failure exits `4` reporting the underlying error. When the walk ends
+without an answer the error says which of the two it was: no configured server
+serves v1 at all is a configuration error naming the servers (exit `2`, the
+remedy is to add galaxy.ansible.com or a standalone Galaxy NG to the list),
+while servers that do serve v1 and none of them knows the role is a resolution
+failure (exit `3`). A role entry takes no `source:` key; a role is never pinned
+to one server.
+
+Two requests answer a role: `roles/?owner__username=<owner>&name=<role>`
+for the record, then `roles/<id>/versions/`, paginated, following the
+server's own next link only while it stays on the server's origin and for at
+most 20 pages. Both go through the same cache-policy-aware JSON fetch as the
+v3 requests, on the Galaxy HTTP client, so the token configured for that
+server is attached to them exactly as it is to a collection lookup, and to no
+other origin. What the server answers is a pointer, never content: the
+record's `github_user` and `github_repo` are held to the GitHub name alphabet
+and composed into `https://github.com/<user>/<repo>`, `download_url` is not
+read, and the role is then fetched from that repository at the chosen tag by
+the git client - the same credential-free client every git collection uses,
+which carries no Galaxy token, so the token configured for
+galaxy.ansible.com never reaches github.com. A `GO_GALAXY_GIT_<ID>_URL`
+binding for `https://github.com` (see the next section) does apply to that
+fetch, should an operator configure one; without one the repository is
+fetched anonymously, which is how `ansible-galaxy` downloads it too.
+
+A git role names its repository directly and never touches a Galaxy server.
+
 ## TLS: validate_certs
 
 `validate_certs = false` really disables certificate verification for that
@@ -214,8 +256,9 @@ for the exact rule and its remedies.
 ## Git sources and credentials
 
 A collection that comes from a git repository (see
-[requirements.yml](configuration.md#requirementsyml) for the spellings) is
-fetched over https or ssh by go-galaxy itself: no `git` binary is executed,
+[requirements.yml](configuration.md#requirementsyml) for the spellings), a git
+role, and the repository a Galaxy role resolves to, are all fetched over
+https or ssh by go-galaxy itself: no `git` binary is executed,
 and therefore no credential helper, `~/.netrc`, `~/.ssh/config` or git
 configuration of the runner is consulted. Whatever a private repository needs
 is bound through the environment, and bound to a host, never written into
@@ -314,7 +357,15 @@ These are refused before any request is made, exiting with the usage exit code
   abbreviated commit or not a name git itself accepts, or whose `#subdir`
   is not a safe relative path; and an ssh repository reached with neither a
   bound key nor an agent. See [Git sources and
-  credentials](#git-sources-and-credentials).
+  credentials](#git-sources-and-credentials). A git role is held to the same
+  URL and ref grammar, and additionally may carry no `#subdir` at all.
+- A `roles:` entry this tool cannot install from: a tarball or other non-git
+  URL, a local path, an `scm` other than `git`, an `include:`, a `source:`,
+  `signatures:` or `type:` key, a name or version outside the role alphabets,
+  or two entries installing into one directory; and a Galaxy role when no
+  configured server serves the v1 role API, or when the record a server
+  returns cannot be turned into a GitHub repository URL. See [Roles and the
+  v1 role API](#roles-and-the-v1-role-api).
 
 By contrast, an auth failure (401/403) or an unavailable server exits with the
 network exit code (`4`) instead, since that's a runtime condition to retry or

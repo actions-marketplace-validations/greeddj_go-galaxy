@@ -27,14 +27,14 @@ var errRequirementsNotRegular = errors.New("requirements file is not a regular f
 // buildReachable runs while initCleanup's exclusive backend lock is still
 // held, with no context or per-call deadline of its own. A recorded
 // requirements file that turns out to be a fifo rather than a real file
-// would otherwise reach requirements.LoadCollections's os.ReadFile
+// would otherwise reach requirements.Load's os.ReadFile
 // unguarded: ReadFile opens with O_RDONLY, which blocks in open() until a
 // writer appears - potentially forever, on an attacker-planted or merely
 // misconfigured pipe. That stall does not stay local to this run: on the S3
 // backend, the lock's own heartbeat keeps renewing its TTL for as long as
 // this call blocks, so it locks out every other runner sharing the bucket
 // for the same duration. os.Stat gates against exactly that shape before
-// ever delegating to requirements.LoadCollections, mirroring
+// ever delegating to requirements.Load, mirroring
 // manifestIsRegularFile's identical reasoning for the MANIFEST.json leaf
 // (scan.go).
 //
@@ -49,18 +49,17 @@ var errRequirementsNotRegular = errors.New("requirements file is not a regular f
 // returns the Stat error unchanged, still satisfying errors.Is(err,
 // fs.ErrNotExist), so projectRequirementRoots routes it to its tolerated
 // stale-entry arm.
-func loadRequirements(path, defaultSource string) ([]requirements.CollectionRequirement, error) {
+func loadRequirements(path, defaultSource string) (requirements.File, error) {
 	// #nosec G703 -- path is a registry-recorded requirements file path (a
 	// fixed set of candidates this program itself wrote via
 	// store.RecordProject), not a value taken directly from an external
 	// request; this is a read-only shape check before any read is attempted.
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, err
+		return requirements.File{}, err
 	}
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%w: %q", errRequirementsNotRegular, path)
+		return requirements.File{}, fmt.Errorf("%w: %q", errRequirementsNotRegular, path)
 	}
-	reqs, _, err := requirements.LoadCollections(path, defaultSource)
-	return reqs, err
+	return requirements.Load(path, defaultSource)
 }

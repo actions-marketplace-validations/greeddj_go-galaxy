@@ -35,6 +35,9 @@ type Config struct {
 	MetricsFile       string
 	CacheDir          string
 	DownloadPath      string
+	// RolesPath is the directory roles install into, one role per child
+	// directory named for the role - ansible's roles_path, first entry.
+	RolesPath string
 	// Server is the derived "first effective server" URL, kept for the
 	// consumers that only ever deal with one Galaxy server: metrics,
 	// GALAXY.yml, the lockfile's Server field, and Meta.Server. It always
@@ -90,6 +93,7 @@ type Config struct {
 	Offline                    bool
 	Frozen                     bool
 	AnsibleCollectionsPathUsed bool
+	AnsibleRolesPathUsed       bool
 	AnsibleCacheDirUsed        bool
 	AnsibleServerUsed          bool
 	// AnsibleServerEnvUsed narrows AnsibleServerUsed: the ansible-side server
@@ -209,6 +213,7 @@ func newConfigFromCLI(c *cli.Command) *Config {
 		Offline:          c.Bool("offline"),
 		Frozen:           c.Bool("frozen"),
 		DownloadPath:     c.String("download-path"),
+		RolesPath:        c.String("roles-path"),
 	}
 
 	// Two shapes reach this fallback. A command that does not register
@@ -549,6 +554,7 @@ func applyAnsibleConfig(cfg *Config, c *cli.Command, ansibleConfig ansibleConfig
 	}
 	cfg.AnsibleSignatureKeys = ansibleConfig.Galaxy.SignatureKeys
 	cfg.DownloadPath, cfg.AnsibleCollectionsPathUsed = pickConfigValue(c, "download-path", ansibleConfig.Defaults.CollectionsPath)
+	cfg.RolesPath, cfg.AnsibleRolesPathUsed = pickConfigValue(c, "roles-path", ansibleConfig.Defaults.RolesPath)
 	cfg.CacheDir, cfg.AnsibleCacheDirUsed = pickConfigValue(c, "cache-dir", ansibleConfig.Galaxy.CacheDir)
 	serverValue, serverFromEnv := ansibleGalaxyServer(ansibleConfig.Galaxy.Server)
 	cfg.Server, cfg.AnsibleServerUsed = pickConfigValue(c, "server", serverValue)
@@ -564,19 +570,33 @@ func applyAnsibleConfig(cfg *Config, c *cli.Command, ansibleConfig ansibleConfig
 	// unconditionally (a no-op when there was nothing to split, including a
 	// bare trailing separator with no further entries); only a genuinely
 	// ignored entry produces a warning.
-	first, rest := firstCollectionsPath(cfg.DownloadPath)
-	cfg.DownloadPath = first
-	if len(rest) > 0 {
+	cfg.DownloadPath = firstSearchPathEntry(cfg, "collections_path", cfg.DownloadPath)
+	// roles_path is the same shape in ansible - a search list whose first
+	// entry is where ansible-galaxy installs - and gets the same treatment.
+	cfg.RolesPath = firstSearchPathEntry(cfg, "roles_path", cfg.RolesPath)
+	if cfg.RolesPath != "" && filepath.Clean(cfg.RolesPath) == filepath.Clean(cfg.DownloadPath) {
 		cfg.Warnings = append(cfg.Warnings,
-			fmt.Sprintf("collections_path lists multiple paths; using %q and ignoring the rest: %v", first, rest))
+			fmt.Sprintf("roles_path and collections_path are the same directory %q; roles install beside ansible_collections", cfg.RolesPath))
 	}
 }
 
-// firstCollectionsPath splits a POSIX ":"-separated collections_path value
-// into its first entry and the remaining non-empty entries. It is not
-// aware of Windows drive letters (e.g. "C:\path"), consistent with this
-// tool's CI/Linux target.
-func firstCollectionsPath(value string) (string, []string) {
+// firstSearchPathEntry keeps the first entry of a ":"-separated search path
+// and records a warning naming the setting when further entries were
+// dropped.
+func firstSearchPathEntry(cfg *Config, setting, value string) string {
+	first, rest := splitSearchPath(value)
+	if len(rest) > 0 {
+		cfg.Warnings = append(cfg.Warnings,
+			fmt.Sprintf("%s lists multiple paths; using %q and ignoring the rest: %v", setting, first, rest))
+	}
+	return first
+}
+
+// splitSearchPath splits a POSIX ":"-separated search path value into its
+// first entry and the remaining non-empty entries. It is not aware of
+// Windows drive letters (e.g. "C:\path"), consistent with this tool's
+// CI/Linux target.
+func splitSearchPath(value string) (string, []string) {
 	parts := strings.Split(value, ":")
 	first := parts[0]
 

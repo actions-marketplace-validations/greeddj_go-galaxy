@@ -126,19 +126,72 @@ type GitPinEntry struct {
 	Collections []GitPinCollection `json:"collections"`
 }
 
-// Store holds cached state for collections and metadata.
+// InstalledRoleEntry records one installed role: the directory it was
+// materialized into, the locator (git+<url>#@<commit>) its artifact was
+// built from - the one string the artifact key, this record and the lockfile
+// all key on - the artifact's sha256, the version the role was asked for (a
+// tag, a branch name, or the ref HEAD resolved to), the Galaxy name for a
+// role that came through the Galaxy API ("" for a git role), when it was
+// installed, and the install names of the roles its meta depends on. Keyed
+// by the role's install name, the directory name under the roles path.
+type InstalledRoleEntry struct {
+	InstalledAt    time.Time `json:"installed_at"`
+	InstallPath    string    `json:"install_path"`
+	Source         string    `json:"source"`
+	ArtifactSHA256 string    `json:"artifact_sha256"`
+	Version        string    `json:"version"`
+	GalaxyName     string    `json:"galaxy_name,omitempty"`
+	Deps           []string  `json:"deps,omitempty"`
+}
+
+// RolePinDep is one dependency a pinned role's meta declared, as written.
+type RolePinDep struct {
+	Src     string `json:"src,omitempty"`
+	Scm     string `json:"scm,omitempty"`
+	Version string `json:"version,omitempty"`
+	Name    string `json:"name,omitempty"`
+}
+
+// RolePinEntry records what one role requirement resolved to: the repository
+// URL, the commit, the concrete version (tag or branch), the commit sha the
+// Galaxy v1 API recorded for that tag ("" when it gave none, and for a git
+// role), the galaxy_info.role_name when the meta carried one, and the
+// dependencies its meta declared. Keyed by the requirement line, and - like
+// GitPinEntry - never expired by the clock: a pin is invalidated by the
+// requirements signature and by --refresh, because a ref that has not moved
+// is the same answer a month later.
+type RolePinEntry struct {
+	FetchedAt      time.Time `json:"fetched_at"`
+	Repository     string    `json:"repository"`
+	Commit         string    `json:"commit"`
+	Version        string    `json:"version"`
+	GalaxySHA      string    `json:"galaxy_sha,omitempty"`
+	GalaxyRoleName string    `json:"galaxy_role_name,omitempty"`
+	// Server is the Galaxy server whose v1 API answered for a Galaxy role's
+	// pin, "" for a git role's: the provenance the lockfile records and the
+	// server outdated asks again.
+	Server string `json:"server,omitempty"`
+	// Ref is the qualified ref a Galaxy role's pin chose (refs/tags/<tag> or
+	// refs/heads/<branch>), "" for a git role's pin, whose ref is its key.
+	Ref  string       `json:"ref,omitempty"`
+	Deps []RolePinDep `json:"deps,omitempty"`
+}
+
+// Store holds cached state for collections, roles and metadata.
 type Store struct {
-	APICache     map[string]APICacheEntry   `json:"api_cache"`
-	DepsCache    map[string]DepsCacheEntry  `json:"deps_cache"`
-	Installed    map[string]InstalledEntry  `json:"installed"`
-	Graph        map[string][]string        `json:"graph"`
-	Requirements map[string]RequirementSpec `json:"requirements"`
-	Resolved     map[string]ResolvedEntry   `json:"resolved"`
-	Versions     map[string]VersionsEntry   `json:"versions_cache"`
-	Warmed       map[string]WarmedEntry     `json:"warmed"`
-	GitPins      map[string]GitPinEntry     `json:"git_pins"`
-	Meta         SnapshotMeta               `json:"meta"`
-	mu           sync.RWMutex               `json:"-"`
+	APICache       map[string]APICacheEntry      `json:"api_cache"`
+	DepsCache      map[string]DepsCacheEntry     `json:"deps_cache"`
+	Installed      map[string]InstalledEntry     `json:"installed"`
+	Graph          map[string][]string           `json:"graph"`
+	Requirements   map[string]RequirementSpec    `json:"requirements"`
+	Resolved       map[string]ResolvedEntry      `json:"resolved"`
+	Versions       map[string]VersionsEntry      `json:"versions_cache"`
+	Warmed         map[string]WarmedEntry        `json:"warmed"`
+	GitPins        map[string]GitPinEntry        `json:"git_pins"`
+	InstalledRoles map[string]InstalledRoleEntry `json:"installed_roles"`
+	RolePins       map[string]RolePinEntry       `json:"role_pins"`
+	Meta           SnapshotMeta                  `json:"meta"`
+	mu             sync.RWMutex                  `json:"-"`
 	// dirty records whether this process has written something into the
 	// store since it was loaded (or since New built a fresh one); see Dirty
 	// for the full contract.
@@ -153,15 +206,17 @@ func New() *Store {
 		Meta: SnapshotMeta{
 			SchemaVersion: helpers.StoreSnapshotSchemaVersion,
 		},
-		APICache:     make(map[string]APICacheEntry),
-		DepsCache:    make(map[string]DepsCacheEntry),
-		Installed:    make(map[string]InstalledEntry),
-		Graph:        make(map[string][]string),
-		Requirements: make(map[string]RequirementSpec),
-		Resolved:     make(map[string]ResolvedEntry),
-		Versions:     make(map[string]VersionsEntry),
-		Warmed:       make(map[string]WarmedEntry),
-		GitPins:      make(map[string]GitPinEntry),
+		APICache:       make(map[string]APICacheEntry),
+		DepsCache:      make(map[string]DepsCacheEntry),
+		Installed:      make(map[string]InstalledEntry),
+		Graph:          make(map[string][]string),
+		Requirements:   make(map[string]RequirementSpec),
+		Resolved:       make(map[string]ResolvedEntry),
+		Versions:       make(map[string]VersionsEntry),
+		Warmed:         make(map[string]WarmedEntry),
+		GitPins:        make(map[string]GitPinEntry),
+		InstalledRoles: make(map[string]InstalledRoleEntry),
+		RolePins:       make(map[string]RolePinEntry),
 	}
 }
 
@@ -180,8 +235,8 @@ func New() *Store {
 // The guard lives here, on the type, rather than being called explicitly at
 // each decode site (e.g. LoadStore): every present and future decode path -
 // including one nobody has written yet - inherits it automatically, and a
-// ninth map added to Store later cannot reopen this hole just by a call site
-// forgetting to guard it.
+// twelfth map added to Store later cannot reopen this hole just by a call
+// site forgetting to guard it.
 //
 // The local Bolt path never needed this: loadJSONBucket only ever populates an
 // already-initialized map key by key and never assigns a whole map field, so
@@ -342,6 +397,133 @@ func cloneGitPin(entry GitPinEntry) GitPinEntry {
 	return clone
 }
 
+// SetInstalledRole records an installed role under its install name. The
+// entry's Deps slice is cloned before storing, so a later caller mutation of
+// its backing array cannot corrupt the stored snapshot state.
+func (s *Store) SetInstalledRole(name string, entry InstalledRoleEntry) {
+	if s == nil {
+		return
+	}
+	entry.Deps = slices.Clone(entry.Deps)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.InstalledRoles[name] = entry
+	s.dirty = true
+}
+
+// GetInstalledRole returns the installed role recorded under name. Deps is
+// cloned before returning, so a caller mutation of the returned slice cannot
+// corrupt the stored snapshot state.
+func (s *Store) GetInstalledRole(name string) (InstalledRoleEntry, bool) {
+	if s == nil {
+		return InstalledRoleEntry{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entry, ok := s.InstalledRoles[name]
+	entry.Deps = slices.Clone(entry.Deps)
+	return entry, ok
+}
+
+// DeleteInstalledRole removes the installed role recorded under name.
+func (s *Store) DeleteInstalledRole(name string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.InstalledRoles, name)
+	s.dirty = true
+}
+
+// InstalledRolesSnapshot returns a fully independent deep copy of the
+// installed roles: each entry's Deps slice is cloned too, so mutating the
+// returned map or any of its slices cannot corrupt the stored snapshot
+// state. Cleanup walks it to decide which role directories are still owned.
+func (s *Store) InstalledRolesSnapshot() map[string]InstalledRoleEntry {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	clone := make(map[string]InstalledRoleEntry, len(s.InstalledRoles))
+	copyInstalledRoles(clone, s.InstalledRoles)
+	return clone
+}
+
+// InstalledRoleArtifactSHAs returns a fresh map from installed role name to
+// its ArtifactSHA256, omitting entries with an empty sha. It is the roles'
+// half of the extracted keep set, for the same reason
+// InstalledArtifactSHAByKey is the collections' half: an entry outlives its
+// workspace, so a project whose roles path is currently absent still keeps
+// its extracted trees.
+func (s *Store) InstalledRoleArtifactSHAs() map[string]string {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]string, len(s.InstalledRoles))
+	for name, entry := range s.InstalledRoles {
+		if entry.ArtifactSHA256 == "" {
+			continue
+		}
+		out[name] = entry.ArtifactSHA256
+	}
+	return out
+}
+
+// GetRolePin returns the pin recorded under key, deep-copied so a caller can
+// neither observe nor cause a later mutation.
+func (s *Store) GetRolePin(key string) (RolePinEntry, bool) {
+	if s == nil {
+		return RolePinEntry{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entry, ok := s.RolePins[key]
+	if !ok {
+		return RolePinEntry{}, false
+	}
+	return cloneRolePin(entry), true
+}
+
+// SetRolePin records entry under key, deep-copying it and stamping FetchedAt
+// with the current time when the caller left it zero. An empty key or commit
+// is ignored, as SetGitPin ignores them: a pin that names no commit protects
+// nothing and would only ever be replayed into a failure.
+func (s *Store) SetRolePin(key string, entry RolePinEntry) {
+	if s == nil || key == "" || entry.Commit == "" {
+		return
+	}
+	clone := cloneRolePin(entry)
+	if clone.FetchedAt.IsZero() {
+		clone.FetchedAt = time.Now().UTC()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.RolePins[key] = clone
+	s.dirty = true
+}
+
+// DeleteRolePin removes the pin recorded under key.
+func (s *Store) DeleteRolePin(key string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.RolePins, key)
+	s.dirty = true
+}
+
+// cloneRolePin copies a pin and the one reference-type field inside it.
+func cloneRolePin(entry RolePinEntry) RolePinEntry {
+	clone := entry
+	clone.Deps = slices.Clone(entry.Deps)
+	return clone
+}
+
 // WarmedArtifactSHAByKey returns a fresh map from warmed collection key to
 // artifact sha, excluding entries with an empty sha and entries outside the
 // WarmedEntryMaxAge retention window. The window is enforced here, not just
@@ -449,9 +631,10 @@ func (s *Store) SetAPICache(key string, entry APICacheEntry) {
 	s.dirty = true
 }
 
-// ClearCaches clears the API, dependency, versions and git pin caches: every
-// bucket that is an answer from a remote rather than a record of content on
-// disk.
+// ClearCaches clears the API, dependency, versions, git pin and role pin
+// caches: every bucket that is an answer from a remote rather than a record
+// of content on disk. Installed and InstalledRoles are records of content
+// and survive, as Warmed does.
 func (s *Store) ClearCaches() {
 	if s == nil {
 		return
@@ -462,6 +645,7 @@ func (s *Store) ClearCaches() {
 	s.DepsCache = make(map[string]DepsCacheEntry)
 	s.Versions = make(map[string]VersionsEntry)
 	s.GitPins = make(map[string]GitPinEntry)
+	s.RolePins = make(map[string]RolePinEntry)
 	s.dirty = true
 }
 
@@ -770,16 +954,18 @@ func stampSaveMeta(data *snapshotData, hasContent bool) {
 
 // snapshotData is a serialized view of Store contents.
 type snapshotData struct {
-	APICache     map[string]APICacheEntry
-	DepsCache    map[string]DepsCacheEntry
-	Installed    map[string]InstalledEntry
-	Graph        map[string][]string
-	Requirements map[string]RequirementSpec
-	Resolved     map[string]ResolvedEntry
-	Versions     map[string]VersionsEntry
-	Warmed       map[string]WarmedEntry
-	GitPins      map[string]GitPinEntry
-	Meta         SnapshotMeta
+	APICache       map[string]APICacheEntry
+	DepsCache      map[string]DepsCacheEntry
+	Installed      map[string]InstalledEntry
+	Graph          map[string][]string
+	Requirements   map[string]RequirementSpec
+	Resolved       map[string]ResolvedEntry
+	Versions       map[string]VersionsEntry
+	Warmed         map[string]WarmedEntry
+	GitPins        map[string]GitPinEntry
+	InstalledRoles map[string]InstalledRoleEntry
+	RolePins       map[string]RolePinEntry
+	Meta           SnapshotMeta
 }
 
 // MarshalSnapshot returns a schema-stamped JSON encoding of the store,
@@ -796,22 +982,25 @@ func (s *Store) MarshalSnapshot() ([]byte, error) {
 	// throwaway Store so the encoding reuses Store's existing json tags and
 	// the wire shape stays byte-identical to marshaling a *Store directly.
 	snapshot := &Store{
-		APICache:     data.APICache,
-		DepsCache:    data.DepsCache,
-		Installed:    data.Installed,
-		Graph:        data.Graph,
-		Requirements: data.Requirements,
-		Resolved:     data.Resolved,
-		Versions:     data.Versions,
-		Warmed:       data.Warmed,
-		GitPins:      data.GitPins,
-		Meta:         data.Meta,
+		APICache:       data.APICache,
+		DepsCache:      data.DepsCache,
+		Installed:      data.Installed,
+		Graph:          data.Graph,
+		Requirements:   data.Requirements,
+		Resolved:       data.Resolved,
+		Versions:       data.Versions,
+		Warmed:         data.Warmed,
+		GitPins:        data.GitPins,
+		InstalledRoles: data.InstalledRoles,
+		RolePins:       data.RolePins,
+		Meta:           data.Meta,
 	}
 	return json.Marshal(snapshot)
 }
 
 // hasContentEntries reports whether the live store currently holds any record
-// of on-disk content. It is what a save consults to decide whether to stamp
+// of on-disk content - an installed collection, a warmed one, or an installed
+// role. It is what a save consults to decide whether to stamp
 // Meta.ContentRecorded; see stampSaveMeta for why it is read here, from the
 // store itself, rather than from the payload that save is about to write.
 func (s *Store) hasContentEntries() bool {
@@ -820,7 +1009,7 @@ func (s *Store) hasContentEntries() bool {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return len(s.Installed) > 0 || len(s.Warmed) > 0
+	return len(s.Installed) > 0 || len(s.Warmed) > 0 || len(s.InstalledRoles) > 0
 }
 
 // ensureMaps re-allocates every map a decode may have nilled. The caller must
@@ -836,6 +1025,8 @@ func (s *Store) ensureMaps() {
 	s.Versions = ensureMap(s.Versions)
 	s.Warmed = ensureMap(s.Warmed)
 	s.GitPins = ensureMap(s.GitPins)
+	s.InstalledRoles = ensureMap(s.InstalledRoles)
+	s.RolePins = ensureMap(s.RolePins)
 }
 
 // ensureMap returns m when it is non-nil and a fresh empty map otherwise.
@@ -923,16 +1114,18 @@ func (s *Store) snapshotData() snapshotData {
 	warmedWindow := newRetentionWindow(now, helpers.WarmedEntryMaxAge)
 
 	data := snapshotData{
-		Meta:         s.Meta,
-		APICache:     make(map[string]APICacheEntry, len(s.APICache)),
-		DepsCache:    make(map[string]DepsCacheEntry, len(s.DepsCache)),
-		Installed:    make(map[string]InstalledEntry, len(s.Installed)),
-		Graph:        make(map[string][]string, len(s.Graph)),
-		Requirements: make(map[string]RequirementSpec, len(s.Requirements)),
-		Resolved:     make(map[string]ResolvedEntry, len(s.Resolved)),
-		Versions:     make(map[string]VersionsEntry, len(s.Versions)),
-		Warmed:       make(map[string]WarmedEntry, len(s.Warmed)),
-		GitPins:      make(map[string]GitPinEntry, len(s.GitPins)),
+		Meta:           s.Meta,
+		APICache:       make(map[string]APICacheEntry, len(s.APICache)),
+		DepsCache:      make(map[string]DepsCacheEntry, len(s.DepsCache)),
+		Installed:      make(map[string]InstalledEntry, len(s.Installed)),
+		Graph:          make(map[string][]string, len(s.Graph)),
+		Requirements:   make(map[string]RequirementSpec, len(s.Requirements)),
+		Resolved:       make(map[string]ResolvedEntry, len(s.Resolved)),
+		Versions:       make(map[string]VersionsEntry, len(s.Versions)),
+		Warmed:         make(map[string]WarmedEntry, len(s.Warmed)),
+		GitPins:        make(map[string]GitPinEntry, len(s.GitPins)),
+		InstalledRoles: make(map[string]InstalledRoleEntry, len(s.InstalledRoles)),
+		RolePins:       make(map[string]RolePinEntry, len(s.RolePins)),
 	}
 
 	for key, entry := range s.APICache {
@@ -998,8 +1191,35 @@ func (s *Store) snapshotData() snapshotData {
 	for key, entry := range s.GitPins {
 		data.GitPins[key] = cloneGitPin(entry)
 	}
+	// Installed roles are copied whole for the reasons Installed is, just
+	// above; role pins for the reasons git pins are.
+	copyInstalledRoles(data.InstalledRoles, s.InstalledRoles)
+	copyRolePins(data.RolePins, s.RolePins)
 
 	return data
+}
+
+// copyInstalledRoles copies every entry from src into dst, cloning each
+// entry's Deps slice. It is factored out of snapshotData, rather than inlined
+// there as a loop like the other buckets above, purely to keep snapshotData
+// under its cyclomatic complexity budget (see copyRequirementsCutQuery for
+// the measurement); InstalledRolesSnapshot shares it so the two copies cannot
+// drift. The caller holds the store's read lock for the duration of the call.
+func copyInstalledRoles(dst, src map[string]InstalledRoleEntry) {
+	for name, entry := range src {
+		entry.Deps = slices.Clone(entry.Deps)
+		dst[name] = entry
+	}
+}
+
+// copyRolePins copies every entry from src into dst through cloneRolePin. It
+// is factored out of snapshotData for the same complexity-budget reason
+// copyInstalledRoles is; the caller holds the store's read lock for the
+// duration of the call.
+func copyRolePins(dst, src map[string]RolePinEntry) {
+	for key, entry := range src {
+		dst[key] = cloneRolePin(entry)
+	}
 }
 
 // copyRequirementsCutQuery copies every entry from src into dst, cutting each
@@ -1121,7 +1341,7 @@ func Load(dbs *DBs) (*Store, error) {
 }
 
 // Save writes cached state to the consolidated Bolt database. The meta
-// bucket and all nine data buckets are written inside a single Bolt
+// bucket and all eleven data buckets are written inside a single Bolt
 // transaction so a mid-save failure (e.g. a key or value exceeding Bolt's
 // limits) leaves the previously committed snapshot fully intact instead of
 // a partially overwritten mix of old and new data.
@@ -1190,10 +1410,11 @@ func bindJSONBucket[T any](name string, dst, src map[string]T) jsonBucketIO {
 	}
 }
 
-// jsonBuckets lists the nine data buckets in the one fixed order both
+// jsonBuckets lists the eleven data buckets in the one fixed order both
 // runners follow (api_cache, deps_cache, installed, graph, requirements,
-// resolved, versions_cache, warmed, git_pins), which fault injection tests
-// rely on for the save side.
+// resolved, versions_cache, warmed, git_pins, installed_roles, role_pins),
+// which fault injection tests rely on for the save side - a new bucket is
+// appended, never inserted.
 func jsonBuckets(store *Store, data snapshotData) []jsonBucketIO {
 	return []jsonBucketIO{
 		bindJSONBucket(helpers.StoreBucketAPICache, store.APICache, data.APICache),
@@ -1205,10 +1426,12 @@ func jsonBuckets(store *Store, data snapshotData) []jsonBucketIO {
 		bindJSONBucket(helpers.StoreBucketVersions, store.Versions, data.Versions),
 		bindJSONBucket(helpers.StoreBucketWarmed, store.Warmed, data.Warmed),
 		bindJSONBucket(helpers.StoreBucketGitPins, store.GitPins, data.GitPins),
+		bindJSONBucket(helpers.StoreBucketInstalledRoles, store.InstalledRoles, data.InstalledRoles),
+		bindJSONBucket(helpers.StoreBucketRolePins, store.RolePins, data.RolePins),
 	}
 }
 
-// runLoadSteps reads the nine data buckets in the given transaction.
+// runLoadSteps reads the eleven data buckets in the given transaction.
 func runLoadSteps(tx *bolt.Tx, store *Store) error {
 	buckets := jsonBuckets(store, snapshotData{})
 	steps := make([]func() error, 0, len(buckets))
@@ -1218,7 +1441,7 @@ func runLoadSteps(tx *bolt.Tx, store *Store) error {
 	return runSteps(steps)
 }
 
-// runSaveSteps writes the nine data buckets in the given transaction, in the
+// runSaveSteps writes the eleven data buckets in the given transaction, in the
 // fixed order jsonBuckets states.
 func runSaveSteps(tx *bolt.Tx, data snapshotData) error {
 	buckets := jsonBuckets(&Store{}, data)

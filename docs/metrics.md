@@ -16,6 +16,7 @@ JSON report suitable for CI dashboards:
   "cache_misses":     5,
   "bytes_downloaded": 4831201,
   "collections":      17,
+  "roles":            3,
   "failures":         0,
   "frozen":           true
 }
@@ -70,6 +71,16 @@ fetch is a miss and the pack bytes written to disk for it count as
 `bytes_downloaded` (the pack, not the artifact built from it, is what crossed
 the wire), and a later run that installs it from the cache is a hit.
 
+`roles` is the number of roles in the run's plan - the `roles:` entries plus
+the dependencies discovered through them, for `install`/`warm`, the roles the
+written lockfile holds for `lock`, and the role entries checked for
+`outdated` - and is `0`, never absent, for a run without roles. `failures`
+counts both kinds together: a failed role and a failed collection each add
+one. A role's artifact counts in the three artifact counters exactly as a git
+collection's does - the fetch at discovery is a miss and its pack bytes are
+`bytes_downloaded`, a later install from the cache is a hit - so
+`cache_hits + cache_misses` counts collection and role acquisitions alike.
+
 `cache_hits`, `cache_misses`, and `bytes_downloaded` are artifact-level counters,
 not collection-level: a hit is one artifact served from the artifact cache and a
 miss is one artifact fetched from the origin, so `cache_hits + cache_misses`
@@ -81,5 +92,7 @@ since a collection whose install is skipped touches no artifact at all. A cache
 hit always contributes zero bytes to `bytes_downloaded`, including an S3 cache
 hit: that object transfer is a real network round trip to the cache backend,
 but it is not artifact-download traffic, so it is deliberately excluded. The
-`lock` command never fetches an artifact, so its report always has
-`cache_hits`, `cache_misses`, and `bytes_downloaded` at `0`.
+`lock` command never downloads a Galaxy artifact, so for a file of Galaxy
+collections its report has `cache_hits`, `cache_misses`, and
+`bytes_downloaded` at `0`; a git collection or a role it locks is fetched and
+built during its resolve, and counts as above.

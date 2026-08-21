@@ -102,7 +102,11 @@ type Backend interface {
 	LoadStore(ctx context.Context) (*store.Store, error)
 	SaveStore(ctx context.Context, st *store.Store) error
 	ClearFiles(ctx context.Context) error
-	RecordProject(ctx context.Context, requirementsFile, downloadPath string) error
+	// RecordProject enrolls the project behind requirementsFile in the
+	// registry cleanup walks, with its collections path and its roles path;
+	// an empty rolesPath records no roles path, which cleanup reads as
+	// "do not scan" (see store.ProjectRecord).
+	RecordProject(ctx context.Context, requirementsFile, downloadPath, rolesPath string) error
 	LoadProjectRegistry(ctx context.Context) (*store.ProjectRegistry, error)
 	// Artifacts returns the backend's artifact store. Call it only after a
 	// successful Open: an implementation may build its artifact store inside

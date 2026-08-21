@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
+	"github.com/greeddj/go-galaxy/internal/galaxy/store"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -332,4 +333,85 @@ func readOnlyDir(t *testing.T) string {
 		t.Skip("this process can write to a 0o555 directory (running as root?), so the permission case is unreachable here")
 	}
 	return dir
+}
+
+// TestBackendRoundTripsRoleBucketsAndRolesPath drives the role state through
+// the local backend's public surface end to end: SaveStore then LoadStore
+// keeps an installed role and a role pin, and RecordProject then
+// LoadProjectRegistry keeps the roles path the run recorded, resolved against
+// the project directory as the collections path is.
+func TestBackendRoundTripsRoleBucketsAndRolesPath(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	b := openedBackend(t, dir)
+	release := lockOrFatal(t, b)
+	defer func() {
+		if err := release(); err != nil {
+			t.Errorf("release: %v", err)
+		}
+	}()
+
+	assertRoleBucketsRoundTrip(t, b, dir)
+	assertRolesPathRoundTrip(t, b)
+}
+
+// assertRoleBucketsRoundTrip saves a store holding one installed role and one
+// role pin through b and reads both back.
+func assertRoleBucketsRoundTrip(t *testing.T, b *Backend, dir string) {
+	t.Helper()
+	ctx := context.Background()
+	const (
+		roleName = "nginx"
+		commit   = "0123456789abcdef0123456789abcdef01234567"
+		pinKey   = "acme.nginx,v1.2.3"
+	)
+	st := store.New()
+	st.SetInstalledRole(roleName, store.InstalledRoleEntry{
+		InstallPath:    filepath.Join(dir, "roles", roleName),
+		Source:         "git+https://github.com/acme/ansible-role-nginx.git#@" + commit,
+		ArtifactSHA256: "role-sha",
+		Version:        "v1.2.3",
+		Deps:           []string{"common"},
+	})
+	st.SetRolePin(pinKey, store.RolePinEntry{Repository: "https://github.com/acme/ansible-role-nginx.git", Commit: commit})
+	if err := b.SaveStore(ctx, st); err != nil {
+		t.Fatalf("SaveStore: %v", err)
+	}
+	loaded, err := b.LoadStore(ctx)
+	if err != nil {
+		t.Fatalf("LoadStore: %v", err)
+	}
+	role, ok := loaded.GetInstalledRole(roleName)
+	if !ok || role.ArtifactSHA256 != "role-sha" || len(role.Deps) != 1 || role.Deps[0] != "common" {
+		t.Fatalf("installed role after round trip: %#v (ok=%t)", role, ok)
+	}
+	if pin, ok := loaded.GetRolePin(pinKey); !ok || pin.Commit != commit {
+		t.Fatalf("role pin after round trip: %#v (ok=%t)", pin, ok)
+	}
+	if !loaded.HasRecordedContent() {
+		t.Fatalf("a snapshot holding only an installed role did not record content")
+	}
+}
+
+// assertRolesPathRoundTrip records a project with a relative roles path
+// through b and reads the resolved path back from the registry.
+func assertRolesPathRoundTrip(t *testing.T, b *Backend) {
+	t.Helper()
+	ctx := context.Background()
+	projectDir := t.TempDir()
+	reqPath := filepath.Join(projectDir, "requirements.yml")
+	if err := b.RecordProject(ctx, reqPath, "collections", "roles"); err != nil {
+		t.Fatalf("RecordProject: %v", err)
+	}
+	registry, err := b.LoadProjectRegistry(ctx)
+	if err != nil {
+		t.Fatalf("LoadProjectRegistry: %v", err)
+	}
+	record, ok := registry.Projects[projectDir]
+	if !ok {
+		t.Fatalf("no record under %q, got %#v", projectDir, registry.Projects)
+	}
+	if want := filepath.Join(projectDir, "roles"); record.RolesPath != want {
+		t.Fatalf("RolesPath = %q, want %q", record.RolesPath, want)
+	}
 }

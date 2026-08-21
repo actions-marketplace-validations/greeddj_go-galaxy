@@ -18,6 +18,9 @@ const (
 	fieldSHA256  = "sha256"
 	fieldDeps    = "deps"
 	fieldServer  = "server"
+	// fieldGalaxy and fieldRepository belong to a role entry alone.
+	fieldGalaxy     = "galaxy"
+	fieldRepository = "repository"
 )
 
 // comparedFieldCount is the number of per-entry fields Change.Fields() can
@@ -38,6 +41,12 @@ type Diff struct {
 	Added   []Entry
 	Updated []Change
 	Removed []Entry
+	// RolesAdded, RolesUpdated and RolesRemoved are the roles list's half of
+	// the diff, keyed by install name exactly as the collections are keyed
+	// by fqdn.
+	RolesAdded   []RoleEntry
+	RolesUpdated []RoleChange
+	RolesRemoved []RoleEntry
 }
 
 // Change is one collection present in both before and after whose pinned
@@ -102,6 +111,7 @@ func Compare(before, after *File) Diff {
 	afterIdx := indexByName(after)
 	diff := diffIndexes(beforeIdx, afterIdx)
 	diff.Server = serverFieldChange(before, after)
+	diff.RolesAdded, diff.RolesUpdated, diff.RolesRemoved = diffRoles(indexRolesByName(before), indexRolesByName(after))
 	return diff
 }
 
@@ -166,10 +176,17 @@ func serverFieldChange(before, after *File) *FieldChange {
 	return &FieldChange{Field: fieldServer, From: before.Server, To: after.Server}
 }
 
-// Empty reports whether d describes no difference at all: no collection
-// added, updated, or removed, and no file-level server change.
+// Empty reports whether d describes no difference at all: no collection or
+// role added, updated, or removed, and no file-level server change.
 func (d Diff) Empty() bool {
-	return d.Server == nil && len(d.Added) == 0 && len(d.Updated) == 0 && len(d.Removed) == 0
+	return d.Server == nil && len(d.Added) == 0 && len(d.Updated) == 0 && len(d.Removed) == 0 &&
+		len(d.RolesAdded) == 0 && len(d.RolesUpdated) == 0 && len(d.RolesRemoved) == 0
+}
+
+// HasRoles reports whether either side of the diff involved a role, for a
+// report that names roles only when a run has any.
+func (d Diff) HasRoles() bool {
+	return len(d.RolesAdded) > 0 || len(d.RolesUpdated) > 0 || len(d.RolesRemoved) > 0
 }
 
 // Fields reports which of c's pinned fields differ between From and To, in a
