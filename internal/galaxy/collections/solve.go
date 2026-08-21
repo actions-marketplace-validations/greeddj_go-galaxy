@@ -40,7 +40,7 @@ func solveCollections(ctx context.Context, deps collectionDeps, roots []collecti
 	// mp.bindings is read only now that Solve has returned: the solver core
 	// drives every MetadataProvider method from this one goroutine, so there
 	// is no concurrent writer left to race with this read.
-	return solverResultToResolvedGraph(result, deps.cfg, mp.bindings)
+	return solverResultToResolvedGraph(result, deps.cfg, mp.bindings, mp.pins)
 }
 
 // rootSourceMap builds a root fqdn -> explicit-source map from roots: a
@@ -113,6 +113,7 @@ func solverResultToResolvedGraph(
 	result *solver.Result,
 	cfg *config.Config,
 	bindings map[string]string,
+	pins map[string]gitPin,
 ) (map[string]collection, map[string][]string, error) {
 	resolved := make(map[string]collection, len(result.Versions))
 	for fqdn, version := range result.Versions {
@@ -120,12 +121,22 @@ func solverResultToResolvedGraph(
 		if !ok {
 			return nil, nil, fmt.Errorf("%w: %q", helpers.ErrInvalidCollectionName, fqdn)
 		}
-		resolved[fqdn] = collection{
+		col := collection{
 			Namespace: ns,
 			Name:      name,
 			Version:   version,
-			Source:    sourceFor(fqdn, bindings, cfg),
 		}
+		// A git pin's source is its locator, taken from the pin itself: the
+		// solver decides an exact pin through Dependencies alone, so no
+		// binding is ever recorded for it, and sourceFor's fallback would
+		// otherwise stamp the first Galaxy server onto a collection no
+		// server holds.
+		if pin, pinned := pins[fqdn]; pinned {
+			col.Source, col.Type, col.Ref = pin.locator, typeGit, pin.ref
+		} else {
+			col.Source = sourceFor(fqdn, bindings, cfg)
+		}
+		resolved[fqdn] = col
 	}
 
 	depsByParent := make(map[string]map[string]string, len(result.Graph))

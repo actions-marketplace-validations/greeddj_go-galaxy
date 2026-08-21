@@ -218,22 +218,28 @@ func seedAlreadyInstalled(t *testing.T, cfg *config.Config, st *store.Store, col
 // applies the exact same predicate a sequential scan would, including its
 // fail-open behavior on a Has() error: c1 is absent so it is scheduled, c2 is
 // present so it is skipped, c3's Has errors so it is scheduled anyway
-// (fail-open), c4 is not a Galaxy-type source so it is skipped regardless of
+// (fail-open), c4 is a git source whose locator-keyed artifact is present
+// (the shape discovery leaves behind) so it is skipped and counted present,
+// c6 is a type this tool does not resolve so it is skipped regardless of
 // cache state, and c5 is already installed (canSkipInstall reports true) so
 // it is skipped without ever reaching the Has probe. It also pins
-// buildPrefetchTasks' presence set: c2 is the only one of the five whose
-// probe both ran and found the artifact cached, so it is the only key
-// p.presence names.
+// buildPrefetchTasks' presence set: c2 and c4 are the only ones of the six
+// whose probe both ran and found the artifact cached, so they are the only
+// keys p.presence names.
 func TestBuildPrefetchTasksSchedulesExactlyTheRightSet(t *testing.T) {
 	t.Parallel()
 	c1 := collection{Namespace: "acme", Name: "absent", Version: "1.0.0", Type: "galaxy"}
 	c2 := collection{Namespace: "acme", Name: "present", Version: "1.0.0", Type: "galaxy"}
 	c3 := collection{Namespace: "acme", Name: "erroring", Version: "1.0.0", Type: "galaxy"}
-	c4 := collection{Namespace: "acme", Name: "nongalaxy", Version: "1.0.0", Type: "git"}
+	c4 := collection{
+		Namespace: "acme", Name: "fromgit", Version: "1.0.0", Type: "git",
+		Source: "git+https://h.example/acme/fromgit.git#@0123456789abcdef0123456789abcdef01234567",
+	}
 	c5 := collection{Namespace: "acme", Name: "installed", Version: "1.0.0", Type: "galaxy"}
+	c6 := collection{Namespace: "acme", Name: "nongalaxy", Version: "1.0.0", Type: "url"}
 
 	art := &presenceArtifacts{
-		present: map[string]bool{artifactKey(c2): true},
+		present: map[string]bool{artifactKey(c2): true, artifactKey(c4): true},
 		errKeys: map[string]bool{artifactKey(c3): true},
 	}
 	cfg := &config.Config{Workers: 2, DownloadPath: t.TempDir()}
@@ -248,6 +254,7 @@ func TestBuildPrefetchTasksSchedulesExactlyTheRightSet(t *testing.T) {
 		c3.key(): c3,
 		c4.key(): c4,
 		c5.key(): c5,
+		c6.key(): c6,
 	}
 
 	p := &prefetcher{done: make(map[string]chan struct{})}
@@ -278,6 +285,16 @@ func TestBuildPrefetchTasksSchedulesExactlyTheRightSet(t *testing.T) {
 	}
 
 	assertPresenceNamesOnlyC2(t, p, c1, c2, c3)
+	assertPresenceNamesGitRow(t, p, c4)
+}
+
+// assertPresenceNamesGitRow checks that the git row's locator-keyed artifact,
+// probed present, made it into buildPrefetchTasks' presence set.
+func assertPresenceNamesGitRow(t *testing.T, p *prefetcher, c4 collection) {
+	t.Helper()
+	if !p.presence[artifactKey(c4)] {
+		t.Fatalf("presence must name c4: its locator-keyed artifact was found cached")
+	}
 }
 
 // assertPresenceNamesOnlyC2 checks buildPrefetchTasks' presence set against
@@ -286,7 +303,8 @@ func TestBuildPrefetchTasksSchedulesExactlyTheRightSet(t *testing.T) {
 // set's total size - kept out of the calling test to stay under its
 // cyclomatic complexity budget. The four checks are ordered so each is the
 // first one a given mutation can fail: a broader check placed earlier would
-// mask a later, more specific one before it is ever reached.
+// mask a later, more specific one before it is ever reached. The size check
+// counts the git row too, which the caller asserts separately.
 func assertPresenceNamesOnlyC2(t *testing.T, p *prefetcher, c1, c2, c3 collection) {
 	t.Helper()
 	if p.presence[artifactKey(c1)] {
@@ -298,7 +316,7 @@ func assertPresenceNamesOnlyC2(t *testing.T, p *prefetcher, c1, c2, c3 collectio
 	if !p.presence[artifactKey(c2)] {
 		t.Fatalf("presence must name c2: its probe found the artifact cached and left it unscheduled")
 	}
-	if len(p.presence) != 1 {
-		t.Fatalf("len(p.presence) = %d, want 1 (only c2)", len(p.presence))
+	if len(p.presence) != 2 {
+		t.Fatalf("len(p.presence) = %d, want 2 (c2 and the cached git row)", len(p.presence))
 	}
 }

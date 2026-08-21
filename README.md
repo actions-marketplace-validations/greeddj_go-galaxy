@@ -21,8 +21,9 @@ difference is written down in
 
 ## Scope
 
-- Collections only (Galaxy API sources). Non-Galaxy sources (git/url/file/dir)
-  are not supported, and `roles` entries are ignored with a warning.
+- Collections only, from Galaxy API servers and from git repositories (https,
+  ssh, public or private). `url`, `file` and `dir` sources are not supported,
+  and `roles` entries are ignored with a warning.
 - `requirements.yml` is either a mapping carrying a `collections` list or a
   bare top-level list of collection entries; anything else is refused.
 - `ansible.cfg` is read for `[defaults] collections_path`, `[galaxy] server`,

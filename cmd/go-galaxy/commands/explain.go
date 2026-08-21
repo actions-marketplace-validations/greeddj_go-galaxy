@@ -42,7 +42,7 @@ func Explain() *cli.Command {
 			if err != nil {
 				return err
 			}
-			roots, _ := loadRootFQDNs(reqPath)
+			roots, _ := loadRootFQDNs(reqPath, lf)
 			rootSet := make(map[string]bool, len(roots))
 			for _, r := range roots {
 				rootSet[r] = true
@@ -91,8 +91,20 @@ func findExplainTarget(lf *lockfile.File, target string) (lockfile.Entry, []lock
 
 func printEntryHeader(w io.Writer, entry lockfile.Entry) {
 	_, _ = fmt.Fprintf(w, "%s %s\n", entry.Name, entry.Version)
+	if entry.Type != "" {
+		_, _ = fmt.Fprintf(w, "  type   : %s\n", entry.Type)
+	}
 	if entry.Source != "" {
 		_, _ = fmt.Fprintf(w, "  source : %s\n", entry.Source)
+	}
+	if entry.Ref != "" {
+		_, _ = fmt.Fprintf(w, "  ref    : %s\n", entry.Ref)
+	}
+	if entry.Commit != "" {
+		_, _ = fmt.Fprintf(w, "  commit : %s\n", entry.Commit)
+	}
+	if entry.Subdir != "" {
+		_, _ = fmt.Fprintf(w, "  subdir : %s\n", entry.Subdir)
 	}
 	if entry.SHA256 != "" {
 		_, _ = fmt.Fprintf(w, "  sha256 : %s\n", entry.SHA256)

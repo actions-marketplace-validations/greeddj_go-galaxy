@@ -40,6 +40,13 @@ type MetadataProvider struct {
 	// Solve returns, to stamp the same winning server onto each resolved
 	// collection's Source.
 	bindings map[string]string
+	// pins maps every fqdn a git discovery produced this run to what it
+	// found (see gitDiscoveryMemo.snapshot). A pinned fqdn is answered from
+	// here and never from a Galaxy server: its universe is the single version
+	// its galaxy.yml declares, its dependencies are that file's, and no
+	// binding is recorded for it - solverResultToResolvedGraph takes a pinned
+	// fqdn's source from the pin directly. Read-only after construction.
+	pins map[string]gitPin
 }
 
 // NewMetadataProvider builds a MetadataProvider sharing cfg/runtime/st with
@@ -70,7 +77,7 @@ func NewMetadataProvider(
 // through, rather than each provider getting its own scoped-to-nothing-else
 // copy the way NewMetadataProvider's own newCollectionDeps call produces.
 func newMetadataProviderWithDeps(deps collectionDeps, sources map[string]string) *MetadataProvider {
-	return &MetadataProvider{deps: deps, sources: sources, bindings: make(map[string]string)}
+	return &MetadataProvider{deps: deps, sources: sources, bindings: make(map[string]string), pins: deps.gitMemo.snapshot()}
 }
 
 // Highest returns fqdn's registry-reported highest_version, with no
@@ -79,6 +86,9 @@ func newMetadataProviderWithDeps(deps collectionDeps, sources map[string]string)
 // fetch) or a package whose root metadata carries no highest_version
 // reports ok=false, sending the core to Universe instead.
 func (p *MetadataProvider) Highest(ctx context.Context, fqdn string) (solver.Version, bool, error) {
+	if v, pinned, err := p.pinnedVersion(fqdn); pinned || err != nil {
+		return v, pinned, err
+	}
 	ns, name, err := splitFQDN(fqdn)
 	if err != nil {
 		return solver.Version{}, false, err
@@ -106,6 +116,12 @@ func (p *MetadataProvider) Highest(ctx context.Context, fqdn string) (solver.Ver
 // since the core would otherwise re-sort with the exact same comparator. An
 // unknown package returns (nil, nil), matching solver.Provider's contract.
 func (p *MetadataProvider) Universe(ctx context.Context, fqdn string) ([]solver.Version, error) {
+	if v, pinned, err := p.pinnedVersion(fqdn); pinned || err != nil {
+		if err != nil {
+			return nil, err
+		}
+		return []solver.Version{v}, nil
+	}
 	ns, name, err := splitFQDN(fqdn)
 	if err != nil {
 		return nil, err
@@ -135,6 +151,13 @@ func (p *MetadataProvider) Universe(ctx context.Context, fqdn string) ([]solver.
 // an unparseable constraint aborts wrapped, both as a provider contract
 // violation the core never tries to guess around.
 func (p *MetadataProvider) Dependencies(ctx context.Context, fqdn string, v solver.Version) (map[string]solver.Constraint, error) {
+	if pin, ok := p.pins[fqdn]; ok {
+		if v.Original() != pin.version {
+			return nil, fmt.Errorf("%w: git collection %s is built as %s, not %s",
+				helpers.ErrNoVersionSatisfiesConstraints, fqdn, pin.version, v.Original())
+		}
+		return canonicalizeDependencies(fqdn, pin.deps)
+	}
 	ns, name, err := splitFQDN(fqdn)
 	if err != nil {
 		return nil, err
@@ -388,4 +411,17 @@ func NewNoDepsProvider(p solver.Provider) solver.Provider {
 // wrapped provider.
 func (noDepsProvider) Dependencies(context.Context, string, solver.Version) (map[string]solver.Constraint, error) {
 	return map[string]solver.Constraint{}, nil
+}
+
+// pinnedVersion returns the single version a git pin declares for fqdn.
+func (p *MetadataProvider) pinnedVersion(fqdn string) (solver.Version, bool, error) {
+	pin, ok := p.pins[fqdn]
+	if !ok {
+		return solver.Version{}, false, nil
+	}
+	v, err := solver.NewVersion(pin.version)
+	if err != nil {
+		return solver.Version{}, false, fmt.Errorf("parsing git collection version for %s: %w", fqdn, err)
+	}
+	return v, true, nil
 }

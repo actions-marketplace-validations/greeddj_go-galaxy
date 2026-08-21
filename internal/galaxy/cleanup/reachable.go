@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
+	"path"
 	"slices"
+	"strings"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/greeddj/go-galaxy/internal/galaxy/gitsource"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 	"github.com/greeddj/go-galaxy/internal/galaxy/output"
@@ -53,7 +56,9 @@ import (
 //   - it lets a test fixture pin a genuine ordering bug with a single run
 //     instead of a statistical loop that only sometimes iterates the
 //     registry in the order that exposes it.
-func buildReachable(runtime *infra.Infra, registry *store.ProjectRegistry) (map[string]bool, map[string][]installedCollection, error) {
+func buildReachable(
+	runtime *infra.Infra, registry *store.ProjectRegistry, st *store.Store,
+) (map[string]bool, map[string][]installedCollection, error) {
 	reachable := make(map[string]bool)
 	installedIndex := make(map[string][]installedCollection)
 	depsByKey := make(map[string]map[string]string)
@@ -88,6 +93,12 @@ func buildReachable(runtime *infra.Infra, registry *store.ProjectRegistry) (map[
 			return nil, nil, err
 		}
 		for _, root := range roots {
+			if root.IsGit() {
+				for _, key := range gitRootKeys(st, installedByKey, root) {
+					markReachable(key, reachable, depsByKey, installedIndex, constraints)
+				}
+				continue
+			}
 			fqdn := fmt.Sprintf("%s.%s", root.Namespace, root.Name)
 			for _, inst := range selectInstalled(installedIndex, constraints, fqdn, root.Version) {
 				markReachable(inst.Key, reachable, depsByKey, installedIndex, constraints)
@@ -95,6 +106,83 @@ func buildReachable(runtime *infra.Infra, registry *store.ProjectRegistry) (map[
 		}
 	}
 	return reachable, installedByKey, nil
+}
+
+// gitRootKeys returns the installed keys a git requirement keeps alive. A git
+// root has no fqdn and no constraint of its own; what it names is whatever
+// its repository held at the commit it last resolved to, which the store's
+// git pin records under (url, ref, subdir) - the same answer the resolve
+// used. A root that names its collection keeps that one alone. When no pin is
+// recorded (a cache cleared since, or a project resolved by an older binary)
+// the installed records are read instead: every record whose source is a
+// locator of the same repository under the root's subdir, or an immediate
+// child of it, is kept, whatever commit it names - only one tree can live at
+// an install path, and a commit change replaces it at install time, so
+// keeping the tree that is there is the safe direction for a sweep.
+func gitRootKeys(st *store.Store, installedByKey map[string][]installedCollection, root requirements.CollectionRequirement) []string {
+	if pin, ok := st.GetGitPin(gitsource.PinKey(root.Source, root.Ref, root.Subdir)); ok {
+		return pinnedGitKeys(pin, installedByKey, root)
+	}
+	return installedGitKeys(st, installedByKey, root)
+}
+
+// pinnedGitKeys is gitRootKeys' pin branch: the installed keys among the
+// collections the pin records, narrowed to the named one when the root names
+// its collection.
+func pinnedGitKeys(pin store.GitPinEntry, installedByKey map[string][]installedCollection,
+	root requirements.CollectionRequirement,
+) []string {
+	keys := make([]string, 0)
+	for _, c := range pin.Collections {
+		if root.Name != "" && (c.Namespace != root.Namespace || c.Name != root.Name) {
+			continue
+		}
+		key := fmt.Sprintf("%s.%s@%s", c.Namespace, c.Name, c.Version)
+		if _, installed := installedByKey[key]; installed {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+// installedGitKeys is gitRootKeys' fallback when no pin is recorded: every
+// installed record sourced from a locator of the root's repository under its
+// subdir (or an immediate child), narrowed to the named collection when the
+// root names one, in sorted order.
+func installedGitKeys(st *store.Store, installedByKey map[string][]installedCollection,
+	root requirements.CollectionRequirement,
+) []string {
+	keys := make([]string, 0)
+	for key := range installedByKey {
+		entry, ok := st.GetInstalled(key)
+		if !ok || !gitsource.IsLocator(entry.Source) {
+			continue
+		}
+		loc, err := gitsource.ParseLocator(entry.Source)
+		if err != nil || loc.URL != root.Source || !gitSubdirWithin(loc.Subdir, root.Subdir) {
+			continue
+		}
+		if root.Name != "" && !strings.HasPrefix(key, root.Namespace+"."+root.Name+"@") {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// gitSubdirWithin reports whether an installed collection's subdir is the
+// root's own subdir or an immediate child of it - the two shapes a git
+// requirement expands into.
+func gitSubdirWithin(entrySubdir, rootSubdir string) bool {
+	if entrySubdir == rootSubdir {
+		return true
+	}
+	parent := path.Dir(entrySubdir)
+	if parent == "." {
+		parent = ""
+	}
+	return parent == rootSubdir
 }
 
 // projectRequirementRoots loads projectPath's requirements roots for

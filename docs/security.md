@@ -125,6 +125,31 @@ no packaging that clears that flag on your behalf.
   URL go-galaxy asked for rather than the hop that failed, so a presigned redirect target
   never reaches the log at all - at the cost of the message no longer saying which hop in
   the chain was unreachable.
+- A git repository named in `requirements.yml` is repository content, and everything
+  about it is judged on that basis. Its URL may carry no credential; credentials are
+  bound to a host through the environment and applied only when the scheme, host and
+  port match (see [Git sources and
+  credentials](servers-and-auth.md#git-sources-and-credentials)). Its path is held to a
+  conservative alphabet and may not begin with `-`, because the remote's upload-pack
+  receives it as an argument and go-git quotes but does not escape it. The remote is
+  spoken to directly - no `git` binary, no credential helper, no `~/.ssh/config` - over
+  this tool's own HTTP client, which carries no Galaxy token, relaxes no certificate
+  check, and refuses a redirect that would move the session off the origin (net/http
+  would otherwise forward a Basic `Authorization` header to a subdomain or across a
+  downgrade to plaintext); an ssh host key must already be in known_hosts, with no
+  first-use trust. What the remote can do to the process is bounded: the pack it ships
+  is capped on disk (both transports converge there), the fetch is bounded by the same
+  deadline as an artifact download, every tree entry name is validated before a path is
+  built from it (no `..`, `.git`, separators, control runes or case-folded duplicates),
+  blobs are capped at the archive's per-entry size, submodules are never fetched, and
+  nothing is ever checked out, so no hook, `.gitattributes` or `.gitmodules` is
+  interpreted. What remains bounded by go-git rather than by this tool is the inflated
+  size of a single object during pack indexing, which is why the pack cap is far below
+  the artifact cap. The artifact built from the tree passes the same manifest chain
+  check and the same extractor a downloaded artifact does, and its identity is the
+  `galaxy.yml` it was built from, compared against the collection being installed; a
+  signature can vouch for none of it, so a verifying run reports a git collection as the
+  vacuous pass it is.
 - Pinned (`--frozen`) installs are already immune to a poisoned snapshot: for a
   lockfile-pinned collection, go-galaxy hashes the actually downloaded (or on-disk)
   bytes and compares them to the sha256 recorded in the in-repo lockfile, not to the

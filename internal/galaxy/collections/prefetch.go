@@ -175,8 +175,12 @@ func buildPrefetchTasks(
 // buildPrefetchTasks' own doc comment for how it relies on that to record
 // col's cache key in its presence set unconditionally on cached alone.
 //
-// schedule is a Galaxy-type source that is neither already installed nor
-// already present in the artifact cache. A Has() error is treated as
+// schedule is a Galaxy or git source that is neither already installed nor
+// already present in the artifact cache. A git collection's artifact is
+// normally committed by discovery before the scan runs, so it reads as
+// cached here; it is absent - and scheduled - only after a --dry-run
+// discovery, under --no-cache, or on a --frozen miss, where prefetchOne
+// rebuilds it from its pinned commit. A Has() error is treated as
 // "schedule it" - the same fail-open behavior the original sequential scan
 // had, where a probe error fell through to scheduling rather than silently
 // skipping the collection - and reports cached=false: an errored probe found
@@ -195,7 +199,7 @@ func buildPrefetchTasks(
 // error handling below - a wrong "needs prefetch" only costs a redundant
 // background download, never correctness.
 func shouldSchedulePrefetch(ctx context.Context, deps prefetchDeps, col collection) (bool, bool) {
-	if !isGalaxyType(col.Type) {
+	if !isSupportedType(col.Type) {
 		return false, false
 	}
 	if target, ok := newInstallTarget(deps.root, deps.cfg, col); ok && installRecordMatches(target, col, deps.st) {
@@ -251,6 +255,12 @@ func prefetchOne(
 	deps prefetchDeps,
 	col collection,
 ) (*types.GalaxyCollectionVersionInfo, downloadResult, error) {
+	if col.isGit() {
+		gitDeps := newInstallDeps(deps.cfg, deps.runtime, deps.st, deps.artifacts, nil, nil, nil, nil)
+		gitDeps.collectionDeps = gitDeps.withGit(deps.gitStore, deps.gitMemo)
+		result, err := gitFetchToCache(ctx, gitDeps, col, true)
+		return nil, result, err
+	}
 	meta, err := loadCollectionMetadata(ctx, deps.collectionDeps, col)
 	if err != nil {
 		return nil, downloadResult{}, err
@@ -274,6 +284,7 @@ func prefetchOne(
 	// for the reason stated on prefetchDeps itself: this worker fills a
 	// policy-free shared cache and installs nothing.
 	downloadDeps := newInstallDeps(deps.cfg, deps.runtime, deps.st, deps.artifacts, nil, nil, nil, nil)
+	downloadDeps.collectionDeps = downloadDeps.withGit(deps.gitStore, deps.gitMemo)
 	result, err := downloadCollectionToCache(ctx, downloadDeps, artifactKey(col), col.Source, meta, true)
 	if err != nil {
 		return meta, downloadResult{}, err

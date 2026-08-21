@@ -79,6 +79,7 @@ func installWithState(ctx context.Context, cfg *config.Config, runtime *infra.In
 	depsCtx := newInstallDeps(
 		cfg, runtime, state.store, state.backend.Artifacts(), state.extractStore, root, plan.prefetch.cachedArtifacts(), plan.verify,
 	)
+	depsCtx.collectionDeps = depsCtx.withGit(state.backend.Artifacts(), state.gitMemo)
 	summary, err := installLevels(ctx, depsCtx, plan)
 	if err != nil {
 		return err

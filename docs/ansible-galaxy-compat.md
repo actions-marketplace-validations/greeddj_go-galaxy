@@ -106,6 +106,94 @@ would wrongly conclude the environment names are dead too - they are not.
   configured - the out-of-the-box state - or one under `--disable-gpg-verify`
   verifies nothing, and therefore checks no listing either.
 
+- **A git source is built from a commit here, not cloned by a git binary.**
+  ansible shells out to `git clone` and `git checkout` with whatever the
+  runner's git configuration, credential helpers and `~/.ssh/config` supply,
+  copies the checkout into the collections path, and records nothing about
+  where it came from. go-galaxy speaks the git protocol itself over https or
+  ssh, wants the commit the ref resolved to (never the name, so a branch
+  moved between the advertisement and the fetch cannot substitute content),
+  reads that commit's tree without a worktree or a checkout, builds the same
+  `MANIFEST.json` and `FILES.json` an `ansible-galaxy collection build` would
+  into an artifact, and from there on treats it exactly like a downloaded
+  one: cached under a key that carries the commit, extracted by the same
+  extractor, recorded with its commit in `GALAXY.yml`, and pinned in the
+  lockfile. The consequences, each deliberate:
+  - The pin is the commit. `lock` records `type: git`, the repository URL,
+    the ref as written, the commit and the subdir, and no `sha256` - the
+    artifact is rebuilt deterministically from the commit, and the gzip
+    bytes of a rebuild depend on the toolchain, so a digest over them would
+    fail a frozen install for no reason an operator could act on. A lockfile
+    with a git entry is written as `schema_version: 2`; one without stays
+    at `1`, byte for byte.
+  - `version:` on a git entry is a ref - a branch, a tag, a qualified
+    `refs/heads/...` or `refs/tags/...`, or a full forty-digit commit - and
+    defaults to `HEAD`. An abbreviated commit is refused (spell it in full,
+    or a branch that happens to be hexadecimal as `refs/heads/<name>`), and
+    a name that git itself would refuse to create is refused before any
+    request. An unqualified name that is both a branch and a tag resolves to
+    the branch, with a warning, as `git checkout` would.
+  - The collection's version is its `galaxy.yml` `version:` and has to be an
+    exact `MAJOR.MINOR.PATCH`; its namespace and name have to match the
+    collection-name alphabet. ansible installs a missing or non-semver
+    version as `*`. Here the run is refused naming the repository and the
+    remedy, because the install path, the cache key and the lockfile all
+    need an exact version.
+  - `build_ignore` is honored with Python `fnmatch` semantics (so `*`
+    matches `/`); `manifest:` directives are refused with a usage error
+    naming `build_ignore` as the alternative. A directory carrying both a
+    `galaxy.yml` and a `MANIFEST.json` is refused, where ansible silently
+    prefers the `MANIFEST.json` for a git checkout. A `MANIFEST.json` alone
+    is accepted and the tree is rebuilt, as ansible rebuilds it.
+  - `dependencies:` keys must be `namespace.name` and resolve through the
+    configured Galaxy servers (or another git source of the same run that
+    provides that name). ansible incidentally accepts a git URL or a local
+    path as a dependency key; here it is refused as an invalid dependency
+    key.
+  - A git collection is the single candidate for its `namespace.name`: a
+    Galaxy dependency that constrains it is satisfied by the git version or
+    fails the resolve with a proof. ansible lets whichever requirement
+    resolvelib happens to see first win, silently.
+  - One repository may hold several collections and is searched exactly as
+    ansible searches it: a `galaxy.yml` in the target directory (the root,
+    or the `#subdir`) is one collection, otherwise every immediate child
+    directory with a `galaxy.yml` or a `MANIFEST.json` is one, and all of
+    them install unless the entry names one (`name: namespace.name` beside
+    a git `source:`). `#<subdir>` and `,<ref>` keep ansible's order: the
+    comma is split first, then the fragment, so `<url>#sub,main` is ref
+    `main` under `sub`, while `<url>,main#sub` asks for a ref named
+    `main#sub` and fails at the remote, as it fails for ansible at
+    checkout.
+  - Credentials come from the environment, bound to a host (see [Git
+    sources and authentication](servers-and-auth.md#git-sources-and-credentials)).
+    No credential helper, `~/.netrc`, `~/.gitconfig` or `~/.ssh/config` is
+    read; a credential in the repository URL is refused; the certificate of
+    an https repository is always verified (`SSL_CERT_FILE`/`SSL_CERT_DIR`
+    for a private CA, no `ignore_certs` equivalent); the host key of an ssh
+    repository must be in known_hosts, with no trust-on-first-use; an ssh
+    URL names its login explicitly (`ssh://git@host/...`) rather than
+    defaulting to the local user; a redirect off the origin is refused.
+  - The fetch is shallow (depth 1) when the remote advertises `shallow`, a
+    direct fetch by hash when it advertises `allow-reachable-sha1-in-want`,
+    and a full fetch of the ref, or of every tip, otherwise. ansible clones
+    with `--depth=1` only for `HEAD` and in full for any named ref.
+    Submodules are never fetched (ansible never initializes them either);
+    their entries are skipped with a warning.
+  - Symlinks are kept only when they point inside the collection; one that
+    points outside is skipped with a warning, a dangling one fails the
+    build, and a `galaxy.yml` or `MANIFEST.json` that is itself a symlink
+    does not mark its directory as a collection (ansible's `isfile` follows
+    the link). A tree entry named `..`, `.git`, or anything that is not a safe
+    path element, and two entries whose names differ only in case, are
+    refused. `galaxy.yml` itself is not installed, as with ansible.
+  - A run resolves a branch or tag once and replays the commit it found
+    until `--refresh` asks again (editing the git line itself - its URL, ref
+    or subdir - is a new question; editing other entries is not);
+    `--offline` replays a recorded pin or fails. A dry run still fetches the
+    repository - the collections it holds cannot be known otherwise - and
+    writes nothing to the cache.
+  - `url`, `file` and `dir` sources remain refused at load.
+
 Resolution itself is stricter than ansible's: a constraint set with no solution
 is a failure with a proof, not a lenient pick. See [Exit codes](exit-codes.md#exit-codes) for
 what each failure class exits with.
@@ -234,15 +322,16 @@ does not define is a usage error naming the flag and exits `2`, which is how
 Two shapes ansible accepts are handled here in opposite ways, which is worth
 knowing before a `requirements.yml` written for ansible is pointed at this tool.
 
-- **A non-Galaxy collection source fails the whole file, rather than being
-  skipped.** A `type:` other than `galaxy`, or - where no `type:` is given - a
-  name that reads as a source rather than as `namespace.name`, meaning anything
-  containing `://` or starting with `git+`, `git@`, `/`, `./`, `../` or `~`,
-  is refused at load with the usage code (`2`), naming the offending value,
-  before any request is made. The messages are `unsupported collection type
-  "git" (only galaxy is supported)` and `unsupported collection source "..."
-  (only Galaxy API sources are supported)`. ansible installs these; here the
-  run does not start.
+- **A `url`, `file` or `dir` collection source fails the whole file, rather
+  than being skipped.** A `type:` other than `galaxy` or `git`, or - where no
+  `type:` is given - a name that reads as a source rather than as
+  `namespace.name` or a git pointer, meaning anything containing `://` or
+  starting with `/`, `./`, `../` or `~` (a `git+` or `git@` prefix is a git
+  source), is refused at load with the usage code (`2`), naming the offending
+  value, before any request is made. The messages are `unsupported collection
+  type "url" (only galaxy and git are supported)` and `unsupported collection
+  source "..." (only Galaxy API and git sources are supported)`. ansible
+  installs these; here the run does not start.
 - **`roles` are ignored, and the run still succeeds.** A file declaring
   `roles:` draws one warning naming them and everything else proceeds. A file
   declaring `roles:` and no `collections:` is therefore a successful run that

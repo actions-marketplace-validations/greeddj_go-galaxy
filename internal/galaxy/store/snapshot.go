@@ -102,6 +102,30 @@ type WarmedEntry struct {
 	ArtifactSHA256 string    `json:"artifact_sha256"`
 }
 
+// GitPinCollection is one collection a pinned git commit carried: its
+// identity, the subdir it was built from, and its raw galaxy.yml
+// dependencies, which is everything the solver needs to answer for it
+// without touching the remote again.
+type GitPinCollection struct {
+	Dependencies map[string]string `json:"dependencies,omitempty"`
+	Namespace    string            `json:"namespace"`
+	Name         string            `json:"name"`
+	Version      string            `json:"version"`
+	Subdir       string            `json:"subdir,omitempty"`
+}
+
+// GitPinEntry records what a (url, ref, subdir) git requirement resolved to:
+// the commit, and the collections discovered at it. Keyed by
+// gitsource.PinKey. A pin carries no retention window: it is invalidated by
+// the requirements signature (a changed ref re-resolves) and by --refresh,
+// never by the clock, because a branch that has not moved is the same answer
+// a month later and re-advertising it would cost a round trip for nothing.
+type GitPinEntry struct {
+	FetchedAt   time.Time          `json:"fetched_at"`
+	Commit      string             `json:"commit"`
+	Collections []GitPinCollection `json:"collections"`
+}
+
 // Store holds cached state for collections and metadata.
 type Store struct {
 	APICache     map[string]APICacheEntry   `json:"api_cache"`
@@ -112,6 +136,7 @@ type Store struct {
 	Resolved     map[string]ResolvedEntry   `json:"resolved"`
 	Versions     map[string]VersionsEntry   `json:"versions_cache"`
 	Warmed       map[string]WarmedEntry     `json:"warmed"`
+	GitPins      map[string]GitPinEntry     `json:"git_pins"`
 	Meta         SnapshotMeta               `json:"meta"`
 	mu           sync.RWMutex               `json:"-"`
 	// dirty records whether this process has written something into the
@@ -136,6 +161,7 @@ func New() *Store {
 		Resolved:     make(map[string]ResolvedEntry),
 		Versions:     make(map[string]VersionsEntry),
 		Warmed:       make(map[string]WarmedEntry),
+		GitPins:      make(map[string]GitPinEntry),
 	}
 }
 
@@ -175,10 +201,14 @@ func (s *Store) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// ResolvedEntry stores a resolved collection version and source.
+// ResolvedEntry stores a resolved collection version and source. Ref is set
+// only for a collection resolved from a git source: the branch, tag or
+// commit the requirements file asked for, kept so a lockfile built from a
+// replayed resolution records the same ref a fresh one would.
 type ResolvedEntry struct {
 	Version string `json:"version"`
 	Source  string `json:"source"`
+	Ref     string `json:"ref,omitempty"`
 }
 
 // RequirementSpec captures a requirement constraint and metadata.
@@ -264,6 +294,52 @@ func (s *Store) SetWarmed(key, artifactSHA string) {
 	defer s.mu.Unlock()
 	s.Warmed[key] = WarmedEntry{WarmedAt: time.Now().UTC(), ArtifactSHA256: artifactSHA}
 	s.dirty = true
+}
+
+// GetGitPin returns the pin recorded under key, deep-copied so a caller can
+// neither observe nor cause a later mutation.
+func (s *Store) GetGitPin(key string) (GitPinEntry, bool) {
+	if s == nil {
+		return GitPinEntry{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entry, ok := s.GitPins[key]
+	if !ok {
+		return GitPinEntry{}, false
+	}
+	return cloneGitPin(entry), true
+}
+
+// SetGitPin records entry under key, deep-copying it and stamping
+// FetchedAt with the current time. An empty key or commit is ignored: a pin
+// that names no commit protects nothing and would only ever be replayed into
+// a failure.
+func (s *Store) SetGitPin(key string, entry GitPinEntry) {
+	if s == nil || key == "" || entry.Commit == "" {
+		return
+	}
+	clone := cloneGitPin(entry)
+	clone.FetchedAt = time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.GitPins[key] = clone
+	s.dirty = true
+}
+
+// cloneGitPin copies a pin and every reference-type field inside it.
+func cloneGitPin(entry GitPinEntry) GitPinEntry {
+	clone := entry
+	clone.Collections = make([]GitPinCollection, len(entry.Collections))
+	for i, c := range entry.Collections {
+		cc := c
+		if c.Dependencies != nil {
+			cc.Dependencies = make(map[string]string, len(c.Dependencies))
+			maps.Copy(cc.Dependencies, c.Dependencies)
+		}
+		clone.Collections[i] = cc
+	}
+	return clone
 }
 
 // WarmedArtifactSHAByKey returns a fresh map from warmed collection key to
@@ -373,7 +449,9 @@ func (s *Store) SetAPICache(key string, entry APICacheEntry) {
 	s.dirty = true
 }
 
-// ClearCaches clears API, dependency, and versions caches.
+// ClearCaches clears the API, dependency, versions and git pin caches: every
+// bucket that is an answer from a remote rather than a record of content on
+// disk.
 func (s *Store) ClearCaches() {
 	if s == nil {
 		return
@@ -383,6 +461,7 @@ func (s *Store) ClearCaches() {
 	s.APICache = make(map[string]APICacheEntry)
 	s.DepsCache = make(map[string]DepsCacheEntry)
 	s.Versions = make(map[string]VersionsEntry)
+	s.GitPins = make(map[string]GitPinEntry)
 	s.dirty = true
 }
 
@@ -699,6 +778,7 @@ type snapshotData struct {
 	Resolved     map[string]ResolvedEntry
 	Versions     map[string]VersionsEntry
 	Warmed       map[string]WarmedEntry
+	GitPins      map[string]GitPinEntry
 	Meta         SnapshotMeta
 }
 
@@ -724,6 +804,7 @@ func (s *Store) MarshalSnapshot() ([]byte, error) {
 		Resolved:     data.Resolved,
 		Versions:     data.Versions,
 		Warmed:       data.Warmed,
+		GitPins:      data.GitPins,
 		Meta:         data.Meta,
 	}
 	return json.Marshal(snapshot)
@@ -754,6 +835,7 @@ func (s *Store) ensureMaps() {
 	s.Resolved = ensureMap(s.Resolved)
 	s.Versions = ensureMap(s.Versions)
 	s.Warmed = ensureMap(s.Warmed)
+	s.GitPins = ensureMap(s.GitPins)
 }
 
 // ensureMap returns m when it is non-nil and a fresh empty map otherwise.
@@ -850,6 +932,7 @@ func (s *Store) snapshotData() snapshotData {
 		Resolved:     make(map[string]ResolvedEntry, len(s.Resolved)),
 		Versions:     make(map[string]VersionsEntry, len(s.Versions)),
 		Warmed:       make(map[string]WarmedEntry, len(s.Warmed)),
+		GitPins:      make(map[string]GitPinEntry, len(s.GitPins)),
 	}
 
 	for key, entry := range s.APICache {
@@ -910,6 +993,11 @@ func (s *Store) snapshotData() snapshotData {
 		data.Versions[key] = VersionsEntry{FetchedAt: entry.FetchedAt, List: clone}
 	}
 	copyFreshWarmed(data.Warmed, s.Warmed, warmedWindow)
+	// Git pins are copied whole: see GitPinEntry for why they carry no
+	// retention window.
+	for key, entry := range s.GitPins {
+		data.GitPins[key] = cloneGitPin(entry)
+	}
 
 	return data
 }
@@ -1033,7 +1121,7 @@ func Load(dbs *DBs) (*Store, error) {
 }
 
 // Save writes cached state to the consolidated Bolt database. The meta
-// bucket and all eight data buckets are written inside a single Bolt
+// bucket and all nine data buckets are written inside a single Bolt
 // transaction so a mid-save failure (e.g. a key or value exceeding Bolt's
 // limits) leaves the previously committed snapshot fully intact instead of
 // a partially overwritten mix of old and new data.
@@ -1084,35 +1172,61 @@ func runSteps(steps []func() error) error {
 	return nil
 }
 
-// runLoadSteps reads the eight data buckets in the given transaction.
-func runLoadSteps(tx *bolt.Tx, store *Store) error {
-	return runSteps([]func() error{
-		func() error { return loadJSONBucket(tx, helpers.StoreBucketAPICache, store.APICache) },
-		func() error { return loadJSONBucket(tx, helpers.StoreBucketInstalled, store.Installed) },
-		func() error { return loadJSONBucket(tx, helpers.StoreBucketDepsCache, store.DepsCache) },
-		func() error { return loadJSONBucket(tx, helpers.StoreBucketGraph, store.Graph) },
-		func() error { return loadJSONBucket(tx, helpers.StoreBucketRequirements, store.Requirements) },
-		func() error { return loadJSONBucket(tx, helpers.StoreBucketResolved, store.Resolved) },
-		func() error { return loadJSONBucket(tx, helpers.StoreBucketVersions, store.Versions) },
-		func() error { return loadJSONBucket(tx, helpers.StoreBucketWarmed, store.Warmed) },
-	})
+// jsonBucketIO is one data bucket bound to the maps it is mirrored in, in
+// both directions at once: load fills the live store's map, save writes the
+// snapshot copy's. Binding both together means a bucket cannot be listed for
+// one direction and forgotten in the other.
+type jsonBucketIO struct {
+	load func(*bolt.Tx) error
+	save func(*bolt.Tx) error
 }
 
-// runSaveSteps writes the eight data buckets in the given transaction, in a
-// fixed order (api_cache, deps_cache, installed, graph, requirements,
-// resolved, versions_cache, warmed) that callers rely on for fault injection
-// tests.
+// bindJSONBucket pairs the named bucket with the store map it loads into and
+// the snapshot map it saves from.
+func bindJSONBucket[T any](name string, dst, src map[string]T) jsonBucketIO {
+	return jsonBucketIO{
+		load: func(tx *bolt.Tx) error { return loadJSONBucket(tx, name, dst) },
+		save: func(tx *bolt.Tx) error { return saveJSONBucket(tx, name, src) },
+	}
+}
+
+// jsonBuckets lists the nine data buckets in the one fixed order both
+// runners follow (api_cache, deps_cache, installed, graph, requirements,
+// resolved, versions_cache, warmed, git_pins), which fault injection tests
+// rely on for the save side.
+func jsonBuckets(store *Store, data snapshotData) []jsonBucketIO {
+	return []jsonBucketIO{
+		bindJSONBucket(helpers.StoreBucketAPICache, store.APICache, data.APICache),
+		bindJSONBucket(helpers.StoreBucketDepsCache, store.DepsCache, data.DepsCache),
+		bindJSONBucket(helpers.StoreBucketInstalled, store.Installed, data.Installed),
+		bindJSONBucket(helpers.StoreBucketGraph, store.Graph, data.Graph),
+		bindJSONBucket(helpers.StoreBucketRequirements, store.Requirements, data.Requirements),
+		bindJSONBucket(helpers.StoreBucketResolved, store.Resolved, data.Resolved),
+		bindJSONBucket(helpers.StoreBucketVersions, store.Versions, data.Versions),
+		bindJSONBucket(helpers.StoreBucketWarmed, store.Warmed, data.Warmed),
+		bindJSONBucket(helpers.StoreBucketGitPins, store.GitPins, data.GitPins),
+	}
+}
+
+// runLoadSteps reads the nine data buckets in the given transaction.
+func runLoadSteps(tx *bolt.Tx, store *Store) error {
+	buckets := jsonBuckets(store, snapshotData{})
+	steps := make([]func() error, 0, len(buckets))
+	for _, b := range buckets {
+		steps = append(steps, func() error { return b.load(tx) })
+	}
+	return runSteps(steps)
+}
+
+// runSaveSteps writes the nine data buckets in the given transaction, in the
+// fixed order jsonBuckets states.
 func runSaveSteps(tx *bolt.Tx, data snapshotData) error {
-	return runSteps([]func() error{
-		func() error { return saveJSONBucket(tx, helpers.StoreBucketAPICache, data.APICache) },
-		func() error { return saveJSONBucket(tx, helpers.StoreBucketDepsCache, data.DepsCache) },
-		func() error { return saveJSONBucket(tx, helpers.StoreBucketInstalled, data.Installed) },
-		func() error { return saveJSONBucket(tx, helpers.StoreBucketGraph, data.Graph) },
-		func() error { return saveJSONBucket(tx, helpers.StoreBucketRequirements, data.Requirements) },
-		func() error { return saveJSONBucket(tx, helpers.StoreBucketResolved, data.Resolved) },
-		func() error { return saveJSONBucket(tx, helpers.StoreBucketVersions, data.Versions) },
-		func() error { return saveJSONBucket(tx, helpers.StoreBucketWarmed, data.Warmed) },
-	})
+	buckets := jsonBuckets(&Store{}, data)
+	steps := make([]func() error, 0, len(buckets))
+	for _, b := range buckets {
+		steps = append(steps, func() error { return b.save(tx) })
+	}
+	return runSteps(steps)
 }
 
 // loadMeta reads the meta bucket into store.Meta. When the meta bucket does

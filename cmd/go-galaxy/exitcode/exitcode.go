@@ -351,10 +351,20 @@ func isCacheCorruptError(err error) bool {
 // listed file against FILES.json's - which is this class's own question,
 // whatever a signature check wrapped around it concluded; isSignatureError's
 // one member asks who vouched for the bytes instead.
+//
+// The two git sentinels are members on the same predicate. A remote that
+// advertised one commit and shipped a pack without it, or that answered a
+// request for a commit with a different one, delivered bytes that do not
+// match the identity they were promised under (helpers.ErrGitCommitMismatch);
+// and a pinned git collection whose rebuild from its commit names a different
+// namespace, name or version than the pin is the lockfile's own digest
+// question asked of a commit (helpers.ErrGitArtifactIdentityMismatch).
 func isIntegrityError(err error) bool {
 	return errors.Is(err, helpers.ErrSHA256Mismatch) ||
 		errors.Is(err, helpers.ErrMalformedArtifactSHA256) ||
-		errors.Is(err, helpers.ErrManifestChainMismatch)
+		errors.Is(err, helpers.ErrManifestChainMismatch) ||
+		errors.Is(err, helpers.ErrGitCommitMismatch) ||
+		errors.Is(err, helpers.ErrGitArtifactIdentityMismatch)
 }
 
 // isSignatureError reports whether err carries one collection's signature
@@ -459,7 +469,25 @@ func isServerSuppliedURLPolicyError(err error) bool {
 // same sentinel set.
 func isInstallError(err error) bool {
 	return isFileIntegrityError(err) || isArchiveError(err) ||
-		isSymlinkError(err) || isArtifactShapeError(err)
+		isSymlinkError(err) || isArtifactShapeError(err) || isGitBuildError(err)
+}
+
+// isGitBuildError reports whether err says a git tree could not be turned
+// into a collection artifact: an entry name this tool refuses to materialize,
+// two entries that would land on one name, nesting beyond the depth cap, a
+// symlink that resolves nowhere inside the collection, or an artifact the
+// builder produced and then failed its own manifest chain check on. Every
+// member is about content that arrived intact and still cannot be installed,
+// which is isArchiveError's own question asked of a tree instead of a tar,
+// so the class is the same. The per-blob, entry-count and total-size budgets
+// a git build enforces raise the archive budget sentinels themselves and
+// classify through isArchiveBudgetError without an entry here.
+func isGitBuildError(err error) bool {
+	return errors.Is(err, helpers.ErrGitTreeEntryInvalid) ||
+		errors.Is(err, helpers.ErrGitTreeDuplicateEntry) ||
+		errors.Is(err, helpers.ErrGitTreeTooDeep) ||
+		errors.Is(err, helpers.ErrGitSymlinkUnresolvable) ||
+		errors.Is(err, helpers.ErrGitArtifactSelfCheck)
 }
 
 // isArtifactShapeError reports whether err says what arrived does not have the
@@ -672,6 +700,11 @@ func isSignatureTransportError(err error) bool {
 // ExitInstall once joined behind helpers.ErrInstallationFailed by
 // isFileIntegrityError's match on that headline, identical to every other
 // per-collection cause.
+//
+// The server-side refusals - a Galaxy server list walk aborting and a git
+// source's wire failures - are matched by isRemoteRefusalError; the split is
+// purely to stay under the cyclomatic-complexity budget and the two together
+// still cover one class.
 func isTransportError(err error) bool {
 	return errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, helpers.ErrArtifactDownloadDeadline) ||
@@ -680,9 +713,23 @@ func isTransportError(err error) bool {
 		errors.Is(err, helpers.ErrOfflineMode) ||
 		errors.Is(err, helpers.ErrDownloadFailed) ||
 		errors.Is(err, helpers.ErrCacheBackendUnavailable) ||
-		errors.Is(err, helpers.ErrGalaxyAuthFailed) ||
+		errors.Is(err, helpers.ErrResponseTooLarge) ||
+		isRemoteRefusalError(err)
+}
+
+// isRemoteRefusalError reports whether err is a remote that refused or could
+// not answer: a Galaxy server-list walk aborting on a credential failure or
+// an exhausted retry budget (helpers.ErrGalaxyAuthFailed,
+// helpers.ErrGalaxyServerUnavailable), and the git shapes of the same two - a
+// transport, protocol or host-key-database failure while talking to a
+// repository (helpers.ErrGitTransportFailed) and a credential or host key the
+// remote did not accept (helpers.ErrGitAuthFailed). All four are runtime
+// conditions to investigate rather than configuration shapes to fix.
+func isRemoteRefusalError(err error) bool {
+	return errors.Is(err, helpers.ErrGalaxyAuthFailed) ||
 		errors.Is(err, helpers.ErrGalaxyServerUnavailable) ||
-		errors.Is(err, helpers.ErrResponseTooLarge)
+		errors.Is(err, helpers.ErrGitTransportFailed) ||
+		errors.Is(err, helpers.ErrGitAuthFailed)
 }
 
 // isMetadataFetchError reports whether err is a Galaxy metadata-response
@@ -736,30 +783,84 @@ func isMetadataFetchError(err error) bool {
 // one, helpers.ErrInvalidDependencyKey, is malformed graph input discovered
 // while walking a collection's declared dependencies - no retry repairs it,
 // the same reasoning that makes every other member of this class a
-// resolution failure rather than a network or install one.
+// resolution failure rather than a network or install one. The members that
+// say no candidate exists at all are matched by isNoCandidateError; the split
+// is purely to stay under the cyclomatic-complexity budget and the two
+// together still cover one class.
 func isResolutionError(err error) bool {
 	return errors.Is(err, helpers.ErrNoVersionSatisfiesConstraints) ||
 		errors.Is(err, helpers.ErrConflictingRootConstraints) ||
 		errors.Is(err, helpers.ErrConflictingExactVersions) ||
 		errors.Is(err, helpers.ErrDependencyGraphHasACycle) ||
-		errors.Is(err, helpers.ErrNoSemverCandidates) ||
 		errors.Is(err, helpers.ErrMissingResolvedParent) ||
 		errors.Is(err, helpers.ErrMissingResolvedDependency) ||
 		errors.Is(err, helpers.ErrMissingResolvedRoot) ||
 		errors.Is(err, helpers.ErrLoadMetadataFailed) ||
-		errors.Is(err, helpers.ErrInvalidDependencyKey)
+		errors.Is(err, helpers.ErrInvalidDependencyKey) ||
+		isNoCandidateError(err)
+}
+
+// isNoCandidateError reports whether err says nothing exists for what
+// requirements.yml asked for: a Galaxy collection with no semver release
+// (helpers.ErrNoSemverCandidates), and the same answer from a repository - a
+// git ref the remote does not advertise, or a commit it does not hold
+// (helpers.ErrGitRefNotFound, helpers.ErrGitCommitNotFound).
+func isNoCandidateError(err error) bool {
+	return errors.Is(err, helpers.ErrNoSemverCandidates) ||
+		errors.Is(err, helpers.ErrGitRefNotFound) ||
+		errors.Is(err, helpers.ErrGitCommitNotFound)
 }
 
 // isUsageError reports whether err is a configuration or CLI-input sentinel
 // (invalid flags, malformed requirements, or a missing path). Split into
-// five sub-checks purely to stay under the cyclomatic-complexity budget;
-// the five together still cover the exact same sentinel set.
+// six sub-checks purely to stay under the cyclomatic-complexity budget;
+// the six together still cover the exact same sentinel set.
 func isUsageError(err error) bool {
 	return isConfigUsageError(err) ||
 		isGalaxyServerConfigError(err) ||
 		isCollectionNameUsageError(err) ||
 		isCollectionListUsageError(err) ||
-		isSignatureConfigError(err)
+		isSignatureConfigError(err) ||
+		isGitUsageError(err)
+}
+
+// isGitUsageError reports whether err says a git source, as written in
+// requirements.yml or bound through the environment, cannot be used as given:
+// a URL, ref, subdir or locator this tool refuses; an explicit collection name
+// the repository does not carry; a repository (or subdir) holding no
+// collection, or holding one twice; a galaxy.yml that cannot be built from, or
+// whose version is not exact; a credential binding that does not parse; or an
+// ssh source with neither a bound key nor an agent. The predicate every member
+// shares with the rest of this class is that an operator has to change
+// something - the requirements file, a galaxy.yml in the repository, or an
+// environment variable - and no retry repairs it. That holds even for the
+// members discovered only after a network round trip (a missing galaxy.yml is
+// learned from the fetched tree): what the round trip found is a shape
+// defect, not a transport one. Split into the locator half here and the
+// repository-content half in isGitContentUsageError purely to stay under the
+// cyclomatic-complexity budget; the two together still cover one class.
+func isGitUsageError(err error) bool {
+	return errors.Is(err, helpers.ErrInvalidGitURL) ||
+		errors.Is(err, helpers.ErrGitURLUserinfo) ||
+		errors.Is(err, helpers.ErrInvalidGitRef) ||
+		errors.Is(err, helpers.ErrGitAbbreviatedCommit) ||
+		errors.Is(err, helpers.ErrInvalidGitSubdir) ||
+		errors.Is(err, helpers.ErrInvalidGitLocator) ||
+		errors.Is(err, helpers.ErrGitCredentialInvalid) ||
+		errors.Is(err, helpers.ErrGitSSHNoCredential) ||
+		isGitContentUsageError(err)
+}
+
+// isGitContentUsageError reports whether err says what the repository holds
+// cannot be used as given: an explicit collection name it does not carry, no
+// collection (or one twice) under the subdir, or a galaxy.yml that cannot be
+// built from or whose version is not exact.
+func isGitContentUsageError(err error) bool {
+	return errors.Is(err, helpers.ErrGitNameMismatch) ||
+		errors.Is(err, helpers.ErrGitCollectionNotFound) ||
+		errors.Is(err, helpers.ErrGitDuplicateCollection) ||
+		errors.Is(err, helpers.ErrGalaxyYMLInvalid) ||
+		errors.Is(err, helpers.ErrGitCollectionVersionNotExact)
 }
 
 // isSignatureConfigError reports whether err says this run's signature

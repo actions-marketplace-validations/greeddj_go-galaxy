@@ -14,6 +14,7 @@ import (
 	"github.com/Masterminds/semver/v3"
 	cacheManager "github.com/greeddj/go-galaxy/internal/galaxy/cache"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
+	"github.com/greeddj/go-galaxy/internal/galaxy/gitsource"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
 	"github.com/psvmcc/hub/pkg/types"
@@ -82,6 +83,19 @@ func resolveCollectionsInternal(
 	cfg := deps.cfg
 	st := deps.st
 	allowSnapshot := mode == resolveTopLevel
+
+	// Git roots are expanded before anything else looks at the roots: a git
+	// requirement has no identity until its repository has been read, and
+	// the requirements signature below must cover the commit it resolved to
+	// (its locator) rather than the ref it was written with. That ordering is
+	// what keeps --clear-cache honest: ClearCaches drops the git pins but
+	// keeps the resolved snapshot, and a signature computed over the
+	// unexpanded roots would replay the old commit's graph while the pin
+	// bucket, re-discovered, named a newer one.
+	roots, err := expandGitRoots(ctx, deps, roots)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	reqSpec := buildRequirementsSpec(roots)
 	reqHash := requirementsSignatureFromSpec(reqSpec, cfg.NoDeps, serversSignature(cfg))
@@ -209,7 +223,7 @@ func setResolvedAll(st *store.Store, resolved map[string]collection) {
 	}
 	entries := make(map[string]store.ResolvedEntry, len(resolved))
 	for fqdn, col := range resolved {
-		entries[fqdn] = store.ResolvedEntry{Version: col.Version, Source: col.Source}
+		entries[fqdn] = store.ResolvedEntry{Version: col.Version, Source: col.Source, Ref: col.Ref}
 	}
 	st.SetResolvedAll(entries)
 }
@@ -1053,20 +1067,11 @@ func addPreservedEntry(
 	if !ok || entry.Version != version {
 		return false
 	}
-	namespace, name, ok := helpers.SplitFQDN(fqdn)
+	col, ok := collectionFromResolvedEntry(cfg, fqdn, entry)
 	if !ok {
 		return false
 	}
-	source := entry.Source
-	if source == "" {
-		source = cfg.Server
-	}
-	preservedResolved[fqdn] = collection{
-		Namespace: namespace,
-		Name:      name,
-		Version:   version,
-		Source:    source,
-	}
+	preservedResolved[fqdn] = col
 	return true
 }
 
@@ -1149,20 +1154,11 @@ func ensureResolvedFromSnapshot(
 	if !ok || entry.Version != version {
 		return false
 	}
-	namespace, name, ok := helpers.SplitFQDN(fqdn)
+	col, ok := collectionFromResolvedEntry(cfg, fqdn, entry)
 	if !ok {
 		return false
 	}
-	source := entry.Source
-	if source == "" {
-		source = cfg.Server
-	}
-	mergedResolved[fqdn] = collection{
-		Namespace: namespace,
-		Name:      name,
-		Version:   version,
-		Source:    source,
-	}
+	mergedResolved[fqdn] = col
 	return true
 }
 
@@ -1319,35 +1315,64 @@ func snapshotMatchesRequirements(st *store.Store, reqHash string) bool {
 func buildResolvedSnapshot(cfg *config.Config, resolvedSnapshot map[string]store.ResolvedEntry) (map[string]collection, bool) {
 	resolved := make(map[string]collection, len(resolvedSnapshot))
 	for fqdn, entry := range resolvedSnapshot {
-		if entry.Version == "" {
-			return nil, false
-		}
-		namespace, name, ok := helpers.SplitFQDN(fqdn)
+		col, ok := collectionFromResolvedEntry(cfg, fqdn, entry)
 		if !ok {
 			return nil, false
 		}
-		source := entry.Source
-		if source == "" {
-			source = cfg.Server
-		}
-		resolved[fqdn] = collection{
-			Namespace: namespace,
-			Name:      name,
-			Version:   entry.Version,
-			Source:    source,
-		}
+		resolved[fqdn] = col
 	}
 	return resolved, true
 }
 
+// collectionFromResolvedEntry rebuilds the collection value a snapshot entry
+// recorded. It is the one place the three snapshot readers (whole replay,
+// preserved roots, merged graph) agree on what an entry means: a Galaxy entry
+// with no source defaults to the run's own server, while a git entry - one
+// whose source is a locator - keeps its locator untouched and gets its type
+// and ref back, since the locator is the identity everything downstream keys
+// on and the ref is what the lockfile records.
+func collectionFromResolvedEntry(cfg *config.Config, fqdn string, entry store.ResolvedEntry) (collection, bool) {
+	if entry.Version == "" {
+		return collection{}, false
+	}
+	namespace, name, ok := helpers.SplitFQDN(fqdn)
+	if !ok {
+		return collection{}, false
+	}
+	col := collection{
+		Namespace: namespace,
+		Name:      name,
+		Version:   entry.Version,
+		Source:    entry.Source,
+	}
+	switch {
+	case gitsource.IsLocator(entry.Source):
+		loc, err := gitsource.ParseLocator(entry.Source)
+		if err != nil || !loc.Pinned() {
+			return collection{}, false
+		}
+		col.Type = typeGit
+		col.Ref = entry.Ref
+	case entry.Source == "":
+		col.Source = cfg.Server
+	}
+	return col, true
+}
+
 func rootsMatchSnapshot(roots []collection, resolved map[string]collection, graphSnapshot map[string][]string) bool {
 	for _, root := range roots {
-		if !isGalaxyType(root.Type) {
+		if !isSupportedType(root.Type) {
 			return false
 		}
 		fqdn := fmt.Sprintf("%s.%s", root.Namespace, root.Name)
 		col, ok := resolved[fqdn]
 		if !ok {
+			return false
+		}
+		// A git root is pinned to a locator, which carries the commit: a
+		// snapshot whose entry names another commit for the same collection
+		// is another resolution, however its version compares.
+		if root.isGit() && col.Source != root.Source {
 			return false
 		}
 		constraint := root.Constraint

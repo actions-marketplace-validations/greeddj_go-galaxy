@@ -128,7 +128,7 @@ func cleanupWithState(ctx context.Context, cfg *config.Config, runtime *infra.In
 	}
 	warnIfSnapshotNotPersisted(runtime, state.store)
 
-	reachable, installedByKey, err := buildReachable(runtime, state.registry)
+	reachable, installedByKey, err := buildReachable(runtime, state.registry, state.store)
 	if err != nil {
 		return err
 	}

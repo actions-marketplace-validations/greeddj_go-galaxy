@@ -212,6 +212,15 @@ sources will not be checked.
   manifest chain, a missing `MANIFEST.json`, or a signature that vouches for
   a different collection all do evict and retry once.
 
+A collection built from a git source carries no signature and can carry none:
+its `MANIFEST.json` is written here, at build time, and nobody has signed it.
+A verifying run therefore reports every git collection as the vacuous pass
+described above, with the same warning, and a strict `+N` spelling fails it -
+which is the honest answer, since the run was told to require a signature it
+cannot have. Its attribution rests instead on the identity the builder read
+from `galaxy.yml` being the one the resolve asked for, and on the manifest
+chain check below, which the builder runs on every artifact it produces.
+
 ## Manifest chain check
 
 Once at least one signature verifies, the artifact is checked against

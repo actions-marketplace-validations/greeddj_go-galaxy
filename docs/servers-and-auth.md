@@ -211,6 +211,77 @@ environment rather than the file: export
 and [Galaxy servers and authentication](#galaxy-servers-and-authentication)
 for the exact rule and its remedies.
 
+## Git sources and credentials
+
+A collection that comes from a git repository (see
+[requirements.yml](configuration.md#requirementsyml) for the spellings) is
+fetched over https or ssh by go-galaxy itself: no `git` binary is executed,
+and therefore no credential helper, `~/.netrc`, `~/.ssh/config` or git
+configuration of the runner is consulted. Whatever a private repository needs
+is bound through the environment, and bound to a host, never written into
+the requirements file.
+
+```bash
+export GO_GALAXY_GIT_CREDENTIALS=hub,forge
+
+# an https host: Basic auth; a personal access token or a CI job token goes
+# in PASSWORD, and USERNAME is whatever the host expects beside it
+export GO_GALAXY_GIT_HUB_URL=https://gitlab.example.internal
+export GO_GALAXY_GIT_HUB_USERNAME=gitlab-ci-token
+export GO_GALAXY_GIT_HUB_PASSWORD="$CI_JOB_TOKEN"
+
+# an ssh host: a private key, inline or from a file, with an optional
+# passphrase; the ssh login comes from the repository URL (git@...)
+export GO_GALAXY_GIT_FORGE_URL=ssh://forge.example.internal
+export GO_GALAXY_GIT_FORGE_SSH_KEY_FILE=/run/secrets/deploy_key
+export GO_GALAXY_GIT_FORGE_SSH_KEY_PASSPHRASE="$DEPLOY_KEY_PASSPHRASE"
+```
+
+`GO_GALAXY_GIT_CREDENTIALS` lists credential ids, under the same grammar as
+`server_list` ids (`^[A-Za-z0-9_-]+$`, no two equal or differing only in
+case). Each id is read from `GO_GALAXY_GIT_<ID>_*` with `<ID>` upper-cased.
+`_URL` is required and names what the credential applies to: a scheme
+(`https`, `http` or `ssh`), a host, an optional port and an optional path
+prefix - `https://gitlab.example.internal/platform` covers every repository
+under that group and nothing beside it. A credential applies to a requirement
+URL only when the scheme, host and port match exactly and the path carries the
+prefix; among several matching bindings the longest prefix wins. Nothing is
+ever inferred from the requirement URL's own user, and a requirement URL that
+carries a password of its own is refused outright, because it is repository
+content.
+
+The remaining keys decide the kind, and the kind has to fit the scheme:
+`_USERNAME` and `_PASSWORD` together make a Basic credential for an http(s)
+host (one without the other is refused; a token is a password here - GitHub
+and GitLab both take it that way); `_SSH_KEY` (the PEM text) or
+`_SSH_KEY_FILE` (a path, read once at startup), with an optional
+`_SSH_KEY_PASSPHRASE`, make a key credential for an ssh host (both key forms
+at once, or a passphrase without a key, is refused). A binding with neither
+kind, two ids bound to one URL, or a Basic credential for a plaintext `http`
+host that is not loopback, are refused the same way a Galaxy token on a
+plaintext server is. An unknown `GO_GALAXY_GIT_<ID>_*` variable for a
+declared id is warned about and ignored; variables for an id that is not
+listed are ignored silently.
+
+An ssh repository with no bound key is reached through the agent
+`SSH_AUTH_SOCK` names, and an ssh repository with neither a bound key nor an
+agent is a configuration error, not a network one. The host key is checked
+against `SSH_KNOWN_HOSTS` when that is set and against `~/.ssh/known_hosts`
+and `/etc/ssh/ssh_known_hosts` otherwise; a host that none of them vouches
+for, or whose key changed, fails the run - there is no trust-on-first-use,
+and there is no flag to add one. An https repository's certificate is always
+verified; `SSL_CERT_FILE`/`SSL_CERT_DIR` supply a private CA, and no
+`validate_certs` equivalent exists for git. A redirect that would move the
+session to another scheme, host or port is refused rather than followed, so
+a credential never travels anywhere but the origin it was bound to; write
+the address the remote actually serves.
+
+Every git secret is a `Secret` value like a Galaxy token: it never appears
+in the snapshot, the lockfile, `GALAXY.yml`, the metrics file or any printed
+line, and the lockfile records a repository URL, never a credential. Prefer
+the environment over any file for the same reason the `--token` section
+gives; there is deliberately no flag for a git credential.
+
 ## Rejected as configuration errors
 
 These are refused before any request is made, exiting with the usage exit code
@@ -233,6 +304,17 @@ These are refused before any request is made, exiting with the usage exit code
   certificate verification a `[galaxy_server.<id>] validate_certs` key
   disabled, unless that same section also supplied the token itself. See
   [TLS: validate_certs](#tls-validate_certs) above for the remedy.
+- A git credential binding that does not parse: an id outside the grammar or
+  listed twice, a missing or malformed `_URL`, a kind that does not fit the
+  URL's scheme, `_PASSWORD` without `_USERNAME`, both `_SSH_KEY` and
+  `_SSH_KEY_FILE`, an unreadable or unparseable key, two ids bound to one
+  URL, or a Basic credential for a plaintext non-loopback `http` host.
+- A git requirement whose URL carries a credential, whose scheme is not
+  `https`, `http` or `ssh` (or the `user@host:path` form), whose ref is an
+  abbreviated commit or not a name git itself accepts, or whose `#subdir`
+  is not a safe relative path; and an ssh repository reached with neither a
+  bound key nor an agent. See [Git sources and
+  credentials](#git-sources-and-credentials).
 
 By contrast, an auth failure (401/403) or an unavailable server exits with the
 network exit code (`4`) instead, since that's a runtime condition to retry or

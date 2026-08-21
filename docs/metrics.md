@@ -65,6 +65,11 @@ project that has never run `lock` emits a report with no `lockfile_hash` key at
 all. That is not a signal about the run: read its absence as "there was no
 lockfile to hash", never as a failure.
 
+A collection built from a git source counts like any other artifact: its
+fetch is a miss and the pack bytes written to disk for it count as
+`bytes_downloaded` (the pack, not the artifact built from it, is what crossed
+the wire), and a later run that installs it from the cache is a hit.
+
 `cache_hits`, `cache_misses`, and `bytes_downloaded` are artifact-level counters,
 not collection-level: a hit is one artifact served from the artifact cache and a
 miss is one artifact fetched from the origin, so `cache_hits + cache_misses`

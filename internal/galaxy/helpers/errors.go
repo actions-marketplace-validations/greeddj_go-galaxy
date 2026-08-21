@@ -1048,4 +1048,134 @@ var (
 	// sibling of ErrOutdatedSchemaVersion above, which uses "outdated" in the
 	// unrelated sense of a stale snapshot schema.
 	ErrLatestVersionLookupFailed = errors.New("latest version lookup failed")
+
+	// The git-source sentinels below are grouped by the exit class each one
+	// lands in (cmd/go-galaxy/exitcode), because the class is the contract a
+	// caller relies on when it picks one: a configuration refusal must stay a
+	// usage error even when it is discovered only after a network round trip,
+	// and a remote that does not hold a ref must classify with the solver's
+	// own "no such version" answers rather than with a transport failure.
+
+	// ErrInvalidGitURL names a repository URL this tool will not use: an
+	// unsupported scheme (file, git, anything but https, http, ssh and the
+	// scp-like user@host:path form), an empty host or path, a query, a
+	// fragment left after the #subdir split, a quote or control rune in the
+	// path (go-git hands the path to the remote as `git-upload-pack '<path>'`
+	// without escaping), or a leading "-" in the first path segment. Usage
+	// class: the value came from requirements.yml or a credential binding.
+	ErrInvalidGitURL = errors.New("invalid git url")
+	// ErrGitURLUserinfo names a repository URL that carries a credential:
+	// any userinfo on http(s), or a password on ssh. The URL is repository
+	// content, so the credential would be too; a git credential comes from
+	// the environment, bound to a host, and never from the URL.
+	ErrGitURLUserinfo = errors.New("git url must not contain a credential")
+	// ErrInvalidGitRef names a requirements version: for a git source that
+	// is not a ref this tool accepts: an empty name, a name outside git's own
+	// check-ref-format rules, or a refs/ prefix other than refs/heads/ and
+	// refs/tags/.
+	ErrInvalidGitRef = errors.New("invalid git ref")
+	// ErrGitAbbreviatedCommit names a ref that reads as a shortened commit
+	// hash (7 to 39 hex digits). It is refused rather than resolved because
+	// a lockfile pins a full commit and a prefix may become ambiguous later;
+	// a branch that happens to be spelled in hex is reachable through the
+	// qualified refs/heads/<name> form.
+	ErrGitAbbreviatedCommit = errors.New("abbreviated git commit is not accepted")
+	// ErrInvalidGitSubdir names a #subdir fragment whose elements are not
+	// all safe path elements (see IsPathElement), or that names a .git
+	// directory.
+	ErrInvalidGitSubdir = errors.New("invalid git subdir")
+	// ErrInvalidGitLocator names a persisted git source locator
+	// (git+<url>#<subdir>@<commit>) that does not parse back into its parts.
+	// It is reachable only through a hand-edited cache or record, never
+	// through a value this tool wrote itself.
+	ErrInvalidGitLocator = errors.New("invalid git source locator")
+	// ErrGitNameMismatch reports that a requirements entry named a
+	// collection (name: namespace.name with a git source:) the repository at
+	// the resolved commit does not carry.
+	ErrGitNameMismatch = errors.New("explicit collection name does not match the git repository")
+	// ErrGitCollectionNotFound reports that the repository, at the resolved
+	// commit and under the requested subdir, holds no collection: the subdir
+	// does not exist, or neither it nor any of its immediate children carries
+	// a galaxy.yml or a MANIFEST.json.
+	ErrGitCollectionNotFound = errors.New("no collection found in git repository")
+	// ErrGitDuplicateCollection reports that two directories of one
+	// repository declare the same namespace.name.
+	ErrGitDuplicateCollection = errors.New("git repository declares the same collection twice")
+	// ErrGalaxyYMLInvalid names a galaxy.yml (or a MANIFEST.json standing in
+	// for one) this tool cannot build from: not a mapping, larger than the
+	// cap, a key of the wrong type, a missing mandatory key, a manifest:
+	// directive block (not supported; use build_ignore), or a directory
+	// carrying both galaxy.yml and MANIFEST.json. The message names the
+	// specific defect.
+	ErrGalaxyYMLInvalid = errors.New("invalid galaxy.yml")
+	// ErrGitCollectionVersionNotExact reports a galaxy.yml whose version is
+	// missing or not an exact semver version. ansible-galaxy installs such a
+	// collection as version "*"; here the install path, the lockfile and the
+	// cache key all need an exact version, so the run is refused naming the
+	// repository and the remedy.
+	ErrGitCollectionVersionNotExact = errors.New("git collection galaxy.yml version is not an exact version")
+	// ErrGitCredentialInvalid names a GO_GALAXY_GIT_<ID>_* binding this tool
+	// refuses: an id outside the server-id alphabet or listed twice, a
+	// missing or malformed _URL, a _PASSWORD without a _USERNAME, both
+	// _SSH_KEY and _SSH_KEY_FILE, a credential kind that does not match the
+	// URL's scheme, an unreadable or unparseable key, or two ids bound to one
+	// URL. The message names the variable, never its value.
+	ErrGitCredentialInvalid = errors.New("invalid git credential configuration")
+	// ErrGitSSHNoCredential reports an ssh repository URL for which no key is
+	// bound and no ssh-agent is reachable through SSH_AUTH_SOCK. Usage class:
+	// the remedy is a binding or an agent, not a retry.
+	ErrGitSSHNoCredential = errors.New("no ssh credential for git repository")
+
+	// ErrGitTransportFailed wraps a go-git transport failure: a refused
+	// connection, a TLS or protocol error, a pkt-line ERR from the remote, a
+	// redirect that would change the origin, or a host-key database this
+	// tool could not load. Network class.
+	ErrGitTransportFailed = errors.New("git transport failure")
+	// ErrGitAuthFailed reports that the remote refused the credential this
+	// run presented (401, 403, a rejected key) or that its host key was not
+	// the one known_hosts vouches for. Network class, like a Galaxy 401:
+	// a runtime condition to investigate, not a configuration shape to fix.
+	ErrGitAuthFailed = errors.New("git authentication failed")
+
+	// ErrGitRefNotFound reports that the remote advertises no such branch or
+	// tag, and no HEAD when HEAD was asked for. Resolution class: the remote
+	// has no candidate for what requirements.yml asked for.
+	ErrGitRefNotFound = errors.New("git ref not found on the remote")
+	// ErrGitCommitNotFound reports that a commit named by its hash is not
+	// reachable on the remote, or that the remote did not ship it.
+	ErrGitCommitNotFound = errors.New("git commit not found on the remote")
+
+	// ErrGitCommitMismatch reports that the remote advertised one commit for
+	// the requested ref and then shipped a pack in which that commit does
+	// not exist, or that a requested commit came back under a different
+	// hash. Integrity class: bytes did not match the identity they were
+	// promised under.
+	ErrGitCommitMismatch = errors.New("fetched git commit does not match the requested commit")
+	// ErrGitArtifactIdentityMismatch reports that rebuilding a pinned git
+	// collection from its commit produced a different namespace, name or
+	// version than the pin records.
+	ErrGitArtifactIdentityMismatch = errors.New("rebuilt git artifact is not the pinned collection")
+
+	// ErrGitTreeEntryInvalid names a tree entry this tool refuses to
+	// materialize: an empty name, ".", "..", a slash or backslash, a NUL or
+	// control rune, a .git or git~1 name (case-insensitive), or a malformed
+	// mode. Install class: the archive that would be built from it would be
+	// refused by the extractor anyway.
+	ErrGitTreeEntryInvalid = errors.New("git tree entry is invalid")
+	// ErrGitTreeDuplicateEntry names two entries of one tree whose names are
+	// equal, or equal once case is folded - the install destination may be a
+	// case-insensitive filesystem, where the second would overwrite the first.
+	ErrGitTreeDuplicateEntry = errors.New("git tree carries duplicate entries")
+	// ErrGitTreeTooDeep reports a tree nested deeper than GitTreeMaxDepth.
+	ErrGitTreeTooDeep = errors.New("git tree is nested too deep")
+	// ErrGitSymlinkUnresolvable names a symlink whose target cannot be
+	// resolved inside the collection: a dangling link, or a chain longer than
+	// the manifest chain check follows.
+	ErrGitSymlinkUnresolvable = errors.New("git symlink target cannot be resolved")
+	// ErrGitArtifactSelfCheck reports that an artifact this tool built from a
+	// git tree did not pass its own manifest chain check. That is a defect in
+	// the builder, not in the repository, which is why it carries the cause as
+	// text rather than wrapping it: a wrapped ErrManifestChainMismatch would
+	// classify as an integrity failure of the remote's bytes.
+	ErrGitArtifactSelfCheck = errors.New("built git artifact failed its self-check")
 )

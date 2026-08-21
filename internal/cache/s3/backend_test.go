@@ -251,8 +251,8 @@ func TestLoadStoreToleratesNullRootsKey(t *testing.T) {
 //
 // Unlike TestLoadStoreToleratesNullRootsKey above - which documents that it
 // does NOT pin the panic, because Roots and its only mutator were deleted
-// entirely - this test DOES pin the panic: Installed, Warmed, and the other
-// six map fields, and their mutators, still exist on Store, so without
+// entirely - this test DOES pin the panic: Installed, Warmed, GitPins and the
+// other six map fields, and their mutators, still exist on Store, so without
 // store.Store.UnmarshalJSON re-allocating a decode-nilled map, the SetInstalled
 // / SetWarmed calls below panic with "assignment to entry in nil map" inside
 // LoadStore's caller, exactly as production code would when the next install
@@ -271,7 +271,8 @@ func TestLoadStoreToleratesNullBuckets(t *testing.T) {
 		"requirements": null,
 		"resolved": null,
 		"versions_cache": null,
-		"warmed": null
+		"warmed": null,
+		"git_pins": null
 	}`, helpers.StoreSnapshotSchemaVersion)
 	putRawStoreObject(ctx, t, b, rawJSON)
 
@@ -289,6 +290,12 @@ func TestLoadStoreToleratesNullBuckets(t *testing.T) {
 	loaded.SetWarmed("a.b@1.0.0", "sha-1")
 	if warmed := loaded.WarmedArtifactSHAByKey(); warmed["a.b@1.0.0"] != "sha-1" {
 		t.Fatalf("unexpected warmed entry: %#v", warmed)
+	}
+
+	const pinCommit = "0123456789abcdef0123456789abcdef01234567"
+	loaded.SetGitPin("url\nref\n", store.GitPinEntry{Commit: pinCommit})
+	if pin, ok := loaded.GetGitPin("url\nref\n"); !ok || pin.Commit != pinCommit {
+		t.Fatalf("unexpected git pin: %#v (ok=%v)", pin, ok)
 	}
 }
 
@@ -631,7 +638,7 @@ func emptyGzipMember() []byte {
 // readObject, leaving the failure to be returned as it arrives, fails this
 // test with
 //
-//	backend_test.go:654: readObject(empty member) = gzip stream carries a member that produces no bytes, want ErrCorruptStateObject
+//	backend_test.go:661: readObject(empty member) = gzip stream carries a member that produces no bytes, want ErrCorruptStateObject
 func TestReadObjectReclassifiesAStateObjectThatWillNotInflate(t *testing.T) {
 	t.Parallel()
 	b, _ := newTestBackendAndFake(t)

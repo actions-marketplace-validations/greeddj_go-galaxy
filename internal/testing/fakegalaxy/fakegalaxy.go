@@ -1386,3 +1386,16 @@ func sha256Hex(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }
+
+// BuildArtifact returns the deterministic artifact buildArtifact produces,
+// for a test double outside this package that has to fabricate a collection
+// artifact of its own - the in-memory git client the collections suite
+// drives, which hands the pipeline an artifact it never fetched from a
+// server. The bytes are exactly those Server.AddVersion would serve for the
+// same identity, so a test can reason about one artifact shape whichever
+// double produced it. It is reachable from any package, unlike New, because
+// it touches no server state and performs no IO.
+func BuildArtifact(namespace, name, version string, deps map[string]string) ([]byte, string) {
+	data, sha, _ := buildArtifact(namespace, name, version, deps)
+	return data, sha
+}

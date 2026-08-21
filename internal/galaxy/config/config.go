@@ -62,7 +62,12 @@ type Config struct {
 	// token - the shape every release before multi-server support existed
 	// effectively had.
 	Servers []Server
-	S3Cache S3CacheConfig
+	// GitCredentials is the operator's host-bound git credentials from the
+	// GO_GALAXY_GIT_* environment surface, in GO_GALAXY_GIT_CREDENTIALS list
+	// order; nil when none is declared. See loadGitCredentials for the
+	// grammar and the rules each entry has already passed.
+	GitCredentials []GitCredential
+	S3Cache        S3CacheConfig
 	// Signature is this run's resolved signature verification surface: the
 	// keyring location, how many signatures must verify, which failure
 	// statuses are tolerated, and whether verification is switched off.
@@ -163,6 +168,14 @@ func BuildCollectionConfig(c *cli.Command) (*Config, error) {
 	applyAnsibleConfig(cfg, c, ansibleConfig, ansiblePath)
 
 	if err := resolveServers(cfg, c, ansibleConfig); err != nil {
+		return nil, err
+	}
+
+	// After the servers and before the S3 cache: a git credential is part of
+	// the same "where may a secret go" surface as a server token, and an
+	// error there keeps the precedence a broken server configuration already
+	// has over a broken cache one.
+	if err := loadGitCredentials(cfg); err != nil {
 		return nil, err
 	}
 

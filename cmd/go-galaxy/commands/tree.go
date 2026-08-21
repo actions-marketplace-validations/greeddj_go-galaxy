@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"slices"
 
 	"github.com/greeddj/go-galaxy/cmd/go-galaxy/cliflags"
+	"github.com/greeddj/go-galaxy/internal/galaxy/gitsource"
 	"github.com/greeddj/go-galaxy/internal/galaxy/lockfile"
 	"github.com/greeddj/go-galaxy/internal/galaxy/requirements"
 	"github.com/greeddj/go-galaxy/internal/safeout"
@@ -35,7 +37,7 @@ func Tree() *cli.Command {
 			if err != nil {
 				return err
 			}
-			roots, err := loadRootFQDNs(reqPath)
+			roots, err := loadRootFQDNs(reqPath, lf)
 			if err != nil {
 				return err
 			}
@@ -45,16 +47,62 @@ func Tree() *cli.Command {
 	}
 }
 
-func loadRootFQDNs(reqPath string) ([]string, error) {
+// loadRootFQDNs lists the collections the requirements file names as roots.
+// A Galaxy entry names one directly. A git entry names whatever its
+// repository held, which only the lockfile knows: every git entry locked from
+// the same repository under the entry's subdir (or an immediate child of it,
+// the multi-collection shape) is a root, or just the one the entry named
+// explicitly. A git entry the lockfile holds nothing for is reported under
+// its locator text, so the tree shows it as missing rather than dropping it.
+func loadRootFQDNs(reqPath string, lf *lockfile.File) ([]string, error) {
 	reqs, _, err := requirements.LoadCollections(reqPath, "")
 	if err != nil {
 		return nil, fmt.Errorf("load requirements %s: %w", reqPath, err)
 	}
 	out := make([]string, 0, len(reqs))
 	for _, r := range reqs {
+		if r.IsGit() {
+			out = append(out, gitRootFQDNs(r, lf)...)
+			continue
+		}
 		out = append(out, fmt.Sprintf("%s.%s", r.Namespace, r.Name))
 	}
 	return out, nil
+}
+
+func gitRootFQDNs(r requirements.CollectionRequirement, lf *lockfile.File) []string {
+	var out []string
+	if lf != nil {
+		for _, e := range lf.Collections {
+			if !e.IsGit() || e.Source != r.Source || !gitSubdirWithin(e.Subdir, r.Subdir) {
+				continue
+			}
+			if r.Name != "" && e.Name != r.Namespace+"."+r.Name {
+				continue
+			}
+			out = append(out, e.Name)
+		}
+	}
+	if len(out) == 0 {
+		if r.Name != "" {
+			return []string{r.Namespace + "." + r.Name}
+		}
+		return []string{gitsource.Locator{URL: r.Source, Subdir: r.Subdir}.String()}
+	}
+	return out
+}
+
+// gitSubdirWithin reports whether a locked entry's subdir is the requirement's
+// own subdir or an immediate child of it.
+func gitSubdirWithin(entrySubdir, rootSubdir string) bool {
+	if entrySubdir == rootSubdir {
+		return true
+	}
+	parent := path.Dir(entrySubdir)
+	if parent == "." {
+		parent = ""
+	}
+	return parent == rootSubdir
 }
 
 // printTree writes the header line (the actual requirements path passed in,
@@ -98,10 +146,23 @@ func walkTree(w io.Writer, by map[string]lockfile.Entry, fqdn, prefix string, is
 		return
 	}
 	seen[fqdn] = true
-	_, _ = fmt.Fprintf(w, "%s%s%s %s\n", prefix, branch, fqdn, entry.Version)
+	_, _ = fmt.Fprintf(w, "%s%s%s %s%s\n", prefix, branch, fqdn, entry.Version, gitOrigin(entry))
 
 	deps := slices.Sorted(slices.Values(entry.Deps))
 	for i, dep := range deps {
 		walkTree(w, by, dep, prefix+cont, i == len(deps)-1, seen)
 	}
+}
+
+// gitOrigin renders a git entry's provenance for the tree: the repository,
+// the subdir when one is set, and the commit. Empty for a Galaxy entry.
+func gitOrigin(entry lockfile.Entry) string {
+	if !entry.IsGit() {
+		return ""
+	}
+	subdir := ""
+	if entry.Subdir != "" {
+		subdir = "#" + entry.Subdir
+	}
+	return fmt.Sprintf(" (git %s%s @%s)", entry.Source, subdir, entry.Commit)
 }

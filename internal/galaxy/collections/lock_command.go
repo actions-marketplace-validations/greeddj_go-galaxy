@@ -57,7 +57,7 @@ func lockWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra
 	if err != nil {
 		return err
 	}
-	deps := newCollectionDeps(cfg, runtime, state.store)
+	deps := state.resolveDeps(cfg, runtime)
 	resolved, graph, err := resolveCollectionsInternal(ctx, deps, roots, resolveTopLevel)
 	if err != nil {
 		return fmt.Errorf("failed to resolve dependencies: %w", err)

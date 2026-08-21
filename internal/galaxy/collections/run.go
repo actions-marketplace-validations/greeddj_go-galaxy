@@ -35,6 +35,16 @@ type installState struct {
 	store        *store.Store
 	release      func() error
 	extractStore *extracted.Store
+	// gitMemo is the run-wide table of discovered git collections; see
+	// gitDiscoveryMemo. It lives on the state rather than on a phase's deps
+	// because the install phase reads what the resolve phase wrote.
+	gitMemo *gitDiscoveryMemo
+}
+
+// resolveDeps builds the dependency set a resolve runs with: the store, and
+// the git store and memo every phase shares.
+func (s *installState) resolveDeps(cfg *config.Config, runtime *infra.Infra) collectionDeps {
+	return newCollectionDeps(cfg, runtime, s.store).withGit(s.backend.Artifacts(), s.gitMemo)
 }
 
 type installPlan struct {
@@ -107,6 +117,9 @@ func withBackend(ctx context.Context, cfg *config.Config, runtime *infra.Infra, 
 	defer func() {
 		_ = state.backend.Close(ctx)
 	}()
+	// A --no-cache run hands git builds from discovery to the install phase
+	// through the memo; whatever no install worker took is removed here.
+	defer state.gitMemo.cleanup()
 
 	return cacheManager.LockLostError(ctx, lockCtx, work(lockCtx, cfg, runtime, state, start))
 }
@@ -226,6 +239,7 @@ func initInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) 
 		store:        st,
 		release:      releaseLock,
 		extractStore: extractStore,
+		gitMemo:      newGitDiscoveryMemo(),
 	}, nil
 }
 
@@ -367,12 +381,9 @@ func prepareInstallPlan(
 	runtime.Output.DebugSincef(levelStart, "%s", "build install levels")
 
 	prefetchStart := time.Now()
-	prefetch := startPrefetcher(
-		ctx,
-		newPrefetchDeps(cfg, runtime, state.store, state.backend.Artifacts(), root),
-		collections,
-		levels,
-	)
+	prefetchDeps := newPrefetchDeps(cfg, runtime, state.store, state.backend.Artifacts(), root)
+	prefetchDeps.collectionDeps = prefetchDeps.withGit(state.backend.Artifacts(), state.gitMemo)
+	prefetch := startPrefetcher(ctx, prefetchDeps, collections, levels)
 	runtime.Output.DebugSincef(prefetchStart, "%s", "prefetch schedule")
 
 	return &installPlan{
@@ -409,7 +420,7 @@ func resolveOrLoadLockfile(
 	runtime.Output.Printf("🧩 resolve dependencies")
 	resolved, graph, err := resolveCollectionsInternal(
 		ctx,
-		newCollectionDeps(cfg, runtime, state.store),
+		state.resolveDeps(cfg, runtime),
 		roots,
 		resolveTopLevel,
 	)
@@ -506,6 +517,13 @@ func buildCollectionsMap(resolved map[string]collection) (map[string]collection,
 // drops a root is caught on a fresh solve.
 func verifyRootsResolved(roots []collection, resolved map[string]collection) error {
 	for _, col := range roots {
+		// A git root without an explicit name is verified by discovery (its
+		// collections were produced from the repository, or the resolve
+		// failed) and, under --frozen, by verifyRootsAgainstLockfile; it has
+		// no fqdn of its own to look up here.
+		if col.isGit() && col.Namespace == "" && col.Name == "" {
+			continue
+		}
 		fqdn := fmt.Sprintf("%s.%s", col.Namespace, col.Name)
 		if _, ok := resolved[fqdn]; !ok {
 			return fmt.Errorf("%w: %s", helpers.ErrMissingResolvedRoot, fqdn)

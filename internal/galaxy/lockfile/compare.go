@@ -11,16 +11,20 @@ import (
 const (
 	fieldVersion = "version"
 	fieldSource  = "source"
+	fieldType    = "type"
+	fieldRef     = "ref"
+	fieldCommit  = "commit"
+	fieldSubdir  = "subdir"
 	fieldSHA256  = "sha256"
 	fieldDeps    = "deps"
 	fieldServer  = "server"
 )
 
 // comparedFieldCount is the number of per-entry fields Change.Fields() can
-// report (version, source, sha256, deps) - the server field lives at the
-// file level, on Diff.Server, rather than per entry. Used only to pre-size
-// Fields()'s return slice.
-const comparedFieldCount = 4
+// report (version, source, type, ref, commit, subdir, sha256, deps) - the
+// server field lives at the file level, on Diff.Server, rather than per
+// entry. Used only to pre-size Fields()'s return slice.
+const comparedFieldCount = 8
 
 // Diff is what Compare(before, after) found: which collections after would
 // add, update, or remove relative to before, plus whether the file-level
@@ -48,8 +52,8 @@ type Change struct {
 
 // FieldChange names one field that differs between two values it was
 // derived from, and what it changed from/to. Field is one of "version",
-// "source", "sha256", "deps" (per-entry, via Change.Fields), or "server"
-// (file-level, via Diff.Server).
+// "source", "type", "ref", "commit", "subdir", "sha256", "deps" (per-entry,
+// via Change.Fields), or "server" (file-level, via Diff.Server).
 type FieldChange struct {
 	Field string
 	From  string
@@ -169,7 +173,7 @@ func (d Diff) Empty() bool {
 }
 
 // Fields reports which of c's pinned fields differ between From and To, in a
-// fixed order (version, source, sha256, deps), each carrying its old and new
+// fixed order (version, source, type, ref, commit, subdir, sha256, deps), each carrying its old and new
 // value. It is derived on demand from the same field set sameEntry compares,
 // so "what makes an entry Updated" and "what Fields reports as changed"
 // cannot drift apart - and Diff.Empty stays allocation-free per updated
@@ -185,6 +189,18 @@ func (c Change) Fields() []FieldChange {
 	}
 	if c.From.Source != c.To.Source {
 		fields = append(fields, FieldChange{Field: fieldSource, From: c.From.Source, To: c.To.Source})
+	}
+	if c.From.Type != c.To.Type {
+		fields = append(fields, FieldChange{Field: fieldType, From: c.From.Type, To: c.To.Type})
+	}
+	if c.From.Ref != c.To.Ref {
+		fields = append(fields, FieldChange{Field: fieldRef, From: c.From.Ref, To: c.To.Ref})
+	}
+	if c.From.Commit != c.To.Commit {
+		fields = append(fields, FieldChange{Field: fieldCommit, From: c.From.Commit, To: c.To.Commit})
+	}
+	if c.From.Subdir != c.To.Subdir {
+		fields = append(fields, FieldChange{Field: fieldSubdir, From: c.From.Subdir, To: c.To.Subdir})
 	}
 	if c.From.SHA256 != c.To.SHA256 {
 		fields = append(fields, FieldChange{Field: fieldSHA256, From: c.From.SHA256, To: c.To.SHA256})
@@ -212,11 +228,13 @@ func indexByName(f *File) map[string]Entry {
 }
 
 // sameEntry reports whether a and b pin the same collection: identical
-// version, source, and sha256, and equivalent (order-insensitive) deps. Name
-// is deliberately not compared - sameEntry is only ever called on two entries
-// Compare has already matched by name.
+// version, source, type, ref, commit, subdir and sha256, and equivalent
+// (order-insensitive) deps. Name is deliberately not compared - sameEntry is
+// only ever called on two entries Compare has already matched by name.
 func sameEntry(a, b Entry) bool {
-	return a.Version == b.Version && a.Source == b.Source && a.SHA256 == b.SHA256 && sameDeps(a.Deps, b.Deps)
+	return a.Version == b.Version && a.Source == b.Source && a.Type == b.Type &&
+		a.Ref == b.Ref && a.Commit == b.Commit && a.Subdir == b.Subdir &&
+		a.SHA256 == b.SHA256 && sameDeps(a.Deps, b.Deps)
 }
 
 // sameDeps reports whether a and b are the same multiset of dependency

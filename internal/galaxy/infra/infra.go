@@ -5,12 +5,16 @@
 // new global or widening an already-wide signature. New always allocates fresh
 // counters, so nothing carries over between two runs in one process.
 //
-// It also carries the artifact-download, metadata-fetch, cache-state and
-// signature-fetch budgets as test-only override fields. Read each one through
-// its accessor - ArtifactDeadline, MetadataDeadline, StateDeadline,
-// SignatureDeadline - never the field, so a nil Infra or a non-positive
-// override falls back to the helpers constant by construction rather than by
-// caller convention.
+// It also carries the artifact-download, metadata-fetch, cache-state,
+// signature-fetch and git-fetch budgets as test-only override fields. Read
+// each one through its accessor - ArtifactDeadline, MetadataDeadline,
+// StateDeadline, SignatureDeadline, GitDeadline - never the field, so a nil
+// Infra or a non-positive override falls back to the helpers constant by
+// construction rather than by caller convention.
+//
+// Git is the one dependency here that is an interface rather than a value:
+// the client a git collection source is acquired through, wired by the
+// command layer from the production fetcher and by a test from a double.
 package infra
 
 import (
@@ -19,6 +23,7 @@ import (
 	"time"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
+	"github.com/greeddj/go-galaxy/internal/galaxy/gitsource"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/metrics"
 	"github.com/greeddj/go-galaxy/internal/galaxy/output"
@@ -26,38 +31,18 @@ import (
 
 // Infra holds runtime dependencies such as IO and HTTP clients.
 type Infra struct {
-	Output  output.Printer
-	HTTP    *http.Client
-	Now     func() time.Time
-	TempDir func() string
-	// Metrics accumulates this run's artifact cache-hit/miss and
-	// bytes-downloaded tallies. It belongs to this Infra, and therefore to
-	// this run: New always allocates a fresh Counters, so totals never carry
-	// over from a prior run sharing the same process.
-	Metrics *metrics.Counters
-	// ArtifactDownloadDeadline overrides helpers.ArtifactDownloadDeadline for
-	// this run. It is test-only: production code never sets it, and nothing
-	// wires it to a CLI flag, an environment variable, or an ansible.cfg key
-	// (see helpers.ArtifactDownloadDeadline's own doc comment for why). Read
-	// it only through ArtifactDeadline, never directly, so an unset or
-	// nonsensical value structurally falls back to the real constant.
+	Output                   output.Printer
+	Git                      gitsource.Client
+	HTTP                     *http.Client
+	Now                      func() time.Time
+	TempDir                  func() string
+	Metrics                  *metrics.Counters
+	GitCredentials           []gitsource.Credential
 	ArtifactDownloadDeadline time.Duration
-	// MetadataFetchDeadline overrides helpers.MetadataFetchDeadline for this
-	// run. It is test-only, for the identical reason
-	// ArtifactDownloadDeadline is: nothing wires it to a CLI flag, an
-	// environment variable, or an ansible.cfg key. Read it only through
-	// MetadataDeadline, never directly.
-	MetadataFetchDeadline time.Duration
-	// StateObjectDeadline overrides helpers.StateObjectDeadline for this run.
-	// It is test-only, for the identical reason ArtifactDownloadDeadline is:
-	// nothing wires it to a CLI flag, an environment variable, or an
-	// ansible.cfg key. Read it only through StateDeadline, never directly.
-	StateObjectDeadline time.Duration
-	// SignatureFetchDeadline overrides helpers.SignatureFetchDeadline for this
-	// run. It is test-only, for the identical reason ArtifactDownloadDeadline
-	// is: nothing wires it to a CLI flag, an environment variable, or an
-	// ansible.cfg key. Read it only through SignatureDeadline, never directly.
-	SignatureFetchDeadline time.Duration
+	MetadataFetchDeadline    time.Duration
+	StateObjectDeadline      time.Duration
+	SignatureFetchDeadline   time.Duration
+	GitFetchDeadline         time.Duration
 }
 
 // New builds Infra with default helpers for time and temp paths.
@@ -72,7 +57,20 @@ func New(out output.Printer, httpClient *http.Client) *Infra {
 		MetadataFetchDeadline:    helpers.MetadataFetchDeadline,
 		StateObjectDeadline:      helpers.StateObjectDeadline,
 		SignatureFetchDeadline:   helpers.SignatureFetchDeadline,
+		GitFetchDeadline:         helpers.ArtifactDownloadDeadline,
 	}
+}
+
+// GitDeadline returns the budget one git acquisition gets, from the first
+// advertisement request to the last built artifact: i.GitFetchDeadline when
+// positive, helpers.ArtifactDownloadDeadline otherwise. It is the same
+// constant an artifact download gets because a git acquisition is one: a
+// repository's pack is the artifact's wire form, with the build on top.
+func (i *Infra) GitDeadline() time.Duration {
+	if i == nil || i.GitFetchDeadline <= 0 {
+		return helpers.ArtifactDownloadDeadline
+	}
+	return i.GitFetchDeadline
 }
 
 // ArtifactDeadline returns the per-acquisition artifact download budget this
@@ -150,6 +148,7 @@ func (i *Infra) DebugAnsibleConfig(cfg *config.Config) {
 		i.Output.Debugf("env ANSIBLE_GALAXY_SERVER: galaxy.server=%s", cfg.Server)
 	}
 	i.debugServerList(cfg.Servers)
+	i.debugGitCredentials(cfg.GitCredentials)
 }
 
 // WarnConfig surfaces non-fatal configuration warnings collected while
@@ -176,5 +175,20 @@ func (i *Infra) debugServerList(servers []config.Server) {
 	for _, s := range servers {
 		i.Output.Debugf("galaxy server %q: url=%s token=%t insecure_skip_tls_verify=%t",
 			s.ID, s.URL, s.Token.IsSet(), s.InsecureSkipTLSVerify)
+	}
+}
+
+// debugGitCredentials logs one line per configured git credential binding:
+// its id, the URL prefix it covers, and which kind it is. The password, key
+// and passphrase are never rendered, not even as presence booleans - the kind
+// already says which of them the binding holds, and config refused any shape
+// where that is ambiguous.
+func (i *Infra) debugGitCredentials(creds []config.GitCredential) {
+	for _, c := range creds {
+		kind := "basic"
+		if c.Kind == config.GitCredentialSSHKey {
+			kind = "ssh-key"
+		}
+		i.Output.Debugf("git credential %q: url=%s kind=%s", c.ID, c.URL.String(), kind)
 	}
 }

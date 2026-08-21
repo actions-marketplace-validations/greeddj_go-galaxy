@@ -3,9 +3,11 @@ package collections
 import (
 	"context"
 	"fmt"
+	"path"
 	"strings"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
+	"github.com/greeddj/go-galaxy/internal/galaxy/gitsource"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 	"github.com/greeddj/go-galaxy/internal/galaxy/lockfile"
@@ -42,6 +44,14 @@ func buildLockfile(
 		if !helpers.IsExactVersion(col.Version) {
 			return nil, fmt.Errorf("lockfile: %s: %w: %q", fqdn, helpers.ErrInvalidCollectionVersion, col.Version)
 		}
+		if col.isGit() {
+			entry, err := gitLockfileEntry(fqdn, col, graph)
+			if err != nil {
+				return nil, err
+			}
+			entries = append(entries, entry)
+			continue
+		}
 		meta, err := loadCollectionMetadata(ctx, deps, col)
 		if err != nil {
 			return nil, fmt.Errorf("lockfile: %s: %w", fqdn, err)
@@ -73,9 +83,41 @@ func buildLockfile(
 		})
 	}
 	return &lockfile.File{
-		SchemaVersion: lockfile.SchemaVersion,
+		SchemaVersion: lockfile.SchemaVersionFor(entries),
 		Server:        cfg.Server,
 		Collections:   entries,
+	}, nil
+}
+
+// gitLockfileEntry renders a git collection's pin: the repository URL as its
+// source, the ref the requirements file asked for, the commit it resolved to
+// and the subdir it was built from, and no sha256 (see lockfile.Entry for
+// why). The locator is taken apart rather than written as-is so the file a
+// human reviews names the repository, not an internal key. No metadata fetch
+// happens: everything a git entry records was settled at discovery.
+func gitLockfileEntry(fqdn string, col collection, graph map[string][]string) (lockfile.Entry, error) {
+	loc, err := col.gitLocator()
+	if err != nil {
+		return lockfile.Entry{}, fmt.Errorf("lockfile: %s: %w", fqdn, err)
+	}
+	if !loc.Pinned() {
+		return lockfile.Entry{}, fmt.Errorf("lockfile: %s: %w: git source is not pinned to a commit", fqdn, helpers.ErrInvalidGitLocator)
+	}
+	ref := col.Ref
+	if ref == "" {
+		// A resolved collection that lost its ref on the way here (a snapshot
+		// written before refs were recorded) still pins correctly by commit.
+		ref = loc.Commit
+	}
+	return lockfile.Entry{
+		Name:    fqdn,
+		Type:    lockfile.TypeGit,
+		Version: col.Version,
+		Source:  loc.URL,
+		Ref:     ref,
+		Commit:  loc.Commit,
+		Subdir:  loc.Subdir,
+		Deps:    lockfileDepsFromGraph(graph, col.key()),
 	}, nil
 }
 
@@ -123,7 +165,7 @@ func indexLockfile(lf *lockfile.File, cfg *config.Config) (map[string]lockfile.E
 			return nil, fmt.Errorf("%w: invalid name %q", helpers.ErrLockfileInvalid, e.Name)
 		}
 		entry := e
-		if entry.Source == "" {
+		if entry.Source == "" && !entry.IsGit() {
 			entry.Source = cfg.Server
 		}
 		out[e.Name] = entry
@@ -133,6 +175,12 @@ func indexLockfile(lf *lockfile.File, cfg *config.Config) (map[string]lockfile.E
 
 func verifyRootsAgainstLockfile(roots []collection, byFQDN map[string]lockfile.Entry) error {
 	for _, root := range roots {
+		if root.isGit() {
+			if err := verifyGitRootAgainstLockfile(root, byFQDN); err != nil {
+				return err
+			}
+			continue
+		}
 		fqdn := fmt.Sprintf("%s.%s", root.Namespace, root.Name)
 		entry, ok := byFQDN[fqdn]
 		if !ok {
@@ -163,10 +211,85 @@ func materializeLockfile(byFQDN map[string]lockfile.Entry) (map[string]collectio
 			return nil, nil, fmt.Errorf("%w: %s", helpers.ErrLockfileInvalid, fqdn)
 		}
 		col := collection{Namespace: ns, Name: name, Version: e.Version, Source: e.Source, SHA256: e.SHA256}
+		if e.IsGit() {
+			// The pin is the commit: the locator rebuilt here is what keys the
+			// artifact cache and the installed record, and SHA256 stays empty
+			// so verifyPinnedSHA has nothing to compare (see lockfile.Entry).
+			col.Source = gitsource.Locator{URL: e.Source, Subdir: e.Subdir, Commit: e.Commit}.String()
+			col.Type = typeGit
+			col.Ref = e.Ref
+		}
 		resolved[fqdn] = col
 		graph[col.key()] = lockfileDepsToKeys(e.Deps, byFQDN)
 	}
 	return resolved, graph, nil
+}
+
+// verifyGitRootAgainstLockfile checks one git root, as the requirements file
+// wrote it, against the lockfile: at least one git entry must come from the
+// same repository URL under the root's subdir (the root's own directory, or
+// an immediate child of it, which is how a multi-collection repository
+// expands), every such entry must have been locked from the same ref, and a
+// root that names its collection must find that very fqdn among them. A ref
+// change is a mismatch even when the commit happens to be the same: the
+// lockfile records what was asked for, and --frozen means "what was asked for
+// has not changed".
+func verifyGitRootAgainstLockfile(root collection, byFQDN map[string]lockfile.Entry) error {
+	loc, err := root.gitLocator()
+	if err != nil {
+		return err
+	}
+	display := helpers.URLForMessage(loc.URL)
+	matched := 0
+	for fqdn, entry := range byFQDN {
+		if !lockedFromGitRoot(entry, loc) {
+			continue
+		}
+		if entry.Ref != root.Ref {
+			return fmt.Errorf("%w: git root %s locked from ref %q, requirements ask for %q",
+				helpers.ErrLockfileMismatch, display, entry.Ref, root.Ref)
+		}
+		matched++
+		if root.Namespace != "" && fqdn == root.Namespace+"."+root.Name {
+			return nil
+		}
+	}
+	return gitRootUnmatched(root, display, matched)
+}
+
+// lockedFromGitRoot reports whether entry is a git entry locked from loc's
+// repository under loc's subdir (itself or an immediate child).
+func lockedFromGitRoot(entry lockfile.Entry, loc gitsource.Locator) bool {
+	return entry.IsGit() && entry.Source == loc.URL && subdirWithin(entry.Subdir, loc.Subdir)
+}
+
+// gitRootUnmatched is verifyGitRootAgainstLockfile's verdict once the scan
+// found no entry naming the root's own fqdn: no entry at all from the
+// repository is a mismatch, so is a named root whose fqdn is absent, and an
+// unnamed root is satisfied by any matched entry.
+func gitRootUnmatched(root collection, display string, matched int) error {
+	switch {
+	case matched == 0:
+		return fmt.Errorf("%w: git root %s has no lockfile entry", helpers.ErrLockfileMismatch, display)
+	case root.Namespace != "":
+		return fmt.Errorf("%w: git root %s has no lockfile entry for %s.%s",
+			helpers.ErrLockfileMismatch, display, root.Namespace, root.Name)
+	default:
+		return nil
+	}
+}
+
+// subdirWithin reports whether a locked entry's subdir is the root's own
+// subdir or an immediate child of it.
+func subdirWithin(entrySubdir, rootSubdir string) bool {
+	if entrySubdir == rootSubdir {
+		return true
+	}
+	parent := path.Dir(entrySubdir)
+	if parent == "." {
+		parent = ""
+	}
+	return parent == rootSubdir
 }
 
 func lockfileDepsToKeys(deps []string, byFQDN map[string]lockfile.Entry) []string {

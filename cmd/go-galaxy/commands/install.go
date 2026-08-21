@@ -9,6 +9,7 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/collections"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/fetch"
+	"github.com/greeddj/go-galaxy/internal/galaxy/gitsource"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/urfave/cli/v3"
 )
@@ -69,4 +70,31 @@ func serverAuths(servers []config.Server) []fetch.ServerAuth {
 		})
 	}
 	return auths
+}
+
+// gitCredentials converts cfg.GitCredentials into gitsource's plain
+// Credential view. This is the only call site of config.Secret.Reveal() for a
+// git credential: gitsource sits below config and cannot hold a Secret, so
+// the password, the key and its passphrase are handed over in the clear once,
+// here, and the fetcher offers them to the remote as they are.
+//
+// It satisfies the same rule serverAuths does - the plaintext is taken only
+// to build the value that goes onto the wire - and the result must never be
+// printed, logged or persisted; gitsource.Credential's own doc comment
+// states that nothing renders one.
+func gitCredentials(cfg *config.Config) []gitsource.Credential {
+	if cfg == nil {
+		return nil
+	}
+	creds := make([]gitsource.Credential, 0, len(cfg.GitCredentials))
+	for _, c := range cfg.GitCredentials {
+		creds = append(creds, gitsource.Credential{
+			URL:           c.URL,
+			Username:      c.Username,
+			Password:      c.Password.Reveal(),
+			SSHKey:        []byte(c.SSHKeyPEM.Reveal()),
+			SSHPassphrase: c.SSHPassphrase.Reveal(),
+		})
+	}
+	return creds
 }

@@ -55,6 +55,11 @@ func serverCandidates(deps collectionDeps, col collection) []serverCandidate {
 	if deps.cfg == nil {
 		return nil
 	}
+	// A git locator is not a server and matches none; it must never be
+	// probed with the Galaxy API root suffixes as an unmatched source: would be.
+	if col.isGit() {
+		return nil
+	}
 	if col.Source != "" {
 		candidate, matched := pinnedServerCandidate(deps.cfg, col.Source)
 		if !matched {

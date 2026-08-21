@@ -688,6 +688,42 @@ func recordInstall(st *store.Store, col collection, installPath, artifactSHA str
 	}
 }
 
+// fetchArtifactMiss is fetchArtifact's cache-miss arm: a prebuilt git
+// artifact left by a --no-cache discovery is taken as is, offline mode
+// refuses to go to the network, and otherwise the artifact is fetched from
+// its origin (git rebuild or Galaxy download).
+func fetchArtifactMiss(
+	ctx context.Context,
+	deps installDeps,
+	col collection,
+	meta *types.GalaxyCollectionVersionInfo,
+	useCache bool,
+) (artifactData, error) {
+	if prebuilt, ok := deps.gitMemo.takePrebuilt(col.Namespace + "." + col.Name); ok {
+		// A --no-cache discovery built this artifact minutes ago and no
+		// store holds it; the fetch it stands for happened once.
+		return artifactData{Path: prebuilt.Path, Cleanup: prebuilt.Cleanup, SHA: prebuilt.SHA}, nil
+	}
+	if deps.cfg != nil && deps.cfg.Offline {
+		return artifactData{}, fmt.Errorf("%w: artifact %s not in cache", helpers.ErrOfflineMode, col.key())
+	}
+	downloadStart := time.Now()
+	var (
+		result downloadResult
+		err    error
+	)
+	if col.isGit() {
+		result, err = gitFetchToCache(ctx, deps, col, useCache)
+	} else {
+		result, err = downloadCollectionToCache(ctx, deps, artifactKey(col), col.Source, meta, useCache)
+	}
+	if err != nil {
+		return artifactData{}, err
+	}
+	deps.runtime.Output.DebugSincef(downloadStart, "%s", "download "+col.key())
+	return artifactData{Path: result.Path, Cleanup: result.Cleanup, SHA: result.SHA}, nil
+}
+
 func artifactExists(ctx context.Context, artifacts cacheManager.ArtifactStore, col collection) bool {
 	ok, err := artifacts.Has(ctx, artifactKey(col))
 	return err == nil && ok
@@ -705,16 +741,7 @@ func fetchArtifact(
 	artifacts := deps.artifacts
 
 	if !cacheHit {
-		if deps.cfg != nil && deps.cfg.Offline {
-			return artifactData{}, fmt.Errorf("%w: artifact %s not in cache", helpers.ErrOfflineMode, col.key())
-		}
-		downloadStart := time.Now()
-		result, err := downloadCollectionToCache(ctx, deps, artifactKey(col), col.Source, meta, useCache)
-		if err != nil {
-			return artifactData{}, err
-		}
-		runtime.Output.DebugSincef(downloadStart, "%s", "download "+col.key())
-		return artifactData{Path: result.Path, Cleanup: result.Cleanup, SHA: result.SHA}, nil
+		return fetchArtifactMiss(ctx, deps, col, meta, useCache)
 	}
 	if artifacts == nil {
 		return artifactData{}, helpers.ErrArtifactCacheNotConfigured
@@ -1449,6 +1476,13 @@ func resolveMetadata(
 	runtime := deps.runtime
 	if meta != nil {
 		return meta, nil
+	}
+	// A git collection has no Galaxy version document: its artifact was built
+	// here, carries no server digest and no signatures, and is verified by
+	// its own manifest chain. A nil meta is the shape every downstream step
+	// already handles for a metadata-free cache hit.
+	if col.isGit() {
+		return nil, nil //nolint:nilnil // nil meta is the established "no server metadata" value downstream
 	}
 	metaStart := time.Now()
 	meta, err := loadCollectionMetadata(ctx, deps, col)

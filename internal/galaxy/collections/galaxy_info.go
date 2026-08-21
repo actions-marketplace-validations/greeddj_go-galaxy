@@ -15,7 +15,12 @@ import (
 // silently reproducing the disagreement this file's chokepoint closes.
 const galaxyYAMLFileName = "GALAXY.yml"
 
-// GalaxyYAML represents the GALAXY.yml metadata file.
+// GalaxyYAML represents the GALAXY.yml metadata file. For a collection built
+// from a git source, Server names the repository URL (credential-free by
+// construction) rather than a Galaxy server, the two URL fields and the
+// signatures are empty, and GitCommit records the commit the tree was built
+// from; ansible-galaxy writes no sidecar at all for a git install, so the
+// extra key is this tool's provenance, and ansible ignores it.
 type GalaxyYAML struct {
 	DownloadURL string `yaml:"download_url"`
 	FormatVer   string `yaml:"format_version"`
@@ -25,6 +30,7 @@ type GalaxyYAML struct {
 	Signatures  any    `yaml:"signatures"`
 	Version     string `yaml:"version"`
 	VersionURL  string `yaml:"version_url"`
+	GitCommit   string `yaml:"git_commit,omitempty"`
 }
 
 // writeGalaxyInfo writes GALAXY.yml for the installed collection. When meta
@@ -117,6 +123,11 @@ func buildGalaxyYAML(cfg *config.Config, col collection, meta *types.GalaxyColle
 		Namespace: col.Namespace,
 		Server:    cfg.Server,
 		Version:   col.Version,
+	}
+	if loc, err := col.gitLocator(); err == nil && col.isGit() {
+		g.Server = helpers.WithoutCredentials(loc.URL)
+		g.GitCommit = loc.Commit
+		return g
 	}
 	if meta != nil {
 		g.DownloadURL = helpers.WithoutCredentials(meta.DownloadURL)

@@ -28,13 +28,13 @@ import (
 // would fail loudly rather than silently producing different bytes.
 const corruptedTarballContent = "this is not a valid tar.gz artifact - the cached tarball was corrupted on disk"
 
-// cacheArtifactFilename returns the on-disk cache filename for one
-// collection version's tarball. It mirrors the collections package's own
+// acmeArtifactFilename returns the on-disk cache filename for one "acme"
+// collection version's tarball (every e2e fixture's namespace). It mirrors the collections package's own
 // unexported artifactKey (filename plus url.QueryEscape) so this external
 // test package can locate - and deliberately corrupt - the cached artifact
 // file directly.
-func cacheArtifactFilename(namespace, name, version string) string {
-	return url.QueryEscape(fmt.Sprintf("%s-%s-%s.tar.gz", namespace, name, version))
+func acmeArtifactFilename(name, version string) string {
+	return url.QueryEscape(fmt.Sprintf("acme-%s-%s.tar.gz", name, version))
 }
 
 // loadInstalledEntry opens cfg's cache backend, loads its persisted
@@ -87,7 +87,7 @@ func TestWarmInstallCacheHitDoesNotRehashCorruptedTarball(t *testing.T) {
 		t.Fatalf("first Start (populate the cache, sidecar, and extracted store): %v", err)
 	}
 
-	tarballPath := filepath.Join(f.cfg.CacheDir, cacheArtifactFilename("acme", "lib", "1.0.0"))
+	tarballPath := filepath.Join(f.cfg.CacheDir, acmeArtifactFilename("lib", "1.0.0"))
 	if err := os.WriteFile(tarballPath, []byte(corruptedTarballContent), helpers.FileMod); err != nil {
 		t.Fatalf("corrupt the cached tarball: %v", err)
 	}

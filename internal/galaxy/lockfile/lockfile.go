@@ -1,7 +1,18 @@
 // Package lockfile reads and writes go-galaxy lockfiles. The lockfile pins
-// every transitive collection to an exact version with a SHA256 so CI runs
-// are reproducible and hermetic - once a lockfile exists, install only
-// reads the cache, never the Galaxy API.
+// every transitive collection to an exact version with a SHA256 - or, for a
+// collection built from a git source, to the commit it was built from - so
+// CI runs are reproducible and hermetic: once a lockfile exists, install only
+// reads the cache, never the Galaxy API or the git remote.
+//
+// Two schema versions are written and both are read. Schema 1 is the
+// Galaxy-only shape every lockfile had before git sources existed; schema 2
+// adds the git fields to an entry and is written exactly when a file carries
+// at least one git entry. canonicalize decides between them from the
+// entries alone, so a project with no git source keeps producing a schema-1
+// file that is byte-identical to what it produced before, and a project that
+// drops its last git source goes back to schema 1 on its next lock. An older
+// binary reading a schema-2 file refuses it loudly instead of installing a
+// git entry's source as if it were a Galaxy server.
 package lockfile
 
 import (
@@ -16,25 +27,63 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/greeddj/go-galaxy/internal/galaxy/gitsource"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"go.yaml.in/yaml/v3"
 )
 
 var errNilFile = errors.New("lockfile: nil File")
 
-// SchemaVersion is the current lockfile schema. Bumping requires migration.
+// SchemaVersion is the lockfile schema of a file without git entries, and
+// the lowest one Load accepts. Bumping it requires migration.
 const SchemaVersion = 1
+
+// SchemaVersionGit is the schema of a file carrying at least one git entry.
+// It differs from SchemaVersion only in that an entry may carry Type, Ref,
+// Commit and Subdir; SchemaVersionFor picks it from the entries.
+const SchemaVersionGit = 2
+
+// TypeGit is the Entry.Type of a collection built from a git source. An
+// empty Type is a Galaxy entry; no other value is accepted.
+const TypeGit = "git"
 
 // DefaultName is the conventional lockfile name beside requirements.yml.
 const DefaultName = "requirements.lock.yml"
 
-// Entry is a single pinned collection in the lockfile.
+// Entry is a single pinned collection in the lockfile. A Galaxy entry pins a
+// version and the artifact's SHA256 under the server it came from; a git
+// entry (Type == TypeGit) pins the commit the collection was built from,
+// with Source naming the repository URL, Ref the branch, tag or commit the
+// requirements file asked for, and Subdir the collection's directory inside
+// the repository. A git entry carries no SHA256: the artifact is rebuilt
+// deterministically from the commit, and the gzip bytes of that rebuild
+// depend on the toolchain that produced them, so a digest over them would
+// fail a frozen install for no reason the operator could act on.
 type Entry struct {
 	Name    string   `yaml:"name"`
+	Type    string   `yaml:"type,omitempty"`
 	Version string   `yaml:"version"`
 	Source  string   `yaml:"source"`
+	Ref     string   `yaml:"ref,omitempty"`
+	Commit  string   `yaml:"commit,omitempty"`
+	Subdir  string   `yaml:"subdir,omitempty"`
 	SHA256  string   `yaml:"sha256,omitempty"`
 	Deps    []string `yaml:"deps,omitempty"`
+}
+
+// IsGit reports whether the entry pins a git source.
+func (e Entry) IsGit() bool { return e.Type == TypeGit }
+
+// SchemaVersionFor returns the schema a file holding entries is written
+// with: SchemaVersionGit when any entry is a git entry, SchemaVersion
+// otherwise.
+func SchemaVersionFor(entries []Entry) int {
+	for _, e := range entries {
+		if e.IsGit() {
+			return SchemaVersionGit
+		}
+	}
+	return SchemaVersion
 }
 
 // File is the on-disk lockfile structure.
@@ -102,8 +151,9 @@ func Load(path string) (*File, error) {
 	if f.SchemaVersion == 0 {
 		return nil, fmt.Errorf("%w: missing schema_version", helpers.ErrLockfileInvalid)
 	}
-	if f.SchemaVersion != SchemaVersion {
-		return nil, fmt.Errorf("%w: schema_version=%d, supported=%d", helpers.ErrLockfileInvalid, f.SchemaVersion, SchemaVersion)
+	if f.SchemaVersion != SchemaVersion && f.SchemaVersion != SchemaVersionGit {
+		return nil, fmt.Errorf("%w: schema_version=%d, supported=%d and %d",
+			helpers.ErrLockfileInvalid, f.SchemaVersion, SchemaVersion, SchemaVersionGit)
 	}
 	if err := f.validate(); err != nil {
 		return nil, err
@@ -171,6 +221,11 @@ func (f *File) canonicalClone() *File {
 // from, so it cannot hand Save a non-exact version; a duplicate name simply
 // cannot arise in the first place, because that same map is keyed by fqdn,
 // so two entries can never share a name to begin with.
+//
+// A git entry is judged on top of that by validateGitEntry, and a schema-1
+// file carrying one is refused outright: the schema is what tells an older
+// binary to stop, so a file that claims the old schema while carrying the
+// new shape has been edited by hand.
 func (f *File) validate() error {
 	seen := make(map[string]struct{}, len(f.Collections))
 	for _, e := range f.Collections {
@@ -196,8 +251,59 @@ func (f *File) validate() error {
 		if sourceHasUserinfo(e.Source) {
 			return fmt.Errorf("%w: %s: %w", helpers.ErrLockfileInvalid, e.Name, helpers.ErrGalaxyServerURLUserinfo)
 		}
+		if err := validateEntryType(e, f.SchemaVersion); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// validateEntryType judges the fields that distinguish a git entry from a
+// Galaxy one. A Galaxy entry may carry none of them; a git entry must carry a
+// canonical repository URL as its source, a valid ref, a full lowercase
+// commit and a valid subdir, and must not carry a SHA256 (see Entry for why),
+// and may only appear in a schema-2 file. The URL is re-parsed rather than
+// trusted because the source is repository content: anything a later run
+// connects to has to pass the same grammar a requirements entry does.
+func validateEntryType(e Entry, schema int) error {
+	switch e.Type {
+	case "":
+		if e.Ref != "" || e.Commit != "" || e.Subdir != "" {
+			return fmt.Errorf("%w: %s: ref, commit and subdir belong to a git entry (type: git)", helpers.ErrLockfileInvalid, e.Name)
+		}
+		return nil
+	case TypeGit:
+	default:
+		return fmt.Errorf("%w: %s: unsupported entry type %q", helpers.ErrLockfileInvalid, e.Name, e.Type)
+	}
+	if schema != SchemaVersionGit {
+		return fmt.Errorf("%w: %s: a git entry requires schema_version %d", helpers.ErrLockfileInvalid, e.Name, SchemaVersionGit)
+	}
+	if reason := gitEntryProblem(e); reason != "" {
+		return fmt.Errorf("%w: %s: %s", helpers.ErrLockfileInvalid, e.Name, reason)
+	}
+	return nil
+}
+
+// gitEntryProblem returns why a git entry's source, ref, commit, subdir or
+// sha256 is refused, or "" when every field is canonical.
+func gitEntryProblem(e Entry) string {
+	if u, err := gitsource.ParseURL(e.Source); err != nil || u.String() != e.Source {
+		return "source is not a canonical git repository URL"
+	}
+	if ref, err := gitsource.ParseRef(e.Ref); err != nil || e.Ref == "" || ref.Name != e.Ref {
+		return fmt.Sprintf("ref %q is not a canonical git ref", e.Ref)
+	}
+	if !gitsource.IsCommitHash(e.Commit) {
+		return fmt.Sprintf("commit %q is not a lowercase 40-hex commit", e.Commit)
+	}
+	if subdir, err := gitsource.ParseSubdir(e.Subdir); err != nil || subdir != e.Subdir {
+		return fmt.Sprintf("subdir %q is not a canonical subdir", e.Subdir)
+	}
+	if e.SHA256 != "" {
+		return "a git entry carries no sha256"
+	}
+	return ""
 }
 
 // sourceHasUserinfo reports whether an entry's source embeds URL userinfo
@@ -263,10 +369,13 @@ func LoadRequired(path string) (*File, error) {
 	}
 }
 
+// canonicalize sorts the entries and their deps and sets the schema version
+// from the entries, unconditionally: the schema is a function of the
+// content, never a value a producer chooses, which is what keeps a Galaxy-only
+// file at schema 1 and flips a file to schema 2 exactly when its first git
+// entry appears.
 func canonicalize(f *File) {
-	if f.SchemaVersion == 0 {
-		f.SchemaVersion = SchemaVersion
-	}
+	f.SchemaVersion = SchemaVersionFor(f.Collections)
 	slices.SortFunc(f.Collections, func(a, b Entry) int {
 		return strings.Compare(a.Name, b.Name)
 	})

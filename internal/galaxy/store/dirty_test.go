@@ -88,6 +88,9 @@ func dirtyMutatorCases() []dirtyMutatorCase {
 		{name: "SetWarmed", call: func(st *Store) {
 			st.SetWarmed("a.b@1.0.0", "warmed-sha")
 		}},
+		{name: "SetGitPin", call: func(st *Store) {
+			st.SetGitPin(testGitPinKey, GitPinEntry{Commit: testGitPinCommit})
+		}},
 		{name: "SetDepsCache", call: func(st *Store) {
 			st.SetDepsCache("deps", map[string]string{"a.b": testDepsConstraint})
 		}},

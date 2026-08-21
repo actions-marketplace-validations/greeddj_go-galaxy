@@ -30,6 +30,25 @@ entries.
 Two caches must not be shared between principals holding different Galaxy
 credentials; see [Security](security.md#security--trust-model) for why.
 
+A collection built from a git source lives in the same caches under its own
+key. The artifact key's scope is the source locator
+`git+<url>#<subdir>@<commit>` rather than a server base, so a branch that
+moves produces a new key and never overwrites the artifact built from its
+previous commit - and, the other way round, the artifacts of superseded
+commits stay in the artifact cache until `--clear-cache`, since nothing
+references them and no sweep targets them. The snapshot records a git pin per
+`(url, ref, subdir)`: the commit the ref resolved to and the collections that
+commit held, which is what a rerun replays without contacting the remote. A
+pin is keyed by the git line itself, so editing its URL, ref or subdir is a
+new key; it is invalidated by `--refresh` (a commit ref is never
+re-advertised, it is its own answer) and by `--clear-cache`, never by age and
+never by an edit elsewhere in the requirements file. `--offline` replays a recorded pin or fails;
+`--no-cache` fetches and builds once and hands the build straight to the
+install phase without committing it. `warm` records a git collection under
+`namespace.name@version` like any other, so two commits of a branch that did
+not bump the collection's version share one warmed entry; the artifact cache
+itself keeps both.
+
 ## S3 Cache (optional)
 
 When `--s3-bucket` (or `GO_GALAXY_S3_BUCKET`) is set, go-galaxy uses S3 as the cache backend.

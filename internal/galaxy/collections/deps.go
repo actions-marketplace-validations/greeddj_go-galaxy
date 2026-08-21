@@ -25,6 +25,23 @@ type collectionDeps struct {
 	// phase, so one misconfigured host produces one line rather than one per
 	// collection pinned to it. Scoped exactly like apiRoots above.
 	unmatchedSources *unmatchedSourceMemo
+
+	// gitStore is the artifact store a git discovery commits its builds to,
+	// and gitMemo the run-wide table of what discovery found. Unlike the two
+	// memos above they are scoped to the whole run, not to one phase: the
+	// install phase needs the same table the resolve phase filled. Both are
+	// nil for outdated, which never resolves. gitStore is named apart from
+	// installDeps.artifacts and prefetchDeps.artifacts on purpose - those two
+	// embed this struct, and a same-named field would shadow silently.
+	gitStore cacheManager.ArtifactStore
+	gitMemo  *gitDiscoveryMemo
+}
+
+// withGit returns d with the run's git store and memo attached.
+func (d collectionDeps) withGit(gitStore cacheManager.ArtifactStore, memo *gitDiscoveryMemo) collectionDeps {
+	d.gitStore = gitStore
+	d.gitMemo = memo
+	return d
 }
 
 type installDeps struct {

@@ -259,6 +259,24 @@ Its constructor takes a `testing.TB`, deliberately: that is the one interface
 implementable only by the standard testing package, so the double can never be
 reached from production code.
 
+Git paths go through `internal/testing/fakegit`, its sibling for a git remote:
+an in-process smart-HTTP server over `httptest` and an ssh listener over
+`golang.org/x/crypto/ssh`, both serving repositories built in memory with a
+fixed committer time (so every commit hash in a test is reproducible), with
+capability toggles (`shallow`, `allow-reachable-sha1-in-want`), the same fault
+grammar (status, hang, stall, plus a pack built from another commit and a
+redirect to another server), request counting per endpoint and auth capture
+(the Basic header over http, the key fingerprint over ssh). It also hands out
+generated client keys, an in-process ssh-agent on a unix socket, and a
+known_hosts file for the listener. Its own tests drive the stock go-git client
+against every shape, which is what keeps the wire framing honest. A test that
+uses the ssh half sets `SSH_KNOWN_HOSTS`, `SSH_AUTH_SOCK` or `HOME` through
+`t.Setenv` and therefore runs serially; the agent socket lives in a short
+`os.MkdirTemp` directory rather than under `t.TempDir`, because darwin caps a
+unix socket path at 104 bytes. The collections suite drives its pipeline
+through an in-memory `gitsource.Client` double with no transport at all, and
+leaves the transport to `internal/galaxy/gitfetch`'s own tests against fakegit.
+
 There is exactly one `testdata` directory, under `internal/galaxy/signature`,
 holding keyrings and a family of detached signatures covering the valid,
 expired, revoked, outsider and malformed cases.
@@ -310,7 +328,10 @@ Adding a dependency is therefore two steps, and skipping either fails in a
 different place:
 
 1. add the module path to the depguard `allow:` list in `.golangci.yml`, or
-   `just lint` and CI reject the import;
+   `just lint` and CI reject the import (the list names go-git, go-billy and
+   `golang.org/x/crypto/ssh` for the git transport and its test double, and
+   those three are imported by exactly `internal/galaxy/gitfetch` and
+   `internal/testing/fakegit`);
 2. run `just deps`, or Go's own vendor-consistency check fails the build and
    names what is out of sync.
 

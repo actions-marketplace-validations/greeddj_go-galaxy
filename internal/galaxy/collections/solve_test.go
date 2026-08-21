@@ -28,7 +28,7 @@ func TestSolverResultSlotsIntoInstallLevels(t *testing.T) {
 	}
 	cfg := &config.Config{Server: "https://galaxy.example"}
 
-	resolved, graph, err := solverResultToResolvedGraph(result, cfg, nil)
+	resolved, graph, err := solverResultToResolvedGraph(result, cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("solverResultToResolvedGraph: unexpected error: %v", err)
 	}

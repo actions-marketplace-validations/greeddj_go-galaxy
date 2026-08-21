@@ -253,6 +253,26 @@ of work per worker - an artifact already in hand still finishes extracting,
 since neither the untar nor the store's rename is interruptible - but every
 write to the shared cache ends with the context.
 
+### Git discovery
+
+A git requirement has no identity until its repository has been read, so it
+is expanded before anything else looks at the roots, as the first step of a
+resolve. Per requirement, on the download-worker pool: the recorded pin is
+replayed when the cache policy allows a read; otherwise one advertised-
+references round trip resolves the ref to a commit and tells whether the
+remote allows a shallow fetch or a fetch by hash, the pack for exactly that
+commit is streamed into a bare on-disk object store under a byte cap, the
+commit's tree is read object by object (never checked out), the collection
+directories are located as ansible locates them, and each is built into a
+deterministic `tar.gz` with its `MANIFEST.json` and `FILES.json`, self-checked
+through the manifest chain reader, and committed to the artifact store under
+its locator-scoped key. What discovery learned - identity, exact version,
+dependencies - becomes an exact-pin root the solver owns: its universe is that
+one version and its dependencies come from its `galaxy.yml`, so no Galaxy
+server is ever asked about a git collection, and a Galaxy dependency that
+constrains it is satisfied or refused with a proof. The requirements signature
+is computed over the expanded roots, so it covers the commit, not just the ref.
+
 ### Plan construction
 
 Order is load-bearing:
@@ -328,6 +348,16 @@ one, the bytes are written and hashed, then probed for tar.gz shape - a check
 the streaming arm answers by construction, and one that keeps an error page from
 occupying a shared cache slot when a server declares no digest.
 
+A git collection takes the same path with one difference: it is normally a
+cache hit, because discovery already committed its artifact. When it is not
+(a dry-run discovery committed nothing, the cached artifact was evicted, a
+`--frozen` run meets a commit no cache holds), the pinned commit is fetched
+again and rebuilt, restricted to that one collection's identity; a rebuild
+that yields a different identity is an integrity failure, never a
+substitution. It carries no server digest and no signatures, and its
+attribution is the identity the builder read from `galaxy.yml`, checked
+against the collection being installed.
+
 ### Verify, extract, record
 
 Two questions in order, both before anything is written into the collections
@@ -380,6 +410,15 @@ Content addressing was considered and rejected here for a mechanical reason: the
 digest is not known until the download completes, and the cache-hit fast path
 has to be answerable *before* any bytes are fetched.
 
+A git source has no server base; its scope is the locator
+`git+<url>#<subdir>@<commit>` the resolve produced, which is also what the
+installed record and the resolved snapshot carry as that collection's source.
+One string therefore moves the key with the commit, forces a reinstall when
+the commit changes (the installed record's source no longer matches), and
+lets cleanup delete the right artifact, without any of those consumers
+knowing what a git source is: they compare sources, and a locator is a
+source.
+
 ### Extracted store: content-addressed, materialized by hardlink
 
 Unpacked trees live under a per-digest directory and are materialized into a
@@ -403,9 +442,11 @@ over exactly those bytes does not.
 
 One value holds the cached API responses, version lists, dependency maps,
 install records, the dependency graph, the requirements spec, the last
-resolution, and the warmed set. The local backend bucket-maps it into a single
-BoltDB file - one atomic transaction rather than nine file writes - and the S3
-backend marshals it as one gzipped JSON object.
+resolution, the warmed set, and the git pins - per `(url, ref, subdir)`, the
+commit a git requirement resolved to and the collections it held. The local
+backend bucket-maps it into a single BoltDB file - one atomic transaction
+rather than ten file writes - and the S3 backend marshals it as one gzipped
+JSON object.
 
 Retention and redaction are applied at persist time, in the single copy path, so
 both backends inherit one set of rules rather than each implementing its own.
@@ -496,3 +537,27 @@ trusts, so it validates a server's declared digest for shape before writing it,
 and validates each version before spending a metadata fetch on it - failing
 closed under the whole-run exclusive lock rather than after buying work. An
 empty digest is left alone, which keeps servers that publish no digests usable.
+
+A git entry pins a commit instead of a digest:
+
+```yaml
+  - name: acme.app
+    type: git
+    version: "1.2.3"
+    source: https://github.com/acme/app.git
+    ref: main
+    commit: 0123456789abcdef0123456789abcdef01234567
+    subdir: collections/app
+    deps: [acme.lib]
+```
+
+It carries no `sha256` because the artifact is rebuilt from the commit and the
+gzip bytes of a rebuild depend on the toolchain; a digest over them would fail
+a frozen install for nothing. A file holding at least one git entry is written
+as `schema_version: 2` and a file holding none stays at `1`, decided from the
+entries alone, so a project without git sources keeps producing a byte-identical
+lockfile and an older binary meeting a git entry refuses the file loudly instead
+of reading its repository URL as a Galaxy server. Under `--frozen` a git root
+is checked against the entries locked from its repository under its subdir
+(the root's own directory or an immediate child): zero such entries, or a
+different ref, is a mismatch.

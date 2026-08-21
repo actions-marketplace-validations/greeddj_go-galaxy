@@ -1,15 +1,23 @@
 // Package requirements parses an ansible-style requirements.yml into the
 // collection entries the resolver works from. It accepts both shapes ansible
 // writes - a bare list, or a mapping carrying a collections: key - with each
-// item either a "namespace.name" string or a mapping, reports separately
-// whether the file declared roles (which this tool does not install), and
-// refuses any other shape rather than guessing at it.
+// item either a "namespace.name" string, a git pointer string ("git+<url>" or
+// "git@host:path"), or a mapping, reports separately whether the file
+// declared roles (which this tool does not install), and refuses any other
+// shape rather than guessing at it.
 //
 // This is one of the boundaries an untrusted identifier enters the program
 // through, so an entry is validated here rather than downstream:
 // parseCollectionItem is where both item shapes converge on the collection
-// name alphabet, and validateRequirement rejects a non-Galaxy type: and a
-// source: embedding URL userinfo before anything can print or request it.
+// name alphabet, validateRequirement rejects a type: that is neither galaxy
+// nor git and a source: embedding URL userinfo before anything can print or
+// request it, and parseGitRequirement judges a git entry's URL, ref and
+// subdir through internal/galaxy/gitsource's grammar, which is where a
+// credential in a repository URL is refused. A git entry has no identity at
+// parse time unless the file names one (name: namespace.name beside a git
+// source:), exactly as in ansible, where the repository's own galaxy.yml is
+// what says which collection it holds; the alphabet check is therefore
+// applied to a git entry only when it carries a name to check.
 package requirements
 
 import (
@@ -18,6 +26,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/greeddj/go-galaxy/internal/galaxy/gitsource"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/signature"
 	"go.yaml.in/yaml/v3"
@@ -26,15 +35,31 @@ import (
 // Collections is a list of collection requirements.
 type Collections = []CollectionRequirement
 
-// CollectionRequirement describes a single collection requirement entry.
+// CollectionRequirement describes a single collection requirement entry. For
+// a Galaxy entry, Version is a constraint and Source a server id or URL. For
+// a git entry (Type == TypeGit), Source is the canonical repository URL, Ref
+// the branch, tag or commit asked for (HEAD when none was), Subdir the
+// "#fragment" with its slashes trimmed, Version is empty, and Namespace and
+// Name are empty unless the file named the collection explicitly.
 type CollectionRequirement struct {
 	Namespace  string
 	Name       string
 	Version    string
 	Source     string
 	Type       string
+	Ref        string
+	Subdir     string
 	Signatures []string
 }
+
+// Type values a requirements entry may carry. An empty type is Galaxy.
+const (
+	TypeGalaxy = "galaxy"
+	TypeGit    = "git"
+)
+
+// IsGit reports whether the requirement names a git source.
+func (r CollectionRequirement) IsGit() bool { return r.Type == TypeGit }
 
 // LoadCollections reads and parses requirements from a file.
 func LoadCollections(path, defaultSource string) (Collections, bool, error) {
@@ -118,6 +143,12 @@ func parseCollectionItem(item any, defaultSource string) (CollectionRequirement,
 	if err != nil {
 		return CollectionRequirement{}, err
 	}
+	// A git entry without an explicit name has no identity to check yet: the
+	// repository's galaxy.yml supplies one at discovery, where the same
+	// alphabet is applied to what it says.
+	if req.IsGit() && req.Namespace == "" && req.Name == "" {
+		return req, nil
+	}
 	if !helpers.IsCollectionNamePart(req.Namespace) || !helpers.IsCollectionNamePart(req.Name) {
 		return CollectionRequirement{}, fmt.Errorf("%w: %q.%q must each match ^[a-z][a-z0-9_]*$",
 			helpers.ErrInvalidCollectionName, req.Namespace, req.Name)
@@ -144,6 +175,9 @@ func parseCollectionStringItem(value string, defaultSource string) (CollectionRe
 	if name == "" {
 		return CollectionRequirement{}, helpers.ErrEmptyCollectionName
 	}
+	if gitsource.IsPointer(name) {
+		return parseGitRequirement(name, "", "", "")
+	}
 	if looksLikeSourceName(name) {
 		return CollectionRequirement{}, fmt.Errorf("%w %q (only Galaxy API sources are supported)", helpers.ErrUnsupportedCollectionSource, name)
 	}
@@ -161,6 +195,9 @@ func parseCollectionStringItem(value string, defaultSource string) (CollectionRe
 
 func parseCollectionMapItem(value map[string]any, defaultSource string) (CollectionRequirement, error) {
 	req := parseCollectionMapFields(value)
+	if req.Type == TypeGit || (req.Type == "" && gitsource.IsPointer(req.Name)) {
+		return parseGitMapItem(req, value)
+	}
 	if err := checkNamespaceNameConflict(req); err != nil {
 		return CollectionRequirement{}, err
 	}
@@ -257,13 +294,103 @@ func validateRequirement(req CollectionRequirement, raw any) error {
 	if req.Name == "" {
 		return fmt.Errorf("%w: %v", helpers.ErrInvalidCollectionEntry, raw)
 	}
-	if req.Type != "" && req.Type != "galaxy" {
-		return fmt.Errorf("%w %q (only galaxy is supported)", helpers.ErrUnsupportedCollectionType, req.Type)
+	if req.Type != "" && req.Type != TypeGalaxy {
+		return fmt.Errorf("%w %q (only galaxy and git are supported)", helpers.ErrUnsupportedCollectionType, req.Type)
 	}
 	if req.Type == "" && looksLikeSourceName(req.Name) {
-		return fmt.Errorf("%w %q (only Galaxy API sources are supported)", helpers.ErrUnsupportedCollectionSource, req.Name)
+		return fmt.Errorf("%w %q (only Galaxy API and git sources are supported)", helpers.ErrUnsupportedCollectionSource, req.Name)
+	}
+	// A Galaxy entry whose source: is a git pointer or a git locator would
+	// otherwise pass this function as a server reference and be dispatched
+	// as a git source later by its prefix alone, with its URL, ref and
+	// subdir never judged; the spelling that means a git source is type: git.
+	if gitsource.IsPointer(req.Source) || gitsource.IsLocator(req.Source) {
+		return fmt.Errorf("%w: source %q names a git repository; spell the entry with type: git",
+			helpers.ErrUnsupportedCollectionSource, helpers.URLForMessage(req.Source))
 	}
 	return nil
+}
+
+// parseGitMapItem parses a mapping that names a git source: type: git, or a
+// name: that reads as a git pointer. The repository URL is source: when
+// given and name: otherwise; when source: carries the URL, name: (or the
+// namespace:/name: pair) may name the one collection of the repository the
+// entry is for. signatures: is refused on a git entry before raw is ever
+// echoed, for the same reason validateRequirement checks credential-bearing
+// keys first: a git artifact is built here and carries no signature anyone
+// could have made, so a signatures: block can only be a mistake or a
+// smuggled value.
+func parseGitMapItem(req CollectionRequirement, raw map[string]any) (CollectionRequirement, error) {
+	if value, ok := raw["signatures"]; ok && value != nil {
+		return CollectionRequirement{}, fmt.Errorf("%w: a signatures key is not supported on a git requirement",
+			helpers.ErrInvalidCollectionEntry)
+	}
+	if req.Source == "" {
+		if req.Namespace != "" {
+			return CollectionRequirement{}, fmt.Errorf("%w: a git entry names its collection through the name key beside a source key",
+				helpers.ErrInvalidCollectionEntry)
+		}
+		if req.Name == "" {
+			return CollectionRequirement{}, fmt.Errorf("%w: a git entry needs a repository URL in its name or source key",
+				helpers.ErrInvalidCollectionEntry)
+		}
+		return parseGitRequirement(req.Name, req.Version, "", "")
+	}
+	namespace, name, err := gitCollectionName(req)
+	if err != nil {
+		return CollectionRequirement{}, err
+	}
+	return parseGitRequirement(req.Source, req.Version, namespace, name)
+}
+
+// gitCollectionName reads the optional collection name of a git entry whose
+// source: carries the repository URL: empty when neither name: nor
+// namespace: is given, the namespace:/name: pair when both are, else name:
+// split as a fully qualified collection name.
+func gitCollectionName(req CollectionRequirement) (string, string, error) {
+	switch {
+	case req.Name == "" && req.Namespace == "":
+		return "", "", nil
+	case gitsource.IsPointer(req.Name):
+		return "", "", fmt.Errorf("%w: name and source both name a git repository",
+			helpers.ErrInvalidCollectionEntry)
+	case req.Namespace != "":
+		return req.Namespace, req.Name, nil
+	}
+	namespace, name, ok := helpers.SplitFQDN(req.Name)
+	if !ok {
+		return "", "", fmt.Errorf("%w: %q", helpers.ErrInvalidCollectionName, req.Name)
+	}
+	return namespace, name, nil
+}
+
+// parseGitRequirement turns a git pointer plus version into a requirement,
+// in ansible's parse_scm order (gitsource.SplitSCM), then judges each part
+// through gitsource's grammar. A URL is rendered in an error only through
+// helpers.URLForMessage, and the grammar has already refused one carrying a
+// credential before any message is composed.
+func parseGitRequirement(pointer, version, namespace, name string) (CollectionRequirement, error) {
+	rawURL, rawRef, rawSubdir := gitsource.SplitSCM(pointer, version)
+	u, err := gitsource.ParseURL(rawURL)
+	if err != nil {
+		return CollectionRequirement{}, err
+	}
+	ref, err := gitsource.ParseRef(rawRef)
+	if err != nil {
+		return CollectionRequirement{}, fmt.Errorf("%s: %w", helpers.URLForMessage(u.String()), err)
+	}
+	subdir, err := gitsource.ParseSubdir(rawSubdir)
+	if err != nil {
+		return CollectionRequirement{}, fmt.Errorf("%s: %w", helpers.URLForMessage(u.String()), err)
+	}
+	return CollectionRequirement{
+		Namespace: namespace,
+		Name:      name,
+		Source:    u.String(),
+		Type:      TypeGit,
+		Ref:       ref.Name,
+		Subdir:    subdir,
+	}, nil
 }
 
 // checkSignatureSources validates the one repository-authored field of a

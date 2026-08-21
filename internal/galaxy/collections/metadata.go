@@ -100,6 +100,13 @@ func loadRootMetadataCached(
 	col collection,
 	policy cacheManager.Policy,
 ) (*types.GalaxyCollection, string, error) {
+	// Every caller branches on the git locator before asking a server; this
+	// guard turns a caller that forgot into a plain resolution failure
+	// instead of a walk over servers that cannot know the collection.
+	if col.isGit() {
+		return nil, "", fmt.Errorf("%w: %s comes from a git source, which no Galaxy server answers for",
+			helpers.ErrLoadMetadataFailed, col.key())
+	}
 	var lastErr error
 	for _, srv := range serverCandidates(deps, col) {
 		meta, ok, err := tryServerRootMetadata(ctx, deps, col, policy, srv)

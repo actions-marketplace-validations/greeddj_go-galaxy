@@ -12,6 +12,7 @@ import (
 	"github.com/Masterminds/semver/v3"
 	cacheManager "github.com/greeddj/go-galaxy/internal/galaxy/cache"
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
+	"github.com/greeddj/go-galaxy/internal/galaxy/gitsource"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 	"github.com/greeddj/go-galaxy/internal/galaxy/lockfile"
@@ -177,6 +178,9 @@ func queryLatestVersions(ctx context.Context, cfg *config.Config, runtime *infra
 }
 
 func lookupOutdated(ctx context.Context, deps collectionDeps, e lockfile.Entry) outdatedEntry {
+	if e.IsGit() {
+		return lookupGitOutdated(ctx, deps, e)
+	}
 	ns, name, ok := helpers.SplitFQDN(e.Name)
 	if !ok {
 		return outdatedEntry{
@@ -200,6 +204,45 @@ func lookupOutdated(ctx context.Context, deps collectionDeps, e lockfile.Entry) 
 		return outdatedEntry{Name: e.Name, Locked: e.Version, Err: errNoHighestVersion}
 	}
 	return classifyOutdated(e.Name, e.Version, latest)
+}
+
+// lookupGitOutdated asks the remote what the locked ref points at now and
+// reports the commit drift: Locked and Latest are full commit hashes, so a
+// reader can paste either into a lockfile or a git command without
+// disambiguating an abbreviation. A ref that is itself a commit is up to date
+// by definition and costs no round trip. A run wired without a git client
+// reports that as a configuration defect rather than as a remote failure.
+func lookupGitOutdated(ctx context.Context, deps collectionDeps, e lockfile.Entry) outdatedEntry {
+	entry := outdatedEntry{Name: e.Name, Locked: e.Commit}
+	ref, err := gitsource.ParseRef(e.Ref)
+	if err != nil {
+		entry.Err = fmt.Errorf("%w: %s: %w", helpers.ErrLockfileInvalid, e.Name, err)
+		return entry
+	}
+	if ref.IsCommit() {
+		entry.Latest = e.Commit
+		return entry
+	}
+	if deps.runtime == nil || deps.runtime.Git == nil {
+		entry.Err = fmt.Errorf("%w: no git client is wired into this run", helpers.ErrConfigIsNil)
+		return entry
+	}
+	u, err := gitsource.ParseURL(e.Source)
+	if err != nil {
+		entry.Err = fmt.Errorf("%w: %s: %w", helpers.ErrLockfileInvalid, e.Name, err)
+		return entry
+	}
+	cred, _ := gitsource.MatchCredential(u, deps.runtime.GitCredentials)
+	gitCtx, cancel := context.WithTimeout(ctx, deps.runtime.GitDeadline())
+	defer cancel()
+	latest, _, err := deps.runtime.Git.Advertise(gitCtx, u, ref, cred)
+	if err != nil {
+		entry.Err = artifactDeadlineError(ctx, gitCtx, deps.runtime.GitDeadline(), err)
+		return entry
+	}
+	entry.Latest = latest
+	entry.Newer = latest != e.Commit
+	return entry
 }
 
 // classifyOutdated compares locked against latest and builds the resulting

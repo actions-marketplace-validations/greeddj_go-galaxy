@@ -161,7 +161,9 @@ func warmCollections(
 	// Close before returning (deferred, ahead of the inline wg.Wait below)
 	// joins every prefetch worker and reclaims any unclaimed temp inside
 	// warmWithState's own frame, so no download outlives the backend lock.
-	prefetch := startPrefetcher(ctx, newPrefetchDeps(cfg, runtime, state.store, state.backend.Artifacts(), nil), collections, nil)
+	prefetchDeps := newPrefetchDeps(cfg, runtime, state.store, state.backend.Artifacts(), nil)
+	prefetchDeps.collectionDeps = prefetchDeps.withGit(state.backend.Artifacts(), state.gitMemo)
+	prefetch := startPrefetcher(ctx, prefetchDeps, collections, nil)
 	defer prefetch.Close()
 	// warm never touches the collections tree at all - it only downloads and
 	// extracts into the content-addressable extracted store - so its
@@ -171,6 +173,7 @@ func warmCollections(
 	depsCtx := newInstallDeps(
 		cfg, runtime, state.store, state.backend.Artifacts(), state.extractStore, nil, prefetch.cachedArtifacts(), verify,
 	)
+	depsCtx.collectionDeps = depsCtx.withGit(state.backend.Artifacts(), state.gitMemo)
 	var wg sync.WaitGroup
 	// max(cfg.Workers, 1): a zero Workers would make sem unbuffered, and the
 	// first send would block forever since no worker has started to drain it

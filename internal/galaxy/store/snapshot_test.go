@@ -47,6 +47,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	assertResolved(t, loaded)
 	assertVersions(t, loaded)
 	assertWarmed(t, loaded)
+	assertGitPin(t, loaded)
 }
 
 func openTestDBs(t *testing.T) *DBs {
@@ -67,9 +68,9 @@ func buildTestStore(fixed time.Time) *Store {
 }
 
 // populateTestStore writes a fixed, known fixture into every one of Store's
-// eight map buckets via their normal mutators (SetAPICache, SetDepsCache,
+// nine map buckets via their normal mutators (SetAPICache, SetDepsCache,
 // SetInstalled, SetGraph, SetRequirements, SetResolvedAll, SetVersionsCache,
-// SetWarmed). It is factored out of buildTestStore so a test can also apply
+// SetWarmed, SetGitPin). It is factored out of buildTestStore so a test can also apply
 // this same fixture to a store obtained some other way (e.g. one just
 // decoded from JSON), then reuse the assert* helpers below to verify it
 // without duplicating the fixture values.
@@ -105,7 +106,38 @@ func populateTestStore(st *Store, fixed time.Time) *Store {
 	})
 	st.SetVersionsCache("versions", []string{"1.0.0", "2.0.0"})
 	st.SetWarmed("a.b@1.0.0", "warmed-sha")
+	st.SetGitPin(testGitPinKey, GitPinEntry{
+		Commit: testGitPinCommit,
+		Collections: []GitPinCollection{{
+			Namespace:    "acme",
+			Name:         "app",
+			Version:      "1.2.3",
+			Subdir:       "collections/app",
+			Dependencies: map[string]string{"a.b": testDepsConstraint},
+		}},
+	})
 	return st
+}
+
+const (
+	testGitPinKey    = "https://github.com/acme/app.git\nmain\n"
+	testGitPinCommit = "0123456789abcdef0123456789abcdef01234567"
+)
+
+func assertGitPin(t *testing.T, loaded *Store) {
+	t.Helper()
+	pin, ok := loaded.GetGitPin(testGitPinKey)
+	if !ok || pin.Commit != testGitPinCommit || len(pin.Collections) != 1 {
+		t.Fatalf("unexpected git pin: %#v (ok=%t)", pin, ok)
+	}
+	c := pin.Collections[0]
+	if c.Namespace != "acme" || c.Name != "app" || c.Version != "1.2.3" || c.Subdir != "collections/app" ||
+		c.Dependencies["a.b"] != testDepsConstraint {
+		t.Fatalf("unexpected git pin collection: %#v", c)
+	}
+	if pin.FetchedAt.IsZero() {
+		t.Fatalf("git pin FetchedAt was not stamped")
+	}
 }
 
 func mustSave(t *testing.T, dbs *DBs, st *Store) {
@@ -959,6 +991,7 @@ func assertStoreMapsNonNil(t *testing.T, st *Store) {
 		{"Requirements", st.Requirements == nil},
 		{"Resolved", st.Resolved == nil},
 		{"Versions", st.Versions == nil},
+		{"GitPins", st.GitPins == nil},
 		{"Warmed", st.Warmed == nil},
 	}
 	for _, f := range fields {
@@ -990,7 +1023,8 @@ func TestUnmarshalJSONRestoresEveryNilMap(t *testing.T) {
 		"requirements": null,
 		"resolved": null,
 		"versions_cache": null,
-		"warmed": null
+		"warmed": null,
+		"git_pins": null
 	}`, helpers.StoreSnapshotSchemaVersion)
 
 	st := New()
@@ -1009,6 +1043,7 @@ func TestUnmarshalJSONRestoresEveryNilMap(t *testing.T) {
 	assertResolved(t, st)
 	assertVersions(t, st)
 	assertWarmed(t, st)
+	assertGitPin(t, st)
 }
 
 // TestUnmarshalJSONKeepsDecodedData proves ensureMaps only fills in a field a

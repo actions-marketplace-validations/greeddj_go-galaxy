@@ -263,6 +263,31 @@ const (
 	// to.
 	ArtifactMaxDownloadSize = ArchiveMaxTotalSize
 
+	// GitPackMaxSize caps the compressed bytes a git fetch may write to its
+	// on-disk object storage (the packfile and its index) before the fetch is
+	// refused. It is deliberately far below ArtifactMaxDownloadSize: a
+	// collection repository is a source tree, not an artifact archive, and
+	// go-git inflates every object into memory while it indexes the pack,
+	// before any of this tool's per-blob or per-tree caps can run. The cap
+	// therefore bounds the inflation surface a hostile remote gets, as well as
+	// the disk it can fill; what it cannot bound is the inflated size of a
+	// single object inside that budget, which go-git exposes no knob for.
+	GitPackMaxSize = int64(512 << 20) // 512 MiB
+
+	// GitErrorBodyMaxSize caps how much of a non-2xx response body the git
+	// HTTP client lets go-git read. go-git reads a failed request's body whole
+	// to compose its error, and a pack cap bounds only bytes that reach the
+	// object store, so without this a remote answering 401 or 500 with an
+	// endless body could grow the process at line speed until the fetch
+	// deadline. A real error page is a few kilobytes.
+	GitErrorBodyMaxSize = int64(64 << 10) // 64 KiB
+
+	// GitTreeMaxDepth caps how deep a git tree may nest before this tool
+	// refuses to read it. A collection never approaches it; a tree that does
+	// is a crafted one, and refusing early keeps the walk's recursion bounded
+	// by something this tool chose rather than by the remote.
+	GitTreeMaxDepth = 64
+
 	// ArtifactDownloadDeadline bounds the wall-clock time one artifact
 	// acquisition (a fetchArtifact/downloadCollectionToCache call) may take
 	// from start to finish: the response-header phase, the streamed body, the
@@ -774,7 +799,16 @@ const (
 	// its next SaveStore and re-expose the bug this schema version fixes, and
 	// a loud ErrUnsupportedSchemaVersion on that old binary is the intended
 	// failure instead.
-	StoreSnapshotSchemaVersion = 6
+	//
+	// Bumped to 7 when the snapshot gained the git pin bucket
+	// (StoreBucketGitPins): what commit a (url, ref, subdir) git requirement
+	// resolved to and which collections that commit carried, which is what
+	// lets a rerun replay a git source without touching the remote. The same
+	// reasoning as the bump to 6 applies: the change is additive, the
+	// drop-and-rebuild policy yields the only end state a migration could
+	// (an empty pin set the next resolve refills), and an older binary sharing
+	// an S3 cache would otherwise drop the bucket on its next save.
+	StoreSnapshotSchemaVersion = 7
 
 	// CacheEntryMaxAge is the retention window for persisted cache entries
 	// (API responses, resolved versions lists, and dependency constraints).
@@ -846,6 +880,9 @@ const (
 	StoreBucketVersions = "versions_cache"
 	// StoreBucketWarmed is the bucket name for warmed extracted entries.
 	StoreBucketWarmed = "warmed"
+	// StoreBucketGitPins is the bucket name for git source pins: the commit a
+	// (url, ref, subdir) requirement resolved to and the collections it held.
+	StoreBucketGitPins = "git_pins"
 
 	// StoreMetaSchemaVersion is the metadata key for the snapshot schema version.
 	StoreMetaSchemaVersion = "schema_version"
