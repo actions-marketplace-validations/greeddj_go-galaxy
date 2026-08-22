@@ -53,6 +53,9 @@ jobs:
       - name: Upload coverage
         uses: codecov/codecov-action@v7
         with:
-          file: ./coverage.txt
+          # `files`, plural. The singular `file` is not an input this action
+          # knows, and an unknown input is a warning rather than an error, so
+          # the misspelling rode along on green runs.
+          files: ./coverage.txt
           flags: unittests
           fail_ci_if_error: false

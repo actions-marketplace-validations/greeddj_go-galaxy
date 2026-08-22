@@ -52,8 +52,13 @@ jobs:
       # goreleaser shells out to both of these: cosign for the signs and
       # docker_signs stages, syft for sboms. Neither ships on the runner, and a
       # missing one fails the release rather than skipping the stage.
+      #
+      # cosign is pinned to a full version rather than a floating major, unlike
+      # every other action here: sigstore publishes 4.x releases but has never
+      # moved a `v4` tag, so `@v4` resolves to nothing and fails the job during
+      # set-up, before a step runs. Dependabot bumps it the same as the rest.
       - name: Install cosign
-        uses: sigstore/cosign-installer@v4
+        uses: sigstore/cosign-installer@v4.1.2
 
       - name: Install syft
         uses: anchore/sbom-action/download-syft@v0
