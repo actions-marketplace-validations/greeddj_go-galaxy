@@ -1,4 +1,7 @@
 PROJECT := "go-galaxy"
+# The benchmark harness, built beside the product but never shipped with it:
+# .goreleaser.yml builds ./cmd/go-galaxy/main.go alone.
+BENCH := PROJECT + "-benchmark"
 # --always --dirty, never --abbrev=0: a bare nearest-tag lookup makes every
 # build between two releases report the earlier release's version, so a binary
 # built from an arbitrary commit claims to be a shipped one. This keeps the
@@ -18,6 +21,10 @@ LDFLAGS := "-s -w" \
 # editing both spellings in one commit and fixing whatever the new release
 # reports.
 GOLANGCI_LINT_VERSION := "v2.13.1"
+# The harness declares none of the Version, Commit, Date and BuiltBy variables
+# LDFLAGS injects, so it is linked with the size flags only. Stamping a binary
+# that is never released would make dist/ look like it holds two products.
+BENCH_LDFLAGS := "-s -w"
 
 deps:
 	@echo "===== Check deps for {{PROJECT}} ====="
@@ -64,12 +71,18 @@ build: check lint test
 	mkdir -p dist
 	test -f dist/{{PROJECT}} && rm -f dist/{{PROJECT}} || echo "Not exist dist/{{PROJECT}}"
 	CGO_ENABLED=0 go build -trimpath -ldflags="{{LDFLAGS}}"  -o ./dist/{{PROJECT}} ./cmd/{{ PROJECT }}/main.go
+	@echo "===== Build {{BENCH}} ====="
+	rm -f dist/{{BENCH}}
+	CGO_ENABLED=0 go build -trimpath -ldflags="{{BENCH_LDFLAGS}}" -o ./dist/{{BENCH}} ./cmd/{{BENCH}}
 
 build_linux: check
 	@echo "===== Build {{PROJECT}} for Linux / amd64 ====="
 	mkdir -p dist
 	test -f dist/{{PROJECT}} && rm -f dist/{{PROJECT}} || echo "Not exist dist/{{PROJECT}}"
 	GOOS="linux" GOARCH="amd64" CGO_ENABLED=0 go build -trimpath -ldflags="{{LDFLAGS}}" -o dist/{{PROJECT}} ./cmd/{{ PROJECT }}/main.go
+	@echo "===== Build {{BENCH}} for Linux / amd64 ====="
+	rm -f dist/{{BENCH}}
+	GOOS="linux" GOARCH="amd64" CGO_ENABLED=0 go build -trimpath -ldflags="{{BENCH_LDFLAGS}}" -o dist/{{BENCH}} ./cmd/{{BENCH}}
 
 oci executor="podman" tag="local": build_linux
 	@echo "===== Build Local OCI {{PROJECT}} ====="

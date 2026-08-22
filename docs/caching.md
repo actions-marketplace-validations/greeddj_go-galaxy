@@ -19,6 +19,40 @@ cache entry are one inode - which is what makes an install cheap and what makes
 installed files read-only. See
 [Differences a migration runs into](ansible-galaxy-compat.md#differences-a-migration-runs-into).
 
+### What the directory holds
+
+Five kinds of entry, and only one of them is a database:
+
+| entry | what it is |
+|:------|:-----------|
+| `go-galaxy.db` | the snapshot, a single BoltDB file |
+| `<fingerprint>.<name>-<version>.tar.gz` | the artifact store, flat files, each with a `.sha256` beside it |
+| `extracted/<sha256>/` | the extracted trees, ordinary directories |
+| `projects.json` | the project registry `cleanup` reads |
+| `.go-galaxy.lock` | the lock one run holds exclusively |
+
+The fingerprint an artifact carries is the first twelve hex characters of the
+SHA256 of the server base it came from, so the same tarball fetched from two
+servers is two entries and neither is ever served in place of the other. A
+collection built from a git source is keyed by its source locator instead, as
+described above.
+
+`go-galaxy.db` holds twelve buckets: `meta` for the schema version, and eleven
+data buckets - `api_cache`, `deps_cache`, `versions_cache`, `requirements`,
+`resolved`, `graph`, `installed`, `warmed`, `git_pins`, `installed_roles` and
+`role_pins`. Each holds JSON.
+
+Nothing tree-shaped is kept in the database. The dependency graph is a bucket
+of records, but a collection's files are a real directory under `extracted/`,
+and an installed collection is hardlinks pointing into that directory. On a
+ten-collection cache the proportions come out as 8 MB of `go-galaxy.db`, 6 MB
+of tarballs and 68 MB of extracted trees.
+
+The snapshot used to be nine separate files named `go-galaxy-meta.db`,
+`go-galaxy-graph.db` and so on. It is one database now; those names survive
+only so that `--clear-cache` recognises leftovers from an older binary and
+reclaims them.
+
 `go-galaxy hash` prints a deterministic `sha256:...` of the lockfile, or of
 `requirements.yml` when no lockfile is present, for use as a CI cache key.
 `go-galaxy warm` populates the caches without installing anything, and

@@ -14,7 +14,7 @@ just check     # go vet, staticcheck, govulncheck, fieldalignment
 just lint      # golangci-lint, at exactly the pinned release
 just fix       # go fix + fieldalignment -fix
 just deps      # go mod tidy && go mod vendor - after any dependency change
-just build     # check + lint + test, then dist/go-galaxy
+just build     # check + lint + test, then dist/go-galaxy and dist/go-galaxy-benchmark
 ```
 
 To reproduce what CI runs:
@@ -321,6 +321,8 @@ expired, revoked, outsider and malformed cases.
 
 ## The benchmark harness
 
+### testing/bench.sh
+
 `testing/bench.sh` measures `ansible-galaxy` against `go-galaxy` across
 `requirements-{1,10,100}.yml` in six scenarios: `cold`, `warm`, `frozen`
 (go-galaxy only) and their three S3 equivalents, and across
@@ -343,6 +345,7 @@ scenarios are dropped with a warning, rather than failing the run,
 when the endpoint does not answer, so the local scenarios still run on a machine
 with no container runtime.
 
+
 Knobs and defaults: `RUNS=5`, `WARMUP=1`, `SIZES="1 10 100"`,
 `SCENARIOS="cold warm frozen s3-cold s3-warm s3-frozen roles-cold roles-warm"`,
 `S3_ENDPOINT=http://127.0.0.1:9000`, plus the bucket and credentials.
@@ -357,6 +360,28 @@ Output lands in `dist/bench/`: `<scenario>-<N>.md` per scenario and size,
 `resources-<N>.md` with peak RSS and bytes downloaded from a separate single-run
 pass, and `summary.md` concatenating everything with the tool versions and host
 recorded. See [Benchmarks](benchmarks.md) for the published numbers.
+
+### go-galaxy-benchmark
+
+`cmd/go-galaxy-benchmark` is the same comparison as a Go binary, narrowed to
+collections in `cold` and `warm` with no S3. What it measures and what its
+output looks like is written up once, in
+[Benchmarks](benchmarks.md#go-galaxy-benchmark); what follows is only how to
+run it from a checkout.
+
+```bash
+just build
+dist/go-galaxy-benchmark run \
+  --ansible-galaxy .venv/bin/ansible-galaxy \
+  --go-galaxy dist/go-galaxy \
+  --work-dir /var/tmp/gg-bench \
+  --requirements-dir testing \
+  --sizes 1,10,100 --runs 5
+dist/go-galaxy-benchmark show --report /var/tmp/gg-bench/report.json --format svg --out bench.svg
+```
+
+`--work-dir` should be on real disk. The workload is mostly inode creation, and
+a run on tmpfs describes no storage anyone deploys on.
 
 ## Dependencies
 

@@ -11,6 +11,15 @@ entirely under `--frozen --offline`. With a lockfile and warm caches,
 installing 100 collections takes seconds rather than minutes - see
 [Benchmarks](docs/benchmarks.md).
 
+![go-galaxy against ansible-galaxy, install speedup by cache state and collection count](docs/benchmark.svg)
+
+Five measured runs per point on Linux with xfs, both tools passed `--no-deps`,
+against `ansible-galaxy` 2.21.3. Read the warm rows knowing they compare two
+designs rather than one design done faster: `ansible-galaxy` caches API
+responses only, so a warm run still re-downloads every tarball, while
+go-galaxy hardlinks out of an extracted cache and pays one inode per file.
+`cmd/go-galaxy-benchmark` reproduces the chart.
+
 It is a drop-in for the `install` subset of `ansible-galaxy`: the same
 `requirements.yml` (collections and roles in one file), the same `ansible.cfg`
 keys, the same `ANSIBLE_*` environment variables. Where it deliberately
@@ -19,6 +28,31 @@ fail-closed 401/5xx, a resolver that refuses an unsatisfiable constraint set
 instead of picking leniently, a role fetched by git at its tag rather than as
 a GitHub tarball - every difference is written down in
 [Compatibility with ansible-galaxy](docs/ansible-galaxy-compat.md).
+
+## Resolution
+
+Versions are chosen by a PubGrub solver - the algorithm Dart's `pub`
+introduced - rather than by walking the requirements and taking the newest
+version of each in turn. The difference shows up exactly where the greedy
+approach gets stuck.
+
+It backtracks as far as it has to. Asking for the latest `ansible.netcommon`
+alongside `ansible.utils` pinned to `1.0.0` does not fail: the solver walks
+`ansible.netcommon` back through its release history until it finds one whose
+dependencies the pin allows.
+
+It refuses rather than guesses. When no combination satisfies the constraints
+there is no lenient fallback and no "closest match" - it prints PubGrub's proof
+of why and exits 3:
+
+```
+✗ failed to resolve dependencies: Because ansible.netcommon 8.6.2 depends on ansible.utils >=3.0.0 and root depends on ansible.netcommon 8.6.2, ansible.utils >=3.0.0 is forbidden.
+So, because root depends on ansible.utils 1.0.0, version solving failed.
+```
+
+The solver is pure, in-memory and deterministic, performs no I/O of its own,
+and is checked against a brute-force oracle and a fuzzer. See
+[How it works](docs/architecture.md#the-version-solver).
 
 ## Scope
 
@@ -50,7 +84,7 @@ a GitHub tarball - every difference is written down in
 
 ## Features
 
-- Dependency resolution with snapshot reuse.
+- PubGrub version solving, complete and deterministic, with snapshot reuse.
 - API and tarball caches, local or shared over S3; role artifacts and their
   extracted trees share them.
 - Skip install if already extracted.
