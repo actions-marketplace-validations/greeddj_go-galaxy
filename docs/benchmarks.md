@@ -10,27 +10,22 @@ priming run that is not measured. Both tools are invoked with `--no-deps`.
 
 ![go-galaxy against ansible-galaxy, install speedup by cache state and collection count](benchmark.svg)
 
-The chart is a separate, later measurement than the tables below: same host and
-same `ansible-galaxy`, but `go-galaxy` at commit `58c23c3` and whatever the
-Galaxy servers were publishing on the day. It is rendered by
-[go-galaxy-benchmark](#go-galaxy-benchmark) from its own JSON report. Numbers
-drift between the two runs - 18.4x against 21.1x on the cold 100-collection
-row - because the collection versions do.
+The chart and the table below are the same measurement, rendered by
+[go-galaxy-benchmark](#go-galaxy-benchmark) from one JSON report: the chart
+carries the ratios, the table the seconds they came from.
 
 ## Local cache
 
-| Scenario             | 1 collection | 10 collections | 100 collections |
-|:---------------------|-------------:|---------------:|----------------:|
-| **cold cache**       |              |                |                 |
-| ・ansible-galaxy      |       8.99 s |       152.28 s |        458.10 s |
-| ・go-galaxy           |       2.93 s |         7.71 s |         21.67 s |
-| ・**speedup**         |     **3.1x** |      **19.8x** |       **21.1x** |
-| **warm cache**       |              |                |                 |
-| ・ansible-galaxy      |       5.43 s |        36.67 s |        343.00 s |
-| ・go-galaxy           |      0.206 s |        0.292 s |          1.04 s |
-| ・**speedup**         |    **26.4x** |     **125.6x** |      **330.1x** |
-| **frozen + offline** |              |                |                 |
-| ・go-galaxy           |      0.217 s |        0.309 s |          1.13 s |
+| Scenario         | 1 collection | 10 collections | 100 collections |
+|:-----------------|-------------:|---------------:|----------------:|
+| **cold cache**   |              |                |                 |
+| ・ansible-galaxy |      8.058 s |       43.198 s |       465.601 s |
+| ・go-galaxy      |      2.612 s |        4.900 s |        25.287 s |
+| ・**speedup**    |    **3.08x** |      **8.82x** |      **18.41x** |
+| **warm cache**   |              |                |                 |
+| ・ansible-galaxy |      5.377 s |       29.070 s |       267.363 s |
+| ・go-galaxy      |      0.189 s |        0.277 s |         0.951 s |
+| ・**speedup**    |   **28.45x** |    **104.87x** |      **281.2x** |
 
 **Read the warm row knowing what each tool caches.** `ansible-galaxy` keeps
 only an API response cache - a single `api.json` - and downloads every tarball
@@ -40,25 +35,25 @@ re-downloads all 100 collections, and saves only the metadata round trips.
 installed files out of that cache. The three-hundred-fold figure is the honest
 measurement of two different designs, not of the same design done faster.
 
-The cold rows are network-bound and correspondingly noisy: `ansible-galaxy` at
-10 collections spread from 87 s to 229 s across five runs. The `go-galaxy` warm
-and frozen rows are the tight ones, within a few percent of their mean, because
-they touch no origin at all.
+The cold rows are network-bound and correspondingly noisy, and they carry
+whatever the Galaxy servers were publishing on the day. The `go-galaxy` warm
+row is the tight one, within a few percent of its mean, because it touches no
+origin at all.
 
 ## Filesystem sensitivity
 
-A `--frozen --offline` install creates about 66,000 filesystem objects for the
-100-collection set - 50,792 files and symlinks hardlinked out of the extracted
-store, plus 15,762 directories. At 17.1 us per object on the volume measured
-here, that is 1.13 s, which is essentially the entire figure.
+The 100-collection set installs about 66,000 filesystem objects - 50,792 files
+and symlinks hardlinked out of the extracted store, plus 15,762 directories.
+Creating them is essentially the whole of a warm `go-galaxy` figure: nothing is
+fetched, nothing is unpacked a second time, and what is left is the storage
+making inodes.
 
-So a warm or frozen number measures how fast the storage creates inodes, not
-how fast anything is parsed or unpacked. Two consequences worth carrying to
-your own hardware. These figures move with the filesystem and the device under
-it, so they transfer between machines far less readily than a CPU-bound
-benchmark would. And `--workers` is worth tuning only where inode creation
-contends; on the volume measured here the derived default already performs
-well.
+So a warm number measures how fast the storage creates inodes, not how fast
+anything is parsed or unpacked. Two consequences worth carrying to your own
+hardware. These figures move with the filesystem and the device under it, so
+they transfer between machines far less readily than a CPU-bound benchmark
+would. And `--workers` is worth tuning only where inode creation contends; on
+the volume measured here the derived default already performs well.
 
 ## Roles
 
@@ -209,9 +204,10 @@ disk, which for a workload that is mostly inode creation describes nothing.
 
 ## Conditions
 
-- **Tools:** `ansible-galaxy [core 2.21.3]` throughout. The tables come from
-  `go-galaxy` at commit `826c765` built with go1.26.7; the chart at the top of
-  the page from commit `58c23c3` built with go1.27.0.
+- **Tools:** `ansible-galaxy [core 2.21.3]` throughout, against `go-galaxy` at
+  commit `58c23c3` built with go1.27.0. The object counts under [Filesystem
+  sensitivity](#filesystem-sensitivity) are from an earlier `testing/bench.sh`
+  run on the same guest, at commit `826c765` built with go1.26.7.
 - **Host:** a libvirt guest running Oracle Linux Server 10.1 on
   `6.12.0-203.76.7.5.el10uek.x86_64`, 4 vCPU and 8 GB of RAM. Storage is an
   SSD RAID6 array passed through from the hypervisor as a block device and
