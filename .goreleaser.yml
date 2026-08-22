@@ -174,3 +174,16 @@ release:
     owner: greeddj
     name: go-galaxy
   prerelease: auto
+  # The page opens with the tag's own message, so what a release says about
+  # itself is written when it is cut rather than committed here ahead of time,
+  # and the grouped changelog follows it. `header.from_file` would say this
+  # directly and is GoReleaser Pro; `--release-notes` is not, but it replaces
+  # the body whole and would drop that changelog.
+  #
+  # This is what makes an annotated tag load-bearing - `git tag -a` or `-s`.
+  # For a lightweight tag .TagBody falls back to the body of the commit the
+  # tag points at, and here that is a paragraph of implementation reasoning
+  # the release page never asked for. A tag carrying no body renders nothing,
+  # which is the harmless case.
+  header: |
+    {{ .TagBody }}
