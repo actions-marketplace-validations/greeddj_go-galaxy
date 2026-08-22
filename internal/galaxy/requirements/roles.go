@@ -7,6 +7,7 @@ import (
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/gitsource"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
+	"github.com/greeddj/go-galaxy/internal/galaxy/urlsource"
 )
 
 // RoleRequirement is one validated roles: entry, normalized the way
@@ -25,6 +26,11 @@ type RoleRequirement struct {
 
 // IsGit reports whether the role comes from a git repository.
 func (r RoleRequirement) IsGit() bool { return r.Type == TypeGit }
+
+// IsURL reports whether the role comes from a tarball URL. Src is then the
+// canonical URL and Version the label the role installs under ("" for
+// none).
+func (r RoleRequirement) IsURL() bool { return r.Type == TypeURL }
 
 // roleSpecMaxCommas is how many commas ansible's string form admits:
 // src[,version[,name]].
@@ -241,18 +247,50 @@ func finishRole(spec roleSpec) (RoleRequirement, error) {
 
 // classifyRole decides what a src: names, in ansible's order: a git source
 // (an scm of git, a git pointer, or the github.com special case), then a
-// source this tool refuses (any other URL, a path, a tarball), else a
-// Galaxy role name.
+// url source (an http(s) URL to a .tar.gz - the github.com special case
+// excludes the suffix, so a release-asset URL lands here even on
+// github.com), then a source this tool refuses (any other URL, a path, a
+// non-http tarball), else a Galaxy role name.
 func classifyRole(spec roleSpec) (RoleRequirement, error) {
 	switch {
 	case spec.scm == TypeGit || gitsource.IsPointer(spec.src) || isGitHubHTTPSource(spec.src):
 		return gitRole(spec)
+	case isURLRoleSource(spec.src):
+		return urlRole(spec)
 	case looksLikeSourceName(spec.src) || strings.HasSuffix(strings.ToLower(spec.src), ".tar.gz"):
-		return RoleRequirement{}, fmt.Errorf("%w %q (only Galaxy roles and git sources are supported)",
+		return RoleRequirement{}, fmt.Errorf("%w %q (only Galaxy roles, git and url sources are supported)",
 			helpers.ErrUnsupportedRoleSource, helpers.URLForMessage(spec.src))
 	default:
 		return galaxyRole(spec)
 	}
+}
+
+// isURLRoleSource reports whether src names a role tarball this tool
+// downloads directly: an http(s) URL ending .tar.gz. Any other URL stays
+// refused - ansible would try to download it, and a URL that does not name
+// an archive is far more often a mistyped repository than an artifact.
+func isURLRoleSource(src string) bool {
+	return urlsource.IsHTTPURL(src) && strings.HasSuffix(strings.ToLower(src), ".tar.gz")
+}
+
+// urlRole judges a url spec: the URL through urlsource's grammar, which is
+// where a credential in it and a fragment are refused; the version, when
+// given, as the label the role installs under (the sha256 pins the bytes -
+// a tarball names no versions to pick among); and the install name from the
+// URL's basename when none was given, .tar.gz cut, as ansible derives it.
+func urlRole(spec roleSpec) (RoleRequirement, error) {
+	u, err := urlsource.ParseURL(spec.src)
+	if err != nil {
+		return RoleRequirement{}, err
+	}
+	if spec.version != "" && !helpers.IsRoleVersion(spec.version) {
+		return RoleRequirement{}, fmt.Errorf("%w: %q", helpers.ErrInvalidRoleVersion, helpers.TruncateForMessage(spec.version))
+	}
+	name := spec.name
+	if name == "" {
+		name = strings.TrimSuffix(path.Base(u.Path), ".tar.gz")
+	}
+	return RoleRequirement{Name: name, Src: u.String(), Version: spec.version, Type: TypeURL}, nil
 }
 
 // isGitHubHTTPSource is ansible's special case: an http(s) URL on github.com

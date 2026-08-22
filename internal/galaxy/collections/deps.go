@@ -40,14 +40,23 @@ type collectionDeps struct {
 	// install phase for a --no-cache build. Role artifacts share gitStore,
 	// since a role is built from a git tree exactly as a git collection is.
 	roleMemo *roleDiscoveryMemo
+	// urlMemo is gitMemo's counterpart for url sources: what discovery
+	// learned about each url requirement's collection, filled by the
+	// resolve phase and read by the solver and the install phase. url
+	// artifacts share gitStore, since both source kinds commit their
+	// artifacts during discovery rather than at install time.
+	urlMemo *urlDiscoveryMemo
 }
 
-// withGit returns d with the run's git store and the two discovery memos
-// attached.
-func (d collectionDeps) withGit(gitStore cacheManager.ArtifactStore, memo *gitDiscoveryMemo, roles *roleDiscoveryMemo) collectionDeps {
+// withSources returns d with the run's discovery-side artifact store and the
+// three discovery memos attached.
+func (d collectionDeps) withSources(
+	gitStore cacheManager.ArtifactStore, memo *gitDiscoveryMemo, roles *roleDiscoveryMemo, urls *urlDiscoveryMemo,
+) collectionDeps {
 	d.gitStore = gitStore
 	d.gitMemo = memo
 	d.roleMemo = roles
+	d.urlMemo = urls
 	return d
 }
 

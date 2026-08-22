@@ -8,6 +8,7 @@ import (
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
+	"github.com/greeddj/go-galaxy/internal/galaxy/urlsource"
 )
 
 // recordingPrinter is a minimal output.Printer stub that records every
@@ -74,6 +75,38 @@ func TestDebugAnsibleConfigReportsServerListWithoutLeakingToken(t *testing.T) {
 	assertContainsAll(t, printer.debugLines[0], `"a"`, "url=https://a.example", "token=true", "insecure_skip_tls_verify=false")
 	assertContainsAll(t, printer.debugLines[1], `"b"`, "url=https://b.example", "token=false", "insecure_skip_tls_verify=true")
 	assertContainsAll(t, printer.debugLines[2], `""`, "url=https://c.example", "token=false", "insecure_skip_tls_verify=false")
+}
+
+// TestDebugAnsibleConfigReportsURLCredentialsWithoutLeakingToken pins the url
+// credential debug line: id, binding URL and kind, never the token - not
+// even as a presence boolean, since a binding without a token cannot exist.
+func TestDebugAnsibleConfigReportsURLCredentialsWithoutLeakingToken(t *testing.T) {
+	t.Parallel()
+	const secretToken = "url-tok3n-must-not-appear-in-debug-output" //nolint:gosec // the fixture under test, not a credential
+
+	printer := &recordingPrinter{}
+	i := New(printer, nil)
+	prefix, err := urlsource.ParsePrefix("https://artifacts.example/org")
+	if err != nil {
+		t.Fatalf("ParsePrefix: %v", err)
+	}
+	cfg := &config.Config{
+		URLCredentials: []config.URLCredential{{ID: "hub", URL: prefix, Token: config.NewSecret(secretToken)}},
+	}
+
+	i.DebugAnsibleConfig(cfg)
+
+	if len(printer.debugLines) != 1 {
+		t.Fatalf("expected 1 debug line, got %d: %v", len(printer.debugLines), printer.debugLines)
+	}
+	line := printer.debugLines[0]
+	if strings.Contains(line, secretToken) {
+		t.Fatalf("debug line leaked the token: %q", line)
+	}
+	assertContainsAll(t, line, `"hub"`, "url=https://artifacts.example/org", "kind=bearer")
+	if strings.Contains(line, "token=") {
+		t.Fatalf("debug line renders token presence: %q", line)
+	}
 }
 
 // TestDebugAnsibleConfigNilSafe checks that the nil-guard contract

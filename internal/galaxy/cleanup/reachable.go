@@ -16,6 +16,7 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/output"
 	"github.com/greeddj/go-galaxy/internal/galaxy/requirements"
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
+	"github.com/greeddj/go-galaxy/internal/galaxy/urlsource"
 )
 
 // buildReachable computes, for every project recorded in the registry, the
@@ -122,6 +123,12 @@ func markCollectionRoots(
 			}
 			continue
 		}
+		if root.IsURL() {
+			for _, key := range urlRootKeys(st, installedByKey, root) {
+				markReachable(key, reachable, depsByKey, installedIndex, constraints)
+			}
+			continue
+		}
 		fqdn := fmt.Sprintf("%s.%s", root.Namespace, root.Name)
 		for _, inst := range selectInstalled(installedIndex, constraints, fqdn, root.Version) {
 			markReachable(inst.Key, reachable, depsByKey, installedIndex, constraints)
@@ -201,6 +208,45 @@ func installedGitKeys(st *store.Store, installedByKey map[string][]installedColl
 			continue
 		}
 		if root.Name != "" && !strings.HasPrefix(key, root.Namespace+"."+root.Name+"@") {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// urlRootKeys returns the installed keys a url requirement keeps alive: the
+// gitRootKeys shape one level simpler, since a url root has no ref or subdir
+// dimension. The store's url pin records what the URL resolved to; when no
+// pin is recorded, the installed records are read instead - every record
+// whose source is a url locator of the same URL is kept, whatever sha it
+// names, for the reason gitRootKeys keeps an unpinned commit's tree.
+func urlRootKeys(st *store.Store, installedByKey map[string][]installedCollection, root requirements.CollectionRequirement) []string {
+	if pin, ok := st.GetURLPin(urlsource.PinKey(root.Source)); ok {
+		key := fmt.Sprintf("%s.%s@%s", pin.Namespace, pin.Name, pin.Version)
+		if _, installed := installedByKey[key]; installed {
+			return []string{key}
+		}
+		return nil
+	}
+	return installedURLKeys(st, installedByKey, root)
+}
+
+// installedURLKeys is urlRootKeys' fallback when no pin is recorded: every
+// installed record sourced from a locator of the root's URL, in sorted
+// order.
+func installedURLKeys(st *store.Store, installedByKey map[string][]installedCollection,
+	root requirements.CollectionRequirement,
+) []string {
+	keys := make([]string, 0)
+	for key := range installedByKey {
+		entry, ok := st.GetInstalled(key)
+		if !ok || !urlsource.IsLocator(entry.Source) {
+			continue
+		}
+		loc, err := urlsource.ParseLocator(entry.Source)
+		if err != nil || loc.URL != root.Source {
 			continue
 		}
 		keys = append(keys, key)

@@ -10,8 +10,10 @@ import (
 
 	"github.com/greeddj/go-galaxy/cmd/go-galaxy/cliflags"
 	"github.com/greeddj/go-galaxy/internal/galaxy/gitsource"
+	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/lockfile"
 	"github.com/greeddj/go-galaxy/internal/galaxy/requirements"
+	"github.com/greeddj/go-galaxy/internal/galaxy/urlsource"
 	"github.com/greeddj/go-galaxy/internal/safeout"
 	"github.com/urfave/cli/v3"
 )
@@ -66,6 +68,10 @@ func loadRootFQDNs(reqPath string, lf *lockfile.File) ([]string, []string, error
 			out = append(out, gitRootFQDNs(r, lf)...)
 			continue
 		}
+		if r.IsURL() {
+			out = append(out, urlRootFQDNs(r, lf)...)
+			continue
+		}
 		out = append(out, fmt.Sprintf("%s.%s", r.Namespace, r.Name))
 	}
 	roles := make([]string, 0, len(file.Roles))
@@ -95,6 +101,21 @@ func gitRootFQDNs(r requirements.CollectionRequirement, lf *lockfile.File) []str
 		return []string{gitsource.Locator{URL: r.Source, Subdir: r.Subdir}.String()}
 	}
 	return out
+}
+
+// urlRootFQDNs lists what a url entry named, which only the lockfile knows:
+// the one url entry locked from the same URL. A url entry the lockfile holds
+// nothing for is reported under its locator text, so the tree shows it as
+// missing rather than dropping it.
+func urlRootFQDNs(r requirements.CollectionRequirement, lf *lockfile.File) []string {
+	if lf != nil {
+		for _, e := range lf.Collections {
+			if e.IsURL() && e.Source == r.Source {
+				return []string{e.Name}
+			}
+		}
+	}
+	return []string{urlsource.Locator{URL: r.Source}.String()}
 }
 
 // gitSubdirWithin reports whether a locked entry's subdir is the requirement's
@@ -159,9 +180,13 @@ func walkTree(w io.Writer, by map[string]lockfile.Entry, fqdn, prefix string, is
 	}
 }
 
-// gitOrigin renders a git entry's provenance for the tree: the repository,
-// the subdir when one is set, and the commit. Empty for a Galaxy entry.
+// gitOrigin renders a git or url entry's provenance for the tree: the
+// repository, the subdir when one is set, and the commit - or the tarball
+// URL and its sha256 prefix. Empty for a Galaxy entry.
 func gitOrigin(entry lockfile.Entry) string {
+	if entry.IsURL() {
+		return fmt.Sprintf(" (url %s sha256:%s)", helpers.WithoutCredentials(entry.Source), entry.SHA256[:helpers.ArtifactKeyFingerprintLen])
+	}
 	if !entry.IsGit() {
 		return ""
 	}
@@ -221,6 +246,9 @@ func walkRoleTree(w io.Writer, by map[string]lockfile.RoleEntry, name, prefix st
 // and commit for a git role, the Galaxy name and the repository it was
 // imported from for a Galaxy role.
 func roleOrigin(entry lockfile.RoleEntry) string {
+	if entry.IsURL() {
+		return fmt.Sprintf(" (url %s sha256:%s)", helpers.WithoutCredentials(entry.Source), entry.SHA256[:helpers.ArtifactKeyFingerprintLen])
+	}
 	if entry.IsGit() {
 		return fmt.Sprintf(" (git %s @%s)", entry.Source, entry.Commit)
 	}

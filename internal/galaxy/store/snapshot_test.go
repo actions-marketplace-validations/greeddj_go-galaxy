@@ -50,6 +50,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	assertGitPin(t, loaded)
 	assertInstalledRole(t, loaded)
 	assertRolePin(t, loaded)
+	assertURLPin(t, loaded)
 }
 
 func openTestDBs(t *testing.T) *DBs {
@@ -70,10 +71,10 @@ func buildTestStore(fixed time.Time) *Store {
 }
 
 // populateTestStore writes a fixed, known fixture into every one of Store's
-// eleven map buckets via their normal mutators (SetAPICache, SetDepsCache,
+// twelve map buckets via their normal mutators (SetAPICache, SetDepsCache,
 // SetInstalled, SetGraph, SetRequirements, SetResolvedAll, SetVersionsCache,
-// SetWarmed, SetGitPin, SetInstalledRole, SetRolePin). It is factored out of
-// buildTestStore so a test can also apply
+// SetWarmed, SetGitPin, SetInstalledRole, SetRolePin, SetURLPin). It is
+// factored out of buildTestStore so a test can also apply
 // this same fixture to a store obtained some other way (e.g. one just
 // decoded from JSON), then reuse the assert* helpers below to verify it
 // without duplicating the fixture values.
@@ -136,7 +137,23 @@ func populateTestStore(st *Store, fixed time.Time) *Store {
 		GalaxyRoleName: "nginx",
 		Deps:           []RolePinDep{{Src: "acme.common", Version: "v2.0.0", Name: "common"}},
 	})
+	st.SetURLPin(testURLPinKey, URLPinEntry{
+		SHA256:       testURLPinSHA,
+		Namespace:    "acme",
+		Name:         "app",
+		Version:      "1.2.3",
+		Dependencies: map[string]string{"a.b": testDepsConstraint},
+	})
 	return st
+}
+
+func assertURLPin(t *testing.T, loaded *Store) {
+	t.Helper()
+	pin, ok := loaded.GetURLPin(testURLPinKey)
+	if !ok || pin.SHA256 != testURLPinSHA || pin.Namespace != "acme" || pin.Name != "app" ||
+		pin.Version != "1.2.3" || pin.Dependencies["a.b"] != testDepsConstraint {
+		t.Fatalf("unexpected url pin: %#v (ok=%t)", pin, ok)
+	}
 }
 
 const (
@@ -148,6 +165,9 @@ const (
 	testRoleSource      = "git+" + testRoleRepository + "#@" + testGitPinCommit
 	testRoleArtifactSHA = "role-sha"
 	testRolePinKey      = "acme.nginx,v1.2.3"
+
+	testURLPinKey = "https://example.com/dl/acme-app-1.2.3.tar.gz"
+	testURLPinSHA = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
 )
 
 func assertInstalledRole(t *testing.T, loaded *Store) {
@@ -299,7 +319,7 @@ func assertWarmed(t *testing.T, loaded *Store) {
 }
 
 // TestSaveRollsBackWholeTransactionOnMidSaveFailure proves that Save writes
-// the meta bucket and all eleven data buckets inside a single Bolt
+// the meta bucket and all twelve data buckets inside a single Bolt
 // transaction: a failure partway through (here, an oversized key in the
 // installed bucket, which the fixed save order writes after api_cache)
 // must roll back the entire attempt, leaving the previously committed
@@ -1030,7 +1050,7 @@ func TestWarmedArtifactSHAByKeyReturnsIndependentMap(t *testing.T) {
 }
 
 // assertStoreMapsNonNil fails (via Error, not Fatal) for every one of
-// Store's eleven map fields that is still nil. It never stops early: the
+// Store's twelve map fields that is still nil. It never stops early: the
 // caller relies on every field being checked even if an earlier one already
 // failed, since the point of the test calling this is to then go on and
 // exercise the mutators regardless.
@@ -1051,6 +1071,7 @@ func assertStoreMapsNonNil(t *testing.T, st *Store) {
 		{"Warmed", st.Warmed == nil},
 		{"InstalledRoles", st.InstalledRoles == nil},
 		{"RolePins", st.RolePins == nil},
+		{"URLPins", st.URLPins == nil},
 	}
 	for _, f := range fields {
 		if f.isNil {
@@ -1060,7 +1081,7 @@ func assertStoreMapsNonNil(t *testing.T, st *Store) {
 }
 
 // TestUnmarshalJSONRestoresEveryNilMap proves that decoding a payload where
-// every one of Store's eleven map fields is an explicit JSON null still
+// every one of Store's twelve map fields is an explicit JSON null still
 // leaves every field writable afterward. It reuses populateTestStore - the
 // exact same mutator calls (SetAPICache, SetDepsCache, SetInstalled,
 // SetGraph, SetVersionsCache, SetWarmed, plus the two wholesale replacers
@@ -1084,7 +1105,8 @@ func TestUnmarshalJSONRestoresEveryNilMap(t *testing.T) {
 		"warmed": null,
 		"git_pins": null,
 		"installed_roles": null,
-		"role_pins": null
+		"role_pins": null,
+		"url_pins": null
 	}`, helpers.StoreSnapshotSchemaVersion)
 
 	st := New()
@@ -1106,6 +1128,7 @@ func TestUnmarshalJSONRestoresEveryNilMap(t *testing.T) {
 	assertGitPin(t, st)
 	assertInstalledRole(t, st)
 	assertRolePin(t, st)
+	assertURLPin(t, st)
 }
 
 // TestUnmarshalJSONKeepsDecodedData proves ensureMaps only fills in a field a

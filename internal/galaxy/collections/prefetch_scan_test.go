@@ -236,7 +236,7 @@ func TestBuildPrefetchTasksSchedulesExactlyTheRightSet(t *testing.T) {
 		Source: "git+https://h.example/acme/fromgit.git#@0123456789abcdef0123456789abcdef01234567",
 	}
 	c5 := collection{Namespace: "acme", Name: "installed", Version: "1.0.0", Type: "galaxy"}
-	c6 := collection{Namespace: "acme", Name: "nongalaxy", Version: "1.0.0", Type: "url"}
+	c6 := collection{Namespace: "acme", Name: "nongalaxy", Version: "1.0.0", Type: "file"}
 
 	art := &presenceArtifacts{
 		present: map[string]bool{artifactKey(c2): true, artifactKey(c4): true},

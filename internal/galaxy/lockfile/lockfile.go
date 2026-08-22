@@ -4,17 +4,19 @@
 // CI runs are reproducible and hermetic: once a lockfile exists, install only
 // reads the cache, never the Galaxy API or the git remote.
 //
-// Three schema versions are written and all three are read. Schema 1 is the
+// Four schema versions are written and all four are read. Schema 1 is the
 // Galaxy-only shape every lockfile had before git sources existed; schema 2
 // adds the git fields to an entry and is written exactly when a file carries
 // at least one git entry; schema 3 adds the roles list and is written
-// exactly when a file carries at least one role. canonicalize decides among
+// exactly when a file carries at least one role; schema 4 admits the url
+// entry shape - a collection or role pinned to a tarball URL by its sha256 -
+// and is written exactly when a file carries one. canonicalize decides among
 // them from the entries alone, so a project with no git source and no role
 // keeps producing a schema-1 file that is byte-identical to what it produced
-// before, and a project that drops its last git source or role goes back on
-// its next lock. An older binary reading a newer file refuses it loudly
-// instead of installing a git entry's source as if it were a Galaxy server,
-// or ignoring a roles list it does not know.
+// before, and a project that drops its last git source, role or url source
+// goes back on its next lock. An older binary reading a newer file refuses
+// it loudly instead of installing a git or url entry's source as if it were
+// a Galaxy server, or ignoring a roles list it does not know.
 package lockfile
 
 import (
@@ -31,6 +33,7 @@ import (
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/gitsource"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
+	"github.com/greeddj/go-galaxy/internal/galaxy/urlsource"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -45,9 +48,18 @@ const SchemaVersion = 1
 // Commit and Subdir; SchemaVersionFor picks it from the entries.
 const SchemaVersionGit = 2
 
-// TypeGit is the Entry.Type of a collection built from a git source. An
-// empty Type is a Galaxy entry; no other value is accepted.
-const TypeGit = "git"
+// TypeGit is the Entry.Type of a collection built from a git source, TypeURL
+// of one downloaded from a tarball URL. An empty Type is a Galaxy entry; no
+// other value is accepted.
+const (
+	TypeGit = "git"
+	TypeURL = "url"
+)
+
+// SchemaVersionURL is the schema of a file carrying at least one url entry -
+// a collection or a role pinned to a tarball URL by its sha256.
+// SchemaVersionFor picks it from the entries.
+const SchemaVersionURL = 4
 
 // DefaultName is the conventional lockfile name beside requirements.yml.
 const DefaultName = "requirements.lock.yml"
@@ -60,7 +72,11 @@ const DefaultName = "requirements.lock.yml"
 // the repository. A git entry carries no SHA256: the artifact is rebuilt
 // deterministically from the commit, and the gzip bytes of that rebuild
 // depend on the toolchain that produced them, so a digest over them would
-// fail a frozen install for no reason the operator could act on.
+// fail a frozen install for no reason the operator could act on. A url entry
+// (Type == TypeURL) is the opposite case and its SHA256 is required: Source
+// names the tarball URL, the artifact is the origin's own bytes rather than
+// a rebuild, and the digest is the whole pin - there is no ref, commit or
+// subdir dimension to carry.
 type Entry struct {
 	Name    string   `yaml:"name"`
 	Type    string   `yaml:"type,omitempty"`
@@ -76,19 +92,30 @@ type Entry struct {
 // IsGit reports whether the entry pins a git source.
 func (e Entry) IsGit() bool { return e.Type == TypeGit }
 
+// IsURL reports whether the entry pins a url source.
+func (e Entry) IsURL() bool { return e.Type == TypeURL }
+
 // SchemaVersionFor returns the schema a file holding entries and roles is
-// written with: SchemaVersionRoles when there is any role, else
-// SchemaVersionGit when any entry is a git entry, else SchemaVersion.
+// written with, the highest feature present winning: SchemaVersionURL when
+// any collection or role entry is a url entry, else SchemaVersionRoles when
+// there is any role, else SchemaVersionGit when any entry is a git entry,
+// else SchemaVersion.
 func SchemaVersionFor(entries []Entry, roles []RoleEntry) int {
-	if len(roles) > 0 {
+	switch {
+	case anyURLEntry(entries, roles):
+		return SchemaVersionURL
+	case len(roles) > 0:
 		return SchemaVersionRoles
+	case slices.ContainsFunc(entries, Entry.IsGit):
+		return SchemaVersionGit
+	default:
+		return SchemaVersion
 	}
-	for _, e := range entries {
-		if e.IsGit() {
-			return SchemaVersionGit
-		}
-	}
-	return SchemaVersion
+}
+
+// anyURLEntry reports whether any collection or role entry is a url entry.
+func anyURLEntry(entries []Entry, roles []RoleEntry) bool {
+	return slices.ContainsFunc(entries, Entry.IsURL) || slices.ContainsFunc(roles, RoleEntry.IsURL)
 }
 
 // File is the on-disk lockfile structure.
@@ -160,9 +187,9 @@ func Load(path string) (*File, error) {
 	if f.SchemaVersion == 0 {
 		return nil, fmt.Errorf("%w: missing schema_version", helpers.ErrLockfileInvalid)
 	}
-	if f.SchemaVersion != SchemaVersion && f.SchemaVersion != SchemaVersionGit && f.SchemaVersion != SchemaVersionRoles {
-		return nil, fmt.Errorf("%w: schema_version=%d, supported=%d, %d and %d",
-			helpers.ErrLockfileInvalid, f.SchemaVersion, SchemaVersion, SchemaVersionGit, SchemaVersionRoles)
+	if f.SchemaVersion < SchemaVersion || f.SchemaVersion > SchemaVersionURL {
+		return nil, fmt.Errorf("%w: schema_version=%d, supported=%d through %d",
+			helpers.ErrLockfileInvalid, f.SchemaVersion, SchemaVersion, SchemaVersionURL)
 	}
 	if err := f.validate(); err != nil {
 		return nil, err
@@ -248,9 +275,8 @@ func (f *File) validate() error {
 		// prints the name, and a name carrying a newline would compose extra
 		// lines into the very error reporting it. Once this check has passed,
 		// a name is an ordinary identifier again.
-		if !helpers.IsCollectionName(e.Name) {
-			return fmt.Errorf("%w: collection name %q is not <namespace>.<name> in the form ^[a-z][a-z0-9_]*$",
-				helpers.ErrLockfileInvalid, e.Name)
+		if err := checkEntryName(e); err != nil {
+			return err
 		}
 		if !helpers.IsExactVersion(e.Version) {
 			return fmt.Errorf("%w: %s: version %q is not an exact version", helpers.ErrLockfileInvalid, e.Name, e.Version)
@@ -268,14 +294,40 @@ func (f *File) validate() error {
 	return f.validateRoles()
 }
 
-// validateEntryType judges the fields that distinguish a git entry from a
-// Galaxy one. A Galaxy entry may carry none of them; a git entry must carry a
-// canonical repository URL as its source, a valid ref, a full lowercase
-// commit and a valid subdir, and must not carry a SHA256 (see Entry for why),
-// and may only appear in a schema-2 or later file. The URL is re-parsed rather than
-// trusted because the source is repository content: anything a later run
-// connects to has to pass the same grammar a requirements entry does.
+// checkEntryName judges an entry's name by the alphabet its type earns: a
+// url entry's identity came from its artifact's own MANIFEST.json and is
+// held to the relaxed rule that admits it (see
+// helpers.IsURLCollectionNamePart), every other entry to the Galaxy
+// alphabet a server-resolved name has already passed.
+func checkEntryName(e Entry) error {
+	if e.IsURL() {
+		namespace, name, ok := helpers.SplitFQDN(e.Name)
+		if !ok || !helpers.IsURLCollectionNamePart(namespace) || !helpers.IsURLCollectionNamePart(name) {
+			return fmt.Errorf("%w: collection name %q is not <namespace>.<name> in the form ^[A-Za-z0-9_]+$",
+				helpers.ErrLockfileInvalid, e.Name)
+		}
+		return nil
+	}
+	if !helpers.IsCollectionName(e.Name) {
+		return fmt.Errorf("%w: collection name %q is not <namespace>.<name> in the form ^[a-z][a-z0-9_]*$",
+			helpers.ErrLockfileInvalid, e.Name)
+	}
+	return nil
+}
+
+// validateEntryType judges the fields that distinguish a git or url entry
+// from a Galaxy one. A Galaxy entry may carry none of them; a git entry must
+// carry a canonical repository URL as its source, a valid ref, a full
+// lowercase commit and a valid subdir, must not carry a SHA256 (see Entry for
+// why), and may only appear in a schema-2 or later file; a url entry must
+// carry a canonical tarball URL as its source and a full lowercase sha256,
+// nothing of the git triple, and may only appear in a schema-4 file. The URL
+// is re-parsed rather than trusted because the source is repository content:
+// anything a later run connects to has to pass the same grammar a
+// requirements entry does.
 func validateEntryType(e Entry, schema int) error {
+	var minSchema int
+	var problem func(Entry) string
 	switch e.Type {
 	case "":
 		if e.Ref != "" || e.Commit != "" || e.Subdir != "" {
@@ -283,13 +335,16 @@ func validateEntryType(e Entry, schema int) error {
 		}
 		return nil
 	case TypeGit:
+		minSchema, problem = SchemaVersionGit, gitEntryProblem
+	case TypeURL:
+		minSchema, problem = SchemaVersionURL, urlEntryProblem
 	default:
 		return fmt.Errorf("%w: %s: unsupported entry type %q", helpers.ErrLockfileInvalid, e.Name, e.Type)
 	}
-	if schema < SchemaVersionGit {
-		return fmt.Errorf("%w: %s: a git entry requires schema_version %d", helpers.ErrLockfileInvalid, e.Name, SchemaVersionGit)
+	if schema < minSchema {
+		return fmt.Errorf("%w: %s: a %s entry requires schema_version %d", helpers.ErrLockfileInvalid, e.Name, e.Type, minSchema)
 	}
-	if reason := gitEntryProblem(e); reason != "" {
+	if reason := problem(e); reason != "" {
 		return fmt.Errorf("%w: %s: %s", helpers.ErrLockfileInvalid, e.Name, reason)
 	}
 	return nil
@@ -312,6 +367,21 @@ func gitEntryProblem(e Entry) string {
 	}
 	if e.SHA256 != "" {
 		return "a git entry carries no sha256"
+	}
+	return ""
+}
+
+// urlEntryProblem returns why a url entry's source, sha256 or leftover git
+// fields are refused, or "" when every field is canonical.
+func urlEntryProblem(e Entry) string {
+	if u, err := urlsource.ParseURL(e.Source); err != nil || u.String() != e.Source {
+		return "source is not a canonical tarball URL"
+	}
+	if !helpers.IsSHA256Hex(e.SHA256) {
+		return fmt.Sprintf("sha256 %q is not a lowercase 64-hex digest", e.SHA256)
+	}
+	if e.Ref != "" || e.Commit != "" || e.Subdir != "" {
+		return "ref, commit and subdir belong to a git entry"
 	}
 	return ""
 }

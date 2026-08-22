@@ -327,11 +327,58 @@ type manifestEnvelope struct {
 	CollectionInfo *manifestInfo `json:"collection_info"`
 }
 
+// ParseManifestInfo reads a collection's identity and dependencies out of
+// the bytes of its MANIFEST.json, for the url-source discovery, where the
+// downloaded artifact's manifest is the only identity document there is.
+// The version and the dependency map are judged by the same rules a git
+// discovery judges a repository's manifest with; the namespace and name are
+// held to the relaxed url alphabet (helpers.IsURLCollectionNamePart) rather
+// than the Galaxy one, because the artifact was authored outside any Galaxy
+// server, real release artifacts carry mixed-case namespaces, and ansible
+// installs them.
+func ParseManifestInfo(data []byte) (GalaxyYML, error) {
+	meta, err := decodeManifestInfo(data)
+	if err != nil {
+		return GalaxyYML{}, err
+	}
+	if !helpers.IsURLCollectionNamePart(meta.Namespace) {
+		return GalaxyYML{}, fmt.Errorf("%w: namespace %q", helpers.ErrInvalidCollectionName, helpers.TruncateForMessage(meta.Namespace))
+	}
+	if !helpers.IsURLCollectionNamePart(meta.Name) {
+		return GalaxyYML{}, fmt.Errorf("%w: name %q", helpers.ErrInvalidCollectionName, helpers.TruncateForMessage(meta.Name))
+	}
+	if !helpers.IsExactVersion(meta.Version) {
+		return GalaxyYML{}, fmt.Errorf("%w: MANIFEST.json declares %q",
+			helpers.ErrInvalidCollectionVersion, helpers.TruncateForMessage(meta.Version))
+	}
+	for dep := range meta.Dependencies {
+		if !helpers.IsCollectionName(dep) {
+			return GalaxyYML{}, fmt.Errorf("%w: %q", helpers.ErrInvalidDependencyKey, helpers.TruncateForMessage(dep))
+		}
+	}
+	return meta, nil
+}
+
 // parseManifestInfo reads the identity of a built tree out of its
-// MANIFEST.json. The tree is rebuilt from scratch afterwards, exactly as
-// ansible's install_src does, so nothing but collection_info is read and
-// BuildIgnore stays empty.
+// MANIFEST.json under the full validateMeta rules. The tree is rebuilt from
+// scratch afterwards, exactly as ansible's install_src does, so nothing but
+// collection_info is read and BuildIgnore stays empty.
 func parseManifestInfo(data []byte) (GalaxyYML, error) {
+	meta, err := decodeManifestInfo(data)
+	if err != nil {
+		return GalaxyYML{}, err
+	}
+	if err := validateMeta(&meta); err != nil {
+		return GalaxyYML{}, err
+	}
+	return meta, nil
+}
+
+// decodeManifestInfo is the shared decode half of the two readers above:
+// the size cap, the JSON shape, the collection_info presence, the version
+// presence, and the nil-to-empty normalization - everything except the
+// identity alphabet the two callers disagree on.
+func decodeManifestInfo(data []byte) (GalaxyYML, error) {
 	if len(data) > metadataMaxBytes {
 		return GalaxyYML{}, fmt.Errorf("%w: %s is %d bytes, the limit is %d",
 			helpers.ErrGalaxyYMLInvalid, helpers.ManifestFileName, len(data), metadataMaxBytes)
@@ -374,9 +421,6 @@ func parseManifestInfo(data []byte) (GalaxyYML, error) {
 		if *list == nil {
 			*list = []string{}
 		}
-	}
-	if err := validateMeta(&meta); err != nil {
-		return GalaxyYML{}, err
 	}
 	return meta, nil
 }

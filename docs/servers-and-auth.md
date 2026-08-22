@@ -336,6 +336,58 @@ line, and the lockfile records a repository URL, never a credential. Prefer
 the environment over any file for the same reason the `--token` section
 gives; there is deliberately no flag for a git credential.
 
+## URL sources and credentials
+
+A collection or role that comes from a direct http(s) tarball URL (see
+[requirements.yml](configuration.md#requirementsyml) for the spellings) is
+downloaded by go-galaxy itself, over a client of its own: no Galaxy token
+and no relaxed TLS policy exists for any origin on it, so a requirements
+file naming a configured server's own origin still gets neither. When the
+host needs authentication - a GitHub release in a private repository, an
+artifact store - a Bearer token is bound through the environment, to an
+origin, never written into the requirements file:
+
+```bash
+export GO_GALAXY_URL_CREDENTIALS=gh,artifacts
+
+# a GitHub personal access token for private release assets
+export GO_GALAXY_URL_GH_URL=https://github.com/acme
+export GO_GALAXY_URL_GH_TOKEN="$GITHUB_TOKEN"
+
+# an artifact store, scoped to one path prefix
+export GO_GALAXY_URL_ARTIFACTS_URL=https://artifacts.example.internal/ansible
+export GO_GALAXY_URL_ARTIFACTS_TOKEN="$ARTIFACTS_TOKEN"
+```
+
+`GO_GALAXY_URL_CREDENTIALS` lists credential ids under the same grammar as
+the git list above. Each id is read from `GO_GALAXY_URL_<ID>_*` with `<ID>`
+upper-cased. `_URL` is required and names what the token applies to: a
+scheme (`https`, or `http` for loopback only), a host, an optional port and
+an optional path prefix. `_TOKEN` is required and is sent as
+`Authorization: Bearer <token>`. A request carries the token only when its
+scheme, host and port match the binding exactly and its path carries the
+prefix; among several matching bindings the longest prefix wins. A binding
+itself takes only an origin and a plain path prefix; a caching-proxy URL
+(`http://front/<upstream-url>`) is covered by binding the front host's
+origin, or a prefix the proxy is mounted under - the token authenticates to
+the front host, never to the upstream the path embeds.
+
+That decision is made again on every redirect hop. The ordinary GitHub
+release shape - a 302 into presigned object storage - therefore works and
+leaks nothing: the hop into the unbound origin carries no Authorization
+header at all (an S3-shaped endpoint would refuse a request carrying both a
+header and query signing anyway), and go-galaxy does not rely on the Go
+HTTP client's own stripping heuristic, which forwards a pre-set header to
+any subdomain of the host that set it. A redirect that leaves https for
+plaintext http is refused outright. The URL itself may carry no credential
+and no fragment; a query string is allowed and is part of the source's
+identity, though every printed line cuts it.
+
+A url token is a `Secret` value under exactly the git rules above: never
+persisted, never printed, env-only with no flag. The Galaxy token is never
+reused for a url source, even on the server's own origin - bind the same
+value explicitly under `GO_GALAXY_URL_*` when a host takes it as Bearer.
+
 ## Rejected as configuration errors
 
 These are refused before any request is made, exiting with the usage exit code
@@ -370,13 +422,25 @@ These are refused before any request is made, exiting with the usage exit code
   bound key nor an agent. See [Git sources and
   credentials](#git-sources-and-credentials). A git role is held to the same
   URL and ref grammar, and additionally may carry no `#subdir` at all.
-- A `roles:` entry this tool cannot install from: a tarball or other non-git
-  URL, a local path, an `scm` other than `git`, an `include:`, a `source:`,
-  `signatures:` or `type:` key, a name or version outside the role alphabets,
-  or two entries installing into one directory; and a Galaxy role when no
-  configured server serves the v1 role API, or when the record a server
-  returns cannot be turned into a GitHub repository URL. See [Roles and the
-  v1 role API](#roles-and-the-v1-role-api).
+- A url credential binding that does not parse: an id outside the grammar or
+  listed twice, a missing or malformed `_URL`, an `ssh://` or
+  `user@host:path` binding, a query or fragment in the binding, a missing
+  `_TOKEN`, two ids bound to one URL, or a token bound to a plaintext
+  non-loopback `http` origin. See
+  [URL sources and credentials](#url-sources-and-credentials).
+- A url requirement whose URL carries a credential or a fragment, whose
+  scheme is not `https` or `http`, whose path carries a dot or empty
+  segment (the one exception is the `//` of a canonically spelled embedded
+  upstream URL - the caching-proxy shape), or that names nothing beyond its
+  origin; a `version:` beside it that is not exact; and a `source:`,
+  `namespace:` or `signatures:` key on a url entry.
+- A `roles:` entry this tool cannot install from: a non-http or
+  non-`.tar.gz` URL, a local path, an `scm` other than `git`, an
+  `include:`, a `source:`, `signatures:` or `type:` key, a name or version
+  outside the role alphabets, or two entries installing into one directory;
+  and a Galaxy role when no configured server serves the v1 role API, or
+  when the record a server returns cannot be turned into a GitHub
+  repository URL. See [Roles and the v1 role API](#roles-and-the-v1-role-api).
 
 By contrast, an auth failure (401/403) or an unavailable server exits with the
 network exit code (`4`) instead, since that's a runtime condition to retry or

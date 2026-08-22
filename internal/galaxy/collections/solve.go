@@ -113,7 +113,7 @@ func solverResultToResolvedGraph(
 	result *solver.Result,
 	cfg *config.Config,
 	bindings map[string]string,
-	pins map[string]gitPin,
+	pins map[string]exactPin,
 ) (map[string]collection, map[string][]string, error) {
 	resolved := make(map[string]collection, len(result.Versions))
 	for fqdn, version := range result.Versions {
@@ -126,16 +126,7 @@ func solverResultToResolvedGraph(
 			Name:      name,
 			Version:   version,
 		}
-		// A git pin's source is its locator, taken from the pin itself: the
-		// solver decides an exact pin through Dependencies alone, so no
-		// binding is ever recorded for it, and sourceFor's fallback would
-		// otherwise stamp the first Galaxy server onto a collection no
-		// server holds.
-		if pin, pinned := pins[fqdn]; pinned {
-			col.Source, col.Type, col.Ref = pin.locator, typeGit, pin.ref
-		} else {
-			col.Source = sourceFor(fqdn, bindings, cfg)
-		}
+		stampResolvedSource(&col, fqdn, pins, bindings, cfg)
 		resolved[fqdn] = col
 	}
 
@@ -160,6 +151,26 @@ func solverResultToResolvedGraph(
 	}
 	ensureGraphNodes(resolved, graph)
 	return resolved, graph, nil
+}
+
+// stampResolvedSource stamps col's Source (and pin-carried fields) from its
+// discovery pin when one exists, else from the solve's own binding. A git or
+// url pin's source is its locator, taken from the pin itself: the solver
+// decides an exact pin through Dependencies alone, so no binding is ever
+// recorded for it, and sourceFor's fallback would otherwise stamp the first
+// Galaxy server onto a collection no server holds. A url pin additionally
+// stamps its sha256 onto the collection, which is what makes verifyPinnedSHA
+// enforce the origin digest on every install and warm, not only under
+// --frozen.
+func stampResolvedSource(col *collection, fqdn string, pins map[string]exactPin, bindings map[string]string, cfg *config.Config) {
+	switch pin, pinned := pins[fqdn]; {
+	case pinned && pin.typ == typeGit:
+		col.Source, col.Type, col.Ref = pin.locator, typeGit, pin.ref
+	case pinned:
+		col.Source, col.Type, col.SHA256 = pin.locator, typeURL, pin.sha256
+	default:
+		col.Source = sourceFor(fqdn, bindings, cfg)
+	}
 }
 
 // sourceFor returns fqdn's install source: the server base that actually

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/gitsource"
@@ -130,37 +129,10 @@ func loadGitCredentials(cfg *Config) error {
 	return nil
 }
 
-// gitCredentialIDs splits the id list and applies the same two list-level
-// rules validateServerIDs applies to server ids, for the same reason: each
-// id becomes an environment variable prefix, so it must be spellable as one
-// and must not collide with another by case alone. A blank list is empty
-// rather than invalid; a blank element inside a non-blank list is invalid,
-// since it is what a stray comma produces.
+// gitCredentialIDs splits the id list under the shared rules
+// credentialIDList states, refusing with this surface's sentinel.
 func gitCredentialIDs(raw string) ([]string, error) {
-	if strings.TrimSpace(raw) == "" {
-		return nil, nil
-	}
-	parts := strings.Split(raw, ",")
-	ids := make([]string, 0, len(parts))
-	seen := make(map[string]string, len(parts))
-	for _, part := range parts {
-		id := strings.TrimSpace(part)
-		if id == "" {
-			return nil, fmt.Errorf("%w: %s carries an empty id", helpers.ErrGitCredentialInvalid, gitCredentialsListEnv)
-		}
-		if !serverIDPattern.MatchString(id) {
-			return nil, fmt.Errorf("%w: %s lists id %q, which is not spellable as an environment variable (allowed: A-Z a-z 0-9 _ -)",
-				helpers.ErrGitCredentialInvalid, gitCredentialsListEnv, id)
-		}
-		lower := strings.ToLower(id)
-		if prior, ok := seen[lower]; ok {
-			return nil, fmt.Errorf("%w: %s lists %q and %q, which read the same %s%s_* variables",
-				helpers.ErrGitCredentialInvalid, gitCredentialsListEnv, prior, id, gitCredentialEnvPrefix, strings.ToUpper(id))
-		}
-		seen[lower] = id
-		ids = append(ids, id)
-	}
-	return ids, nil
+	return credentialIDList(raw, gitCredentialsListEnv, gitCredentialEnvPrefix, helpers.ErrGitCredentialInvalid)
 }
 
 // gitCredentialVar composes the variable name for one key of one id.
@@ -314,35 +286,8 @@ func checkGitCredentialURLConflicts(creds []GitCredential) error {
 }
 
 // unknownGitVariableWarnings returns one warning per environment variable
-// that sits under a declared id's prefix and is none of the six keys. The
-// known names of every id are collected first, because one id's prefix can
-// be a prefix of another's (ids "a" and "a_b" share GO_GALAXY_GIT_A_), and a
-// variable that is a known key of the longer id must not be reported as an
-// unknown key of the shorter one. The result is sorted so the warning order
-// does not depend on the environment's own.
+// that sits under a declared id's prefix and is none of the six keys, under
+// the shared scan unknownCredentialVariableWarnings states.
 func unknownGitVariableWarnings(ids []string, environ []string) []string {
-	keys := gitCredentialKeys()
-	known := make(map[string]bool, len(ids)*len(keys))
-	prefixes := make([]string, 0, len(ids))
-	for _, id := range ids {
-		prefixes = append(prefixes, gitCredentialVar(id, ""))
-		for _, key := range keys {
-			known[gitCredentialVar(id, key)] = true
-		}
-	}
-	var warnings []string
-	for _, entry := range environ {
-		name, _, _ := strings.Cut(entry, "=")
-		if known[name] {
-			continue
-		}
-		for _, prefix := range prefixes {
-			if strings.HasPrefix(name, prefix) {
-				warnings = append(warnings, fmt.Sprintf("unsupported variable %s ignored", name))
-				break
-			}
-		}
-	}
-	slices.Sort(warnings)
-	return warnings
+	return unknownCredentialVariableWarnings(ids, environ, gitCredentialKeys(), gitCredentialVar)
 }

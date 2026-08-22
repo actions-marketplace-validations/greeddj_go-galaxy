@@ -123,9 +123,11 @@ func (m *gitDiscoveryMemo) cleanup() {
 //
 // Roots are processed on the download-worker pool and merged in input order,
 // so the expanded list is deterministic. A fqdn two roots both produce - two
-// repositories, or a repository and a Galaxy root - is
-// helpers.ErrDuplicateCollectionRequirement, the same refusal prepareRoots
-// makes for two Galaxy roots.
+// repositories, a repository and a Galaxy root, or a repository and a url
+// root - is helpers.ErrDuplicateCollectionRequirement, the same refusal
+// prepareRoots makes for two Galaxy roots; the check runs in
+// expandSourceRoots, once the url expansion has given every root an
+// identity too.
 func expandGitRoots(ctx context.Context, deps collectionDeps, roots []collection) ([]collection, error) {
 	if !anyUnpinnedGit(roots) {
 		return roots, nil
@@ -158,7 +160,7 @@ func expandGitRoots(ctx context.Context, deps collectionDeps, roots []collection
 	for _, group := range results {
 		expanded = append(expanded, group...)
 	}
-	return checkExpandedDuplicates(expanded)
+	return expanded, nil
 }
 
 func anyUnpinnedGit(roots []collection) bool {

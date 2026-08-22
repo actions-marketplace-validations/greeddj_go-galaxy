@@ -4,16 +4,19 @@ import (
 	"fmt"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/gitsource"
+	"github.com/greeddj/go-galaxy/internal/galaxy/urlsource"
 )
 
 // collection represents a resolved collection with metadata. For a Galaxy
 // collection Source is the server base that owns it; for a git collection it
-// is the gitsource locator (git+<url>#<subdir>@<commit>), which is what every
-// downstream consumer keys on - the artifact cache, the installed record, the
-// resolved snapshot - so a commit change reads as a source change everywhere
-// without any of them knowing what a git source is. Type survives resolution
-// for both kinds; Ref is set only for a git collection and is the ref the
-// requirements file asked for, carried to the lockfile.
+// is the gitsource locator (git+<url>#<subdir>@<commit>) and for a url
+// collection the urlsource locator (url+<url>#sha256:<hex>), which is what
+// every downstream consumer keys on - the artifact cache, the installed
+// record, the resolved snapshot - so a commit or content change reads as a
+// source change everywhere without any of them knowing what the source kind
+// is. Type survives resolution for every kind; Ref is set only for a git
+// collection and is the ref the requirements file asked for, carried to the
+// lockfile.
 type collection struct {
 	Namespace  string `yaml:"namespace"`
 	Name       string `yaml:"name"`
@@ -22,9 +25,10 @@ type collection struct {
 	Constraint string `yaml:"-"`
 	Type       string `yaml:"-"`
 	Ref        string `yaml:"-"`
-	// SHA256 is the frozen-lockfile artifact pin, populated only when
-	// resolving from a lockfile (see materializeLockfile). It is a runtime-only
-	// value used to enforce --frozen integrity and is never (de)serialized.
+	// SHA256 is the artifact pin the install enforces byte for byte: the
+	// frozen-lockfile pin (see materializeLockfile), and for a url collection
+	// the locator's own digest, stamped on every resolution. It is a
+	// runtime-only value and is never (de)serialized.
 	SHA256     string   `yaml:"-"`
 	Signatures []string `yaml:"signatures"`
 }
@@ -32,6 +36,7 @@ type collection struct {
 const (
 	typeGalaxy = "galaxy"
 	typeGit    = "git"
+	typeURL    = "url"
 )
 
 // fqdn returns the collection's namespace.name.
@@ -56,4 +61,16 @@ func (c collection) isGit() bool {
 // isGit reports true.
 func (c collection) gitLocator() (gitsource.Locator, error) {
 	return gitsource.ParseLocator(c.Source)
+}
+
+// isURL reports whether the collection comes from a url source, by the same
+// Source-prefix dispatch isGit uses and for the same reason.
+func (c collection) isURL() bool {
+	return urlsource.IsLocator(c.Source)
+}
+
+// urlLocator parses the collection's locator. It is only meaningful when
+// isURL reports true.
+func (c collection) urlLocator() (urlsource.Locator, error) {
+	return urlsource.ParseLocator(c.Source)
 }

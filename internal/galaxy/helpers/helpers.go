@@ -51,6 +51,30 @@ func IsCollectionName(value string) bool {
 	return ok && IsCollectionNamePart(namespace) && IsCollectionNamePart(name)
 }
 
+// IsURLCollectionNamePart reports whether part is acceptable as one half of
+// a url collection's identity: letters of either case, digits and
+// underscore - ansible's own runtime FQCN word rule. It is deliberately
+// wider than IsCollectionNamePart, which holds a server-resolved collection
+// to the Galaxy alphabet: a url artifact's MANIFEST.json is authored
+// outside any Galaxy server, real release artifacts carry mixed-case
+// namespaces, and ansible-galaxy installs them. Path safety does not rest
+// on this predicate - IsPathElement re-judges every component before a path
+// is built - so the widening admits no separator, no dot and no control
+// rune.
+func IsURLCollectionNamePart(part string) bool {
+	if part == "" {
+		return false
+	}
+	for _, r := range part {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // SplitFQDN splits a "namespace.collection" string into parts. It validates
 // shape only - exactly one dot, two non-empty halves - and deliberately no
 // alphabet: see IsCollectionName for the check a caller reading a name from

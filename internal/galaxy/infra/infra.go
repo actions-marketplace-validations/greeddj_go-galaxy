@@ -31,9 +31,16 @@ import (
 
 // Infra holds runtime dependencies such as IO and HTTP clients.
 type Infra struct {
-	Output                   output.Printer
-	Git                      gitsource.Client
-	HTTP                     *http.Client
+	Output output.Printer
+	Git    gitsource.Client
+	HTTP   *http.Client
+	// URLHTTP is the client url collection and role sources download over
+	// (fetch.NewURLDownload): its own credential layer, no Galaxy token, no
+	// relaxed TLS. A nil URLHTTP at a url acquisition is a wiring defect the
+	// pipeline reports, the same contract Git carries - never a fallback to
+	// HTTP, which would silently re-attach Galaxy tokens to
+	// repository-authored URLs.
+	URLHTTP                  *http.Client
 	Now                      func() time.Time
 	TempDir                  func() string
 	Metrics                  *metrics.Counters
@@ -147,6 +154,7 @@ func (i *Infra) DebugAnsibleConfig(cfg *config.Config) {
 	}
 	i.debugServerList(cfg.Servers)
 	i.debugGitCredentials(cfg.GitCredentials)
+	i.debugURLCredentials(cfg.URLCredentials)
 }
 
 // WarnConfig surfaces non-fatal configuration warnings collected while
@@ -188,6 +196,17 @@ func (i *Infra) debugGitCredentials(creds []config.GitCredential) {
 			kind = "ssh-key"
 		}
 		i.Output.Debugf("git credential %q: url=%s kind=%s", c.ID, c.URL.String(), kind)
+	}
+}
+
+// debugURLCredentials logs one line per configured url credential binding:
+// its id and the URL prefix it covers. The token is never rendered, not even
+// as a presence boolean - a binding without a token cannot exist, config
+// refused that shape, so presence would say nothing the line does not
+// already.
+func (i *Infra) debugURLCredentials(creds []config.URLCredential) {
+	for _, c := range creds {
+		i.Output.Debugf("url credential %q: url=%s kind=bearer", c.ID, c.URL.String())
 	}
 }
 

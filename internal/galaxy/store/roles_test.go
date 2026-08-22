@@ -2,7 +2,6 @@ package store
 
 import (
 	"encoding/json"
-	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -299,32 +298,5 @@ func TestRoleBucketsRoundTripJSON(t *testing.T) {
 	nulled.SetRolePin(testRolePinKey, RolePinEntry{Commit: testGitPinCommit})
 }
 
-// TestSchemaIsEightAndASchemaSevenSnapshotIsDropped pins the bump that
-// introduced the role buckets: the constant is 8, ValidateSchema classes 7 as
-// outdated, and a Bolt snapshot a schema-7 binary wrote - real data under
-// every older bucket, none under the two new ones - is dropped and rebuilt on
-// Load rather than half-trusted. The literal 7 is deliberate: the
-// StoreSnapshotSchemaVersion-1 form the generic tests use would keep passing
-// across any future bump, while this test is about this one.
-func TestSchemaIsEightAndASchemaSevenSnapshotIsDropped(t *testing.T) {
-	t.Parallel()
-	if helpers.StoreSnapshotSchemaVersion != 8 {
-		t.Fatalf("StoreSnapshotSchemaVersion = %d, want 8", helpers.StoreSnapshotSchemaVersion)
-	}
-	if err := ValidateSchema(7); !errors.Is(err, helpers.ErrOutdatedSchemaVersion) {
-		t.Fatalf("ValidateSchema(7) = %v, want ErrOutdatedSchemaVersion", err)
-	}
-
-	dbs := openTestDBs(t)
-	fixed := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
-	st := buildTestStore(fixed)
-	st.InstalledRoles = make(map[string]InstalledRoleEntry)
-	st.RolePins = make(map[string]RolePinEntry)
-	mustSave(t, dbs, st)
-	stampSchemaVersion(t, dbs, 7)
-
-	loaded := mustLoad(t, dbs)
-	if !reflect.DeepEqual(loaded, New()) {
-		t.Fatalf("a schema-7 snapshot was not dropped: %#v", loaded)
-	}
-}
+// The schema-bump pin test lives with the bump that last moved the version:
+// see TestSchemaIsNineAndASchemaEightSnapshotIsDropped in urlpins_test.go.

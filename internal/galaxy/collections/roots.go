@@ -12,12 +12,13 @@ import (
 // distinct, stable value that lets the root walk the configured server list,
 // rather than being nailed to a single default server here.
 //
-// A git root may have no identity yet (its repository's galaxy.yml supplies
-// one at discovery), so its duplicate check is by locator rather than by
-// name; a git root that does name its collection is checked by name as well,
-// the same way a Galaxy root is. The invariant that a root is a git root
-// exactly when its Source is a locator is asserted here because everything
-// downstream dispatches on the locator prefix alone.
+// A git or url root may have no identity yet (its repository's galaxy.yml or
+// its artifact's MANIFEST.json supplies one at discovery), so its duplicate
+// check is by locator rather than by name; a git root that does name its
+// collection is checked by name as well, the same way a Galaxy root is. The
+// invariant that a root is typed git or url exactly when its Source is that
+// kind's locator is asserted here because everything downstream dispatches
+// on the locator prefix alone.
 func prepareRoots(roots []collection) ([]collection, error) {
 	prepared := make([]collection, 0, len(roots))
 	seen := make(map[string]collection)
@@ -33,7 +34,7 @@ func prepareRoots(roots []collection) ([]collection, error) {
 		if err := normalizeRootType(&root); err != nil {
 			return nil, err
 		}
-		if root.isGit() {
+		if hasLocatorSource(root) {
 			if err := addRoot(root.Source, root); err != nil {
 				return nil, err
 			}
@@ -54,6 +55,12 @@ func prepareRoots(roots []collection) ([]collection, error) {
 	return prepared, nil
 }
 
+// hasLocatorSource reports whether root's Source is a git or url locator: a
+// root whose identity discovery supplies rather than the file.
+func hasLocatorSource(root collection) bool {
+	return root.isGit() || root.isURL()
+}
+
 // splitRootName fills a root's namespace and name from a dotted Name when
 // either half is missing; a Name that is not a valid fqdn is refused.
 func splitRootName(root *collection) error {
@@ -70,17 +77,17 @@ func splitRootName(root *collection) error {
 }
 
 // normalizeRootType canonicalizes root's type (empty means galaxy), refuses
-// a type other than galaxy or git, and enforces that a root is typed git
-// exactly when its Source is a git locator.
+// a type other than galaxy, git or url, and enforces that a root is typed
+// git or url exactly when its Source is that kind's locator.
 func normalizeRootType(root *collection) error {
 	root.Type = normalizeType(root.Type)
 	if root.Type == "" {
 		root.Type = typeGalaxy
 	}
 	if !isSupportedType(root.Type) {
-		return fmt.Errorf("%w: %q (only galaxy and git are supported)", helpers.ErrUnsupportedCollectionType, root.Type)
+		return fmt.Errorf("%w: %q (only galaxy, git and url are supported)", helpers.ErrUnsupportedCollectionType, root.Type)
 	}
-	if (root.Type == typeGit) != root.isGit() {
+	if (root.Type == typeGit) != root.isGit() || (root.Type == typeURL) != root.isURL() {
 		return fmt.Errorf("%w: type %q does not match source %q", helpers.ErrInvalidCollectionEntry,
 			root.Type, helpers.URLForMessage(root.Source))
 	}
@@ -99,8 +106,9 @@ func isGalaxyType(value string) bool {
 	return normalized == "" || normalized == typeGalaxy
 }
 
-// isSupportedType reports whether the type is one this tool resolves: Galaxy
-// or git.
+// isSupportedType reports whether the type is one this tool resolves:
+// Galaxy, git or url.
 func isSupportedType(value string) bool {
-	return isGalaxyType(value) || normalizeType(value) == typeGit
+	normalized := normalizeType(value)
+	return isGalaxyType(value) || normalized == typeGit || normalized == typeURL
 }

@@ -2,7 +2,11 @@
 // and put them where they are wanted: install, warm, lock, and outdated.
 // Resolution turns a requirements file into an exact version per transitive
 // collection, and the install side then downloads, verifies, extracts, and
-// records each one under the configured collections path.
+// records each one under the configured collections path. A git or url
+// requirement is expanded before the solver runs (expandSourceRoots): its
+// repository or tarball is fetched, its collections become exact-pin roots,
+// and the pin - a commit, or the origin bytes' sha256 - travels in the
+// locator every downstream consumer keys on.
 //
 // install, warm and lock reach the cache backend through one funnel,
 // withBackend: it opens the backend, takes its exclusive lock, and runs the
@@ -43,12 +47,16 @@ type installState struct {
 	// roleMemo is gitMemo's counterpart for roles: what the resolve phase
 	// learned about each role, read by the install phase.
 	roleMemo *roleDiscoveryMemo
+	// urlMemo is gitMemo's counterpart for url sources: what the resolve
+	// phase learned about each url requirement, read by the solver and the
+	// install phase.
+	urlMemo *urlDiscoveryMemo
 }
 
 // resolveDeps builds the dependency set a resolve runs with: the store, and
 // the git store and memo every phase shares.
 func (s *installState) resolveDeps(cfg *config.Config, runtime *infra.Infra) collectionDeps {
-	return newCollectionDeps(cfg, runtime, s.store).withGit(s.backend.Artifacts(), s.gitMemo, s.roleMemo)
+	return newCollectionDeps(cfg, runtime, s.store).withSources(s.backend.Artifacts(), s.gitMemo, s.roleMemo, s.urlMemo)
 }
 
 type installPlan struct {
@@ -124,10 +132,12 @@ func withBackend(ctx context.Context, cfg *config.Config, runtime *infra.Infra, 
 	defer func() {
 		_ = state.backend.Close(ctx)
 	}()
-	// A --no-cache run hands git builds from discovery to the install phase
-	// through the memo; whatever no install worker took is removed here.
+	// A --no-cache run hands git builds and url downloads from discovery to
+	// the install phase through the memos; whatever no install worker took
+	// is removed here.
 	defer state.gitMemo.cleanup()
 	defer state.roleMemo.cleanup()
+	defer state.urlMemo.cleanup()
 
 	return cacheManager.LockLostError(ctx, lockCtx, work(lockCtx, cfg, runtime, state, start))
 }
@@ -249,6 +259,7 @@ func initInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) 
 		extractStore: extractStore,
 		gitMemo:      newGitDiscoveryMemo(),
 		roleMemo:     newRoleDiscoveryMemo(),
+		urlMemo:      newURLDiscoveryMemo(),
 	}, nil
 }
 
@@ -401,7 +412,7 @@ func prepareInstallPlan(
 
 	prefetchStart := time.Now()
 	prefetchDeps := newPrefetchDeps(cfg, runtime, state.store, state.backend.Artifacts(), root)
-	prefetchDeps.collectionDeps = prefetchDeps.withGit(state.backend.Artifacts(), state.gitMemo, state.roleMemo)
+	prefetchDeps.collectionDeps = prefetchDeps.withSources(state.backend.Artifacts(), state.gitMemo, state.roleMemo, state.urlMemo)
 	prefetch := startPrefetcher(ctx, prefetchDeps, collections, levels)
 	runtime.Output.DebugSincef(prefetchStart, "%s", "prefetch schedule")
 
@@ -552,11 +563,12 @@ func buildCollectionsMap(resolved map[string]collection) (map[string]collection,
 // drops a root is caught on a fresh solve.
 func verifyRootsResolved(roots []collection, resolved map[string]collection) error {
 	for _, col := range roots {
-		// A git root without an explicit name is verified by discovery (its
-		// collections were produced from the repository, or the resolve
-		// failed) and, under --frozen, by verifyRootsAgainstLockfile; it has
-		// no fqdn of its own to look up here.
-		if col.isGit() && col.Namespace == "" && col.Name == "" {
+		// A git root without an explicit name, and every url root, is
+		// verified by discovery (its collections were produced from the
+		// repository or the tarball, or the resolve failed) and, under
+		// --frozen, by verifyRootsAgainstLockfile; it has no fqdn of its own
+		// to look up here.
+		if (col.isGit() || col.isURL()) && col.Namespace == "" && col.Name == "" {
 			continue
 		}
 		fqdn := fmt.Sprintf("%s.%s", col.Namespace, col.Name)

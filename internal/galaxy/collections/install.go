@@ -699,9 +699,13 @@ func fetchArtifactMiss(
 	meta *types.GalaxyCollectionVersionInfo,
 	useCache bool,
 ) (artifactData, error) {
-	if prebuilt, ok := deps.gitMemo.takePrebuilt(col.Namespace + "." + col.Name); ok {
+	if prebuilt, ok := deps.gitMemo.takePrebuilt(col.fqdn()); ok {
 		// A --no-cache discovery built this artifact minutes ago and no
 		// store holds it; the fetch it stands for happened once.
+		return artifactData{Path: prebuilt.Path, Cleanup: prebuilt.Cleanup, SHA: prebuilt.SHA}, nil
+	}
+	if prebuilt, ok := deps.urlMemo.takePrebuilt(col.fqdn()); ok {
+		// The url counterpart of the handoff above: discovery downloaded it.
 		return artifactData{Path: prebuilt.Path, Cleanup: prebuilt.Cleanup, SHA: prebuilt.SHA}, nil
 	}
 	if deps.cfg != nil && deps.cfg.Offline {
@@ -712,9 +716,12 @@ func fetchArtifactMiss(
 		result downloadResult
 		err    error
 	)
-	if col.isGit() {
+	switch {
+	case col.isGit():
 		result, err = gitFetchToCache(ctx, deps, col, useCache)
-	} else {
+	case col.isURL():
+		result, err = urlFetchToCache(ctx, deps, col, useCache)
+	default:
 		result, err = downloadCollectionToCache(ctx, deps, artifactKey(col), col.Source, meta, useCache)
 	}
 	if err != nil {
@@ -1477,11 +1484,12 @@ func resolveMetadata(
 	if meta != nil {
 		return meta, nil
 	}
-	// A git collection has no Galaxy version document: its artifact was built
-	// here, carries no server digest and no signatures, and is verified by
-	// its own manifest chain. A nil meta is the shape every downstream step
+	// A git or url collection has no Galaxy version document: its artifact
+	// was built here or downloaded from its own origin, carries no server
+	// digest and no signatures, and is verified by its own manifest chain or
+	// its locator's sha256. A nil meta is the shape every downstream step
 	// already handles for a metadata-free cache hit.
-	if col.isGit() {
+	if col.isGit() || col.isURL() {
 		return nil, nil //nolint:nilnil // nil meta is the established "no server metadata" value downstream
 	}
 	metaStart := time.Now()

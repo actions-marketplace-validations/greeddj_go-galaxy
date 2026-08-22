@@ -31,6 +31,13 @@ func queryLatestRoleVersions(ctx context.Context, deps collectionDeps, lf *lockf
 // collection sharing a name stay apart in the report.
 func lookupRoleOutdated(ctx context.Context, deps collectionDeps, e lockfile.RoleEntry) outdatedEntry {
 	display := "role " + e.Name
+	if e.IsURL() {
+		// A url pin is content-addressed: the source has no version feed,
+		// and "the same URL now serves different bytes" is drift --refresh
+		// and --frozen own, not "newer". The verdict the lockfile can give
+		// is the one reported.
+		return outdatedEntry{Name: display, Locked: e.Version, Latest: e.Version, Newer: false}
+	}
 	if e.IsGit() {
 		entry := lookupGitOutdated(ctx, deps, lockfile.Entry{Name: e.Name, Source: e.Source, Ref: e.Ref, Commit: e.Commit})
 		entry.Name = display

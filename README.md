@@ -56,16 +56,22 @@ and is checked against a brute-force oracle and a fuzzer. See
 
 ## Scope
 
-- Collections from Galaxy API servers and from git repositories (https, ssh,
-  public or private). `url`, `file` and `dir` sources are not supported.
+- Collections from Galaxy API servers, from git repositories (https, ssh,
+  public or private), and from direct http(s) tarball URLs (`url` sources: a
+  release asset, an artifact store object), pinned in the lockfile by the
+  artifact's sha256, with an optional Bearer token bound per origin through
+  `GO_GALAXY_URL_*` - see [Servers and auth](docs/servers-and-auth.md).
+  `file` and `dir` sources are not supported.
 - Roles from the Galaxy v1 role API (`owner.role`, resolved on
   galaxy.ansible.com or a standalone Galaxy NG - Automation Hub has no role
-  API) and from git repositories (`git+<url>`, `git@host:path`, `scm: git`,
-  or a bare `https://github.com/<owner>/<repo>` URL). A Galaxy role is fetched
-  by git at the tag the v1 API names, never as a GitHub tarball, so its
-  lockfile pin is a commit. A role's `meta/main.yml` and `meta/requirements.yml`
-  dependencies are installed transitively. Tarball and local-path role
-  sources, `scm` other than `git`, and `include:` are refused at load.
+  API), from git repositories (`git+<url>`, `git@host:path`, `scm: git`,
+  or a bare `https://github.com/<owner>/<repo>` URL), and from http(s)
+  `.tar.gz` URLs, pinned by the origin bytes' sha256. A Galaxy role is
+  fetched by git at the tag the v1 API names, never as a GitHub tarball, so
+  its lockfile pin is a commit. A role's `meta/main.yml` and
+  `meta/requirements.yml` dependencies are installed transitively.
+  Local-path role sources, non-http and non-`.tar.gz` role URLs, `scm`
+  other than `git`, and `include:` are refused at load.
 - Roles install under `roles_path` (`--roles-path`, default `.roles`,
   project-local like `.collections`), one directory per role, with ansible's
   `meta/.galaxy_install_info` written beside the role's meta so

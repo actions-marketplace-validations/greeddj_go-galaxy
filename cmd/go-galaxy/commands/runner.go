@@ -40,6 +40,11 @@ func runCollectionCommand(ctx context.Context, c *cli.Command, action collection
 	// Galaxy token and no relaxed TLS policy can ride along to a repository.
 	runtime.Git = gitfetch.New(fetch.NewGit(cfg.Timeout), runtime.TempDir)
 	runtime.GitCredentials = gitCredentials(cfg)
+	// The url client is wired for every command alike for the same reason
+	// the git client is: it holds no connection until a url requirement is
+	// met, and it runs on its own client (fetch.NewURLDownload) so no Galaxy
+	// token and no relaxed TLS policy can ride along to an artifact host.
+	runtime.URLHTTP = fetch.NewURLDownload(cfg.Timeout, cfg.Offline, urlBindings(cfg))
 	runtime.DebugAnsibleConfig(cfg)
 	runtime.WarnConfig(cfg)
 	return action(ctx, cfg, runtime)

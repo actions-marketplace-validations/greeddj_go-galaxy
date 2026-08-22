@@ -98,3 +98,25 @@ func gitCredentials(cfg *config.Config) []gitsource.Credential {
 	}
 	return creds
 }
+
+// urlBindings converts cfg.URLCredentials into fetch's URLBinding view. This
+// is the only call site of config.Secret.Reveal() for a url token, and it
+// satisfies the same rule serverAuths and gitCredentials do: the plaintext
+// is taken only to build the value the transport puts on the wire. The
+// binding's origin comes from urlsource.Prefix.Origin(), which renders it
+// exactly as helpers.Origin renders a request URL's, so the transport's
+// match is a byte comparison.
+func urlBindings(cfg *config.Config) []fetch.URLBinding {
+	if cfg == nil {
+		return nil
+	}
+	bindings := make([]fetch.URLBinding, 0, len(cfg.URLCredentials))
+	for _, c := range cfg.URLCredentials {
+		bindings = append(bindings, fetch.URLBinding{
+			Origin:     c.URL.Origin(),
+			PathPrefix: c.URL.Path,
+			Token:      c.Token.Reveal(),
+		})
+	}
+	return bindings
+}

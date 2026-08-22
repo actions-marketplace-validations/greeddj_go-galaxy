@@ -175,6 +175,8 @@ func resolveRoleRequest(ctx context.Context, deps collectionDeps, req requiremen
 	switch req.Type {
 	case requirements.TypeGit:
 		pin, err = resolveGitRole(ctx, deps, req)
+	case requirements.TypeURL:
+		pin, err = resolveURLRole(ctx, deps, req)
 	default:
 		pin, err = resolveGalaxyRole(ctx, deps, req)
 	}

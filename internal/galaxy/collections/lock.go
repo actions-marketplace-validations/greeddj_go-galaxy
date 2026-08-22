@@ -11,6 +11,7 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 	"github.com/greeddj/go-galaxy/internal/galaxy/lockfile"
+	"github.com/greeddj/go-galaxy/internal/galaxy/urlsource"
 )
 
 // buildLockfile assembles a lockfile from a resolved set and its graph.
@@ -49,8 +50,7 @@ func buildLockfile(
 		if !helpers.IsExactVersion(col.Version) {
 			return nil, fmt.Errorf("lockfile: %s: %w: %q", fqdn, helpers.ErrInvalidCollectionVersion, col.Version)
 		}
-		if col.isGit() {
-			entry, err := gitLockfileEntry(fqdn, col, graph)
+		if entry, handled, err := sourceLockfileEntry(fqdn, col, graph); handled {
 			if err != nil {
 				return nil, err
 			}
@@ -95,6 +95,22 @@ func buildLockfile(
 	}, nil
 }
 
+// sourceLockfileEntry renders the pin of a collection whose Source is a
+// locator - a git or url entry - and reports handled=false for a Galaxy
+// collection, whose entry buildLockfile itself renders from server metadata.
+func sourceLockfileEntry(fqdn string, col collection, graph map[string][]string) (lockfile.Entry, bool, error) {
+	switch {
+	case col.isGit():
+		entry, err := gitLockfileEntry(fqdn, col, graph)
+		return entry, true, err
+	case col.isURL():
+		entry, err := urlLockfileEntry(fqdn, col, graph)
+		return entry, true, err
+	default:
+		return lockfile.Entry{}, false, nil
+	}
+}
+
 // gitLockfileEntry renders a git collection's pin: the repository URL as its
 // source, the ref the requirements file asked for, the commit it resolved to
 // and the subdir it was built from, and no sha256 (see lockfile.Entry for
@@ -123,6 +139,27 @@ func gitLockfileEntry(fqdn string, col collection, graph map[string][]string) (l
 		Ref:     ref,
 		Commit:  loc.Commit,
 		Subdir:  loc.Subdir,
+		Deps:    lockfileDepsFromGraph(graph, col.key()),
+	}, nil
+}
+
+// urlLockfileEntry renders a url collection's pin: the tarball URL as its
+// source and the origin bytes' sha256 - a real digest, required where a git
+// entry's is refused (see lockfile.Entry). The locator is taken apart rather
+// than written as-is so the file a human reviews names the URL, not an
+// internal key. No metadata fetch happens: everything a url entry records
+// was settled at discovery.
+func urlLockfileEntry(fqdn string, col collection, graph map[string][]string) (lockfile.Entry, error) {
+	loc, err := urlSourceOf(col)
+	if err != nil {
+		return lockfile.Entry{}, fmt.Errorf("lockfile: %s: %w", fqdn, err)
+	}
+	return lockfile.Entry{
+		Name:    fqdn,
+		Type:    lockfile.TypeURL,
+		Version: col.Version,
+		Source:  loc.URL,
+		SHA256:  loc.SHA256,
 		Deps:    lockfileDepsFromGraph(graph, col.key()),
 	}, nil
 }
@@ -171,7 +208,7 @@ func indexLockfile(lf *lockfile.File, cfg *config.Config) (map[string]lockfile.E
 			return nil, fmt.Errorf("%w: invalid name %q", helpers.ErrLockfileInvalid, e.Name)
 		}
 		entry := e
-		if entry.Source == "" && !entry.IsGit() {
+		if entry.Source == "" && !entry.IsGit() && !entry.IsURL() {
 			entry.Source = cfg.Server
 		}
 		out[e.Name] = entry
@@ -183,6 +220,12 @@ func verifyRootsAgainstLockfile(roots []collection, byFQDN map[string]lockfile.E
 	for _, root := range roots {
 		if root.isGit() {
 			if err := verifyGitRootAgainstLockfile(root, byFQDN); err != nil {
+				return err
+			}
+			continue
+		}
+		if root.isURL() {
+			if err := verifyURLRootAgainstLockfile(root, byFQDN); err != nil {
 				return err
 			}
 			continue
@@ -217,13 +260,19 @@ func materializeLockfile(byFQDN map[string]lockfile.Entry) (map[string]collectio
 			return nil, nil, fmt.Errorf("%w: %s", helpers.ErrLockfileInvalid, fqdn)
 		}
 		col := collection{Namespace: ns, Name: name, Version: e.Version, Source: e.Source, SHA256: e.SHA256}
-		if e.IsGit() {
+		switch {
+		case e.IsGit():
 			// The pin is the commit: the locator rebuilt here is what keys the
 			// artifact cache and the installed record, and SHA256 stays empty
 			// so verifyPinnedSHA has nothing to compare (see lockfile.Entry).
 			col.Source = gitsource.Locator{URL: e.Source, Subdir: e.Subdir, Commit: e.Commit}.String()
 			col.Type = typeGit
 			col.Ref = e.Ref
+		case e.IsURL():
+			// The pin is the sha256, carried in both the locator (the artifact
+			// key) and col.SHA256 (what verifyPinnedSHA compares bytes to).
+			col.Source = urlsource.Locator{URL: e.Source, SHA256: e.SHA256}.String()
+			col.Type = typeURL
 		}
 		resolved[fqdn] = col
 		graph[col.key()] = lockfileDepsToKeys(e.Deps, byFQDN)
@@ -283,6 +332,29 @@ func gitRootUnmatched(root collection, display string, matched int) error {
 	default:
 		return nil
 	}
+}
+
+// verifyURLRootAgainstLockfile checks one url root, as the requirements file
+// wrote it, against the lockfile: exactly the entry locked from the same URL
+// must be present, and a version: the root asserted must be the version it
+// was locked as - --frozen means "what was asked for has not changed".
+func verifyURLRootAgainstLockfile(root collection, byFQDN map[string]lockfile.Entry) error {
+	loc, err := root.urlLocator()
+	if err != nil {
+		return err
+	}
+	display := helpers.URLForMessage(loc.URL)
+	for _, entry := range byFQDN {
+		if !entry.IsURL() || entry.Source != loc.URL {
+			continue
+		}
+		if root.Constraint != "" && entry.Version != root.Constraint {
+			return fmt.Errorf("%w: url root %s locked as version %q, requirements ask for %q",
+				helpers.ErrLockfileMismatch, display, entry.Version, root.Constraint)
+		}
+		return nil
+	}
+	return fmt.Errorf("%w: url root %s has no lockfile entry", helpers.ErrLockfileMismatch, display)
 }
 
 // subdirWithin reports whether a locked entry's subdir is the root's own

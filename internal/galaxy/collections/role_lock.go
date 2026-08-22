@@ -9,6 +9,7 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/lockfile"
 	"github.com/greeddj/go-galaxy/internal/galaxy/requirements"
+	"github.com/greeddj/go-galaxy/internal/galaxy/urlsource"
 )
 
 // roleLockfileEntries renders every resolved role as a lockfile entry, in
@@ -42,6 +43,9 @@ func roleLockfileEntries(cfg *config.Config, roles roleResolution) ([]lockfile.R
 }
 
 func roleLockfileEntry(cfg *config.Config, r resolvedRole) (lockfile.RoleEntry, error) {
+	if urlsource.IsLocator(r.Source) {
+		return urlRoleLockfileEntry(r)
+	}
 	loc, err := gitsource.ParseLocator(r.Source)
 	if err != nil {
 		return lockfile.RoleEntry{}, fmt.Errorf("lockfile: role %s: %w", r.Name, err)
@@ -71,6 +75,28 @@ func roleLockfileEntry(cfg *config.Config, r resolvedRole) (lockfile.RoleEntry, 
 	return entry, nil
 }
 
+// urlRoleLockfileEntry renders a url role's pin: the tarball URL as its
+// source and the origin bytes' sha256 - required where a git role's digest
+// is refused (see lockfile.RoleEntry) - with no ref, commit, galaxy or
+// repository to carry.
+func urlRoleLockfileEntry(r resolvedRole) (lockfile.RoleEntry, error) {
+	loc, err := urlsource.ParseLocator(r.Source)
+	if err != nil {
+		return lockfile.RoleEntry{}, fmt.Errorf("lockfile: role %s: %w", r.Name, err)
+	}
+	if !loc.Pinned() {
+		return lockfile.RoleEntry{}, fmt.Errorf("lockfile: role %s: %w: role is not pinned to a sha256", r.Name, helpers.ErrInvalidURLLocator)
+	}
+	return lockfile.RoleEntry{
+		Name:    r.Name,
+		Type:    lockfile.RoleTypeURL,
+		Version: r.Version,
+		Source:  loc.URL,
+		SHA256:  loc.SHA256,
+		Deps:    slices.Clone(r.Deps),
+	}, nil
+}
+
 // resolveRolesFromLockfile is resolveFromLockfile for the roles list: every
 // requirement must be locked as it is written, and every role entry becomes
 // a resolved role whose artifact the install fetches from the cache or, on
@@ -88,27 +114,43 @@ func resolveRolesFromLockfile(lf *lockfile.File, roots []requirements.RoleRequir
 	}
 	res := roleResolution{roles: make(map[string]resolvedRole, len(lf.Roles)), order: make([]string, 0, len(lf.Roles))}
 	for _, e := range lf.Roles {
-		kind := requirements.TypeGit
-		if !e.IsGit() {
-			kind = requirements.TypeGalaxy
-		}
-		role := resolvedRole{
-			Deps:       slices.Clone(e.Deps),
-			Name:       e.Name,
-			Source:     gitsource.Locator{URL: e.RepositoryURL(), Commit: e.Commit}.String(),
-			Repository: e.RepositoryURL(),
-			Ref:        e.Ref,
-			Version:    e.Version,
-			GalaxyName: e.Galaxy,
-			Kind:       kind,
-		}
-		if !e.IsGit() {
-			role.Server = e.Source
-		}
-		res.roles[e.Name] = role
+		res.roles[e.Name] = resolvedRoleFromLockfile(e)
 		res.order = append(res.order, e.Name)
 	}
 	return res, nil
+}
+
+// resolvedRoleFromLockfile materializes one locked role: a url entry
+// rebuilds its url locator from the URL and sha256, a git or Galaxy entry
+// its git locator from the repository and commit.
+func resolvedRoleFromLockfile(e lockfile.RoleEntry) resolvedRole {
+	if e.IsURL() {
+		return resolvedRole{
+			Deps:    slices.Clone(e.Deps),
+			Name:    e.Name,
+			Source:  urlsource.Locator{URL: e.Source, SHA256: e.SHA256}.String(),
+			Version: e.Version,
+			Kind:    requirements.TypeURL,
+		}
+	}
+	kind := requirements.TypeGit
+	if !e.IsGit() {
+		kind = requirements.TypeGalaxy
+	}
+	role := resolvedRole{
+		Deps:       slices.Clone(e.Deps),
+		Name:       e.Name,
+		Source:     gitsource.Locator{URL: e.RepositoryURL(), Commit: e.Commit}.String(),
+		Repository: e.RepositoryURL(),
+		Ref:        e.Ref,
+		Version:    e.Version,
+		GalaxyName: e.Galaxy,
+		Kind:       kind,
+	}
+	if !e.IsGit() {
+		role.Server = e.Source
+	}
+	return role
 }
 
 // verifyRoleRootAgainstLockfile checks one roles: entry, as written, against
@@ -122,18 +164,49 @@ func verifyRoleRootAgainstLockfile(root requirements.RoleRequirement, byName map
 	if !ok {
 		return fmt.Errorf("%w: role %s missing", helpers.ErrLockfileMismatch, root.Name)
 	}
-	if root.IsGit() {
-		if !entry.IsGit() || entry.Source != root.Src {
-			return fmt.Errorf("%w: role %s locked from %s, requirements ask for %s",
-				helpers.ErrLockfileMismatch, root.Name, roleEntryOrigin(entry), helpers.URLForMessage(root.Src))
-		}
-		if entry.Ref != root.Version {
-			return fmt.Errorf("%w: role %s locked from ref %q, requirements ask for %q",
-				helpers.ErrLockfileMismatch, root.Name, entry.Ref, root.Version)
-		}
-		return nil
+	switch {
+	case root.IsURL():
+		return verifyURLRoleRoot(root, entry)
+	case root.IsGit():
+		return verifyGitRoleRoot(root, entry)
+	default:
+		return verifyGalaxyRoleRoot(root, entry)
 	}
-	if entry.IsGit() || entry.Galaxy != root.Src {
+}
+
+// verifyURLRoleRoot checks a url roles: entry against its locked form: same
+// URL, and the same version label when the root spelled one.
+func verifyURLRoleRoot(root requirements.RoleRequirement, entry lockfile.RoleEntry) error {
+	if !entry.IsURL() || entry.Source != root.Src {
+		return fmt.Errorf("%w: role %s locked from %s, requirements ask for %s",
+			helpers.ErrLockfileMismatch, root.Name, roleEntryOrigin(entry), helpers.URLForMessage(root.Src))
+	}
+	if root.Version != "" && entry.Version != root.Version {
+		return fmt.Errorf("%w: role %s locked at %q, requirements ask for %q",
+			helpers.ErrLockfileMismatch, root.Name, entry.Version, root.Version)
+	}
+	return nil
+}
+
+// verifyGitRoleRoot checks a git roles: entry against its locked form: same
+// repository and the same ref, a ref change being a mismatch even at the
+// same commit.
+func verifyGitRoleRoot(root requirements.RoleRequirement, entry lockfile.RoleEntry) error {
+	if !entry.IsGit() || entry.Source != root.Src {
+		return fmt.Errorf("%w: role %s locked from %s, requirements ask for %s",
+			helpers.ErrLockfileMismatch, root.Name, roleEntryOrigin(entry), helpers.URLForMessage(root.Src))
+	}
+	if entry.Ref != root.Version {
+		return fmt.Errorf("%w: role %s locked from ref %q, requirements ask for %q",
+			helpers.ErrLockfileMismatch, root.Name, entry.Ref, root.Version)
+	}
+	return nil
+}
+
+// verifyGalaxyRoleRoot checks a Galaxy roles: entry against its locked
+// form: same Galaxy name, and the version asked for when one was.
+func verifyGalaxyRoleRoot(root requirements.RoleRequirement, entry lockfile.RoleEntry) error {
+	if entry.IsGit() || entry.IsURL() || entry.Galaxy != root.Src {
 		return fmt.Errorf("%w: role %s locked from %s, requirements ask for Galaxy role %s",
 			helpers.ErrLockfileMismatch, root.Name, roleEntryOrigin(entry), root.Src)
 	}
@@ -146,7 +219,7 @@ func verifyRoleRootAgainstLockfile(root requirements.RoleRequirement, byName map
 
 // roleEntryOrigin renders where a locked role came from, for a message.
 func roleEntryOrigin(e lockfile.RoleEntry) string {
-	if e.IsGit() {
+	if e.IsGit() || e.IsURL() {
 		return helpers.URLForMessage(e.Source)
 	}
 	return "Galaxy role " + e.Galaxy

@@ -35,12 +35,13 @@ The fingerprint an artifact carries is the first twelve hex characters of the
 SHA256 of the server base it came from, so the same tarball fetched from two
 servers is two entries and neither is ever served in place of the other. A
 collection built from a git source is keyed by its source locator instead, as
-described above.
+described above, and one downloaded from a url source by its own locator,
+`url+<url>#sha256:<hex>`.
 
-`go-galaxy.db` holds twelve buckets: `meta` for the schema version, and eleven
-data buckets - `api_cache`, `deps_cache`, `versions_cache`, `requirements`,
-`resolved`, `graph`, `installed`, `warmed`, `git_pins`, `installed_roles` and
-`role_pins`. Each holds JSON.
+`go-galaxy.db` holds thirteen buckets: `meta` for the schema version, and
+twelve data buckets - `api_cache`, `deps_cache`, `versions_cache`,
+`requirements`, `resolved`, `graph`, `installed`, `warmed`, `git_pins`,
+`installed_roles`, `role_pins` and `url_pins`. Each holds JSON.
 
 Nothing tree-shaped is kept in the database. The dependency graph is a bucket
 of records, but a collection's files are a real directory under `extracted/`,
@@ -84,6 +85,19 @@ install phase without committing it. `warm` records a git collection under
 `namespace.name@version` like any other, so two commits of a branch that did
 not bump the collection's version share one warmed entry; the artifact cache
 itself keeps both.
+
+A url source follows the same shape one dimension simpler. The artifact
+key's scope is the locator `url+<url>#sha256:<hex>`, so an origin that
+starts serving different bytes produces a new key rather than overwriting
+the old artifact. The snapshot records a url pin per URL - the sha256 the
+URL served and the collection identity and dependencies its MANIFEST.json
+declared - which is what a rerun replays without contacting the origin (a
+url role's pin lives in `role_pins`, keyed `url\n<url>`, and additionally
+records the version label). `--refresh` re-downloads the URL, since there is
+no cheaper probe than the download itself: unchanged bytes keep the pin and
+the artifact key, changed bytes become a new pin. Everything else - the
+`--offline` replay, the `--no-cache` handoff, the warmed entry - behaves as
+it does for a git source.
 
 A role lives in the same caches by the same rules, with a role-shaped key. Its
 artifact - the deterministic `tar.gz` built from the repository tree - is

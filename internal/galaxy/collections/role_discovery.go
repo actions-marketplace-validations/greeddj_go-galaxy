@@ -25,7 +25,12 @@ type rolePin struct {
 	server     string
 	roleName   string
 	kind       string
-	deps       []gitsource.RoleDependency
+	// url and sha256 are a url role's pin - the tarball URL and the sha256
+	// of the bytes it served - standing where repository and commit stand
+	// for a git or Galaxy pin; each kind leaves the other's fields empty.
+	url    string
+	sha256 string
+	deps   []gitsource.RoleDependency
 }
 
 // roleDiscoveryMemo is the run-wide table of discovered roles, keyed by

@@ -103,6 +103,7 @@ func dirtyMutatorCases() []dirtyMutatorCase {
 		{name: "DeleteRolePin", call: func(st *Store) {
 			st.DeleteRolePin(testRolePinKey)
 		}},
+		{name: "SetURLPin", call: func(st *Store) { st.SetURLPin(testURLPinKey, URLPinEntry{SHA256: testURLPinSHA}) }},
 		{name: "SetDepsCache", call: func(st *Store) {
 			st.SetDepsCache("deps", map[string]string{"a.b": testDepsConstraint})
 		}},

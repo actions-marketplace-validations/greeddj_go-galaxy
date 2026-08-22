@@ -183,6 +183,13 @@ func lookupOutdated(ctx context.Context, deps collectionDeps, e lockfile.Entry) 
 	if e.IsGit() {
 		return lookupGitOutdated(ctx, deps, e)
 	}
+	if e.IsURL() {
+		// A url pin is content-addressed: the source has no version feed,
+		// and "the same URL now serves different bytes" is drift --refresh
+		// and --frozen own, not "newer". No network, current by
+		// construction.
+		return outdatedEntry{Name: e.Name, Locked: e.Version, Latest: e.Version, Newer: false}
+	}
 	ns, name, ok := helpers.SplitFQDN(e.Name)
 	if !ok {
 		return outdatedEntry{

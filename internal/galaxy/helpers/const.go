@@ -840,7 +840,18 @@ const (
 	// must fail loudly with ErrUnsupportedSchemaVersion rather than drop both
 	// buckets on its next save and hand the next cleanup a snapshot that
 	// records no installed role at all.
-	StoreSnapshotSchemaVersion = 8
+	//
+	// Bumped to 9 when the snapshot gained the url pin bucket
+	// (StoreBucketURLPins) and the role pin entry grew its url-source fields
+	// (store.RolePinEntry.URL and .SHA256): what sha256 and identity a url
+	// requirement's tarball resolved to, which is what lets a rerun replay a
+	// url source without touching the origin. The change is additive and the
+	// drop-and-rebuild policy yields the only end state a migration could
+	// (an empty pin set the next resolve refills), but the bump is again not
+	// optional: an older binary sharing an S3 cache would otherwise drop the
+	// bucket - and every url role pin's identifying fields - on its next
+	// save.
+	StoreSnapshotSchemaVersion = 9
 
 	// CacheEntryMaxAge is the retention window for persisted cache entries
 	// (API responses, resolved versions lists, and dependency constraints).
@@ -921,6 +932,9 @@ const (
 	// StoreBucketRolePins is the bucket name for role pins: the repository,
 	// commit and version a role requirement line resolved to.
 	StoreBucketRolePins = "role_pins"
+	// StoreBucketURLPins is the bucket name for url source pins: the sha256
+	// and collection identity a url requirement's tarball resolved to.
+	StoreBucketURLPins = "url_pins"
 
 	// StoreMetaSchemaVersion is the metadata key for the snapshot schema version.
 	StoreMetaSchemaVersion = "schema_version"

@@ -7,6 +7,7 @@ import (
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/gitsource"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
+	"github.com/greeddj/go-galaxy/internal/galaxy/urlsource"
 )
 
 // SchemaVersionRoles is the schema of a file carrying at least one role
@@ -15,26 +16,32 @@ import (
 const SchemaVersionRoles = 3
 
 // Role entry types. A role always has one: a Galaxy role was looked up by
-// name on a Galaxy server, a git role was named by its repository.
+// name on a Galaxy server, a git role was named by its repository, a url
+// role by a tarball URL.
 const (
 	RoleTypeGalaxy = "galaxy"
 	RoleTypeGit    = "git"
+	RoleTypeURL    = "url"
 )
 
 // RoleEntry is a single pinned role in the lockfile. Name is the directory
-// the role installs into under roles_path. Type is galaxy or git. Version is
-// the concrete version installed - a tag, a branch name, or the commit the
-// requirement spelled - and is not an exact version in the semver sense,
-// since a branch is a legal role version; the commit is the pin. For a
-// Galaxy role, Galaxy is the Galaxy name (owner.role), Source the Galaxy
-// server it was looked up on and Repository the git repository that server
-// pointed at; for a git role, Source is the repository URL and Repository
-// and Galaxy are empty. Ref is the ref the requirement asked for and Commit
-// the commit it resolved to, which is what a frozen install fetches when the
-// artifact is not cached. Deps are the install names of the roles this
-// role's meta depends on that the run installed. A role entry carries no
-// sha256 for the reason Entry gives for a git entry: its artifact is rebuilt
-// from the commit, and the bytes of a rebuild depend on the toolchain.
+// the role installs into under roles_path. Type is galaxy, git or url.
+// Version is the concrete version installed - a tag, a branch name, the
+// commit the requirement spelled, or a url role's label - and is not an
+// exact version in the semver sense, since a branch is a legal role version.
+// For a Galaxy role, Galaxy is the Galaxy name (owner.role), Source the
+// Galaxy server it was looked up on and Repository the git repository that
+// server pointed at; for a git role, Source is the repository URL and
+// Repository and Galaxy are empty; for a url role, Source is the tarball
+// URL. Ref is the ref the requirement asked for and Commit the commit it
+// resolved to, which is what a frozen install fetches when the artifact is
+// not cached; a url role carries neither, and pins the origin bytes by
+// SHA256 instead. Deps are the install names of the roles this role's meta
+// depends on that the run installed. A git or Galaxy role entry carries no
+// sha256 for the reason Entry gives for a git entry - its artifact is
+// rebuilt from the commit, and the bytes of a rebuild depend on the
+// toolchain - while a url role's sha256 is over the origin's own bytes,
+// which no toolchain touches, so it is required there.
 type RoleEntry struct {
 	Name       string   `yaml:"name"`
 	Type       string   `yaml:"type"`
@@ -42,14 +49,18 @@ type RoleEntry struct {
 	Galaxy     string   `yaml:"galaxy,omitempty"`
 	Source     string   `yaml:"source"`
 	Repository string   `yaml:"repository,omitempty"`
-	Ref        string   `yaml:"ref"`
-	Commit     string   `yaml:"commit"`
+	Ref        string   `yaml:"ref,omitempty"`
+	Commit     string   `yaml:"commit,omitempty"`
+	SHA256     string   `yaml:"sha256,omitempty"`
 	Deps       []string `yaml:"deps,omitempty"`
 }
 
 // IsGit reports whether the role was named by its repository rather than
 // looked up on a Galaxy server.
 func (e RoleEntry) IsGit() bool { return e.Type == RoleTypeGit }
+
+// IsURL reports whether the role was named by a tarball URL.
+func (e RoleEntry) IsURL() bool { return e.Type == RoleTypeURL }
 
 // RepositoryURL is the one repository a frozen install fetches the role
 // from: Repository for a Galaxy role, Source for a git role.
@@ -61,12 +72,13 @@ func (e RoleEntry) RepositoryURL() string {
 }
 
 // validateRoles judges every role entry: a unique install name in the role
-// alphabet, a type, a version in the persisted-version shape, a canonical
-// ref, a full commit, a canonical repository URL where one belongs and none
-// where it does not, no userinfo in the source, dependency names in the
-// alphabet, and a file whose schema admits roles at all - a schema-1 or
-// schema-2 file carrying a role has been edited by hand, since the schema
-// is what tells an older binary to stop.
+// alphabet, a type, a version in the persisted-version shape, the pin the
+// type calls for (a canonical ref and full commit, or a url role's sha256),
+// a canonical repository or tarball URL where one belongs and none where it
+// does not, no userinfo in the source, dependency names in the alphabet, and
+// a file whose schema admits the entry at all - a schema-1 or schema-2 file
+// carrying a role, or a schema-3 file carrying a url role, has been edited
+// by hand, since the schema is what tells an older binary to stop.
 func (f *File) validateRoles() error {
 	seen := make(map[string]struct{}, len(f.Roles))
 	for _, e := range f.Roles {
@@ -77,8 +89,12 @@ func (f *File) validateRoles() error {
 			return fmt.Errorf("%w: duplicate role name %s", helpers.ErrLockfileInvalid, e.Name)
 		}
 		seen[e.Name] = struct{}{}
-		if f.SchemaVersion != SchemaVersionRoles {
+		if f.SchemaVersion < SchemaVersionRoles {
 			return fmt.Errorf("%w: role %s: a role entry requires schema_version %d", helpers.ErrLockfileInvalid, e.Name, SchemaVersionRoles)
+		}
+		if e.IsURL() && f.SchemaVersion < SchemaVersionURL {
+			return fmt.Errorf("%w: role %s: a url role entry requires schema_version %d",
+				helpers.ErrLockfileInvalid, e.Name, SchemaVersionURL)
 		}
 		if reason := roleEntryProblem(e); reason != "" {
 			return fmt.Errorf("%w: role %s: %s", helpers.ErrLockfileInvalid, e.Name, reason)
@@ -95,23 +111,60 @@ func roleEntryProblem(e RoleEntry) string {
 	if !helpers.IsRoleVersion(e.Version) {
 		return fmt.Sprintf("version %q is not a role version", e.Version)
 	}
+	if dep, ok := firstBadDep(e.Deps); !ok {
+		return fmt.Sprintf("dependency %q is not a role install name", dep)
+	}
+	switch e.Type {
+	case RoleTypeGit:
+		if reason := roleCommitPinProblem(e); reason != "" {
+			return reason
+		}
+		return gitRoleEntryProblem(e)
+	case RoleTypeGalaxy:
+		if reason := roleCommitPinProblem(e); reason != "" {
+			return reason
+		}
+		return galaxyRoleEntryProblem(e)
+	case RoleTypeURL:
+		return urlRoleEntryProblem(e)
+	default:
+		return fmt.Sprintf("unsupported role type %q", e.Type)
+	}
+}
+
+// roleCommitPinProblem judges the pin a git or Galaxy role entry carries: a
+// canonical ref, a full lowercase commit, and no sha256, which belongs to a
+// url role alone.
+func roleCommitPinProblem(e RoleEntry) string {
 	if ref, err := gitsource.ParseRef(e.Ref); err != nil || e.Ref == "" || ref.Name != e.Ref {
 		return fmt.Sprintf("ref %q is not a canonical git ref", e.Ref)
 	}
 	if !gitsource.IsCommitHash(e.Commit) {
 		return fmt.Sprintf("commit %q is not a lowercase 40-hex commit", e.Commit)
 	}
-	if dep, ok := firstBadDep(e.Deps); !ok {
-		return fmt.Sprintf("dependency %q is not a role install name", dep)
+	if e.SHA256 != "" {
+		return "a git or galaxy role entry carries no sha256"
 	}
-	switch e.Type {
-	case RoleTypeGit:
-		return gitRoleEntryProblem(e)
-	case RoleTypeGalaxy:
-		return galaxyRoleEntryProblem(e)
-	default:
-		return fmt.Sprintf("unsupported role type %q", e.Type)
+	return ""
+}
+
+// urlRoleEntryProblem judges the pin a url role entry carries: a canonical
+// tarball URL as its source, a full lowercase sha256, and none of the fields
+// that belong to the other types.
+func urlRoleEntryProblem(e RoleEntry) string {
+	if u, err := urlsource.ParseURL(e.Source); err != nil || u.String() != e.Source {
+		return "source is not a canonical tarball URL"
 	}
+	if !helpers.IsSHA256Hex(e.SHA256) {
+		return fmt.Sprintf("sha256 %q is not a lowercase 64-hex digest", e.SHA256)
+	}
+	if e.Ref != "" || e.Commit != "" {
+		return "ref and commit belong to a git or galaxy role"
+	}
+	if e.Galaxy != "" || e.Repository != "" {
+		return "galaxy and repository belong to a galaxy role"
+	}
+	return ""
 }
 
 // firstBadDep returns the first dependency name outside the role install
@@ -181,11 +234,11 @@ type RoleChange struct {
 }
 
 // comparedRoleFieldCount is the number of per-role fields Fields can report.
-const comparedRoleFieldCount = 8
+const comparedRoleFieldCount = 9
 
 // Fields reports which of c's pinned fields differ between From and To, in
 // a fixed order (type, version, galaxy, source, repository, ref, commit,
-// deps); see Change.Fields.
+// sha256, deps); see Change.Fields.
 func (c RoleChange) Fields() []FieldChange {
 	fields := make([]FieldChange, 0, comparedRoleFieldCount)
 	add := func(name, from, to string) {
@@ -200,6 +253,7 @@ func (c RoleChange) Fields() []FieldChange {
 	add(fieldRepository, c.From.Repository, c.To.Repository)
 	add(fieldRef, c.From.Ref, c.To.Ref)
 	add(fieldCommit, c.From.Commit, c.To.Commit)
+	add(fieldSHA256, c.From.SHA256, c.To.SHA256)
 	if !sameDeps(c.From.Deps, c.To.Deps) {
 		fields = append(fields, FieldChange{Field: fieldDeps, From: renderDeps(c.From.Deps), To: renderDeps(c.To.Deps)})
 	}
@@ -210,7 +264,8 @@ func (c RoleChange) Fields() []FieldChange {
 // compared, as in sameEntry.
 func sameRoleEntry(a, b RoleEntry) bool {
 	return a.Type == b.Type && a.Version == b.Version && a.Galaxy == b.Galaxy && a.Source == b.Source &&
-		a.Repository == b.Repository && a.Ref == b.Ref && a.Commit == b.Commit && sameDeps(a.Deps, b.Deps)
+		a.Repository == b.Repository && a.Ref == b.Ref && a.Commit == b.Commit && a.SHA256 == b.SHA256 &&
+		sameDeps(a.Deps, b.Deps)
 }
 
 // indexRolesByName builds a name-keyed index of f's roles; a nil f yields

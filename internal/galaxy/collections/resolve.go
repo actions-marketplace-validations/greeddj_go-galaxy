@@ -17,6 +17,7 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/gitsource"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
+	"github.com/greeddj/go-galaxy/internal/galaxy/urlsource"
 	"github.com/psvmcc/hub/pkg/types"
 )
 
@@ -84,15 +85,16 @@ func resolveCollectionsInternal(
 	st := deps.st
 	allowSnapshot := mode == resolveTopLevel
 
-	// Git roots are expanded before anything else looks at the roots: a git
-	// requirement has no identity until its repository has been read, and
-	// the requirements signature below must cover the commit it resolved to
-	// (its locator) rather than the ref it was written with. That ordering is
-	// what keeps --clear-cache honest: ClearCaches drops the git pins but
-	// keeps the resolved snapshot, and a signature computed over the
-	// unexpanded roots would replay the old commit's graph while the pin
-	// bucket, re-discovered, named a newer one.
-	roots, err := expandGitRoots(ctx, deps, roots)
+	// Git and url roots are expanded before anything else looks at the
+	// roots: such a requirement has no identity until its repository or
+	// tarball has been read, and the requirements signature below must
+	// cover what it resolved to (its pinned locator) rather than the ref or
+	// bare URL it was written with. That ordering is what keeps
+	// --clear-cache honest: ClearCaches drops the pins but keeps the
+	// resolved snapshot, and a signature computed over the unexpanded roots
+	// would replay the old graph while the pin buckets, re-discovered,
+	// named a newer one.
+	roots, err := expandSourceRoots(ctx, deps, roots)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1353,6 +1355,13 @@ func collectionFromResolvedEntry(cfg *config.Config, fqdn string, entry store.Re
 		}
 		col.Type = typeGit
 		col.Ref = entry.Ref
+	case urlsource.IsLocator(entry.Source):
+		loc, err := urlsource.ParseLocator(entry.Source)
+		if err != nil || !loc.Pinned() {
+			return collection{}, false
+		}
+		col.Type = typeURL
+		col.SHA256 = loc.SHA256
 	case entry.Source == "":
 		col.Source = cfg.Server
 	}
@@ -1369,10 +1378,11 @@ func rootsMatchSnapshot(roots []collection, resolved map[string]collection, grap
 		if !ok {
 			return false
 		}
-		// A git root is pinned to a locator, which carries the commit: a
-		// snapshot whose entry names another commit for the same collection
-		// is another resolution, however its version compares.
-		if root.isGit() && col.Source != root.Source {
+		// A git or url root is pinned to a locator, which carries the commit
+		// or the content digest: a snapshot whose entry names another one
+		// for the same collection is another resolution, however its
+		// version compares.
+		if !rootLocatorMatches(root, col) {
 			return false
 		}
 		constraint := root.Constraint
@@ -1388,6 +1398,16 @@ func rootsMatchSnapshot(roots []collection, resolved map[string]collection, grap
 		}
 	}
 	return true
+}
+
+// rootLocatorMatches reports whether col's snapshot source still matches a
+// locator-pinned root's own; a Galaxy root matches unconditionally, since
+// its winning server is the resolution's to pick.
+func rootLocatorMatches(root, col collection) bool {
+	if !root.isGit() && !root.isURL() {
+		return true
+	}
+	return col.Source == root.Source
 }
 
 func filterGraphSnapshot(graphSnapshot map[string][]string, resolved map[string]collection) map[string][]string {

@@ -184,10 +184,9 @@ func gitRejectedCases() []parseCollectionsRejectedCase {
 			wantErr: helpers.ErrUnsupportedCollectionSource,
 		},
 		{
-			name: "plain https stays a refused tarball url", input: "- https://github.com/acme/app.git\n",
+			name: "ftp scheme stays a refused source", input: "- ftp://github.com/acme/app.tar.gz\n",
 			wantErr: helpers.ErrUnsupportedCollectionSource,
 		},
-		{name: "type url", input: "- name: https://h.example/a.tar.gz\n  type: url\n", wantErr: helpers.ErrUnsupportedCollectionType},
 		{name: "type file", input: "- name: ./a.tar.gz\n  type: file\n", wantErr: helpers.ErrUnsupportedCollectionType},
 		{name: "type dir", input: "- name: ./a\n  type: dir\n", wantErr: helpers.ErrUnsupportedCollectionType},
 	}

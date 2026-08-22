@@ -232,9 +232,10 @@ func prewarmEnabled(deps collectionDeps, roots []collection) bool {
 // and server-candidate walk loadRootMetadataCached needs, and Dependencies
 // pays that walk plus a version-detail fetch on top of it.
 func prewarmOne(ctx context.Context, deps collectionDeps, sources map[string]string, root collection) error {
-	// A git root has no Galaxy root metadata to warm: its answers come from
-	// the discovery memo, and asking a server for it would only mint a 404.
-	if root.isGit() {
+	// A git or url root has no Galaxy root metadata to warm: its answers
+	// come from the discovery memos, and asking a server for it would only
+	// mint a 404.
+	if root.isGit() || root.isURL() {
 		return nil
 	}
 	constraint := root.Constraint

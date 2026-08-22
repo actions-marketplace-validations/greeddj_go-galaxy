@@ -40,13 +40,44 @@ type MetadataProvider struct {
 	// Solve returns, to stamp the same winning server onto each resolved
 	// collection's Source.
 	bindings map[string]string
-	// pins maps every fqdn a git discovery produced this run to what it
-	// found (see gitDiscoveryMemo.snapshot). A pinned fqdn is answered from
-	// here and never from a Galaxy server: its universe is the single version
-	// its galaxy.yml declares, its dependencies are that file's, and no
-	// binding is recorded for it - solverResultToResolvedGraph takes a pinned
-	// fqdn's source from the pin directly. Read-only after construction.
-	pins map[string]gitPin
+	// pins maps every fqdn a git or url discovery produced this run to what
+	// it found (see mergeExactPins). A pinned fqdn is answered from here and
+	// never from a Galaxy server: its universe is the single version its
+	// galaxy.yml or MANIFEST.json declares, its dependencies are that
+	// document's, and no binding is recorded for it -
+	// solverResultToResolvedGraph takes a pinned fqdn's source from the pin
+	// directly. Read-only after construction.
+	pins map[string]exactPin
+}
+
+// exactPin is the provider's one view of a discovery pin, whichever source
+// kind produced it: the locator that is the collection's Source, the exact
+// version and validated dependency map its identity document declares, and
+// the kind-specific halves - a git pin's ref, a url pin's sha256 - each
+// empty on the other kind. It exists so the solver-facing code dispatches on
+// one shape while gitPin and urlPin keep the fields their own discovery
+// phases need.
+type exactPin struct {
+	deps    map[string]string
+	locator string
+	version string
+	ref     string
+	sha256  string
+	typ     string
+}
+
+// mergeExactPins folds the git and url discovery tables into the provider's
+// one pin map. The two tables cannot share an fqdn: expandSourceRoots'
+// duplicate check refused that before any solve began.
+func mergeExactPins(git map[string]gitPin, urls map[string]urlPin) map[string]exactPin {
+	out := make(map[string]exactPin, len(git)+len(urls))
+	for fqdn, pin := range git {
+		out[fqdn] = exactPin{deps: pin.deps, locator: pin.locator, version: pin.version, ref: pin.ref, typ: typeGit}
+	}
+	for fqdn, pin := range urls {
+		out[fqdn] = exactPin{deps: pin.deps, locator: pin.locator, version: pin.version, sha256: pin.sha256, typ: typeURL}
+	}
+	return out
 }
 
 // NewMetadataProvider builds a MetadataProvider sharing cfg/runtime/st with
@@ -77,7 +108,12 @@ func NewMetadataProvider(
 // through, rather than each provider getting its own scoped-to-nothing-else
 // copy the way NewMetadataProvider's own newCollectionDeps call produces.
 func newMetadataProviderWithDeps(deps collectionDeps, sources map[string]string) *MetadataProvider {
-	return &MetadataProvider{deps: deps, sources: sources, bindings: make(map[string]string), pins: deps.gitMemo.snapshot()}
+	return &MetadataProvider{
+		deps:     deps,
+		sources:  sources,
+		bindings: make(map[string]string),
+		pins:     mergeExactPins(deps.gitMemo.snapshot(), deps.urlMemo.snapshot()),
+	}
 }
 
 // Highest returns fqdn's registry-reported highest_version, with no
@@ -153,8 +189,8 @@ func (p *MetadataProvider) Universe(ctx context.Context, fqdn string) ([]solver.
 func (p *MetadataProvider) Dependencies(ctx context.Context, fqdn string, v solver.Version) (map[string]solver.Constraint, error) {
 	if pin, ok := p.pins[fqdn]; ok {
 		if v.Original() != pin.version {
-			return nil, fmt.Errorf("%w: git collection %s is built as %s, not %s",
-				helpers.ErrNoVersionSatisfiesConstraints, fqdn, pin.version, v.Original())
+			return nil, fmt.Errorf("%w: %s collection %s is built as %s, not %s",
+				helpers.ErrNoVersionSatisfiesConstraints, pin.typ, fqdn, pin.version, v.Original())
 		}
 		return canonicalizeDependencies(fqdn, pin.deps)
 	}
@@ -413,7 +449,8 @@ func (noDepsProvider) Dependencies(context.Context, string, solver.Version) (map
 	return map[string]solver.Constraint{}, nil
 }
 
-// pinnedVersion returns the single version a git pin declares for fqdn.
+// pinnedVersion returns the single version a git or url pin declares for
+// fqdn.
 func (p *MetadataProvider) pinnedVersion(fqdn string) (solver.Version, bool, error) {
 	pin, ok := p.pins[fqdn]
 	if !ok {
@@ -421,7 +458,7 @@ func (p *MetadataProvider) pinnedVersion(fqdn string) (solver.Version, bool, err
 	}
 	v, err := solver.NewVersion(pin.version)
 	if err != nil {
-		return solver.Version{}, false, fmt.Errorf("parsing git collection version for %s: %w", fqdn, err)
+		return solver.Version{}, false, fmt.Errorf("parsing %s collection version for %s: %w", pin.typ, fqdn, err)
 	}
 	return v, true, nil
 }

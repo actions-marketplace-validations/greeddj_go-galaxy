@@ -104,7 +104,7 @@ func warmWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra
 func warmRoles(ctx context.Context, cfg *config.Config, runtime *infra.Infra, state *installState, roles roleResolution) failureSummary {
 	var failures failureRecorder
 	depsCtx := newInstallDeps(cfg, runtime, state.store, state.backend.Artifacts(), state.extractStore, nil, nil, nil)
-	depsCtx.collectionDeps = depsCtx.withGit(state.backend.Artifacts(), state.gitMemo, state.roleMemo)
+	depsCtx.collectionDeps = depsCtx.withSources(state.backend.Artifacts(), state.gitMemo, state.roleMemo, state.urlMemo)
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, max(cfg.Workers, 1))
 	for _, name := range roles.order {
@@ -232,7 +232,7 @@ func warmCollections(
 	// joins every prefetch worker and reclaims any unclaimed temp inside
 	// warmWithState's own frame, so no download outlives the backend lock.
 	prefetchDeps := newPrefetchDeps(cfg, runtime, state.store, state.backend.Artifacts(), nil)
-	prefetchDeps.collectionDeps = prefetchDeps.withGit(state.backend.Artifacts(), state.gitMemo, state.roleMemo)
+	prefetchDeps.collectionDeps = prefetchDeps.withSources(state.backend.Artifacts(), state.gitMemo, state.roleMemo, state.urlMemo)
 	prefetch := startPrefetcher(ctx, prefetchDeps, collections, nil)
 	defer prefetch.Close()
 	// warm never touches the collections tree at all - it only downloads and
@@ -243,7 +243,7 @@ func warmCollections(
 	depsCtx := newInstallDeps(
 		cfg, runtime, state.store, state.backend.Artifacts(), state.extractStore, nil, prefetch.cachedArtifacts(), verify,
 	)
-	depsCtx.collectionDeps = depsCtx.withGit(state.backend.Artifacts(), state.gitMemo, state.roleMemo)
+	depsCtx.collectionDeps = depsCtx.withSources(state.backend.Artifacts(), state.gitMemo, state.roleMemo, state.urlMemo)
 	var wg sync.WaitGroup
 	// max(cfg.Workers, 1): a zero Workers would make sem unbuffered, and the
 	// first send would block forever since no worker has started to drain it

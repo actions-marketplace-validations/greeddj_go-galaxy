@@ -1267,3 +1267,64 @@ var (
 	// not one this tool can act on.
 	ErrGalaxyRoleInvalid = errors.New("invalid role record from the Galaxy server")
 )
+
+// The url-source sentinels below are grouped by exit class the way the
+// git-source sentinels are: a shape refusal stays a usage error, a pin the
+// remote no longer honors is an integrity failure.
+var (
+	// ErrInvalidURLRequirement names a tarball URL this tool will not use:
+	// a scheme other than https or http, a missing or invalid host, a "#"
+	// anywhere in it (a fragment is never sent to a server, and the locator
+	// grammar relies on the URL carrying none), a path or query rune outside
+	// the conservative alphabet, a dot or empty path segment (a server
+	// resolves those, so they would let a requirements file spend a
+	// credential bound to one path prefix elsewhere on the host), or a URL
+	// naming nothing beyond its origin. Usage class: the value came from
+	// requirements.yml or a credential binding.
+	ErrInvalidURLRequirement = errors.New("invalid url source")
+	// ErrURLRequirementUserinfo names a tarball URL that carries a
+	// credential. The URL is repository content, so the credential would be
+	// too; a url credential comes from the environment, bound to an origin
+	// and path prefix, and never from the URL.
+	ErrURLRequirementUserinfo = errors.New("url source must not contain a credential")
+	// ErrInvalidURLLocator names a persisted url source locator
+	// (url+<url>#sha256:<hex>) that does not parse back into its parts. It
+	// is reachable only through a hand-edited cache or record, never through
+	// a value this tool wrote itself.
+	ErrInvalidURLLocator = errors.New("invalid url source locator")
+	// ErrURLCredentialInvalid names a GO_GALAXY_URL_<ID>_* binding this tool
+	// refuses: an id outside the server-id alphabet or listed twice, a
+	// missing or malformed _URL, a missing _TOKEN, or two ids bound to one
+	// URL. The message names the variable, never its value.
+	ErrURLCredentialInvalid = errors.New("invalid url credential configuration")
+	// ErrRoleTarballLayout reports a role tarball whose layout this tool
+	// cannot resolve to exactly one role: no meta/main.yml at the archive
+	// root or under a single top-level directory, or a meta/main.yml under
+	// more than one. Usage class, like ErrRoleMetaNotFound: the remedy is a
+	// different artifact or entry.
+	ErrRoleTarballLayout = errors.New("role tarball does not contain exactly one role")
+	// ErrRoleTarballEntryInvalid names a tarball entry this tool refuses to
+	// repack into a role artifact: a name carrying a control rune or a
+	// backslash. The extractor tolerates such a name on disk; the archive
+	// this tool would build from it would not survive its own extractor's
+	// name rules, so it is refused at the read instead.
+	ErrRoleTarballEntryInvalid = errors.New("role tarball entry is invalid")
+
+	// ErrURLCollectionVersionMismatch reports that the artifact a url source
+	// serves is built as one version while the requirements entry asserts
+	// another. Resolution class, like a constraint no candidate satisfies:
+	// the URL's one candidate is not the version the file asked for.
+	ErrURLCollectionVersionMismatch = errors.New("url collection version does not match the requested version")
+
+	// ErrURLArtifactIdentityMismatch reports that refetching a pinned url
+	// collection produced a different namespace, name or version than the
+	// pin records. Integrity class: bytes did not match the identity they
+	// were promised under.
+	ErrURLArtifactIdentityMismatch = errors.New("refetched url artifact is not the pinned collection")
+	// ErrURLArtifactSHA256Mismatch reports that the URL a pinned role was
+	// fetched from now serves bytes with a different sha256 than the pin
+	// records. Collections report the same condition through
+	// ErrSHA256Mismatch; a role artifact is repacked before it is stored, so
+	// its refusal names the origin bytes explicitly.
+	ErrURLArtifactSHA256Mismatch = errors.New("url artifact does not match its pinned sha256")
+)

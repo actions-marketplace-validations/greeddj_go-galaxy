@@ -2,6 +2,7 @@ package gitsource
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"regexp"
 	"strings"
@@ -288,11 +289,17 @@ func (u URL) Origin() string {
 	return u.Scheme + "://" + u.Host + ":" + port
 }
 
-// IsLoopback reports whether the host is a loopback literal or "localhost",
-// the one case a plaintext http credential is tolerated for.
+// IsLoopback reports whether the host is a loopback address literal or
+// "localhost", the one case a plaintext http credential is tolerated for.
+// Only a literal counts: a DNS name such as "127.example.com" resolves
+// wherever its owner points it, so it earns no exemption.
 func (u URL) IsLoopback() bool {
 	host := strings.Trim(u.Host, "[]")
-	return host == "localhost" || host == "::1" || strings.HasPrefix(host, "127.")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // SplitSCM splits a requirements pointer into its URL, ref and subdir exactly

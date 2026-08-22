@@ -38,9 +38,11 @@ import (
 // injection (Fail) and request counting (Count).
 type Endpoint int
 
-// The routes the fake server answers: the four v3 collection routes, and
-// the two v1 role routes served only once AddRole has registered a role (a
-// server without roles answers 404 for them, as an Automation Hub does).
+// The routes the fake server answers: the four v3 collection routes, the
+// two v1 role routes served only once AddRole has registered a role (a
+// server without roles answers 404 for them, as an Automation Hub does),
+// and the free-path tarball route AddTarball and AddRedirect register for
+// url-source tests.
 const (
 	EndpointRootMetadata Endpoint = iota
 	EndpointVersionsList
@@ -48,11 +50,12 @@ const (
 	EndpointArtifact
 	EndpointRoleLookup
 	EndpointRoleVersions
+	EndpointTarball
 )
 
 // endpointCount is the number of distinct Endpoint values, sizing Server's
 // per-endpoint counters array.
-const endpointCount = 6
+const endpointCount = 7
 
 // Path segment names used by ServeHTTP's routing and the URLs this package
 // builds. Named rather than repeated string literals, since "api" alone
@@ -133,6 +136,8 @@ type Server struct {
 	artifacts      map[string]fakeArtifact
 	roles          map[string]*fakeRole
 	rolesByID      map[int64]*fakeRole
+	tarballs       map[string][]byte
+	redirects      map[string]string
 	baseURL        string
 	basePathPrefix string
 	apiRootPrefix  string
@@ -350,6 +355,8 @@ func newServer(tb testing.TB, basePath string, apiRoot []string) *Server {
 		artifacts:      make(map[string]fakeArtifact),
 		roles:          make(map[string]*fakeRole),
 		rolesByID:      make(map[int64]*fakeRole),
+		tarballs:       make(map[string][]byte),
+		redirects:      make(map[string]string),
 		basePath:       segments,
 		basePathPrefix: prefix,
 		apiRoot:        apiRoot,
@@ -594,6 +601,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A registered tarball path is matched first, by exact path: the route
+	// is whatever path a test registered, sitting beside every other route,
+	// which is what a url-source URL looks like in production.
+	if s.dispatchTarball(w, r, strings.Join(segments, "/")) {
+		return
+	}
+
 	// The download route sits beside the API root rather than under it, so
 	// it is matched before the API root is stripped.
 	if isDownloadPath(segments) {
@@ -624,6 +638,34 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// AddTarball registers data to be served, as application/gzip, at path
+// (relative to the server's base path) and returns the absolute URL a
+// requirements entry would name it by. The path is free-form - the segments
+// a GitHub release-asset URL carries, or a single filename - and is matched
+// exactly; registering a path that shadows an API route is the test's own
+// mistake. Fault injection, auth capture and counting work as they do for
+// EndpointArtifact, addressed as EndpointTarball with empty namespace and
+// name.
+func (s *Server) AddTarball(path string, data []byte) string {
+	key := strings.Trim(path, "/")
+	s.mu.Lock()
+	s.tarballs[key] = data
+	s.mu.Unlock()
+	return s.baseURL + s.basePathPrefix + "/" + key
+}
+
+// AddRedirect registers a 302 from path (relative to the server's base
+// path) to the absolute URL location, and returns the absolute URL of the
+// redirecting path. It stands in for the release-asset shape: the named URL
+// answers with a Location and no body.
+func (s *Server) AddRedirect(path, location string) string {
+	key := strings.Trim(path, "/")
+	s.mu.Lock()
+	s.redirects[key] = location
+	s.mu.Unlock()
+	return s.baseURL + s.basePathPrefix + "/" + key
+}
+
 // dispatchArtifact counts, then auth-gates, a request to the download
 // route before handing it to handleArtifact. See ServeHTTP for why this
 // ordering is load-bearing.
@@ -633,6 +675,53 @@ func (s *Server) dispatchArtifact(w http.ResponseWriter, r *http.Request, filena
 		return
 	}
 	s.handleArtifact(w, r, filename)
+}
+
+// dispatchTarball serves a path AddTarball or AddRedirect registered,
+// reporting false for every other path so ServeHTTP falls through to the
+// ordinary routes. Counted first, auth second, faults third - the
+// load-bearing order ServeHTTP documents.
+func (s *Server) dispatchTarball(w http.ResponseWriter, r *http.Request, path string) bool {
+	s.mu.Lock()
+	data, isTarball := s.tarballs[path]
+	location, isRedirect := s.redirects[path]
+	s.mu.Unlock()
+	if !isTarball && !isRedirect {
+		return false
+	}
+	s.incr(EndpointTarball)
+	if s.checkAuth(w, r, EndpointTarball) {
+		return true
+	}
+	if s.serveTarballFault(w, r, data, isTarball) {
+		return true
+	}
+	if isRedirect {
+		http.Redirect(w, r, location, http.StatusFound)
+		return true
+	}
+	w.Header().Set("Content-Type", "application/gzip")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+	return true
+}
+
+// serveTarballFault consumes and enacts an armed EndpointTarball fault, and
+// reports whether it answered the request.
+func (s *Server) serveTarballFault(w http.ResponseWriter, r *http.Request, data []byte, isTarball bool) bool {
+	fault, matched := s.consumeFault(EndpointTarball, "", "")
+	if !matched {
+		return false
+	}
+	if fault.StallAfterBytes > 0 && isTarball {
+		serveArtifactStall(w, r, data, fault.StallAfterBytes)
+		return true
+	}
+	if fault.DripInterval > 0 && isTarball && len(data) > 0 {
+		serveArtifactDrip(w, r, data, fault.DripInterval)
+		return true
+	}
+	return enactFault(w, r, fault)
 }
 
 // dispatchRootMetadata counts, then auth-gates, a request to the root

@@ -17,6 +17,11 @@
 // request instead. NewUnauthenticated builds one that is handed no server
 // configuration at all, so neither credential-bearing layer has anything it
 // could match - which is what a request driven by repository content needs.
+// Two more build on that closure for one source kind each: NewGit (git.go)
+// tightens the redirect policy to same-origin for go-git's sake, and
+// NewURLDownload (url.go) adds the one credential a url source may carry -
+// an operator's Bearer token bound to an origin and path prefix, re-decided
+// on every redirect hop.
 package fetch
 
 import (

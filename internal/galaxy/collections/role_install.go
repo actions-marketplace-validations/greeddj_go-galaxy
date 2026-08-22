@@ -17,6 +17,7 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/output"
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
+	"github.com/greeddj/go-galaxy/internal/galaxy/urlsource"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -290,6 +291,15 @@ func fetchCachedArtifact(ctx context.Context, deps installDeps, key string) (art
 // repository serves must be the pinned one; a repository that no longer
 // serves it fails as helpers.ErrRoleArtifactIdentityMismatch.
 func roleFetchToCache(ctx context.Context, deps installDeps, r resolvedRole, useCache bool) (downloadResult, error) {
+	if urlsource.IsLocator(r.Source) {
+		return urlRoleFetchToCache(ctx, deps, r, useCache)
+	}
+	return gitRoleFetchToCache(ctx, deps, r, useCache)
+}
+
+// gitRoleFetchToCache is roleFetchToCache's git and Galaxy arm: the refetch
+// by pinned commit.
+func gitRoleFetchToCache(ctx context.Context, deps installDeps, r resolvedRole, useCache bool) (downloadResult, error) {
 	runtime := deps.runtime
 	if runtime == nil || runtime.Git == nil {
 		return downloadResult{}, fmt.Errorf("%w: no git client is wired into this run", helpers.ErrConfigIsNil)

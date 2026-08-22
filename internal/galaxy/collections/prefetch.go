@@ -255,10 +255,14 @@ func prefetchOne(
 	deps prefetchDeps,
 	col collection,
 ) (*types.GalaxyCollectionVersionInfo, downloadResult, error) {
-	if col.isGit() {
-		gitDeps := newInstallDeps(deps.cfg, deps.runtime, deps.st, deps.artifacts, nil, nil, nil, nil)
-		gitDeps.collectionDeps = gitDeps.withGit(deps.gitStore, deps.gitMemo, deps.roleMemo)
-		result, err := gitFetchToCache(ctx, gitDeps, col, true)
+	if col.isGit() || col.isURL() {
+		sourceDeps := newInstallDeps(deps.cfg, deps.runtime, deps.st, deps.artifacts, nil, nil, nil, nil)
+		sourceDeps.collectionDeps = sourceDeps.withSources(deps.gitStore, deps.gitMemo, deps.roleMemo, deps.urlMemo)
+		if col.isURL() {
+			result, err := urlFetchToCache(ctx, sourceDeps, col, true)
+			return nil, result, err
+		}
+		result, err := gitFetchToCache(ctx, sourceDeps, col, true)
 		return nil, result, err
 	}
 	meta, err := loadCollectionMetadata(ctx, deps.collectionDeps, col)
@@ -284,7 +288,7 @@ func prefetchOne(
 	// for the reason stated on prefetchDeps itself: this worker fills a
 	// policy-free shared cache and installs nothing.
 	downloadDeps := newInstallDeps(deps.cfg, deps.runtime, deps.st, deps.artifacts, nil, nil, nil, nil)
-	downloadDeps.collectionDeps = downloadDeps.withGit(deps.gitStore, deps.gitMemo, deps.roleMemo)
+	downloadDeps.collectionDeps = downloadDeps.withSources(deps.gitStore, deps.gitMemo, deps.roleMemo, deps.urlMemo)
 	result, err := downloadCollectionToCache(ctx, downloadDeps, artifactKey(col), col.Source, meta, true)
 	if err != nil {
 		return meta, downloadResult{}, err

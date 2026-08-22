@@ -70,6 +70,12 @@ type Config struct {
 	// order; nil when none is declared. See loadGitCredentials for the
 	// grammar and the rules each entry has already passed.
 	GitCredentials []GitCredential
+	// URLCredentials is the operator's origin-bound url-source credentials
+	// from the GO_GALAXY_URL_* environment surface, in
+	// GO_GALAXY_URL_CREDENTIALS list order; nil when none is declared. See
+	// loadURLCredentials for the grammar and the rules each entry has
+	// already passed.
+	URLCredentials []URLCredential
 	S3Cache        S3CacheConfig
 	// Signature is this run's resolved signature verification surface: the
 	// keyring location, how many signatures must verify, which failure
@@ -175,11 +181,15 @@ func BuildCollectionConfig(c *cli.Command) (*Config, error) {
 		return nil, err
 	}
 
-	// After the servers and before the S3 cache: a git credential is part of
-	// the same "where may a secret go" surface as a server token, and an
-	// error there keeps the precedence a broken server configuration already
-	// has over a broken cache one.
+	// After the servers and before the S3 cache: a git or url credential is
+	// part of the same "where may a secret go" surface as a server token,
+	// and an error there keeps the precedence a broken server configuration
+	// already has over a broken cache one. Git before url, so which failure
+	// a configuration broken in both reports first is stable.
 	if err := loadGitCredentials(cfg); err != nil {
+		return nil, err
+	}
+	if err := loadURLCredentials(cfg); err != nil {
 		return nil, err
 	}
 

@@ -9,29 +9,34 @@
 // rather than a silent non-install.
 //
 // A collection item is a "namespace.name" string, a git pointer string
-// ("git+<url>" or "git@host:path"), or a mapping. A role item is ansible's
-// "src[,version[,name]]" string or a mapping with src:, scm:, version:,
-// name: (or the old-style role:), and is either a Galaxy role - src: is
-// owner.role - or a git role - src: is a git pointer, an scm: git URL, or
-// ansible's github.com special case. What ansible would install from and
-// this tool does not - a tarball URL, a local path, an scm other than git,
-// an include: of a second file - is refused at load.
+// ("git+<url>" or "git@host:path"), an http(s) tarball URL, or a mapping. A
+// role item is ansible's "src[,version[,name]]" string or a mapping with
+// src:, scm:, version:, name: (or the old-style role:), and is a Galaxy
+// role - src: is owner.role - a git role - src: is a git pointer, an scm:
+// git URL, or ansible's github.com special case - or a url role - src: is
+// an http(s) URL ending .tar.gz. What ansible would install from and this
+// tool does not - a local path, a non-http or non-.tar.gz role URL, an scm
+// other than git, an include: of a second file - is refused at load.
 //
 // This is one of the boundaries an untrusted identifier enters the program
 // through, so an entry is validated here rather than downstream:
 // parseCollectionItem is where both collection item shapes converge on the
 // collection name alphabet, validateRequirement rejects a type: that is
-// neither galaxy nor git and a source: embedding URL userinfo before
+// none of galaxy, git and url and a source: embedding URL userinfo before
 // anything can print or request it, parseGitRequirement judges a git
 // entry's URL, ref and subdir through internal/galaxy/gitsource's grammar,
-// which is where a credential in a repository URL is refused, and
-// finishRole applies the role alphabets (helpers.IsRoleName,
-// helpers.IsRoleInstallName, helpers.IsRoleVersion) and the same git
-// grammar to a role entry. A git collection entry has no identity at parse
-// time unless the file names one (name: namespace.name beside a git
-// source:), exactly as in ansible, where the repository's own galaxy.yml is
-// what says which collection it holds; the alphabet check is therefore
-// applied to a git entry only when it carries a name to check.
+// which is where a credential in a repository URL is refused,
+// parseURLRequirement judges a url entry's URL through
+// internal/galaxy/urlsource's grammar, which refuses a credential and a
+// fragment the same way, and finishRole applies the role alphabets
+// (helpers.IsRoleName, helpers.IsRoleInstallName, helpers.IsRoleVersion)
+// and the same source grammars to a role entry. A git collection entry has
+// no identity at parse time unless the file names one (name: namespace.name
+// beside a git source:), exactly as in ansible, where the repository's own
+// galaxy.yml is what says which collection it holds, and a url entry never
+// has one - its artifact's MANIFEST.json is what names its collection; the
+// alphabet check is therefore applied only when an entry carries a name to
+// check.
 package requirements
 
 import (
@@ -43,6 +48,7 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/gitsource"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/signature"
+	"github.com/greeddj/go-galaxy/internal/galaxy/urlsource"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -70,10 +76,17 @@ type CollectionRequirement struct {
 const (
 	TypeGalaxy = "galaxy"
 	TypeGit    = "git"
+	TypeURL    = "url"
 )
 
 // IsGit reports whether the requirement names a git source.
 func (r CollectionRequirement) IsGit() bool { return r.Type == TypeGit }
+
+// IsURL reports whether the requirement names a url source: a direct http(s)
+// URL to a tar.gz artifact. Source is then the canonical URL, Version the
+// exact version the entry asserted ("" for none), and every other field is
+// empty - the artifact's own MANIFEST.json names its collection.
+func (r CollectionRequirement) IsURL() bool { return r.Type == TypeURL }
 
 // File is everything a requirements file declares: its collections, its
 // roles, and the warnings parsing raised (a key on a role entry ansible
@@ -176,10 +189,11 @@ func parseCollectionItem(item any, defaultSource string) (CollectionRequirement,
 	if err != nil {
 		return CollectionRequirement{}, err
 	}
-	// A git entry without an explicit name has no identity to check yet: the
-	// repository's galaxy.yml supplies one at discovery, where the same
-	// alphabet is applied to what it says.
-	if req.IsGit() && req.Namespace == "" && req.Name == "" {
+	// A git entry without an explicit name, and every url entry, has no
+	// identity to check yet: the repository's galaxy.yml or the artifact's
+	// MANIFEST.json supplies one at discovery, where the same alphabet is
+	// applied to what it says.
+	if (req.IsGit() || req.IsURL()) && req.Namespace == "" && req.Name == "" {
 		return req, nil
 	}
 	if !helpers.IsCollectionNamePart(req.Namespace) || !helpers.IsCollectionNamePart(req.Name) {
@@ -211,8 +225,15 @@ func parseCollectionStringItem(value string, defaultSource string) (CollectionRe
 	if gitsource.IsPointer(name) {
 		return parseGitRequirement(name, "", "", "")
 	}
+	if urlsource.IsHTTPURL(name) {
+		// ansible infers a url source from any http(s) URL in the name
+		// position; whether it really serves a collection tarball is the
+		// download's own question.
+		return parseURLRequirement(name, "")
+	}
 	if looksLikeSourceName(name) {
-		return CollectionRequirement{}, fmt.Errorf("%w %q (only Galaxy API sources are supported)", helpers.ErrUnsupportedCollectionSource, name)
+		return CollectionRequirement{}, fmt.Errorf("%w %q (only Galaxy API, git and url sources are supported)",
+			helpers.ErrUnsupportedCollectionSource, name)
 	}
 	namespace, collection, ok := helpers.SplitFQDN(name)
 	if !ok {
@@ -236,6 +257,9 @@ func parseCollectionMapItem(value map[string]any, defaultSource string) (Collect
 	req := parseCollectionMapFields(value)
 	if req.Type == TypeGit || (req.Type == "" && gitsource.IsPointer(req.Name)) {
 		return parseGitMapItem(req, value)
+	}
+	if req.Type == TypeURL || (req.Type == "" && urlsource.IsHTTPURL(req.Name)) {
+		return parseURLMapItem(req, value)
 	}
 	if err := checkNamespaceNameConflict(req); err != nil {
 		return CollectionRequirement{}, err
@@ -334,20 +358,84 @@ func validateRequirement(req CollectionRequirement, raw any) error {
 		return fmt.Errorf("%w: %v", helpers.ErrInvalidCollectionEntry, raw)
 	}
 	if req.Type != "" && req.Type != TypeGalaxy {
-		return fmt.Errorf("%w %q (only galaxy and git are supported)", helpers.ErrUnsupportedCollectionType, req.Type)
+		return fmt.Errorf("%w %q (only galaxy, git and url are supported)", helpers.ErrUnsupportedCollectionType, req.Type)
 	}
 	if req.Type == "" && looksLikeSourceName(req.Name) {
-		return fmt.Errorf("%w %q (only Galaxy API and git sources are supported)", helpers.ErrUnsupportedCollectionSource, req.Name)
+		return fmt.Errorf("%w %q (only Galaxy API, git and url sources are supported)", helpers.ErrUnsupportedCollectionSource, req.Name)
 	}
-	// A Galaxy entry whose source: is a git pointer or a git locator would
-	// otherwise pass this function as a server reference and be dispatched
-	// as a git source later by its prefix alone, with its URL, ref and
-	// subdir never judged; the spelling that means a git source is type: git.
+	return checkGalaxySourceShape(req)
+}
+
+// checkGalaxySourceShape refuses a Galaxy entry whose source: is a git
+// pointer or a persisted locator: it would otherwise pass validation as a
+// server reference and be dispatched as a git or url source later by its
+// prefix alone, with its URL never judged. The spellings that mean those
+// sources are type: git and type: url.
+func checkGalaxySourceShape(req CollectionRequirement) error {
 	if gitsource.IsPointer(req.Source) || gitsource.IsLocator(req.Source) {
 		return fmt.Errorf("%w: source %q names a git repository; spell the entry with type: git",
 			helpers.ErrUnsupportedCollectionSource, helpers.URLForMessage(req.Source))
 	}
+	if urlsource.IsLocator(req.Source) {
+		return fmt.Errorf("%w: source %q names a url artifact; spell the entry with type: url",
+			helpers.ErrUnsupportedCollectionSource, helpers.URLForMessage(req.Source))
+	}
 	return nil
+}
+
+// parseURLMapItem parses a mapping that names a url source: type: url, or a
+// name: that reads as an http(s) URL. The URL always lives in name:, as
+// ansible spells it. signatures: is refused before raw is ever echoed, the
+// rule parseGitMapItem states, and for the reason ansible itself documents:
+// user-provided signatures are not used for a url source. source: and
+// namespace: are refused rather than dropped - ansible ignores both, and a
+// key that changes nothing is a mistake this tool would rather name.
+// version:, when given, must be an exact version: the URL serves exactly one
+// artifact, so a range could only ever be vacuously satisfied or a lie, and
+// the exact value is asserted against the artifact's MANIFEST.json at
+// discovery.
+func parseURLMapItem(req CollectionRequirement, raw map[string]any) (CollectionRequirement, error) {
+	if value, ok := raw["signatures"]; ok && value != nil {
+		return CollectionRequirement{}, fmt.Errorf("%w: a signatures key is not supported on a url requirement",
+			helpers.ErrInvalidCollectionEntry)
+	}
+	if req.Source != "" {
+		return CollectionRequirement{}, fmt.Errorf("%w: a url entry carries its URL in the name key; source names a Galaxy server",
+			helpers.ErrInvalidCollectionEntry)
+	}
+	if req.Namespace != "" {
+		return CollectionRequirement{}, fmt.Errorf("%w: a url entry has no namespace key; the artifact's MANIFEST.json names its collection",
+			helpers.ErrInvalidCollectionEntry)
+	}
+	if !urlsource.IsHTTPURL(req.Name) {
+		return CollectionRequirement{}, fmt.Errorf("%w: a url entry needs an http(s) URL in its name key",
+			helpers.ErrInvalidCollectionEntry)
+	}
+	if req.Version != "" && req.Version != "*" && !helpers.IsExactVersion(req.Version) {
+		return CollectionRequirement{}, fmt.Errorf("%w: url version %q is not an exact version",
+			helpers.ErrInvalidCollectionVersion, req.Version)
+	}
+	version := req.Version
+	if version == "*" {
+		version = ""
+	}
+	return parseURLRequirement(req.Name, version)
+}
+
+// parseURLRequirement turns a tarball URL plus an optional exact version
+// into a requirement, judged through urlsource's grammar; a URL is rendered
+// in an error only through helpers.URLForMessage, and the grammar has
+// already refused one carrying a credential before any message is composed.
+func parseURLRequirement(rawURL, version string) (CollectionRequirement, error) {
+	u, err := urlsource.ParseURL(rawURL)
+	if err != nil {
+		return CollectionRequirement{}, err
+	}
+	return CollectionRequirement{
+		Source:  u.String(),
+		Type:    TypeURL,
+		Version: version,
+	}, nil
 }
 
 // parseGitMapItem parses a mapping that names a git source: type: git, or a

@@ -33,8 +33,12 @@ internal/galaxy/manifest      MANIFEST.json / FILES.json, read-only
 internal/galaxy/signature     OpenPGP verification, read-only
 internal/galaxy/gitsource     the git grammar (URL, ref, subdir, locator, credentials)
                               and the Client seam; imports no go-git
+internal/galaxy/urlsource     the url-source grammar (URL, credential-binding prefix,
+                              locator); no transport of its own
 internal/galaxy/gitfetch      the only go-git importer: advertise, fetch by hash,
                               read the tree; implements Client for collections and roles
+internal/galaxy/tartree       a downloaded role tarball as a treearchive.Source:
+                              extract through archive, detect the role root
 internal/galaxy/treearchive   the only production tar writer: a tree -> a deterministic tar.gz
 internal/galaxy/collectionbuild  what makes a tree a collection: ignore rules, MANIFEST.json,
                               FILES.json, identity from galaxy.yml; drives treearchive
@@ -288,6 +292,22 @@ server is ever asked about a git collection, and a Galaxy dependency that
 constrains it is satisfied or refused with a proof. The requirements signature
 is computed over the expanded roots, so it covers the commit, not just the ref.
 
+### URL discovery
+
+A url requirement is expanded right after the git ones, by the same rules one
+dimension simpler: the tarball is downloaded over the dedicated url client
+(retried under the artifact deadline, size-capped, probed for tar.gz shape),
+its identity and dependency map are read from its own `MANIFEST.json` - the
+manifest is the identity document, judged by the same predicates a server's
+answer is - and the artifact is committed under its locator-scoped key,
+`url+<url>#sha256:<hex>`, the digest of the origin's own bytes. The pin,
+keyed by the URL alone, records the sha256, the identity and the
+dependencies, which is what a rerun replays without contacting the origin. A
+`version:` on the entry is an assertion checked against the manifest on both
+the fresh and the replay path. The expanded root is an exact pin exactly as
+a git one is, and its sha256 rides the resolution so the install compares
+the actual bytes against it on every run.
+
 ### Roles
 
 A role is the other thing a git tree can be, and the pipeline treats it as
@@ -324,7 +344,15 @@ rerun skips the v1 round trips. What discovery learns is a `resolvedRole`: the
 install name, the locator `git+<url>#@<commit>` (the one string its artifact
 key, its installed record and its lockfile entry all key on), the repository,
 the ref, the concrete version (the tag, the branch, or what `HEAD` resolved
-to), the Galaxy name, and the install names of its dependencies.
+to), the Galaxy name, and the install names of its dependencies. A url role
+takes the same road with the download standing where the fetch stands: the
+tarball comes over the url client, `tartree` extracts it through the
+hardened extractor and finds the role root (the archive root, or the single
+top-level directory carrying `meta/main.yml` - anything else is refused),
+`rolebuild` repacks it into the canonical artifact, and the pin is the
+origin bytes' sha256, keyed `url\n<url>` in the same pin bucket, with the
+locator `url+<url>#sha256:<hex>` and a version label defaulting to the
+sha's first twelve hex digits.
 
 **Install.** Roles install after the collections, and only when every
 collection level went through, on the `--workers` pool and flat - each role is
@@ -451,6 +479,14 @@ substitution. It carries no server digest and no signatures, and its
 attribution is the identity the builder read from `galaxy.yml`, checked
 against the collection being installed.
 
+A url collection is normally a cache hit for the same reason. Its cache miss
+re-downloads the pinned URL over the url client and enforces the pin twice
+over the fresh bytes: the downloaded sha256 must equal the locator's, and
+the manifest's identity must equal the collection being installed. Unlike a
+git collection its pin travels as `col.SHA256` on every resolution, so the
+digest is re-checked against the actual bytes on every install and warm,
+cache hit included, not only under `--frozen`.
+
 ### Verify, extract, record
 
 Two questions in order, both before anything is written into the collections
@@ -517,6 +553,17 @@ its filename is `role.<name>-<version>.tar.gz`. The `role.` prefix is what
 keeps a role and a collection built from one repository and commit apart
 inside one scope: the text before the first `-` of a collection filename is a
 namespace, whose alphabet has no dot, and here it always carries one.
+
+A url source's scope is its own locator, `url+<url>#sha256:<hex>`: the pin
+is the digest of the origin's own bytes rather than a commit, which is why a
+url lockfile entry carries a real `sha256` where a git entry's is refused -
+no rebuild stands between the origin and the artifact, so the digest holds
+on every refetch. The download runs over a dedicated client
+(`fetch.NewURLDownload`) that carries no Galaxy token and no relaxed TLS for
+any origin, with the operator's Bearer binding re-decided on every redirect
+hop; the artifact's identity is read from its own MANIFEST.json during the
+pre-solve expansion (`expandURLRoots`), the same exact-pin road a git root
+takes.
 
 ### Extracted store: content-addressed, materialized by hardlink
 
@@ -669,6 +716,23 @@ is checked against the entries locked from its repository under its subdir
 (the root's own directory or an immediate child): zero such entries, or a
 different ref, is a mismatch.
 
+A url entry is the opposite case and its `sha256` is required:
+
+```yaml
+  - name: acme.kafka
+    type: url
+    version: "0.24.0"
+    source: https://github.com/acme/kafka/releases/download/0.24.0/acme-kafka-0.24.0.tar.gz
+    sha256: <hex>
+    deps: [acme.lib]
+```
+
+The artifact is the origin's own bytes rather than a rebuild, so the digest
+holds on every refetch, and a frozen cache miss re-downloads the URL and
+compares the fresh bytes to it. A file holding a url entry - a collection's
+or a role's - is written as `schema_version: 4`, ranked over the role and
+git schemas by the same content-decides rule.
+
 A role is listed under its own key and pins a commit the same way:
 
 ```yaml
@@ -714,4 +778,8 @@ rather than installing the collections and silently skipping the roles. Every
 role field is re-parsed on load rather than trusted - the repository through
 the git URL grammar, the ref through the ref grammar, the commit as forty hex
 digits, the names through the role alphabets - since a lockfile is repository
-content.
+content. A url role's entry is `type: url` with the tarball URL as its
+source, the origin bytes' `sha256` as its pin (required, where a git or
+Galaxy role's is refused), no ref, commit, galaxy or repository, and the
+version as the label asked for or the sha's first twelve hex digits; a file
+holding one is `schema_version: 4`.

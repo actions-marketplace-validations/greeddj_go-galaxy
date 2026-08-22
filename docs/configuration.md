@@ -62,6 +62,9 @@ A git collection source, and a git role, add a small environment surface of
 their own, none of it with an ansible counterpart: `GO_GALAXY_GIT_CREDENTIALS` and the
 `GO_GALAXY_GIT_<ID>_*` variables bind a credential to a repository host (see
 [Git sources and credentials](servers-and-auth.md#git-sources-and-credentials)),
+a url source likewise binds a Bearer token per origin through
+`GO_GALAXY_URL_CREDENTIALS` and the `GO_GALAXY_URL_<ID>_*` variables (see
+[URL sources and credentials](servers-and-auth.md#url-sources-and-credentials)),
 and three variables go-galaxy reads rather than defines decide what an ssh
 repository is reached with: `SSH_AUTH_SOCK` names the agent used when no key
 is bound, `SSH_KNOWN_HOSTS` names the known_hosts file (`~/.ssh/known_hosts`
@@ -136,9 +139,33 @@ git entry - the artifact is built here and nobody has signed it - and a
 credential in the URL is refused; credentials are bound through the
 environment (see
 [Git sources and credentials](servers-and-auth.md#git-sources-and-credentials)).
-The `url`, `file` and `dir` types stay unsupported. See
-[Compatibility with ansible-galaxy](ansible-galaxy-compat.md) for what differs
-from `ansible-galaxy` on a git source.
+A collection can also come from a direct tarball URL:
+
+```yaml
+---
+collections:
+  # auto-detected by the http(s) scheme; the artifact's own MANIFEST.json
+  # names the collection and its version
+  - https://github.com/acme/kafka/releases/download/0.24.0/acme-kafka-0.24.0.tar.gz
+  # explicit type, with the version asserted against the manifest
+  - name: https://artifacts.example.internal/ansible/acme-app-1.2.3.tar.gz
+    type: url
+    version: "1.2.3"
+  # a caching proxy that reads the rest of the path as the upstream URL;
+  # the embedded URL must be spelled in its canonical form
+  - http://cacheproxy.mirror.example.com/https://github.com/acme/kafka/releases/download/0.24.0/acme-kafka-0.24.0.tar.gz
+```
+
+A `url` entry is downloaded directly over its own credential-scoped client
+(see [URL sources and credentials](servers-and-auth.md#url-sources-and-credentials)),
+its identity and dependencies read from the artifact's MANIFEST.json, and
+pinned - in the cache key, the installed record and the lockfile - by the
+origin bytes' sha256. A `version:` beside it must be exact and must match
+the manifest, or the run fails; `signatures:`, `source:` and `namespace:`
+are refused on a url entry, as are a credential or a `#fragment` in the URL.
+The `file` and `dir` types stay unsupported. See
+[Compatibility with ansible-galaxy](ansible-galaxy-compat.md) for what
+differs from `ansible-galaxy` on a git or url source.
 
 A bare top-level list is a list of collections here, where `ansible-galaxy`
 reads it as the legacy roles format; roles always go under a `roles:` key. A
@@ -175,6 +202,13 @@ roles:
   # scm and no .tar.gz suffix, is a git repository
   - src: https://github.com/acme/ansible-role-cache
     version: v2.0.0
+  # a url role: an http(s) URL ending .tar.gz is downloaded directly and
+  # pinned by its sha256; name: defaults to the basename minus .tar.gz, and
+  # version: is only the label the role installs under (the sha's first
+  # twelve hex digits when absent)
+  - src: https://github.com/acme/ansible-role-cache/archive/2.0.0.tar.gz
+    name: cache
+    version: "2.0.0"
 ```
 
 A Galaxy role name is `owner.role` with exactly one dot, each half matching
@@ -190,9 +224,11 @@ and may never be `ansible_collections`. Quote a version that YAML would read
 as a number (`"2.0"`), as the collection examples do.
 
 Refused at load, with the usage code (`2`): `include:` (list the included
-roles inline), an `scm` other than `git`, a tarball URL, any other non-git URL
-or a local path as `src:`, a `#subdir` fragment on a git role (the repository
-root is the role), a `source:`, `signatures:` or `type:` key on a role entry,
+roles inline), an `scm` other than `git`, a non-http or non-`.tar.gz` URL or
+a local path as `src:` (an http(s) `.tar.gz` URL is a url role, downloaded
+directly and pinned by its sha256), a `#subdir` fragment on a git role (the
+repository root is the role), a `source:`, `signatures:` or `type:` key on a
+role entry,
 two entries that would install into one directory, a name or version outside
 the alphabets above, and a credential in a repository URL. An unknown key on a
 role entry is warned about and dropped, where `ansible-galaxy` drops it

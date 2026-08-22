@@ -178,6 +178,39 @@ no packaging that clears that flag on your behalf.
   tool's own extract marker - a role `ansible-galaxy` installed or somebody wrote by hand
   is never evidence for a delete, and a record written by a binary that predates roles
   carries no roles path and is never scanned.
+- A `url` collection or role source is repository content, judged on the same basis as
+  a git URL. The URL may carry no credential in its userinfo and no fragment, its path
+  is held to a conservative alphabet and may carry no dot segment (a server resolves
+  those while the credential match reads the path as written), and every line printed
+  about it cuts userinfo and query exactly as artifact URLs are cut. One structural
+  path form is admitted beyond plain segments: the path may embed an absolute http(s)
+  URL - the caching-proxy shape `http://front/<upstream-url>`, where a front host reads
+  the rest of the request path as the URL it fetches and caches - and the embedded URL
+  must itself pass this same grammar in its canonical spelling, so the only empty
+  segment such a path carries is the embedded scheme's own `//` separator; the
+  credential-match side recognizes exactly that separator and nothing more, and fails
+  safe to a credential-less request for any other spelling. The credential it
+  may receive is never taken from the file and never inherited from a Galaxy server: a
+  Bearer token is bound to an origin and an optional path prefix through the
+  environment (`GO_GALAXY_URL_*`), attached only when the request's scheme, host and
+  port equal the binding's and its path lies under the prefix, and that decision is
+  made again on every redirect hop. A redirect into another origin - the ordinary
+  GitHub release shape, a 302 into presigned object storage - therefore carries no
+  Authorization header at all; go-galaxy does not rely on net/http's own stripping
+  heuristic, which forwards the header to any subdomain of the host that set it. A hop
+  that leaves https for plaintext http is refused outright. The Galaxy token never
+  reaches a url source's host, even when the file names the Galaxy server's own
+  origin, and a server's `validate_certs=false` relaxes nothing for a url download:
+  the url client is built with no server configuration at all, so both are properties
+  of its constructor rather than of a match a hostile file could steer. The artifact
+  is pinned by the sha256 of the origin's own bytes, carried in the locator and the
+  lockfile and enforced on every fresh download, cache hit, refetch and frozen
+  install; its identity is its own MANIFEST.json, compared against the collection
+  being installed on every refetch; and a url role's tarball passes the hardened
+  extractor before anything reads its layout, then is rebuilt through the same role
+  builder a git role is. A signature can vouch for none of it, so a verifying run
+  reports a url collection as the vacuous pass it is, and a `signatures:` key on a url
+  entry is refused at load.
 - Pinned (`--frozen`) installs are already immune to a poisoned snapshot: for a
   lockfile-pinned collection, go-galaxy hashes the actually downloaded (or on-disk)
   bytes and compares them to the sha256 recorded in the in-repo lockfile, not to the

@@ -50,12 +50,13 @@ steps:
   - run: ansible-playbook site.yml
 ```
 
-A lockfile that holds a role is written as `schema_version: 3`, which a
-go-galaxy binary predating roles refuses to load (exit `6`) rather than
-installing the collections and silently skipping the roles list; pin the
-binary version across the jobs that share the lockfile. A file without roles is
-byte-identical to what earlier versions wrote, so adding this version to a
-collections-only pipeline changes no cache key.
+A lockfile that holds a role is written as `schema_version: 3`, and one that
+holds a url source (a collection's or a role's) as `schema_version: 4`; a
+go-galaxy binary predating those features refuses such a file (exit `6`)
+rather than installing what it understands and silently skipping the rest;
+pin the binary version across the jobs that share the lockfile. A file
+without roles or url sources is byte-identical to what earlier versions
+wrote, so adding this version to such a pipeline changes no cache key.
 
 ## GitHub Actions
 

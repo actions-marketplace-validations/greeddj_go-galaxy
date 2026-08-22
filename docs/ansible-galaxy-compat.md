@@ -192,7 +192,8 @@ would wrongly conclude the environment names are dead too - they are not.
     `--offline` replays a recorded pin or fails. A dry run still fetches the
     repository - the collections it holds cannot be known otherwise - and
     writes nothing to the cache.
-  - `url`, `file` and `dir` sources remain refused at load.
+  - `file` and `dir` sources remain refused at load; a `url` source is
+    supported, with its own divergences (see the url bullet under Notes).
 
 Resolution itself is stricter than ansible's: a constraint set with no solution
 is a failure with a proof, not a lenient pick. See [Exit codes](exit-codes.md#exit-codes) for
@@ -337,8 +338,9 @@ consequence of that, and every other deliberate difference, is listed here.
   What ansible would accept and this tool refuses at load, with the usage
   code (`2`) and before any request: `include:` of a second file, an `scm`
   other than `git` (ansible shells out to `hg` for the other value; this tool
-  executes no process), a tarball URL, any other non-git URL or a local path
-  as `src:`, a `#subdir` fragment on a git role, a `source:`, `signatures:`
+  executes no process), a non-http or non-`.tar.gz` URL or a local path as
+  `src:` (an http(s) `.tar.gz` URL is a url role - see the url bullet under
+  Notes), a `#subdir` fragment on a git role, a `source:`, `signatures:`
   or `type:` key on a role entry (each would silently change what the entry
   means), two entries installing into one directory (ansible installs the
   second over the first), and a credential in a repository URL. A key ansible
@@ -355,7 +357,9 @@ consequence of that, and every other deliberate difference, is listed here.
   promotes an http(s) `src:` to a git repository when the text contains
   `github.com` anywhere and does not end in `.tar.gz`; this tool requires the
   parsed host to be exactly `github.com`, so a tarball host that merely
-  mentions it is not promoted.
+  mentions it is not promoted. A github.com URL that does end in `.tar.gz` -
+  a release asset, an archive link - is a url role here, downloaded directly
+  and pinned by its sha256.
 - **A Galaxy role is fetched by git at the tag, not as the GitHub tarball.**
   The v1 API is asked the same two questions ansible asks - the role record,
   then its version list - on the configured server list in order (a server
@@ -431,9 +435,11 @@ consequence of that, and every other deliberate difference, is listed here.
   branch or a commit - not a semver), the ref, the commit, the repository,
   the Galaxy name and server for a Galaxy role, and the install names of its
   dependencies, and no `sha256`, for the reason a git collection has none. A
-  file holding a role is written as `schema_version: 3`; one without roles
-  is byte-identical to what it was before roles existed. ansible has no
-  lockfile for roles at all.
+  url role is the exception: its entry is `type: url` with the tarball URL
+  as its source and the origin bytes' `sha256` as its pin, and a file
+  holding one is `schema_version: 4`. A file holding a role is written as
+  `schema_version: 3`; one without roles is byte-identical to what it was
+  before roles existed. ansible has no lockfile for roles at all.
 - **`roles_path` is one path, not a search list, and its default is
   project-local.** As with `collections_path`: the first entry of
   `[defaults] roles_path`, `ANSIBLE_ROLES_PATH` or `--roles-path` is used,
@@ -456,16 +462,44 @@ consequence of that, and every other deliberate difference, is listed here.
 Two shapes ansible accepts are handled here in opposite ways, which is worth
 knowing before a `requirements.yml` written for ansible is pointed at this tool.
 
-- **A `url`, `file` or `dir` collection source fails the whole file, rather
-  than being skipped.** A `type:` other than `galaxy` or `git`, or - where no
-  `type:` is given - a name that reads as a source rather than as
-  `namespace.name` or a git pointer, meaning anything containing `://` or
-  starting with `/`, `./`, `../` or `~` (a `git+` or `git@` prefix is a git
-  source), is refused at load with the usage code (`2`), naming the offending
-  value, before any request is made. The messages are `unsupported collection
-  type "url" (only galaxy and git are supported)` and `unsupported collection
-  source "..." (only Galaxy API and git sources are supported)`. ansible
-  installs these; here the run does not start.
+- **A `url` collection source installs, with divergences each in the
+  stricter direction.** An http(s) URL in the name position (or an explicit
+  `type: url`) is downloaded directly, its identity and dependencies read
+  from the artifact's own MANIFEST.json, and the collection resolved as the
+  single candidate for its `namespace.name`, exactly as a git collection
+  is. The lockfile pins it by the origin bytes' sha256 (schema 4), a pin a
+  git entry cannot carry, and the pin is enforced on every install, not
+  only under `--frozen`. Where ansible ignores a `version:` beside a url
+  source, here it is an assertion: the value must be exact and must equal
+  the version the MANIFEST declares, or the run fails with the resolution
+  code (`3`). A `signatures:` key on a url entry is refused (ansible does
+  not apply user signatures to url sources either; here the dead key is
+  named rather than dropped), and so are a `source:` or `namespace:` key
+  beside a url name, a credential in the URL, and a `#fragment`. An
+  optional Bearer token binds per origin and path prefix through
+  `GO_GALAXY_URL_*` (see [Servers and auth](servers-and-auth.md#url-sources-and-credentials)),
+  a capability ansible has no counterpart for; a redirect that leaves https
+  for plaintext http is refused, where ansible follows it. A `--refresh`
+  re-downloads the URL - there is no cheaper probe - and unchanged bytes
+  keep the pin; `outdated` reports a url entry as current by construction,
+  since a content-addressed pin has no version feed to compare against.
+  A caching-proxy URL - `http://front/<upstream-url>`, where a front host
+  reads the rest of the request path as the URL it fetches and caches - is
+  accepted, with one rule ansible does not impose: the embedded upstream URL
+  must itself be a valid url source spelled in its canonical form (lower-case
+  scheme and host, no default port), so one upstream artifact keeps one
+  spelling, one pin and one credential-match reading.
+- **A `file` or `dir` collection source fails the whole file, rather than
+  being skipped.** A `type:` other than `galaxy`, `git` or `url`, or -
+  where no `type:` is given - a name that reads as a source rather than as
+  `namespace.name`, a git pointer or an http(s) URL, meaning anything
+  containing `://` outside http(s) or starting with `/`, `./`, `../` or `~`
+  (a `git+` or `git@` prefix is a git source), is refused at load with the
+  usage code (`2`), naming the offending value, before any request is made.
+  The messages are `unsupported collection type "file" (only galaxy, git
+  and url are supported)` and `unsupported collection source "..." (only
+  Galaxy API, git and url sources are supported)`. ansible installs these;
+  here the run does not start.
 - **A bare top-level list is a list of collections, not ansible's legacy
   roles file.** `ansible-galaxy install -r` reads a file that is a bare list
   as roles; here it is read as collections, and a `src:` or `scm:` key inside

@@ -352,7 +352,7 @@ func parseCollectionsRejectedCases() []parseCollectionsRejectedCase {
 		},
 		{
 			name:    "unsupported source",
-			input:   "- https://example.com/collections\n",
+			input:   "- ftp://example.com/collections\n",
 			source:  "https://default",
 			wantErr: helpers.ErrUnsupportedCollectionSource,
 		},

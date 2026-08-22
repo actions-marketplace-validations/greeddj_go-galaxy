@@ -173,8 +173,31 @@ type RolePinEntry struct {
 	Server string `json:"server,omitempty"`
 	// Ref is the qualified ref a Galaxy role's pin chose (refs/tags/<tag> or
 	// refs/heads/<branch>), "" for a git role's pin, whose ref is its key.
-	Ref  string       `json:"ref,omitempty"`
-	Deps []RolePinDep `json:"deps,omitempty"`
+	Ref string `json:"ref,omitempty"`
+	// URL is the tarball URL a url role's pin was fetched from and SHA256 the
+	// sha256 of the bytes it served - the url pin's identity, standing where
+	// Repository and Commit stand for a git or Galaxy pin. Both are "" on
+	// those pins, as Repository and Commit are "" on a url pin.
+	URL    string       `json:"url,omitempty"`
+	SHA256 string       `json:"sha256,omitempty"`
+	Deps   []RolePinDep `json:"deps,omitempty"`
+}
+
+// URLPinEntry records what a url collection requirement resolved to: the
+// sha256 of the bytes the URL served and the one collection identity the
+// artifact's MANIFEST.json declared, with its raw dependency map - everything
+// the solver needs to answer for it without touching the origin again. Keyed
+// by urlsource.PinKey, the canonical URL. Like GitPinEntry it carries no
+// retention window: a pin is invalidated by an edit to the URL, by --refresh
+// and by --clear-cache, never by the clock, because a URL that still serves
+// the same bytes is the same answer a month later.
+type URLPinEntry struct {
+	FetchedAt    time.Time         `json:"fetched_at"`
+	Dependencies map[string]string `json:"dependencies,omitempty"`
+	SHA256       string            `json:"sha256"`
+	Namespace    string            `json:"namespace"`
+	Name         string            `json:"name"`
+	Version      string            `json:"version"`
 }
 
 // Store holds cached state for collections, roles and metadata.
@@ -190,6 +213,7 @@ type Store struct {
 	GitPins        map[string]GitPinEntry        `json:"git_pins"`
 	InstalledRoles map[string]InstalledRoleEntry `json:"installed_roles"`
 	RolePins       map[string]RolePinEntry       `json:"role_pins"`
+	URLPins        map[string]URLPinEntry        `json:"url_pins"`
 	Meta           SnapshotMeta                  `json:"meta"`
 	mu             sync.RWMutex                  `json:"-"`
 	// dirty records whether this process has written something into the
@@ -217,6 +241,7 @@ func New() *Store {
 		GitPins:        make(map[string]GitPinEntry),
 		InstalledRoles: make(map[string]InstalledRoleEntry),
 		RolePins:       make(map[string]RolePinEntry),
+		URLPins:        make(map[string]URLPinEntry),
 	}
 }
 
@@ -235,7 +260,7 @@ func New() *Store {
 // The guard lives here, on the type, rather than being called explicitly at
 // each decode site (e.g. LoadStore): every present and future decode path -
 // including one nobody has written yet - inherits it automatically, and a
-// twelfth map added to Store later cannot reopen this hole just by a call
+// thirteenth map added to Store later cannot reopen this hole just by a call
 // site forgetting to guard it.
 //
 // The local Bolt path never needed this: loadJSONBucket only ever populates an
@@ -489,11 +514,13 @@ func (s *Store) GetRolePin(key string) (RolePinEntry, bool) {
 }
 
 // SetRolePin records entry under key, deep-copying it and stamping FetchedAt
-// with the current time when the caller left it zero. An empty key or commit
-// is ignored, as SetGitPin ignores them: a pin that names no commit protects
-// nothing and would only ever be replayed into a failure.
+// with the current time when the caller left it zero. An empty key is
+// ignored, and so is an entry naming neither a commit nor a sha256 - a git or
+// Galaxy pin's identity is its commit, a url pin's is its sha256, and a pin
+// that names neither protects nothing and would only ever be replayed into a
+// failure.
 func (s *Store) SetRolePin(key string, entry RolePinEntry) {
-	if s == nil || key == "" || entry.Commit == "" {
+	if s == nil || key == "" || (entry.Commit == "" && entry.SHA256 == "") {
 		return
 	}
 	clone := cloneRolePin(entry)
@@ -521,6 +548,47 @@ func (s *Store) DeleteRolePin(key string) {
 func cloneRolePin(entry RolePinEntry) RolePinEntry {
 	clone := entry
 	clone.Deps = slices.Clone(entry.Deps)
+	return clone
+}
+
+// GetURLPin returns the pin recorded under key, deep-copied so a caller can
+// neither observe nor cause a later mutation.
+func (s *Store) GetURLPin(key string) (URLPinEntry, bool) {
+	if s == nil {
+		return URLPinEntry{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entry, ok := s.URLPins[key]
+	if !ok {
+		return URLPinEntry{}, false
+	}
+	return cloneURLPin(entry), true
+}
+
+// SetURLPin records entry under key, deep-copying it and stamping FetchedAt
+// with the current time. An empty key or sha256 is ignored, as SetGitPin
+// ignores an empty commit: a pin that names no digest protects nothing and
+// would only ever be replayed into a failure.
+func (s *Store) SetURLPin(key string, entry URLPinEntry) {
+	if s == nil || key == "" || entry.SHA256 == "" {
+		return
+	}
+	clone := cloneURLPin(entry)
+	clone.FetchedAt = time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.URLPins[key] = clone
+	s.dirty = true
+}
+
+// cloneURLPin copies a pin and the one reference-type field inside it.
+func cloneURLPin(entry URLPinEntry) URLPinEntry {
+	clone := entry
+	if entry.Dependencies != nil {
+		clone.Dependencies = make(map[string]string, len(entry.Dependencies))
+		maps.Copy(clone.Dependencies, entry.Dependencies)
+	}
 	return clone
 }
 
@@ -631,10 +699,10 @@ func (s *Store) SetAPICache(key string, entry APICacheEntry) {
 	s.dirty = true
 }
 
-// ClearCaches clears the API, dependency, versions, git pin and role pin
-// caches: every bucket that is an answer from a remote rather than a record
-// of content on disk. Installed and InstalledRoles are records of content
-// and survive, as Warmed does.
+// ClearCaches clears the API, dependency, versions, git pin, role pin and
+// url pin caches: every bucket that is an answer from a remote rather than a
+// record of content on disk. Installed and InstalledRoles are records of
+// content and survive, as Warmed does.
 func (s *Store) ClearCaches() {
 	if s == nil {
 		return
@@ -646,6 +714,7 @@ func (s *Store) ClearCaches() {
 	s.Versions = make(map[string]VersionsEntry)
 	s.GitPins = make(map[string]GitPinEntry)
 	s.RolePins = make(map[string]RolePinEntry)
+	s.URLPins = make(map[string]URLPinEntry)
 	s.dirty = true
 }
 
@@ -965,6 +1034,7 @@ type snapshotData struct {
 	GitPins        map[string]GitPinEntry
 	InstalledRoles map[string]InstalledRoleEntry
 	RolePins       map[string]RolePinEntry
+	URLPins        map[string]URLPinEntry
 	Meta           SnapshotMeta
 }
 
@@ -993,6 +1063,7 @@ func (s *Store) MarshalSnapshot() ([]byte, error) {
 		GitPins:        data.GitPins,
 		InstalledRoles: data.InstalledRoles,
 		RolePins:       data.RolePins,
+		URLPins:        data.URLPins,
 		Meta:           data.Meta,
 	}
 	return json.Marshal(snapshot)
@@ -1027,6 +1098,7 @@ func (s *Store) ensureMaps() {
 	s.GitPins = ensureMap(s.GitPins)
 	s.InstalledRoles = ensureMap(s.InstalledRoles)
 	s.RolePins = ensureMap(s.RolePins)
+	s.URLPins = ensureMap(s.URLPins)
 }
 
 // ensureMap returns m when it is non-nil and a fresh empty map otherwise.
@@ -1126,6 +1198,7 @@ func (s *Store) snapshotData() snapshotData {
 		GitPins:        make(map[string]GitPinEntry, len(s.GitPins)),
 		InstalledRoles: make(map[string]InstalledRoleEntry, len(s.InstalledRoles)),
 		RolePins:       make(map[string]RolePinEntry, len(s.RolePins)),
+		URLPins:        make(map[string]URLPinEntry, len(s.URLPins)),
 	}
 
 	for key, entry := range s.APICache {
@@ -1186,17 +1259,35 @@ func (s *Store) snapshotData() snapshotData {
 		data.Versions[key] = VersionsEntry{FetchedAt: entry.FetchedAt, List: clone}
 	}
 	copyFreshWarmed(data.Warmed, s.Warmed, warmedWindow)
-	// Git pins are copied whole: see GitPinEntry for why they carry no
-	// retention window.
-	for key, entry := range s.GitPins {
-		data.GitPins[key] = cloneGitPin(entry)
-	}
-	// Installed roles are copied whole for the reasons Installed is, just
-	// above; role pins for the reasons git pins are.
+	// Git, role and url pins are copied whole: see GitPinEntry for why a pin
+	// carries no retention window. Installed roles are copied whole for the
+	// reasons Installed is, just above.
+	copyGitPins(data.GitPins, s.GitPins)
 	copyInstalledRoles(data.InstalledRoles, s.InstalledRoles)
 	copyRolePins(data.RolePins, s.RolePins)
+	copyURLPins(data.URLPins, s.URLPins)
 
 	return data
+}
+
+// copyGitPins copies every entry from src into dst through cloneGitPin. It is
+// factored out of snapshotData for the same complexity-budget reason
+// copyRolePins is; the caller holds the store's read lock for the duration of
+// the call.
+func copyGitPins(dst, src map[string]GitPinEntry) {
+	for key, entry := range src {
+		dst[key] = cloneGitPin(entry)
+	}
+}
+
+// copyURLPins copies every entry from src into dst through cloneURLPin. It is
+// factored out of snapshotData for the same complexity-budget reason
+// copyRolePins is; the caller holds the store's read lock for the duration of
+// the call.
+func copyURLPins(dst, src map[string]URLPinEntry) {
+	for key, entry := range src {
+		dst[key] = cloneURLPin(entry)
+	}
 }
 
 // copyInstalledRoles copies every entry from src into dst, cloning each
@@ -1341,7 +1432,7 @@ func Load(dbs *DBs) (*Store, error) {
 }
 
 // Save writes cached state to the consolidated Bolt database. The meta
-// bucket and all eleven data buckets are written inside a single Bolt
+// bucket and all twelve data buckets are written inside a single Bolt
 // transaction so a mid-save failure (e.g. a key or value exceeding Bolt's
 // limits) leaves the previously committed snapshot fully intact instead of
 // a partially overwritten mix of old and new data.
@@ -1410,11 +1501,11 @@ func bindJSONBucket[T any](name string, dst, src map[string]T) jsonBucketIO {
 	}
 }
 
-// jsonBuckets lists the eleven data buckets in the one fixed order both
+// jsonBuckets lists the twelve data buckets in the one fixed order both
 // runners follow (api_cache, deps_cache, installed, graph, requirements,
-// resolved, versions_cache, warmed, git_pins, installed_roles, role_pins),
-// which fault injection tests rely on for the save side - a new bucket is
-// appended, never inserted.
+// resolved, versions_cache, warmed, git_pins, installed_roles, role_pins,
+// url_pins), which fault injection tests rely on for the save side - a new
+// bucket is appended, never inserted.
 func jsonBuckets(store *Store, data snapshotData) []jsonBucketIO {
 	return []jsonBucketIO{
 		bindJSONBucket(helpers.StoreBucketAPICache, store.APICache, data.APICache),
@@ -1428,10 +1519,11 @@ func jsonBuckets(store *Store, data snapshotData) []jsonBucketIO {
 		bindJSONBucket(helpers.StoreBucketGitPins, store.GitPins, data.GitPins),
 		bindJSONBucket(helpers.StoreBucketInstalledRoles, store.InstalledRoles, data.InstalledRoles),
 		bindJSONBucket(helpers.StoreBucketRolePins, store.RolePins, data.RolePins),
+		bindJSONBucket(helpers.StoreBucketURLPins, store.URLPins, data.URLPins),
 	}
 }
 
-// runLoadSteps reads the eleven data buckets in the given transaction.
+// runLoadSteps reads the twelve data buckets in the given transaction.
 func runLoadSteps(tx *bolt.Tx, store *Store) error {
 	buckets := jsonBuckets(store, snapshotData{})
 	steps := make([]func() error, 0, len(buckets))
@@ -1441,7 +1533,7 @@ func runLoadSteps(tx *bolt.Tx, store *Store) error {
 	return runSteps(steps)
 }
 
-// runSaveSteps writes the eleven data buckets in the given transaction, in the
+// runSaveSteps writes the twelve data buckets in the given transaction, in the
 // fixed order jsonBuckets states.
 func runSaveSteps(tx *bolt.Tx, data snapshotData) error {
 	buckets := jsonBuckets(&Store{}, data)

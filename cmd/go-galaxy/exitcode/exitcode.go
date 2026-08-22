@@ -365,7 +365,12 @@ func isIntegrityError(err error) bool {
 		errors.Is(err, helpers.ErrManifestChainMismatch) ||
 		errors.Is(err, helpers.ErrGitCommitMismatch) ||
 		errors.Is(err, helpers.ErrGitArtifactIdentityMismatch) ||
-		errors.Is(err, helpers.ErrRoleArtifactIdentityMismatch)
+		errors.Is(err, helpers.ErrRoleArtifactIdentityMismatch) ||
+		// The url siblings of the two above: a refetched url collection
+		// whose manifest names a different identity than the pin, and a url
+		// role's origin serving bytes with a different sha256 than the pin.
+		errors.Is(err, helpers.ErrURLArtifactIdentityMismatch) ||
+		errors.Is(err, helpers.ErrURLArtifactSHA256Mismatch)
 }
 
 // isSignatureError reports whether err carries one collection's signature
@@ -813,7 +818,12 @@ func isNoCandidateError(err error) bool {
 		errors.Is(err, helpers.ErrGitCommitNotFound) ||
 		errors.Is(err, helpers.ErrRoleNotFound) ||
 		errors.Is(err, helpers.ErrRoleVersionNotFound) ||
-		errors.Is(err, helpers.ErrRoleVersionsIncomparable)
+		errors.Is(err, helpers.ErrRoleVersionsIncomparable) ||
+		// A url source's one candidate - the artifact its MANIFEST.json
+		// declares - is not the version the requirements entry asserted:
+		// the same "nothing exists for what was asked" answer a ref the
+		// remote does not advertise gives.
+		errors.Is(err, helpers.ErrURLCollectionVersionMismatch)
 }
 
 // isUsageError reports whether err is a configuration or CLI-input sentinel
@@ -827,7 +837,8 @@ func isUsageError(err error) bool {
 		isCollectionListUsageError(err) ||
 		isSignatureConfigError(err) ||
 		isGitUsageError(err) ||
-		isRoleUsageError(err)
+		isRoleUsageError(err) ||
+		isURLUsageError(err)
 }
 
 // isRoleUsageError reports whether err says a roles: entry, as written in
@@ -907,6 +918,24 @@ func isGitContentUsageError(err error) bool {
 		errors.Is(err, helpers.ErrGitDuplicateCollection) ||
 		errors.Is(err, helpers.ErrGalaxyYMLInvalid) ||
 		errors.Is(err, helpers.ErrGitCollectionVersionNotExact)
+}
+
+// isURLUsageError reports whether err says a url source, as written in
+// requirements.yml or bound through the environment, cannot be used as
+// given: a tarball URL or persisted locator this tool refuses, a URL
+// carrying a credential, a credential binding that does not parse, or a role
+// tarball whose layout or entries cannot become one role. The predicate
+// every member shares with the rest of this class is the one
+// isGitUsageError states: an operator has to change something, and no retry
+// repairs it - even for the members discovered only after a download, since
+// what the download found is a shape defect, not a transport one.
+func isURLUsageError(err error) bool {
+	return errors.Is(err, helpers.ErrInvalidURLRequirement) ||
+		errors.Is(err, helpers.ErrURLRequirementUserinfo) ||
+		errors.Is(err, helpers.ErrInvalidURLLocator) ||
+		errors.Is(err, helpers.ErrURLCredentialInvalid) ||
+		errors.Is(err, helpers.ErrRoleTarballLayout) ||
+		errors.Is(err, helpers.ErrRoleTarballEntryInvalid)
 }
 
 // isSignatureConfigError reports whether err says this run's signature

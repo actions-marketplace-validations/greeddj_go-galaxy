@@ -31,6 +31,9 @@ type GalaxyYAML struct {
 	Version     string `yaml:"version"`
 	VersionURL  string `yaml:"version_url"`
 	GitCommit   string `yaml:"git_commit,omitempty"`
+	// URLSHA256 records a url collection's origin sha256, provenance the way
+	// GitCommit is for a git collection; ansible ignores both.
+	URLSHA256 string `yaml:"url_sha256,omitempty"`
 }
 
 // writeGalaxyInfo writes GALAXY.yml for the installed collection. When meta
@@ -127,6 +130,12 @@ func buildGalaxyYAML(cfg *config.Config, col collection, meta *types.GalaxyColle
 	if loc, err := col.gitLocator(); err == nil && col.isGit() {
 		g.Server = helpers.WithoutCredentials(loc.URL)
 		g.GitCommit = loc.Commit
+		return g
+	}
+	if loc, err := col.urlLocator(); err == nil && col.isURL() {
+		g.Server = helpers.WithoutCredentials(loc.URL)
+		g.DownloadURL = helpers.WithoutCredentials(loc.URL)
+		g.URLSHA256 = loc.SHA256
 		return g
 	}
 	if meta != nil {
