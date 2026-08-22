@@ -45,6 +45,13 @@ outrank both, and the default is `.roles`, project-local like `.collections`
 rather than ansible's `~/.ansible/roles`. A roles path that is the same
 directory as the collections path is accepted with a warning.
 
+Both of those warnings are printed only to a run that has roles to install,
+which means a `requirements.yml` carrying a non-empty `roles:` block. A run
+without one never reads `roles_path`, so how it was spelled cannot affect its
+outcome, and the warning would be noise about a setting that went unused. The
+`collections_path` warning has no such condition: every run installs into that
+path.
+
 One variable go-galaxy reads is deliberately absent from that table.
 `ANSIBLE_GALAXY_REQUIREMENTS_FILE` sits in ansible's namespace without being an
 ansible option: ansible-core declares no requirements-file setting, and

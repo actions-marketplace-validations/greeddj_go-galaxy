@@ -161,11 +161,32 @@ func (i *Infra) DebugAnsibleConfig(cfg *config.Config) {
 // building cfg (e.g. an ignored collections_path entry). Config is built
 // before the output printer exists, so these warnings are queued on cfg
 // and drained here once a printer is available.
+//
+// It drains config.Config.Warnings only. The role-scoped queue beside it is
+// WarnRoleConfig's, because at this point - the top of every command, before
+// any requirements file has been read - whether this run has a role at all
+// is still unknown.
 func (i *Infra) WarnConfig(cfg *config.Config) {
+	i.warn(cfg, func(c *config.Config) []string { return c.Warnings })
+}
+
+// WarnRoleConfig surfaces the configuration warnings that only concern a run
+// installing roles (config.Config.RoleWarnings - everything about
+// roles_path). Its caller is whatever has just read the requirements file
+// and found a roles: block there, so a run without one never hears a
+// complaint about a setting it never reads.
+func (i *Infra) WarnRoleConfig(cfg *config.Config) {
+	i.warn(cfg, func(c *config.Config) []string { return c.RoleWarnings })
+}
+
+// warn is the shared body of WarnConfig and WarnRoleConfig: the nil
+// tolerance both need (a hand-built Infra in a test carries no printer) and
+// the drain itself, with queue selecting which of cfg's two queues to print.
+func (i *Infra) warn(cfg *config.Config, queue func(*config.Config) []string) {
 	if i == nil || i.Output == nil || cfg == nil {
 		return
 	}
-	for _, w := range cfg.Warnings {
+	for _, w := range queue(cfg) {
 		i.Output.Warnf("%s", w)
 	}
 }

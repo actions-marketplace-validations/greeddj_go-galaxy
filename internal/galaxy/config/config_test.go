@@ -164,6 +164,23 @@ func assertWarningMentions(t *testing.T, got *Config, substr string) {
 	}
 }
 
+// assertRoleWarningMentions is assertWarningMentions for the role-scoped
+// queue, and additionally requires Warnings itself to be empty: a role
+// warning that also reached the unconditional queue would be printed to
+// every run regardless of the split.
+func assertRoleWarningMentions(t *testing.T, got *Config, substr string) {
+	t.Helper()
+	if len(got.Warnings) != 0 {
+		t.Fatalf("Warnings = %v, want none - a roles_path warning belongs on RoleWarnings", got.Warnings)
+	}
+	if len(got.RoleWarnings) != 1 {
+		t.Fatalf("len(RoleWarnings) = %d, want 1 (RoleWarnings = %v)", len(got.RoleWarnings), got.RoleWarnings)
+	}
+	if !strings.Contains(got.RoleWarnings[0], substr) {
+		t.Errorf("RoleWarnings[0] = %q, want it to mention %q", got.RoleWarnings[0], substr)
+	}
+}
+
 // TestCollectionsPathSplit checks that applyAnsibleConfig honors ansible's
 // POSIX ":"-separated collections_path list: only the first entry is used,
 // and a warning naming the ignored entries is recorded exactly once. A
@@ -539,25 +556,25 @@ func workersRows() []workersRow {
 // range arm then replaces with the very default the deleted branch would have
 // taken, so the warning count is the only observable difference:
 //
-//	config_test.go:572: len(cfg.Warnings) = 1, want 0
+//	config_test.go:592: len(cfg.Warnings) = 1, want 0
 //
 // M2, helpers.MaxAcceptedInstallWorkers' body reduced to a bare `procs`. Of
 // the rows above only procs=1, --workers=2 fails, since it is the only one
 // whose honored value sits above procs and at or below the floor:
 //
-//	config_test.go:572: len(cfg.Warnings) = 1, want 0
+//	config_test.go:592: len(cfg.Warnings) = 1, want 0
 //
 // M3, the substitute changed from the default to the ceiling (`n = fallback`
 // rewritten to `n = upper`). Only the procs=64, --workers=65 row fails; every
 // procs=8 row survives it, which is exactly why that row exists at all:
 //
-//	config_test.go:572: cfg.Workers = 64, want 16
+//	config_test.go:592: cfg.Workers = 64, want 16
 //
 // M4, `n < 1` relaxed to `n < 0` in the range arm. Both zero shapes fail - the
 // zero row quoted below and the environment subtest that follows it - while
 // the negative row survives, pinning the boundary rather than replacement:
 //
-//	config_test.go:572: cfg.Workers = 0, want 8
+//	config_test.go:592: cfg.Workers = 0, want 8
 func TestApplyWorkers(t *testing.T) {
 	// The fixture flag's own Value. No row in the table reads it - each
 	// registered row supplies --workers explicitly and the unregistered one has
@@ -617,7 +634,7 @@ func TestApplyWorkers(t *testing.T) {
 // leaving only the MaxDefaultDownloadWorkers cap). The 1-cpu row fails, because its
 // raw product (1*4=4) sits below the floor and nothing clamps it back up:
 //
-//	config_test.go:642: DefaultDownloadWorkers(1) = 4, want 8
+//	config_test.go:659: DefaultDownloadWorkers(1) = 4, want 8
 //
 // The 2-cpu row does NOT fail this mutation: its raw product (2*4=8) already
 // equals MinDefaultDownloadWorkers, so the floor was never the thing keeping
@@ -706,7 +723,7 @@ func TestDownloadWorkersDefault(t *testing.T) {
 // `min(procs, MaxDefaultInstallWorkers)`. Only the 1-cpu row fails, since it
 // is the only row whose input sits below the floor at all:
 //
-//	config_test.go:740: DefaultInstallWorkers(1) = 1, want 2
+//	config_test.go:757: DefaultInstallWorkers(1) = 1, want 2
 //
 // The 2-cpu row does NOT fail this mutation: its input already equals
 // MinDefaultInstallWorkers, so the floor was never what kept that row at 2 -
@@ -717,8 +734,8 @@ func TestDownloadWorkersDefault(t *testing.T) {
 // the row exactly at it survives, which is what makes the trio a pin on the
 // boundary rather than on clamping in general:
 //
-//	config_test.go:740: DefaultInstallWorkers(17) = 17, want 16
-//	config_test.go:740: DefaultInstallWorkers(128) = 128, want 16
+//	config_test.go:757: DefaultInstallWorkers(17) = 17, want 16
+//	config_test.go:757: DefaultInstallWorkers(128) = 128, want 16
 func TestInstallWorkersDefault(t *testing.T) {
 	t.Run("derives from permitted cpu", func(t *testing.T) {
 		tests := []struct {
@@ -1050,7 +1067,7 @@ func subtestNonWorldWritableCwdDiscovered(t *testing.T) {
 // current directory %q is world-writable; ignoring ./ansible.cfg as a
 // configuration source") leaves this subtest's first two assertions passing -
 // the file still loads, and the text still names the directory as
-// world-writable - and fails the third, at config_test.go:1073:
+// world-writable - and fails the third, at config_test.go:1093:
 //
 //	warnings = [the current directory "/var/folders/..." is world-writable;
 //	ignoring ./ansible.cfg as a configuration source], want one naming
@@ -1149,11 +1166,11 @@ func assertDiscoveryFallsThroughCleanly(t *testing.T, gotPath string, err error)
 // ini value over the env one (returning ini whenever it is non-empty). Two
 // rows fail - the first, on the precedence itself:
 //
-//	config_test.go:1165: Server = "https://ini.example", want "https://env.example"
+//	config_test.go:1182: Server = "https://ini.example", want "https://env.example"
 //
 // and the third, because a non-empty ini value shadows the empty-env case too:
 //
-//	config_test.go:1190: Server = "https://ini.example", want the flag default "https://default.example"
+//	config_test.go:1207: Server = "https://ini.example", want the flag default "https://default.example"
 func TestAnsibleGalaxyServerEnv(t *testing.T) {
 	const envServer = "https://env.example"
 
@@ -1222,31 +1239,47 @@ func TestApplyAnsibleConfigRolesPath(t *testing.T) {
 		if got.RolesPath != testDefaultRolesPath || got.AnsibleRolesPathUsed {
 			t.Fatalf("RolesPath = %q (ansible used %t), want the flag default", got.RolesPath, got.AnsibleRolesPathUsed)
 		}
-		if len(got.Warnings) != 0 {
-			t.Fatalf("warnings = %q, want none", got.Warnings)
+		if len(got.Warnings) != 0 || len(got.RoleWarnings) != 0 {
+			t.Fatalf("warnings = %q, role warnings = %q, want none of either", got.Warnings, got.RoleWarnings)
 		}
 	})
 }
 
 // TestRolesPathSplitAndOverlap covers the two warnings roles_path can raise:
 // a search list beyond its first entry, and a directory shared with
-// collections_path.
+// collections_path. Both land on RoleWarnings rather than Warnings, which is
+// what keeps them off a run whose requirements.yml has no roles: block -
+// Warnings must stay empty in both cases, or the split would be defeated by
+// the queue alone.
 func TestRolesPathSplitAndOverlap(t *testing.T) {
 	t.Run("search list: first wins, rest warned about by name", func(t *testing.T) {
 		ansCfg := ansibleConfig{Defaults: ansibleDefaultsConfig{RolesPath: "/r/a:/r/b"}}
 		got := runApplyAnsibleConfig(t, nil, ansCfg)
-		if got.RolesPath != "/r/a" || len(got.Warnings) != 1 {
-			t.Fatalf("RolesPath = %q, warnings = %q", got.RolesPath, got.Warnings)
+		if got.RolesPath != "/r/a" {
+			t.Fatalf("RolesPath = %q, want /r/a", got.RolesPath)
 		}
-		assertWarningMentions(t, got, "roles_path lists multiple paths")
-		assertWarningMentions(t, got, "[/r/b]")
+		assertRoleWarningMentions(t, got, "roles_path lists multiple paths")
+		assertRoleWarningMentions(t, got, "[/r/b]")
 	})
 
 	t.Run("same directory as collections_path warns", func(t *testing.T) {
 		got := runApplyAnsibleConfig(t, []string{"--download-path=/shared/", "--roles-path=/shared"}, ansibleConfig{})
-		if len(got.Warnings) != 1 {
-			t.Fatalf("warnings = %q, want exactly one", got.Warnings)
-		}
-		assertWarningMentions(t, got, "roles_path and collections_path are the same directory")
+		assertRoleWarningMentions(t, got, "roles_path and collections_path are the same directory")
 	})
+}
+
+// TestCollectionsPathSplitStaysUnconditional is TestRolesPathSplitAndOverlap's
+// counterpart on the other setting, pinning that the queue split cut only
+// what it was meant to: collections_path is read by every run, so its
+// search-list warning stays on Warnings, where nothing can suppress it.
+func TestCollectionsPathSplitStaysUnconditional(t *testing.T) {
+	t.Parallel()
+	got := runApplyAnsibleConfig(t, []string{"--download-path=/c/a:/c/b"}, ansibleConfig{})
+	if got.DownloadPath != "/c/a" {
+		t.Fatalf("DownloadPath = %q, want /c/a", got.DownloadPath)
+	}
+	if len(got.RoleWarnings) != 0 {
+		t.Fatalf("RoleWarnings = %q, want none - collections_path is not role-scoped", got.RoleWarnings)
+	}
+	assertWarningMentions(t, got, "collections_path lists multiple paths")
 }

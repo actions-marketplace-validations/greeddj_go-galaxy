@@ -491,6 +491,12 @@ func loadRoots(cfg *config.Config, runtime *infra.Infra) ([]collection, []requir
 	for _, w := range file.Warnings {
 		runtime.Output.Warnf("%s", w)
 	}
+	// The first point in a run where "does this have roles at all" is
+	// answered, and therefore the only place the roles_path warnings config
+	// queued can be judged worth printing - see config.Config.RoleWarnings.
+	if len(file.Roles) > 0 {
+		runtime.WarnRoleConfig(cfg)
+	}
 	runtime.Output.Printf("🧩 prepare roots")
 	roots, err := prepareRoots(collectionsDirect)
 	if err != nil {

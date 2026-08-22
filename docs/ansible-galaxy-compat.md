@@ -444,7 +444,11 @@ consequence of that, and every other deliberate difference, is listed here.
   project-local.** As with `collections_path`: the first entry of
   `[defaults] roles_path`, `ANSIBLE_ROLES_PATH` or `--roles-path` is used,
   the rest are named in a warning, and the default is `.roles` rather than
-  ansible's `~/.ansible/roles`.
+  ansible's `~/.ansible/roles`. That warning, and the one about a roles path
+  equal to the collections path, are held back unless the requirements file
+  carries a non-empty `roles:` block - the condition under which the setting
+  is read at all. ansible has no equivalent, since it has no single file
+  declaring both kinds of requirement to a single command.
 - **Roles have no signatures and no `sha256`.** The v1 API offers none and
   ansible verifies none; here the commit check at every rebuild - a
   repository that serves a different commit for a pinned role fails with the

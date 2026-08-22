@@ -51,6 +51,15 @@ type Config struct {
 	// before the output printer exists, so warnings are carried here and
 	// drained later through Infra.WarnConfig.
 	Warnings []string
+	// RoleWarnings collects the non-fatal configuration warnings that are
+	// only worth printing to a run that installs roles - everything this
+	// package can say about roles_path. They are queued apart from
+	// Warnings, and drained through Infra.WarnRoleConfig instead, because
+	// whether the run has a role at all is not known here: it is decided by
+	// the requirements file, which is read later and by another package. A
+	// run whose requirements.yml carries no roles: block never reads
+	// RolesPath, so a complaint about how it was spelled is noise there.
+	RoleWarnings []string
 	// AnsibleSignatureKeys names the signature keys the discovered ansible.cfg
 	// carried, and never a value any of them was set to - see
 	// ansibleGalaxyConfig.SignatureKeys for why the names alone are recorded.
@@ -580,26 +589,37 @@ func applyAnsibleConfig(cfg *Config, c *cli.Command, ansibleConfig ansibleConfig
 	// unconditionally (a no-op when there was nothing to split, including a
 	// bare trailing separator with no further entries); only a genuinely
 	// ignored entry produces a warning.
-	cfg.DownloadPath = firstSearchPathEntry(cfg, "collections_path", cfg.DownloadPath)
+	var warning string
+	cfg.DownloadPath, warning = firstSearchPathEntry("collections_path", cfg.DownloadPath)
+	if warning != "" {
+		cfg.Warnings = append(cfg.Warnings, warning)
+	}
 	// roles_path is the same shape in ansible - a search list whose first
-	// entry is where ansible-galaxy installs - and gets the same treatment.
-	cfg.RolesPath = firstSearchPathEntry(cfg, "roles_path", cfg.RolesPath)
+	// entry is where ansible-galaxy installs - and gets the same treatment,
+	// except that its warnings are queued on RoleWarnings: see that field
+	// for why a run with no roles: block must not hear them.
+	cfg.RolesPath, warning = firstSearchPathEntry("roles_path", cfg.RolesPath)
+	if warning != "" {
+		cfg.RoleWarnings = append(cfg.RoleWarnings, warning)
+	}
 	if cfg.RolesPath != "" && filepath.Clean(cfg.RolesPath) == filepath.Clean(cfg.DownloadPath) {
-		cfg.Warnings = append(cfg.Warnings,
+		cfg.RoleWarnings = append(cfg.RoleWarnings,
 			fmt.Sprintf("roles_path and collections_path are the same directory %q; roles install beside ansible_collections", cfg.RolesPath))
 	}
 }
 
-// firstSearchPathEntry keeps the first entry of a ":"-separated search path
-// and records a warning naming the setting when further entries were
-// dropped.
-func firstSearchPathEntry(cfg *Config, setting, value string) string {
+// firstSearchPathEntry keeps the first entry of a ":"-separated search path,
+// returning it with the warning naming the setting when further entries were
+// dropped, or "" when none were. The warning is returned rather than queued
+// on a *Config so the caller decides which queue it belongs in: which of the
+// two settings this ran for is what decides whether a run with no roles ever
+// hears it.
+func firstSearchPathEntry(setting, value string) (string, string) {
 	first, rest := splitSearchPath(value)
-	if len(rest) > 0 {
-		cfg.Warnings = append(cfg.Warnings,
-			fmt.Sprintf("%s lists multiple paths; using %q and ignoring the rest: %v", setting, first, rest))
+	if len(rest) == 0 {
+		return first, ""
 	}
-	return first
+	return first, fmt.Sprintf("%s lists multiple paths; using %q and ignoring the rest: %v", setting, first, rest)
 }
 
 // splitSearchPath splits a POSIX ":"-separated search path value into its

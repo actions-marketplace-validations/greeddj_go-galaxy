@@ -158,7 +158,9 @@ two-flag set of their own, listed under
   is used and the rest are named in a stderr warning. A roles path equal to the collections path is
   accepted with a warning (roles then sit beside `ansible_collections`; a role named
   `ansible_collections` is refused by the install-name alphabet, so it can never replace that tree).
-  The directory is created only when the run has a role to install, never on a dry run.
+  Both warnings are printed only when the requirements file carries a non-empty `roles:` block, the
+  same condition under which the setting is read at all. The directory is created only when the run
+  has a role to install, never on a dry run.
 - `--requirements-file, -r`, also spelled `--role-file` (`$GO_GALAXY_REQUIREMENTS_FILE`,
   `$ANSIBLE_GALAXY_REQUIREMENTS_FILE` - a go-galaxy extension, not an ansible option). `--role-file`
   is `ansible-galaxy`'s own name for this flag; it names the same file, which carries the
