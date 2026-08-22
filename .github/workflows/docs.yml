@@ -1,0 +1,37 @@
+name: Docs
+
+# The full suite skips a push that changes nothing but markdown, and the one
+# test that reads committed markdown - the dash gate in internal/proseaudit,
+# which enumerates `git ls-files` - would go with it. This runs that package
+# alone instead, so a violation is reported on the push that introduced it
+# rather than on the release gate, where the fix costs a retagging.
+#
+# Push only: a pull request runs the whole suite whatever it touches, so the
+# gate already fires there.
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '**.md'
+
+jobs:
+  prose:
+    name: Prose
+    runs-on: ubuntu-latest
+    steps:
+      # No fetch-depth: the gate enumerates the index through `git ls-files`,
+      # which a shallow checkout populates in full.
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: 'go.mod'
+
+      # `paths` fires when any changed file matches, so a commit carrying both
+      # code and prose runs this beside the full suite and audits twice. The
+      # trigger cannot say "only markdown", and a second of duplicated work is
+      # the cheaper side of that.
+      - name: Run prose audit
+        run: go test ./internal/proseaudit/
