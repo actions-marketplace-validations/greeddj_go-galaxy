@@ -19,13 +19,13 @@ carries the ratios, the table the seconds they came from.
 | Scenario         | 1 collection | 10 collections | 100 collections |
 |:-----------------|-------------:|---------------:|----------------:|
 | **cold cache**   |              |                |                 |
-| ・ansible-galaxy |      8.058 s |       43.198 s |       465.601 s |
-| ・go-galaxy      |      2.612 s |        4.900 s |        25.287 s |
-| ・**speedup**    |    **3.08x** |      **8.82x** |      **18.41x** |
+| ・ansible-galaxy |      7.195 s |       64.716 s |       419.146 s |
+| ・go-galaxy      |      2.723 s |        8.224 s |        18.221 s |
+| ・**speedup**    |    **2.64x** |      **7.87x** |         **23x** |
 | **warm cache**   |              |                |                 |
-| ・ansible-galaxy |      5.377 s |       29.070 s |       267.363 s |
-| ・go-galaxy      |      0.189 s |        0.277 s |         0.951 s |
-| ・**speedup**    |   **28.45x** |    **104.87x** |      **281.2x** |
+| ・ansible-galaxy |      5.357 s |       25.927 s |       290.971 s |
+| ・go-galaxy      |      0.205 s |        0.278 s |         0.989 s |
+| ・**speedup**    |   **26.18x** |      **93.4x** |     **294.33x** |
 
 **Read the warm row knowing what each tool caches.** `ansible-galaxy` keeps
 only an API response cache - a single `api.json` - and downloads every tarball
@@ -36,9 +36,11 @@ installed files out of that cache. The three-hundred-fold figure is the honest
 measurement of two different designs, not of the same design done faster.
 
 The cold rows are network-bound and correspondingly noisy, and they carry
-whatever the Galaxy servers were publishing on the day. The `go-galaxy` warm
-row is the tight one, within a few percent of its mean, because it touches no
-origin at all.
+whatever the Galaxy servers were publishing on the day. The 10-collection cold
+column shows how much: five `ansible-galaxy` runs spanned 36.671 s to
+143.697 s, so its mean sits one slow run away from a different figure. The
+`go-galaxy` warm row is the tight one, within a few percent of its mean,
+because it touches no origin at all.
 
 ## Filesystem sensitivity
 
@@ -102,44 +104,44 @@ environment variable; the prefix is not `GO_GALAXY_` because this process sets
 `GO_GALAXY_*` for the binary it is timing.
 
 ```console
-# go-galaxy-benchmark run --ansible-galaxy /usr/bin/ansible-galaxy --go-galaxy /usr/bin/go-galaxy --work-dir /data/go-galaxy-vs-ansible-galaxy --requirements-dir ~/requirements/ --no-deps
-✔ ansible-galaxy cold size 1: mean 8.058s over 5 runs
-✔ go-galaxy cold size 1: mean 2.612s over 5 runs
-✔ ansible-galaxy warm size 1: mean 5.377s over 5 runs
-✔ go-galaxy warm size 1: mean 0.189s over 5 runs
-✔ ansible-galaxy cold size 10: mean 43.198s over 5 runs
-✔ go-galaxy cold size 10: mean 4.900s over 5 runs
-✔ ansible-galaxy warm size 10: mean 29.070s over 5 runs
-✔ go-galaxy warm size 10: mean 0.277s over 5 runs
-✔ ansible-galaxy cold size 100: mean 465.601s over 5 runs
-✔ go-galaxy cold size 100: mean 25.287s over 5 runs
-✔ ansible-galaxy warm size 100: mean 267.363s over 5 runs
-✔ go-galaxy warm size 100: mean 0.951s over 5 runs
+# go-galaxy-benchmark run --ansible-galaxy /usr/bin/ansible-galaxy --go-galaxy /usr/bin/go-galaxy --work-dir /data/go-galaxy-vs-ansible-galaxy --requirements-dir ./requirements/ --no-deps
+✔ ansible-galaxy cold size 1: mean 7.195s over 5 runs
+✔ go-galaxy cold size 1: mean 2.723s over 5 runs
+✔ ansible-galaxy warm size 1: mean 5.357s over 5 runs
+✔ go-galaxy warm size 1: mean 0.205s over 5 runs
+✔ ansible-galaxy cold size 10: mean 64.716s over 5 runs
+✔ go-galaxy cold size 10: mean 8.224s over 5 runs
+✔ ansible-galaxy warm size 10: mean 25.927s over 5 runs
+✔ go-galaxy warm size 10: mean 0.278s over 5 runs
+✔ ansible-galaxy cold size 100: mean 419.146s over 5 runs
+✔ go-galaxy cold size 100: mean 18.221s over 5 runs
+✔ ansible-galaxy warm size 100: mean 290.971s over 5 runs
+✔ go-galaxy warm size 100: mean 0.989s over 5 runs
 ✔ report written to /data/go-galaxy-vs-ansible-galaxy/report.json
 ansible-galaxy  ansible-galaxy [core 2.21.3]
-go-galaxy       v1.0.2-352-g58c23c3-dirty (commit 58c23c3, built by just @ 2026-08-22T07:19:13Z) // go1.27.0
+go-galaxy       v1.1.0-pre (commit 2d12b2c, built by just @ 2026-08-22T16:32:56Z) // go1.27.0
 host            linux/amd64, 4 cpus, xfs
 measurement     5 runs, --no-deps
 
 SCENARIO  SIZE  TOOL            MEAN      MIN       MAX       FAILED
-cold      1     ansible-galaxy  8.058s    7.370s    9.077s    0
-cold      1     go-galaxy       2.612s    2.460s    2.838s    0
-cold      1     speedup         3.1x
-cold      10    ansible-galaxy  43.198s   39.300s   45.891s   0
-cold      10    go-galaxy       4.900s    3.366s    6.600s    0
-cold      10    speedup         8.8x
-cold      100   ansible-galaxy  465.601s  393.900s  658.204s  0
-cold      100   go-galaxy       25.287s   22.761s   28.068s   0
-cold      100   speedup         18.4x
-warm      1     ansible-galaxy  5.377s    5.032s    5.970s    0
-warm      1     go-galaxy       0.189s    0.186s    0.191s    0
-warm      1     speedup         28.5x
-warm      10    ansible-galaxy  29.070s   23.185s   36.152s   0
-warm      10    go-galaxy       0.277s    0.259s    0.298s    0
-warm      10    speedup         104.9x
-warm      100   ansible-galaxy  267.363s  239.470s  299.250s  0
-warm      100   go-galaxy       0.951s    0.900s    0.999s    0
-warm      100   speedup         281.2x
+cold      1     ansible-galaxy  7.195s    6.958s    7.603s    0
+cold      1     go-galaxy       2.723s    2.494s    2.881s    0
+cold      1     speedup         2.6x
+cold      10    ansible-galaxy  64.716s   36.671s   143.697s  0
+cold      10    go-galaxy       8.224s    5.320s    11.655s   0
+cold      10    speedup         7.9x
+cold      100   ansible-galaxy  419.146s  378.640s  456.976s  0
+cold      100   go-galaxy       18.221s   16.459s   20.906s   0
+cold      100   speedup         23.0x
+warm      1     ansible-galaxy  5.357s    5.146s    5.857s    0
+warm      1     go-galaxy       0.205s    0.191s    0.236s    0
+warm      1     speedup         26.2x
+warm      10    ansible-galaxy  25.927s   22.945s   28.109s   0
+warm      10    go-galaxy       0.278s    0.258s    0.320s    0
+warm      10    speedup         93.4x
+warm      100   ansible-galaxy  290.971s  232.861s  452.386s  0
+warm      100   go-galaxy       0.989s    0.914s    1.131s    0
+warm      100   speedup         294.3x
 ```
 
 The live line above each result carries the current run's elapsed time and the
@@ -159,7 +161,7 @@ go-galaxy-benchmark show --report /data/go-galaxy-vs-ansible-galaxy/report.json 
 ```
 
 Bars carry the ratio rather than the elapsed time, and the absolute pair sits
-in the row's text. Seconds cannot share one axis here: 0.951 s beside 267 s
+in the row's text. Seconds cannot share one axis here: 0.989 s beside 291 s
 would be a bar narrower than a pixel. The ratios span the same three orders of
 magnitude, so their axis is logarithmic as well, with a rule at every power of
 ten the longest bar reaches. One scale serves both cache states, which is what
@@ -204,10 +206,11 @@ disk, which for a workload that is mostly inode creation describes nothing.
 
 ## Conditions
 
-- **Tools:** `ansible-galaxy [core 2.21.3]` throughout, against `go-galaxy` at
-  commit `58c23c3` built with go1.27.0. The object counts under [Filesystem
-  sensitivity](#filesystem-sensitivity) are from an earlier `testing/bench.sh`
-  run on the same guest, at commit `826c765` built with go1.26.7.
+- **Tools:** `ansible-galaxy [core 2.21.3]` throughout, against the
+  `go-galaxy` build the [run above](#go-galaxy-benchmark) names. The object
+  counts under [Filesystem sensitivity](#filesystem-sensitivity) are from an
+  earlier `testing/bench.sh` run on the same guest, at commit `826c765` built
+  with go1.26.7.
 - **Host:** a libvirt guest running Oracle Linux Server 10.1 on
   `6.12.0-203.76.7.5.el10uek.x86_64`, 4 vCPU and 8 GB of RAM. Storage is an
   SSD RAID6 array passed through from the hypervisor as a block device and
