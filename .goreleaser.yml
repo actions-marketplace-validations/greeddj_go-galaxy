@@ -84,12 +84,39 @@ snapshot:
 changelog:
   sort: asc
   filters:
+    # Scope-aware, because most of the tree's commits carry one: `^docs:` on
+    # its own leaves every `docs(cache):` in the published notes. The `!` is
+    # deliberately not matched here - filtering runs before grouping, so a
+    # breaking `chore!:` has to survive this stage to reach the group below.
     exclude:
-      - '^docs:'
-      - '^test:'
-      - '^chore:'
+      - '^docs(\([^)]*\))?:'
+      - '^test(\([^)]*\))?:'
+      - '^chore(\([^)]*\))?:'
       - Merge pull request
       - Merge branch
+  # A commit lands in the first group, by declaration order, whose regexp
+  # matches it, and `order` only sorts the sections in the rendered notes - so
+  # the breaking pattern is declared above feat and fix, which it overlaps, and
+  # the group carrying no regexp is the catch-all that drains whatever is left
+  # and has to come last.
+  #
+  # The regexp is matched against the bare subject line, so a `BREAKING CHANGE:`
+  # footer in the commit body never reaches this stage: the `!` marker in the
+  # subject is the only way a breaking change gets its own section. Scopes are
+  # matched with `[^)]*` rather than the `[[:word:]]+` of GoReleaser's own
+  # examples because ours are package paths and carry slashes.
+  groups:
+    - title: 'Breaking changes'
+      regexp: '^[[:alnum:]]+(\([^)]*\))?!:'
+      order: 0
+    - title: 'Features'
+      regexp: '^feat(\([^)]*\))?:'
+      order: 1
+    - title: 'Bug fixes'
+      regexp: '^fix(\([^)]*\))?:'
+      order: 2
+    - title: 'Others'
+      order: 999
 dockers:
   - id: amd64
     ids:

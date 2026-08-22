@@ -72,6 +72,14 @@ keyless cosign signatures, SPDX SBOMs, multi-arch images, and a build-provenance
 attestation. See [Security](security.md#verifying-a-release) for the verifying
 side of that.
 
+GoReleaser groups the release notes out of commit subjects, so the subject line
+is the only thing deciding where a change is published. `feat:` and `fix:` get
+a section each; a `!` before the colon moves the commit into "Breaking changes"
+whatever its type, so `refactor(collections)!:` is listed there and not among
+the refactors; `docs`, `test` and `chore` are dropped, with or without a scope.
+The body is never read - a `BREAKING CHANGE:` footer reaches nothing, and a
+breaking change that does not mark its subject is published as an ordinary one.
+
 ## The repository audits itself
 
 Six gates are ordinary tests, run by `go test ./...` like anything else. Three
