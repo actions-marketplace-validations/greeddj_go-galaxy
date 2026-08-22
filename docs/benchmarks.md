@@ -171,6 +171,14 @@ ten the longest bar reaches. One scale serves both cache states, which is what
 lets a warm bar be read against a cold one; a ratio at or below `1x` gets no
 bar at all, only its figure.
 
+Every glyph in the chart is one mid grey, and the decade rules are that same
+grey at half opacity. The drawing paints no background of its own, so it is
+read on a white page and on a near-black one, and against those two the best
+contrast ratio any single color can reach is 4.35:1 - spending part of that on
+a brighter tier for headings would take it from the smallest text, which needs
+it most. Size and weight carry the hierarchy instead, and they cost no
+contrast at all.
+
 ## Reproduce
 
 Two harnesses, and the one to reach for depends on what is missing from the

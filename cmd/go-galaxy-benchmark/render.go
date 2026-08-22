@@ -54,6 +54,27 @@ const (
 	decadeStep    = 10
 )
 
+// chartInk is every glyph in the chart, and the rule under the bars.
+//
+// It is one color for every text tier rather than a bright one for emphasis
+// and a dim one for detail, because the drawing is embedded in a README that
+// is read on a white page and on a near-black one, and it has no background
+// of its own to sit against. A color legible on both must sit between them,
+// and the arithmetic is unforgiving: against #ffffff and GitHub dark's
+// #0d1117 the best contrast ratio any single color can reach is 4.35:1, at
+// this luminance. Two tiers would mean spending part of that on one of them,
+// and the cheaper tier is the small text that needs it most. The hierarchy is
+// carried by size and weight instead, which cost no contrast at all.
+//
+// chartInkFaint is the same ink for the decade rules. Opacity, unlike a
+// lighter color, is theme-neutral by construction: it composites against
+// whatever page is actually behind the drawing, so the rule stays a hairline
+// on both instead of turning into a near-black bar on the light one.
+const (
+	chartInk      = "#6f7b81"
+	chartInkFaint = "0.5"
+)
+
 // barColor is the fill for the panel at index, one entry per scenario the
 // benchmark defines and cycling if a report ever carries more. A function
 // rather than a package-level palette so nothing can reassign it.
@@ -414,16 +435,16 @@ func writeSVGHead(out *strings.Builder, title, subtitle string, height int) {
 		canvasWidth, height, canvasWidth, height)
 	fmt.Fprintf(out, "  <title>%s</title>\n", html.EscapeString(title))
 	out.WriteString("  <desc>Speedup factors on a shared logarithmic axis, one bar group per scenario.</desc>\n")
-	out.WriteString("  <style>\n" +
-		"    .t { fill: #f0f6fc; font-size: 15px; font-weight: 600; }\n" +
-		"    .s { fill: #6e7681; font-size: 11px; }\n" +
-		"    .g { stroke: #3d444d; stroke-width: 1; }\n" +
-		"    .a { fill: #6e7681; font-size: 10.5px; }\n" +
-		"    .p { fill: #f0f6fc; font-size: 12.5px; font-weight: 600; }\n" +
-		"    .l { fill: #9198a1; font-size: 12.5px; }\n" +
-		"    .d { fill: #6e7681; font-size: 10.5px; }\n" +
-		"    .v { fill: #f0f6fc; font-size: 13px; font-weight: 600; }\n" +
-		"  </style>\n")
+	fmt.Fprintf(out, "  <style>\n"+
+		"    text { fill: %s; }\n"+
+		"    .g { stroke: %s; stroke-opacity: %s; stroke-width: 1; }\n"+
+		"    .t { font-size: 15px; font-weight: 600; }\n"+
+		"    .s { font-size: 11px; }\n"+
+		"    .p { font-size: 12.5px; font-weight: 600; }\n"+
+		"    .l { font-size: 12.5px; }\n"+
+		"    .v { font-size: 13px; font-weight: 600; }\n"+
+		"    .a, .d { font-size: 10.5px; }\n"+
+		"  </style>\n", chartInk, chartInk, chartInkFaint)
 	fmt.Fprintf(out, "  <text class=\"t\" x=\"%d\" y=\"%d\">%s</text>\n", gutterX, titleDrop, html.EscapeString(title))
 	fmt.Fprintf(out, "  <text class=\"s\" x=\"%d\" y=\"%d\">%s</text>\n", gutterX, subtitleDrop, html.EscapeString(subtitle))
 }

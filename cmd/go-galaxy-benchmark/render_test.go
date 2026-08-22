@@ -5,9 +5,99 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+// relativeLuminance is WCAG 2.1's definition for an sRGB hex color. It is
+// spelled out here rather than approximated so the guard below states the
+// property chartInk exists to satisfy instead of restating its hex digits.
+func relativeLuminance(t *testing.T, color string) float64 {
+	t.Helper()
+
+	var channel [3]float64
+
+	for i := range channel {
+		raw, err := strconv.ParseUint(color[1+2*i:3+2*i], 16, 8)
+		if err != nil {
+			t.Fatalf("parsing %q: %v", color, err)
+		}
+
+		value := float64(raw) / 255
+		if value <= 0.04045 {
+			channel[i] = value / 12.92
+		} else {
+			channel[i] = math.Pow((value+0.055)/1.055, 2.4)
+		}
+	}
+
+	return 0.2126*channel[0] + 0.7152*channel[1] + 0.0722*channel[2]
+}
+
+// contrastRatio is WCAG 2.1's ratio between two sRGB hex colors.
+func contrastRatio(t *testing.T, a, b string) float64 {
+	t.Helper()
+
+	high, low := relativeLuminance(t, a), relativeLuminance(t, b)
+	if high < low {
+		high, low = low, high
+	}
+
+	return (high + 0.05) / (low + 0.05)
+}
+
+// TestChartInkReadsOnBothCanvases is why chartInk is a mid grey and not the
+// near-white a dark-only drawing would use. The chart is embedded in a README
+// that is read on a white page and on GitHub dark's near-black one, and it
+// paints no background of its own to sit against, so one ink has to serve
+// both. Against those two canvases 4.35:1 is the ceiling any single color can
+// reach; the floor here sits just under it, low enough to admit a deliberate
+// change of shade and high enough that a color one theme's readers cannot
+// read fails.
+func TestChartInkReadsOnBothCanvases(t *testing.T) {
+	const (
+		floor     = 4.3
+		lightPage = "#ffffff"
+		darkPage  = "#0d1117"
+	)
+
+	for _, canvas := range []string{lightPage, darkPage} {
+		if got := contrastRatio(t, chartInk, canvas); got < floor {
+			t.Fatalf("contrast of chartInk %s on %s = %.2f, want at least %.2f",
+				chartInk, canvas, got, floor)
+		}
+	}
+}
+
+// TestEmitSVGPaintsEveryGlyphInOneInk pins that the text tiers are separated
+// by size and weight rather than by color. A second, brighter fill would have
+// to spend part of the contrast budget documented on chartInk, and the tier
+// that would lose it is the smallest text, which needs it most.
+func TestEmitSVGPaintsEveryGlyphInOneInk(t *testing.T) {
+	svg := emitSVG("t", "s", []chartPanel{{
+		title: "Cold cache",
+		rows:  []chartRow{{label: "1 collection", detail: "2.0s -> 1.0s", value: 2}},
+	}})
+
+	_, rest, found := strings.Cut(svg, "<style>")
+	if !found {
+		t.Fatalf("SVG carries no style block:\n%s", svg)
+	}
+
+	style, _, found := strings.Cut(rest, "</style>")
+	if !found {
+		t.Fatalf("SVG style block is unterminated:\n%s", svg)
+	}
+
+	if got := strings.Count(style, "fill:"); got != 1 {
+		t.Fatalf("style block declares %d text fills, want exactly one:\n%s", got, style)
+	}
+
+	if !strings.Contains(style, "text { fill: "+chartInk+"; }") {
+		t.Fatalf("style block does not paint text in chartInk %s:\n%s", chartInk, style)
+	}
+}
 
 // TestLogScaleEndsTheLongestBarAtTheColumnEdge pins the rule that sizes the
 // axis: whatever the largest ratio in the chart is, its bar fills the bar
