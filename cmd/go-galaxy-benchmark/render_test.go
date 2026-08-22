@@ -1,45 +1,96 @@
 package main
 
 import (
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestAxisMax(t *testing.T) {
-	cases := []struct {
-		name string
-		peak float64
-		want float64
-	}{
-		{name: "no rows", peak: 0, want: 1},
-		{name: "just under a decade", peak: 9.6, want: 10},
-		{name: "needs headroom above the peak", peak: 21.1, want: 25},
-		{name: "sits on a step", peak: 2, want: 2.5},
-		{name: "three digits", peak: 330.1, want: 500},
-		{name: "tiny", peak: 0.4, want: 0.5},
-	}
+// TestLogScaleEndsTheLongestBarAtTheColumnEdge pins the rule that sizes the
+// axis: whatever the largest ratio in the chart is, its bar fills the bar
+// column exactly, and a ratio ten times smaller is exactly one decade
+// shorter. Nothing else about the data can change either statement.
+func TestLogScaleEndsTheLongestBarAtTheColumnEdge(t *testing.T) {
+	for _, peak := range []float64{3.08, 21.1, 281.2, 5000} {
+		scale := newLogScale([]chartPanel{{rows: []chartRow{{value: peak}}}})
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			rows := []chartRow{}
-			if tc.peak > 0 {
-				rows = append(rows, chartRow{value: tc.peak})
-			}
-
-			if got := axisMax(rows); got != tc.want {
-				t.Fatalf("axisMax(%v) = %v, want %v", tc.peak, got, tc.want)
-			}
-		})
+		if got := scale.width(peak); math.Abs(got-barColumnW) > 0.001 {
+			t.Fatalf("width(%v) = %v, want the full bar column %d", peak, got, barColumnW)
+		}
 	}
 }
 
-func TestAxisMaxAlwaysLeavesTheLongestBarRoom(t *testing.T) {
-	for _, peak := range []float64{1, 3.1, 19.8, 21.1, 26.4, 125.6, 330.1, 1000} {
-		rows := []chartRow{{value: peak}}
-		if got := axisMax(rows); got < peak {
-			t.Fatalf("axisMax(%v) = %v, which would clip the bar", peak, got)
+// TestLogScaleSpacesDecadesEvenly is the other half of what makes the axis a
+// logarithmic one: every tenfold step is the same distance, wherever on the
+// axis it is taken.
+func TestLogScaleSpacesDecadesEvenly(t *testing.T) {
+	scale := newLogScale([]chartPanel{{rows: []chartRow{{value: 281.2}}}})
+
+	for _, pair := range [][2]float64{{10, 1}, {100, 10}, {281.2, 28.12}} {
+		if got := scale.width(pair[0]) - scale.width(pair[1]); math.Abs(got-scale.unitsPerDecade) > 0.001 {
+			t.Fatalf("the step from %v to %v measured %v, want one decade (%v)",
+				pair[1], pair[0], got, scale.unitsPerDecade)
+		}
+	}
+}
+
+// TestLogScaleIsSharedAcrossPanels is the property a single set of gridlines
+// depends on: the same ratio is the same width whichever panel carries it,
+// so a warm bar and a cold bar can be read against each other.
+func TestLogScaleIsSharedAcrossPanels(t *testing.T) {
+	scale := newLogScale([]chartPanel{
+		{title: "Cold cache", rows: []chartRow{{value: 3.08}, {value: 18.41}}},
+		{title: "Warm cache", rows: []chartRow{{value: 18.41}, {value: 281.2}}},
+	})
+
+	if scale.width(18.41) != scale.width(18.41) || scale.width(281.2) <= scale.width(18.41) {
+		t.Fatalf("scale is not monotone across panels: %v vs %v", scale.width(18.41), scale.width(281.2))
+	}
+
+	if got := scale.width(281.2); math.Abs(got-barColumnW) > 0.001 {
+		t.Fatalf("width of the global peak = %v, want the full bar column %d", got, barColumnW)
+	}
+}
+
+// TestLogScaleGivesNoBarToWhatIsNotFaster covers the shape a logarithm cannot
+// draw: a ratio at or below 1x has no positive width, and rendering its
+// logarithm directly would put the bar to the left of its own origin.
+func TestLogScaleGivesNoBarToWhatIsNotFaster(t *testing.T) {
+	scale := newLogScale([]chartPanel{{rows: []chartRow{{value: 0.5}, {value: 1}}}})
+
+	for _, value := range []float64{0.1, 0.5, 1} {
+		if got := scale.width(value); got != 0 {
+			t.Fatalf("width(%v) = %v, want 0 - that is not a speedup", value, got)
+		}
+	}
+}
+
+// TestLogScaleDrawsOnlyTheDecadesABarReaches keeps the axis honest: a rule
+// stands at every power of ten the longest bar passes, and at none beyond it.
+func TestLogScaleDrawsOnlyTheDecadesABarReaches(t *testing.T) {
+	cases := map[float64][]string{
+		3.08:  {"1" + glyphTimes},
+		18.41: {"1" + glyphTimes, "10" + glyphTimes},
+		281.2: {"1" + glyphTimes, "10" + glyphTimes, "100" + glyphTimes},
+	}
+
+	for peak, want := range cases {
+		lines := newLogScale([]chartPanel{{rows: []chartRow{{value: peak}}}}).gridlines()
+
+		got := make([]string, 0, len(lines))
+		for _, line := range lines {
+			got = append(got, line.label)
+		}
+
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("gridlines for peak %v = %v, want %v", peak, got, want)
+		}
+
+		if lines[0].x != barColumnX {
+			t.Fatalf("the 1%s rule stands at x=%d, want the bars' own origin %d", glyphTimes, lines[0].x, barColumnX)
 		}
 	}
 }
@@ -146,11 +197,11 @@ func TestRenderTableSaysWhenNothingSucceeded(t *testing.T) {
 	}
 }
 
-// TestEmitSVGCarriesTheMeasuredValueVerbatim guards the property the whole
-// chart emitter is built around: a bar's width attribute is the number that
-// was measured, and the axis is the viewBox width. Nothing in the emitter
-// converts a value into a coordinate, so nothing can convert it wrongly.
-func TestEmitSVGCarriesTheMeasuredValueVerbatim(t *testing.T) {
+// TestEmitSVGPlacesRowsOnTheDesignedGrid pins the geometry the chart is
+// designed around: a fixed pixel size beside the viewBox so the drawing keeps
+// its size wherever it is embedded, the first bar where the legend puts it,
+// and each further bar one row pitch below the last.
+func TestEmitSVGPlacesRowsOnTheDesignedGrid(t *testing.T) {
 	panel := chartPanel{title: "Cold cache", rows: []chartRow{
 		{label: "10 collections", detail: "152.28s -> 7.71s", value: 19.8},
 		{label: "100 collections", detail: "458.10s -> 21.67s", value: 21.1},
@@ -158,14 +209,33 @@ func TestEmitSVGCarriesTheMeasuredValueVerbatim(t *testing.T) {
 
 	svg := emitSVG("title", "subtitle", []chartPanel{panel})
 
+	firstBarY := firstLegendY + legendToBar
+
 	for _, want := range []string{
-		`viewBox="0 0 25 64" preserveAspectRatio="none"`,
-		`<rect class="bar" y="0" height="18" width="19.8"/>`,
-		`<rect class="bar" y="32" height="18" width="21.1"/>`,
+		fmt.Sprintf(`width="%d" height="%d"`, canvasWidth, firstBarY+rowPitch+barHeight+axisOverhang+axisLabelDrop+bottomMatter),
+		fmt.Sprintf(`<rect x="%d" y="%d" width="%s"`, barColumnX, firstBarY, trimFloat(newLogScale([]chartPanel{panel}).width(19.8))),
+		fmt.Sprintf(`<rect x="%d" y="%d" width="%d" height="%d"`, barColumnX, firstBarY+rowPitch, barColumnW, barHeight),
+		`>19.8` + glyphTimes + `</text>`,
 	} {
 		if !strings.Contains(svg, want) {
 			t.Fatalf("SVG missing %q:\n%s", want, svg)
 		}
+	}
+}
+
+// TestEmitSVGStatesAPixelSizeRatherThanStretching is the regression guard for
+// the one attribute an embedded chart must not carry: a percentage width
+// makes the drawing as wide as whatever contains it, which on a README is the
+// whole page.
+func TestEmitSVGStatesAPixelSizeRatherThanStretching(t *testing.T) {
+	svg := emitSVG("t", "s", []chartPanel{{title: "Cold cache", rows: []chartRow{{value: 2}}}})
+
+	if strings.Contains(svg, `width="100%`) {
+		t.Fatalf("SVG asks for the full width of its container:\n%s", svg)
+	}
+
+	if !strings.Contains(svg, fmt.Sprintf(`width="%d"`, canvasWidth)) {
+		t.Fatalf("SVG does not state its designed pixel width:\n%s", svg)
 	}
 }
 

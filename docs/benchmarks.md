@@ -164,8 +164,12 @@ go-galaxy-benchmark show --report /data/go-galaxy-vs-ansible-galaxy/report.json 
 ```
 
 Bars carry the ratio rather than the elapsed time, and the absolute pair sits
-in the row's text. Seconds cannot share a linear axis here: 0.951 s beside
-267 s would be a bar narrower than a pixel.
+in the row's text. Seconds cannot share one axis here: 0.951 s beside 267 s
+would be a bar narrower than a pixel. The ratios span the same three orders of
+magnitude, so their axis is logarithmic as well, with a rule at every power of
+ten the longest bar reaches. One scale serves both cache states, which is what
+lets a warm bar be read against a cold one; a ratio at or below `1x` gets no
+bar at all, only its figure.
 
 ## Reproduce
 
