@@ -215,7 +215,10 @@ is a provider contract violation the core never guesses around. The production
 implementation lives in `internal/galaxy/collections` and is what turns these
 three questions into cached Galaxy API calls, recording as it goes which server
 answered for each collection - that binding is what the resolved graph's
-`source` is taken from.
+`source` is taken from. A collection pinned by a `source:` needs no such
+evidence: it has exactly one candidate server, so that server is what the
+resolved graph records for it whether or not the solve ever had to ask one -
+under `--no-deps` an exactly pinned root is settled without asking any.
 
 `--no-deps` is a wrapper whose `Dependencies` always returns an empty map
 without consulting the wrapped provider.

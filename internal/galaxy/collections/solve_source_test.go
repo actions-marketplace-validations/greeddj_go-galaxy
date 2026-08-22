@@ -171,3 +171,119 @@ func TestMetadataProviderSourceOf(t *testing.T) {
 		t.Fatalf("sourceOf(acme.dep) = %q, want \"\" (unpinned)", got)
 	}
 }
+
+// TestResolvePinnedExactRootKeepsSourceUnderPrewarm is the direct regression
+// guard for the stamping half of source: pinning. Two exactly pinned roots
+// are what turns prewarmRootMetadata on, and it warms an exactly pinned
+// root through Dependencies on a provider whose bindings it discards - so
+// the solve's own Dependencies call finds the deps cache already warm and
+// returns before any fetch that could bind the root. The resolved Source
+// must still be the pinned server, not cfg.Server, or the install phase
+// would re-read metadata from a server that never carried the collection.
+func TestResolvePinnedExactRootKeepsSourceUnderPrewarm(t *testing.T) {
+	t.Parallel()
+	srvPinned := fakegalaxy.New(t)
+	srvDefault := fakegalaxy.New(t)
+	srvPinned.AddVersion("acme", "one", testVersion100, nil)
+	srvPinned.AddVersion("acme", "two", testVersion100, nil)
+
+	cfg := &config.Config{Server: srvDefault.URL(), Workers: 2}
+	runtime := infra.New(noopPrinter{}, srvPinned.Client())
+	roots := []collection{
+		{Namespace: "acme", Name: "one", Version: testVersion100, Constraint: testVersion100, Source: srvPinned.URL()},
+		{Namespace: "acme", Name: "two", Version: testVersion100, Constraint: testVersion100, Source: srvPinned.URL()},
+	}
+
+	resolved, _, err := resolveCollectionsInternal(
+		context.Background(), newCollectionDeps(cfg, runtime, store.New()), roots, resolveNestedPartial)
+	if err != nil {
+		t.Fatalf("resolveCollectionsInternal: %v", err)
+	}
+
+	for _, fqdn := range []string{"acme.one", "acme.two"} {
+		got, ok := resolved[fqdn]
+		if !ok {
+			t.Fatalf("expected a resolved entry for %s, got %#v", fqdn, resolved)
+		}
+		if got.Source != srvPinned.URL() {
+			t.Fatalf("resolved[%s].Source = %q, want the pinned server %q, not cfg.Server (%s)",
+				fqdn, got.Source, srvPinned.URL(), srvDefault.URL())
+		}
+	}
+	if n := srvDefault.Total(); n != 0 {
+		t.Fatalf("srvDefault.Total() = %d, want 0 - a pinned root never consults cfg.Server", n)
+	}
+}
+
+// TestResolvePinnedExactRootKeepsSourceUnderNoDeps covers the one tier
+// boundBaseFor cannot reach: under cfg.NoDeps the solve settles an exactly
+// pinned root through NewNoDepsProvider's own Dependencies, which never
+// reaches the real provider, so nothing binds the root and nothing fetches
+// for it either. Its source: is still what the resolved Source must carry.
+func TestResolvePinnedExactRootKeepsSourceUnderNoDeps(t *testing.T) {
+	t.Parallel()
+	srvPinned := fakegalaxy.New(t)
+	srvDefault := fakegalaxy.New(t)
+	srvPinned.AddVersion("acme", "pinned", testVersion100, nil)
+
+	cfg := &config.Config{Server: srvDefault.URL(), Workers: 2, NoDeps: true}
+	runtime := infra.New(noopPrinter{}, srvPinned.Client())
+	roots := []collection{
+		{Namespace: "acme", Name: "pinned", Version: testVersion100, Constraint: testVersion100, Source: srvPinned.URL()},
+	}
+
+	resolved, _, err := resolveCollectionsInternal(
+		context.Background(), newCollectionDeps(cfg, runtime, store.New()), roots, resolveNestedPartial)
+	if err != nil {
+		t.Fatalf("resolveCollectionsInternal: %v", err)
+	}
+
+	got, ok := resolved["acme.pinned"]
+	if !ok {
+		t.Fatalf("expected a resolved entry for acme.pinned, got %#v", resolved)
+	}
+	if got.Source != srvPinned.URL() {
+		t.Fatalf("resolved[acme.pinned].Source = %q, want the pinned server %q, not cfg.Server (%s)",
+			got.Source, srvPinned.URL(), srvDefault.URL())
+	}
+}
+
+// TestSourceForPrefersBindingOverSource pins sourceFor's tier order and the
+// spelling each tier records. A bound fqdn takes its binding even when it
+// also carries a source:; an unbound one pinned by server_list id records
+// that server's URL rather than the id itself, so both tiers agree on the
+// value every consumer keys on; and a fqdn with neither falls back to the
+// first configured server.
+func TestSourceForPrefersBindingOverSource(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{
+		Servers: []config.Server{
+			{ID: "first", URL: "https://first.example"},
+			{ID: "pinned", URL: "https://pinned.example"},
+		},
+		Server: "https://first.example",
+	}
+	bindings := map[string]string{"acme.bound": "https://bound.example"}
+	sources := map[string]string{
+		"acme.bound":    "pinned",
+		"acme.byid":     "pinned",
+		"acme.byurl":    "https://anonymous.example/content",
+		"acme.unpinned": "",
+	}
+
+	if got := sourceFor("acme.bound", bindings, sources, cfg); got != "https://bound.example" {
+		t.Fatalf("sourceFor(acme.bound) = %q, want the binding to outrank the source:", got)
+	}
+	if got := sourceFor("acme.byid", bindings, sources, cfg); got != "https://pinned.example" {
+		t.Fatalf("sourceFor(acme.byid) = %q, want the id resolved to its server URL", got)
+	}
+	if got := sourceFor("acme.byurl", bindings, sources, cfg); got != "https://anonymous.example/content" {
+		t.Fatalf("sourceFor(acme.byurl) = %q, want the pinned URL itself", got)
+	}
+	if got := sourceFor("acme.unpinned", bindings, sources, cfg); got != "https://first.example" {
+		t.Fatalf("sourceFor(acme.unpinned) = %q, want the first configured server", got)
+	}
+	if got := sourceFor("acme.dep", bindings, sources, cfg); got != "https://first.example" {
+		t.Fatalf("sourceFor(acme.dep) = %q, want the first configured server", got)
+	}
+}

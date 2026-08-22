@@ -233,10 +233,22 @@ func (p *MetadataProvider) Dependencies(ctx context.Context, fqdn string, v solv
 // genuinely ambiguous. When col has only one possible server candidate - a
 // pinned col.Source, or a single configured server, both cases
 // serverCandidates already resolves with no network access - that candidate
-// IS the server fqdn will end up bound to, so it is returned directly. This
-// is also what keeps a warm single-server deps-cache hit zero-network: the
-// overwhelming majority of deployments configure exactly one server, so this
-// branch covers them without ever touching resolveRootMetadata.
+// IS the server fqdn will end up bound to, so it is recorded as fqdn's
+// binding and returned directly. This is also what keeps a warm
+// single-server deps-cache hit zero-network: the overwhelming majority of
+// deployments configure exactly one server, so this branch covers them
+// without ever touching resolveRootMetadata.
+//
+// Recording the binding here, rather than leaving it to the fetch below, is
+// what keeps bindings complete for a root the solver settles through its
+// exact-pin fast path: Dependencies returns on its deps-cache hit before
+// ever reaching that fetch, so a warm cache - prewarmRootMetadata's own, or
+// an earlier run's - would otherwise leave such a root unbound and
+// solverResultToResolvedGraph would stamp the first configured server onto
+// a collection pinned to a different one. The write is idempotent: the
+// candidate is a pure function of col.Source and the configured server
+// list, and a walk over a one-entry candidate list can only ever win on
+// that same entry, so this and the fetch below always record the same base.
 //
 // Otherwise (more than one configured server, so which one actually serves
 // fqdn is genuinely undetermined without asking) it prefers whatever server
@@ -249,6 +261,7 @@ func (p *MetadataProvider) Dependencies(ctx context.Context, fqdn string, v solv
 // binding via recordBinding so every later call for fqdn reuses it.
 func (p *MetadataProvider) boundBaseFor(ctx context.Context, col collection, fqdn string, policy cacheManager.Policy) (string, error) {
 	if candidates := serverCandidates(p.deps, col); len(candidates) == 1 {
+		p.recordBinding(fqdn, candidates[0].base)
 		return candidates[0].base, nil
 	}
 	if base, ok := p.bindings[fqdn]; ok {
@@ -273,16 +286,24 @@ func (p *MetadataProvider) sourceOf(fqdn string) string {
 	return p.sources[fqdn]
 }
 
-// recordBinding remembers base as the server whose root-metadata fetch for
-// fqdn just succeeded, so solveCollections can later stamp that same server
-// onto fqdn's resolved collection (see sourceFor). It is called on every
-// fetch success, never conditioned on what the caller does with the result
-// afterward: Highest reports known=false when the fetch succeeded but
-// HighestVersion.Version is empty, and a package later decided via Universe
-// must not be left unbound just because that earlier Highest call rejected
-// it for an unrelated reason. base == "" (never expected once a fetch has
-// actually succeeded) is a no-op rather than poisoning the map with an
-// empty winner.
+// recordBinding remembers base as the server serving fqdn, so
+// solveCollections can later stamp that same server onto fqdn's resolved
+// collection (see sourceFor). Two things record one: a root-metadata fetch
+// that just succeeded against base, and boundBaseFor settling on base as
+// fqdn's only possible candidate without fetching anything at all.
+//
+// A fetch success records unconditionally, never conditioned on what the
+// caller does with the result afterward: Highest reports known=false when
+// the fetch succeeded but HighestVersion.Version is empty, and a package
+// later decided via Universe must not be left unbound just because that
+// earlier Highest call rejected it for an unrelated reason.
+//
+// A later write simply replaces an earlier one, which is what makes both
+// callers safe to repeat: they can only ever disagree if a candidate walk
+// ended somewhere other than the sole candidate it started with, which a
+// one-entry candidate list cannot do. base == "" (never expected from
+// either caller) is a no-op rather than poisoning the map with an empty
+// winner.
 func (p *MetadataProvider) recordBinding(fqdn, base string) {
 	if base == "" {
 		return

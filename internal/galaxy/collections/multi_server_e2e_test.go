@@ -118,10 +118,12 @@ func msAssertInstalled(t *testing.T, downloadPath, name string) {
 // msArtifactSHA256 hashes the cached tarball for ns.name@version under
 // cacheDir, scoped to source (the server that actually resolved it - see
 // helpers.ArtifactKey), the same on-disk location the local artifact backend
-// commits a cached tarball to.
-func msArtifactSHA256(t *testing.T, cacheDir, source, ns, name, version string) string {
+// commits a cached tarball to. The namespace is hardcoded for the same
+// reason msAssertInstalled hardcodes it: every collection in this file lives
+// under "ns".
+func msArtifactSHA256(t *testing.T, cacheDir, source, name, version string) string {
 	t.Helper()
-	filename := fmt.Sprintf("%s-%s-%s.tar.gz", ns, name, version)
+	filename := fmt.Sprintf("ns-%s-%s.tar.gz", name, version)
 	key := helpers.ArtifactKey(source, filename)
 	data, err := os.ReadFile(filepath.Join(cacheDir, key)) //nolint:gosec // path built from this test's own temp dir and fixture names.
 	if err != nil {
@@ -180,7 +182,7 @@ func TestMultiServerFirstMatchOwnership(t *testing.T) {
 	msAssertInstalled(t, cfg.DownloadPath, "b")
 	msAssertInstalled(t, cfg.DownloadPath, "both")
 
-	if got := msArtifactSHA256(t, cfg.CacheDir, srvA.URL(), "ns", "both", "1.0.0"); got != bothA.SHA256 {
+	if got := msArtifactSHA256(t, cfg.CacheDir, srvA.URL(), "both", "1.0.0"); got != bothA.SHA256 {
 		t.Fatalf("installed ns.both sha = %s, want A's own sha %s (first-match ownership)", got, bothA.SHA256)
 	}
 
@@ -726,10 +728,10 @@ func TestMultiServerArtifactCacheKeyIsScopedPerServer(t *testing.T) {
 	msAssertInstalled(t, cfgA.DownloadPath, "shared")
 	msAssertInstalled(t, cfgB.DownloadPath, "shared")
 
-	if got := msArtifactSHA256(t, cfgA.CacheDir, srvA.URL(), "ns", "shared", "1.0.0"); got != verA.SHA256 {
+	if got := msArtifactSHA256(t, cfgA.CacheDir, srvA.URL(), "shared", "1.0.0"); got != verA.SHA256 {
 		t.Fatalf("A's cached artifact sha = %s, want A's own sha %s", got, verA.SHA256)
 	}
-	if got := msArtifactSHA256(t, cfgB.CacheDir, srvB.URL(), "ns", "shared", "1.0.0"); got != verB.SHA256 {
+	if got := msArtifactSHA256(t, cfgB.CacheDir, srvB.URL(), "shared", "1.0.0"); got != verB.SHA256 {
 		t.Fatalf("B's cached artifact sha = %s, want B's own sha %s", got, verB.SHA256)
 	}
 }
