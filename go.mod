@@ -19,20 +19,30 @@ require (
 	dario.cat/mergo v1.0.2 // indirect
 	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
+	github.com/bmatcuk/doublestar/v4 v4.10.0 // indirect
+	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/cloudflare/circl v1.6.5 // indirect
 	github.com/cyphar/filepath-securejoin v0.7.0 // indirect
 	github.com/emirpasic/gods v1.18.1 // indirect
+	github.com/fatih/color v1.19.0 // indirect
 	github.com/go-git/gcfg v1.5.1-0.20230307220236-3a3c6141e376 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
 	github.com/kevinburke/ssh_config v1.6.0 // indirect
 	github.com/klauspost/compress v1.19.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
+	github.com/mattn/go-colorable v0.1.15 // indirect
+	github.com/mattn/go-isatty v0.0.22 // indirect
+	github.com/mattn/go-runewidth v0.0.21 // indirect
+	github.com/mattn/go-shellwords v1.0.12 // indirect
 	github.com/pjbgf/sha1cd v0.6.0 // indirect
+	github.com/rhysd/actionlint v1.7.12 // indirect
+	github.com/robfig/cron/v3 v3.0.1 // indirect
 	github.com/rogpeppe/go-internal v1.16.0 // indirect
 	github.com/sergi/go-diff v1.4.0 // indirect
 	github.com/skeema/knownhosts v1.3.2 // indirect
 	github.com/xanzy/ssh-agent v0.3.3 // indirect
+	go.yaml.in/yaml/v4 v4.0.0-rc.3 // indirect
 	golang.org/x/exp/typeparams v0.0.0-20260820142414-ca536658362e // indirect
 	golang.org/x/mod v0.40.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
@@ -47,6 +57,7 @@ require (
 )
 
 tool (
+	github.com/rhysd/actionlint/cmd/actionlint
 	golang.org/x/tools/go/analysis/passes/fieldalignment/cmd/fieldalignment
 	golang.org/x/vuln/cmd/govulncheck
 	honnef.co/go/tools/cmd/staticcheck

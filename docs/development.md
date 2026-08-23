@@ -10,7 +10,7 @@ does.
 
 ```bash
 just test      # go test ./...
-just check     # go vet, staticcheck, govulncheck, fieldalignment
+just check     # go vet, staticcheck, govulncheck, fieldalignment, actionlint
 just lint      # golangci-lint, at exactly the pinned release
 just fix       # go fix + fieldalignment -fix
 just deps      # go mod tidy && go mod vendor - after any dependency change
@@ -21,12 +21,18 @@ To reproduce what CI runs:
 
 ```bash
 go vet ./... && go tool staticcheck ./... && go tool govulncheck ./... && go tool fieldalignment ./...
+go tool actionlint -shellcheck= -pyflakes=
 go test -v -race -coverprofile=coverage.txt ./...
 ```
 
-The three `go tool` binaries come from the `tool` directive in `go.mod`, so
+The four `go tool` binaries come from the `tool` directive in `go.mod`, so
 neither the Justfile nor CI installs them separately. Run the suite with
 `-race` before considering any concurrency work done.
+
+actionlint's own external linters are switched off in both spellings rather
+than left to autodetection: it shells out to shellcheck and pyflakes when they
+are on `PATH`, the CI runner has shellcheck and your machine may not, and a
+check that fires only in CI is one nobody can reproduce before pushing.
 
 One package, one test, one subtest:
 
@@ -62,7 +68,7 @@ reporting it.
 `.github/workflows/ci.yml` runs on pushes and pull requests against `main`, and
 is callable so the release workflow gates a tag on the same checks rather than
 on a second, drifting copy of them. One job, six steps: checkout, set up Go from
-`go.mod`, the four `check` commands, golangci-lint at the pinned release,
+`go.mod`, the five `check` commands, golangci-lint at the pinned release,
 `go test -v -race -coverprofile=coverage.txt ./...`, and a coverage upload that
 does not fail the build.
 
@@ -158,16 +164,10 @@ That is the gate's one acknowledged gap - nothing detects a third lifecycle
 function, or a fourth collection command, that was never added. It is
 deliberately not a general context-threading linter.
 
-### `internal/ciaudit` - workflows and the linter version
+### `internal/ciaudit` - the linter version
 
-Two references in a workflow file are resolved by GitHub and by nothing else, so
-a mistake in either produces no failing job to notice - a release workflow simply
-publishes nothing, silently. The gate resolves them: a job's `needs` must name a
-job defined in the same file, and a `uses: ./...` must name a workflow in this
-repository that declares the `workflow_call` trigger.
-
-It also gates one value that is spelled twice. The golangci-lint release lives
-in `.github/workflows/ci.yml` as the action step's `version` input and in the
+One value is spelled twice. The golangci-lint release lives in
+`.github/workflows/ci.yml` as the action step's `version` input and in the
 `Justfile` as `GOLANGCI_LINT_VERSION`. Nothing resolves those against each
 other, so a bump that edits one and forgets the other is silent - and under
 `default: all`, a release difference is a findings difference. CI's spelling is
@@ -175,6 +175,16 @@ the one held to an exact `vMAJOR.MINOR.PATCH` - `latest` and a truncated `vX.Y`
 are both refused, because neither can disagree with anything while still
 changing what CI enforces - and the Justfile's is then held to equal it.
 **Bump both spellings in one commit.**
+
+The workflows themselves are checked by `go tool actionlint`, not here. This
+package used to resolve a job's `needs` and a local `uses:` by hand, written
+after a release workflow was rejected at dispatch and published nothing at all.
+actionlint resolves both, plus the inputs and secrets a reusable-workflow call
+passes, plus expression syntax, runner labels and action inputs - everything the
+hand-written version had ruled out of scope as belonging to a real linter. The
+version pin stays here because it is the one thing actionlint cannot know: it
+reads an input a second file duplicates, never the `@v9` the action itself is
+pinned at, which nothing duplicates.
 
 ### `internal/galaxy/store` - the dirty flag
 

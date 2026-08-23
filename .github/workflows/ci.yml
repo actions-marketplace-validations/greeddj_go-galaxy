@@ -53,12 +53,18 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
+      # actionlint's external linters are switched off rather than left to
+      # autodetection: it shells out to shellcheck and pyflakes when they are
+      # on PATH, this runner has shellcheck and a developer's machine may not,
+      # and a check that fires only in CI is one nobody can reproduce before
+      # pushing. `just check` runs the same line.
       - name: Run check
         run: |
           go vet ./...;
           go tool staticcheck ./...;
           go tool govulncheck ./...;
           go tool fieldalignment ./...;
+          go tool actionlint -shellcheck= -pyflakes=;
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9

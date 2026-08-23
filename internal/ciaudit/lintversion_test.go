@@ -24,9 +24,9 @@ const lintVersionJustfile = "Justfile"
 // the action's own pin.
 const lintActionPrefix = "golangci/golangci-lint-action"
 
-// lintWorkflowFile is the workflow carrying that step, spelled as the key
-// readWorkflows holds it under.
-const lintWorkflowFile = workflowsDir + "/ci.yml"
+// lintWorkflowFile is the workflow carrying that step, as a slash path
+// relative to the module root.
+const lintWorkflowFile = ".github/workflows/ci.yml"
 
 // justfileLintVersionPattern matches the Justfile's own spelling of the
 // release, `GOLANGCI_LINT_VERSION := "vX.Y.Z"`, and captures the value. It is
@@ -76,15 +76,64 @@ func TestLintVersionIsPinnedAndAgrees(t *testing.T) {
 	t.Parallel()
 
 	root := moduleRoot(t)
-	// #nosec G304 -- the path is this module's own root plus a constant name
-	justfile, err := os.ReadFile(filepath.Join(root, lintVersionJustfile))
-	if err != nil {
-		t.Fatalf("reading %s: %v", lintVersionJustfile, err)
-	}
-
-	problems := auditLintVersion(readWorkflows(t, root)[lintWorkflowFile], justfile)
+	problems := auditLintVersion(readRepoFile(t, root, lintWorkflowFile), readRepoFile(t, root, lintVersionJustfile))
 	if len(problems) > 0 {
 		t.Fatalf("golangci-lint version pin:\n\t%s", strings.Join(problems, "\n\t"))
+	}
+}
+
+// readRepoFile returns the contents of one of this repository's own files,
+// named as a slash path relative to root. A file it cannot read is a failure
+// rather than a skip: both of these are files the gate exists to compare, so a
+// rename that hides one must not quietly pass.
+func readRepoFile(t *testing.T, root, name string) []byte {
+	t.Helper()
+
+	path := filepath.Join(root, filepath.FromSlash(name))
+	// #nosec G304 -- the path is this module's own root plus a constant name
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", name, err)
+	}
+	return data
+}
+
+// moduleRoot walks up from this package's directory to the one holding go.mod.
+func moduleRoot(t *testing.T) string {
+	t.Helper()
+
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("working directory: %v", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("no go.mod above %s", dir)
+		}
+		dir = parent
+	}
+}
+
+// checkOneProblem asserts that the audit reported exactly the one problem
+// containing want, or nothing at all when want is empty.
+func checkOneProblem(t *testing.T, problems []string, want string) {
+	t.Helper()
+
+	if want == "" {
+		if len(problems) != 0 {
+			t.Fatalf("audit reported %d problems, want none: %v", len(problems), problems)
+		}
+		return
+	}
+	if len(problems) != 1 {
+		t.Fatalf("audit reported %d problems, want 1 containing %q: %v", len(problems), want, problems)
+	}
+	if !strings.Contains(problems[0], want) {
+		t.Fatalf("problem %q does not contain %q", problems[0], want)
 	}
 }
 

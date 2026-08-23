@@ -25,7 +25,7 @@ Development is driven by the Justfile:
 
 ```bash
 just test          # go test ./...
-just check         # go vet, staticcheck, govulncheck, fieldalignment (via go tool)
+just check         # go vet, staticcheck, govulncheck, fieldalignment, actionlint (via go tool)
 just lint          # golangci-lint run ./... (requires the exact pinned version, see below)
 just fix           # go fix + fieldalignment -fix (autofixes struct field ordering)
 just deps          # go mod tidy && go mod vendor - run after any dependency change
@@ -43,7 +43,7 @@ Benchmarks: `testing/bench.sh` (needs `hyperfine`, a `.venv` with ansible-core, 
 - **The test suite audits the source itself.** Several packages contain only tests that parse the repo with go/ast or enumerate files through git; `go test ./...` runs them all:
   - `internal/proseaudit`: no committed file may contain an em dash (U+2014) or en dash (U+2013) - hyphen-minus only, in prose, code, comments, and commit text. Also: a comment may cite a `foo_test.go:NNN` line only if a test failure could be attributed to that line, and may never cite a production file's line number - reference production code by identifier instead.
   - `internal/lockaudit`: every command that takes the cache backend's exclusive lock must run its work under the holder context that lock returned, judged via `cacheManager.LockLostError`. Checked over closed tables - adding or renaming such a command means updating the table, and a table entry naming a missing function fails rather than skips.
-  - `internal/ciaudit`: gates workflow cross-references and the golangci-lint version literal, which is spelled in both the Justfile (`GOLANGCI_LINT_VERSION`) and `.github/workflows/ci.yml` and must match. Bump both in one commit.
+  - `internal/ciaudit`: gates the golangci-lint version literal, which is spelled in both the Justfile (`GOLANGCI_LINT_VERSION`) and `.github/workflows/ci.yml` and must match. Bump both in one commit. The workflow files themselves are checked by `go tool actionlint` in `just check`, not here.
   - `internal/galaxy/store` has a dirty-flag audit (every write-locked `*Store` method must set the dirty flag; a new bucket also needs `helpers.StoreSnapshotSchemaVersion` bumped, drop-and-rebuild), `internal/galaxy/archive` gates its probe's decompressor path, and `internal/gzipstream` has a monopoly gate: no package outside it may import klauspost/pgzip for reading.
 - **golangci-lint runs with `default: all`** and a short disable list (`.golangci.yml`). depguard has an explicit import allow-list - importing a new module requires adding it there, plus `just deps` to update go.mod/vendor.
 - **fieldalignment is enforced** (`just check` and CI), so struct field order matters; `just fix` reorders automatically.
