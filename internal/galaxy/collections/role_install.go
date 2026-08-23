@@ -104,10 +104,11 @@ func installRoles(ctx context.Context, deps installDeps, res roleResolution, fai
 		wg.Go(func() {
 			defer func() { <-sem }()
 			if err := installRole(ctx, deps, role); err != nil {
-				deps.runtime.Output.Errorf("Failed: role %s error: %s", role.Name, err)
+				deps.runtime.Output.ErrorVersionf(role.Version, fmt.Sprintf("error: %s", err),
+					"Failed: role %s", role.Name)
 				failures.record(err)
 			} else {
-				deps.runtime.Output.Okf("Installed: role %s", role.Name)
+				deps.runtime.Output.OkVersionf(role.Version, "Installed: role %s", role.Name)
 			}
 		})
 	}

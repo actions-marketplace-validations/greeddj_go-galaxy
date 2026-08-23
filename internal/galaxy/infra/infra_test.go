@@ -18,11 +18,13 @@ type recordingPrinter struct {
 	debugLines []string
 }
 
-func (p *recordingPrinter) Printf(string, ...any)           {}
-func (p *recordingPrinter) PersistentPrintf(string, ...any) {}
-func (p *recordingPrinter) Okf(string, ...any)              {}
-func (p *recordingPrinter) Errorf(string, ...any)           {}
-func (p *recordingPrinter) Warnf(string, ...any)            {}
+func (p *recordingPrinter) Printf(string, ...any)                        {}
+func (p *recordingPrinter) PersistentPrintf(string, ...any)              {}
+func (p *recordingPrinter) Okf(string, ...any)                           {}
+func (p *recordingPrinter) OkVersionf(string, string, ...any)            {}
+func (p *recordingPrinter) Errorf(string, ...any)                        {}
+func (p *recordingPrinter) ErrorVersionf(string, string, string, ...any) {}
+func (p *recordingPrinter) Warnf(string, ...any)                         {}
 
 func (p *recordingPrinter) Debugf(format string, args ...any) {
 	p.debugLines = append(p.debugLines, fmt.Sprintf(format, args...))

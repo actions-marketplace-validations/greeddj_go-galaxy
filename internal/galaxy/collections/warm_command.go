@@ -2,6 +2,7 @@ package collections
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -116,10 +117,11 @@ func warmRoles(ctx context.Context, cfg *config.Config, runtime *infra.Infra, st
 		wg.Go(func() {
 			defer func() { <-sem }()
 			if err := warmRole(ctx, depsCtx, role); err != nil {
-				runtime.Output.Errorf("Failed: role %s error: %s", role.Name, err)
+				runtime.Output.ErrorVersionf(role.Version, fmt.Sprintf("error: %s", err),
+					"Failed: role %s", role.Name)
 				failures.record(err)
 			} else {
-				runtime.Output.Okf("Cached: role %s", role.key())
+				runtime.Output.OkVersionf(role.Version, "Cached: role %s", role.Name)
 			}
 		})
 	}
@@ -285,10 +287,11 @@ func warmCollections(
 				runtime.Output.Printf("⚠️ Prefetch failed for %s: %v", col.key(), prefetchErr)
 			}
 			if err := warmOne(ctx, depsCtx, col, meta, prefetched); err != nil {
-				runtime.Output.Errorf("Failed: %s.%s error: %s", col.Namespace, col.Name, err)
+				runtime.Output.ErrorVersionf(col.Version, fmt.Sprintf("error: %s", err),
+					"Failed: %s.%s", col.Namespace, col.Name)
 				failures.record(err)
 			} else {
-				runtime.Output.Okf("Cached: %s.%s@%s", col.Namespace, col.Name, col.Version)
+				runtime.Output.OkVersionf(col.Version, "Cached: %s.%s", col.Namespace, col.Name)
 			}
 		})
 	}

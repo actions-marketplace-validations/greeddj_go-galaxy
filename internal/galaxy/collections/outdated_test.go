@@ -179,8 +179,14 @@ func (p recordingPrinter) Printf(format string, args ...any) { p.recordf("Printf
 func (p recordingPrinter) PersistentPrintf(format string, args ...any) {
 	p.recordf("PersistentPrintf", format, args...)
 }
-func (p recordingPrinter) Okf(format string, args ...any)    { p.recordf("Okf", format, args...) }
+func (p recordingPrinter) Okf(format string, args ...any) { p.recordf("Okf", format, args...) }
+func (p recordingPrinter) OkVersionf(version, format string, args ...any) {
+	p.recordf("OkVersionf", "%s", renderVersionLine(version, "", format, args...))
+}
 func (p recordingPrinter) Errorf(format string, args ...any) { p.recordf("Errorf", format, args...) }
+func (p recordingPrinter) ErrorVersionf(version, cause, format string, args ...any) {
+	p.recordf("ErrorVersionf", "%s", renderVersionLine(version, cause, format, args...))
+}
 func (p recordingPrinter) Warnf(format string, args ...any)  { p.recordf("Warnf", format, args...) }
 func (p recordingPrinter) Debugf(format string, args ...any) { p.recordf("Debugf", format, args...) }
 func (p recordingPrinter) DebugSincef(_ time.Time, format string, args ...any) {

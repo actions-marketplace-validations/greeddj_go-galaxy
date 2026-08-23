@@ -58,6 +58,24 @@ func (p *capturingPrinter) Okf(format string, args ...any) {
 	p.oks = append(p.oks, fmt.Sprintf(format, args...))
 }
 
+// OkVersionf records a success-tier line into the same slice Okf does, since
+// the two differ only in whether the line names the version it settled on -
+// which keeps a test asserting "no line landed on the success tier" honest
+// whichever of the two a code path chose.
+func (p *capturingPrinter) OkVersionf(version, format string, args ...any) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.oks = append(p.oks, renderVersionLine(version, "", format, args...))
+}
+
+// ErrorVersionf records an error-tier line into the same slice Errorf does,
+// for the reason OkVersionf shares its own with Okf.
+func (p *capturingPrinter) ErrorVersionf(version, cause, format string, args ...any) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.errs = append(p.errs, renderVersionLine(version, cause, format, args...))
+}
+
 // PersistentPrintf records a result-tier line: output that must survive even
 // in quiet mode (see the Printer interface doc comment for the tier split).
 func (p *capturingPrinter) PersistentPrintf(format string, args ...any) {

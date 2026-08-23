@@ -8,9 +8,12 @@
 // redirecting stdout leaves stderr a terminal.
 //
 // Every line the package writes funnels through writeLine, which takes its
-// message as a safeout.Text: the payload is sanitized first and this package's
-// own markers and prefixes are added afterward, so a decoration is never
-// re-sanitized and no unconverted string reaches the writer.
+// payload halves as safeout.Text: each half is sanitized first and this
+// package's own markers, prefixes and version tags are added afterward, so a
+// decoration is never re-sanitized and no unconverted string reaches the
+// writer. A decoration is not only a head: a failure line carries its version
+// between the subject and the cause, which is why writeLine takes a whole
+// decorated line rather than a prefix and a message.
 package progress
 
 import (
@@ -28,11 +31,17 @@ const (
 	ansiRed     = "\x1b[1m\x1b[31m"
 	ansiGreen   = "\x1b[1m\x1b[32m"
 	ansiYellow  = "\x1b[1m\x1b[33m"
+	ansiGray    = "\x1b[1m\x1b[90m"
 	ansiReset   = "\x1b[0m"
 	okGlyph     = "✔"
 	failGlyph   = "✗"
 	warnGlyph   = "!"
 	debugPrefix = "🚧 Debug: "
+	// versionMark introduces the exact version a result line settled on. It
+	// is spelled as the constraint that pins that one version rather than
+	// joined to the name with an @, so a reader can paste the pair straight
+	// into a requirements file.
+	versionMark = "== "
 )
 
 // Environment variables that override the terminal check, in the precedence
@@ -66,6 +75,12 @@ func (s stream) ok() string   { return marker(okGlyph, ansiGreen, s.color) }
 func (s stream) fail() string { return marker(failGlyph, ansiRed, s.color) }
 func (s stream) warn() string { return marker(warnGlyph, ansiYellow, s.color) }
 
+// versionTag returns the version decoration for this stream, colored only
+// when this destination accepts color - the same per-destination question the
+// three markers above answer, asked again for the one decoration that does
+// not sit at the head of a line.
+func (s stream) versionTag(version safeout.Text) string { return versionTag(version, s.color) }
+
 // marker builds one status prefix: the glyph, wrapped in seq and a full reset
 // when colored, and the single trailing space every marker carries either way.
 // The reset always precedes the payload, so no line can leave color state
@@ -75,6 +90,39 @@ func marker(glyph, seq string, colored bool) string {
 		return glyph + " "
 	}
 	return seq + glyph + ansiReset + " "
+}
+
+// versionTag builds the version decoration a result line carries after its
+// subject: versionMark and the version, wrapped in ansiGray and a full reset
+// when colored, behind the single leading space that parts it from what came
+// before. The reset always closes the tag, so the color can never reach the
+// cause a failure line prints after it.
+//
+// An empty version yields no tag at all rather than a bare "== ": a line with
+// no version to report then reads exactly as it did before this decoration
+// existed, which is what makes the version optional at every call site
+// instead of a hole a caller has to fill.
+func versionTag(version safeout.Text, colored bool) string {
+	if version == "" {
+		return ""
+	}
+	if !colored {
+		return " " + versionMark + string(version)
+	}
+	return " " + ansiGray + versionMark + string(version) + ansiReset
+}
+
+// spaced sanitizes s behind the single space that parts it from whatever the
+// line printed before it, and yields nothing at all for an empty s, so a
+// line with no cause to report carries no trailing space. Cleaning the
+// joined string rather than joining the cleaned one is the same value -
+// safeout.Clean maps rune by rune - and keeps a plain string from reaching
+// safeout.Text uncleaned, as Printf's spinner branch does for its own suffix.
+func spaced(s string) safeout.Text {
+	if s == "" {
+		return ""
+	}
+	return safeout.Clean(" " + s)
 }
 
 // colorEnabled reports whether lines written to f may carry color.
@@ -187,14 +235,14 @@ func isTerminal(f *os.File) bool {
 // does.
 func Okf(format string, args ...any) {
 	s := stream{w: os.Stdout, color: colorEnabled(os.Stdout)}
-	writeLine(s.w, s.ok(), safeout.Clean(fmt.Sprintf(format, args...)))
+	writeLine(s.w, decorated{prefix: s.ok(), msg: safeout.Clean(fmt.Sprintf(format, args...))})
 }
 
 // Errorf prints an error message with a marker to stderr. For standalone use;
 // see Okf for why the destination is resolved per call.
 func Errorf(format string, args ...any) {
 	s := stream{w: os.Stderr, color: colorEnabled(os.Stderr)}
-	writeLine(s.w, s.fail(), safeout.Clean(fmt.Sprintf(format, args...)))
+	writeLine(s.w, decorated{prefix: s.fail(), msg: safeout.Clean(fmt.Sprintf(format, args...))})
 }
 
 // Printf updates the spinner suffix when a spinner is active, otherwise
@@ -214,7 +262,7 @@ func (p *Progress) Printf(format string, args ...any) {
 	if p.q {
 		return
 	}
-	p.emit(p.out, "", safeout.Clean(fmt.Sprintf(format, args...)))
+	p.emit(p.out, decorated{msg: safeout.Clean(fmt.Sprintf(format, args...))})
 }
 
 // PersistentPrintf prints a persistent line to stdout that survives spinner
@@ -222,14 +270,32 @@ func (p *Progress) Printf(format string, args ...any) {
 func (p *Progress) PersistentPrintf(format string, args ...any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.emit(p.out, "", safeout.Clean(fmt.Sprintf(format, args...)))
+	p.emit(p.out, decorated{msg: safeout.Clean(fmt.Sprintf(format, args...))})
 }
 
 // Okf prints a success message with a colored marker to stdout.
 func (p *Progress) Okf(format string, args ...any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.emit(p.out, p.out.ok(), safeout.Clean(fmt.Sprintf(format, args...)))
+	p.emit(p.out, decorated{prefix: p.out.ok(), msg: safeout.Clean(fmt.Sprintf(format, args...))})
+}
+
+// OkVersionf is Okf for a subject that settled on an exact version: the
+// message, then that version as a dimmed "== <version>". An empty version
+// prints the line Okf itself would, byte for byte.
+//
+// The version is a parameter rather than something a caller formats into its
+// own message because the tag carries this package's escape sequences and a
+// message is sanitized: an escape spelled into format would be replaced with
+// U+FFFD rather than reaching the terminal. See versionTag.
+func (p *Progress) OkVersionf(version, format string, args ...any) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.emit(p.out, decorated{
+		prefix: p.out.ok(),
+		msg:    safeout.Clean(fmt.Sprintf(format, args...)),
+		tag:    p.out.versionTag(safeout.Clean(version)),
+	})
 }
 
 // Errorf prints an error message with a colored marker to stderr, so failures
@@ -237,7 +303,27 @@ func (p *Progress) Okf(format string, args ...any) {
 func (p *Progress) Errorf(format string, args ...any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.emit(p.errOut, p.errOut.fail(), safeout.Clean(fmt.Sprintf(format, args...)))
+	p.emit(p.errOut, decorated{prefix: p.errOut.fail(), msg: safeout.Clean(fmt.Sprintf(format, args...))})
+}
+
+// ErrorVersionf is Errorf for a subject that settled on an exact version:
+// the message, that version as a dimmed "== <version>", then cause. An empty
+// version prints message and cause with a single space between them, which
+// is the line Errorf itself would print for the two joined.
+//
+// cause is its own parameter, and the version sits between it and the
+// message, because a failure line ends with what went wrong: a version
+// printed after the cause would read as part of the cause. Both halves are
+// sanitized separately; only the tag between them is this package's own.
+func (p *Progress) ErrorVersionf(version, cause, format string, args ...any) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.emit(p.errOut, decorated{
+		prefix: p.errOut.fail(),
+		msg:    safeout.Clean(fmt.Sprintf(format, args...)),
+		tag:    p.errOut.versionTag(safeout.Clean(version)),
+		tail:   spaced(cause),
+	})
 }
 
 // Warnf prints a warning message with a colored marker to stderr. Like
@@ -246,7 +332,7 @@ func (p *Progress) Errorf(format string, args ...any) {
 func (p *Progress) Warnf(format string, args ...any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.emit(p.errOut, p.errOut.warn(), safeout.Clean(fmt.Sprintf(format, args...)))
+	p.emit(p.errOut, decorated{prefix: p.errOut.warn(), msg: safeout.Clean(fmt.Sprintf(format, args...))})
 }
 
 // Debugf prints a debug message when verbose mode is enabled.
@@ -254,7 +340,7 @@ func (p *Progress) Debugf(format string, args ...any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.v {
-		p.emit(p.out, debugPrefix, safeout.Clean(fmt.Sprintf(format, args...)))
+		p.emit(p.out, decorated{prefix: debugPrefix, msg: safeout.Clean(fmt.Sprintf(format, args...))})
 	}
 }
 
@@ -264,7 +350,7 @@ func (p *Progress) DebugSincef(start time.Time, format string, args ...any) {
 	defer p.mu.Unlock()
 	if p.v {
 		prefix := "⏱️ Debug Timing (" + time.Since(start).Round(time.Millisecond).String() + "): "
-		p.emit(p.out, prefix, safeout.Clean(fmt.Sprintf(format, args...)))
+		p.emit(p.out, decorated{prefix: prefix, msg: safeout.Clean(fmt.Sprintf(format, args...))})
 	}
 }
 
@@ -282,7 +368,7 @@ func (p *Progress) Write(payload []byte) (int, error) {
 	if p.q {
 		return len(payload), nil
 	}
-	p.emit(p.out, "", safeout.Clean(message))
+	p.emit(p.out, decorated{msg: safeout.Clean(message)})
 	return len(payload), nil
 }
 
@@ -304,35 +390,59 @@ func (p *Progress) Close() {
 	}
 }
 
-// emit writes prefix and msg to w as a single decorated line, stopping and
-// restarting the spinner around the write when one is active so the line
-// survives it. p.mu must be held by the caller.
+// emit writes one decorated line to dst, stopping and restarting the spinner
+// around the write when one is active so the line survives it. p.mu must be
+// held by the caller.
 //
 // It is the funnel for every line a *Progress writes; the package-level
 // helpers, which own no spinner, reach writeLine directly instead.
-func (p *Progress) emit(dst stream, prefix string, msg safeout.Text) {
+func (p *Progress) emit(dst stream, line decorated) {
 	if p.s != nil {
 		p.s.stop()
-		writeLine(dst.w, prefix, msg)
+		writeLine(dst.w, line)
 		p.s.restart()
 		return
 	}
-	writeLine(dst.w, prefix, msg)
+	writeLine(dst.w, line)
+}
+
+// decorated is one line's parts in the order they are written: a prefix, the
+// message, the version tag, and the tail that follows it. prefix and tag are
+// decorations this package builds and owns; msg and tail are payload, each
+// already through safeout.Clean.
+//
+// A line is described by four parts rather than by a prefix and a message
+// because the version tag is an infix, not a head or a tail: a failure line
+// ends with its cause, and a version printed behind that cause would read as
+// part of it. Every field is optional - the tiers that carry neither a
+// version nor a cause leave tag and tail empty and render exactly what a
+// prefix-and-message line always rendered.
+type decorated struct {
+	prefix string
+	msg    safeout.Text
+	tag    string
+	tail   safeout.Text
 }
 
 // writeLine is the one place this package turns a decorated line into bytes,
 // and it enforces the package's governing rule: sanitize the payload,
 // decorate afterwards, never sanitize a line that has already been
-// decorated. Every caller passes msg as a safeout.Text - built by applying
-// safeout.Clean to exactly what entered through a parameter (a caller's
-// format/args, or Write's payload) - so a prefix this file declares (a
-// colored marker, a debug tag, a timing string) is never itself subject to
-// Clean, and an already-sanitized payload is never re-sanitized. The
-// safeout.Text parameter puts that rule into the signature: a value of any
-// other type cannot reach msg without an explicit conversion, so a payload
-// arriving here from anywhere else has been cleaned or deliberately cast. It
-// is a structural check rather than a proof - safeout.Text's own doc comment
+// decorated. Every caller passes msg and tail as safeout.Text - built by
+// applying safeout.Clean to exactly what entered through a parameter (a
+// caller's format/args, a cause, a version, or Write's payload) - so a
+// decoration this file declares (a colored marker, a debug tag, a timing
+// string, a version tag) is never itself subject to Clean, and an
+// already-sanitized payload is never re-sanitized. The safeout.Text fields
+// put that rule into the type: a value of any other type cannot reach them
+// without an explicit conversion, so a payload arriving here from anywhere
+// else has been cleaned or deliberately cast. It is a structural check
+// rather than a proof - safeout.Text's own doc comment
 // (internal/safeout/safeout.go) holds what the type does not close.
-func writeLine(w io.Writer, prefix string, msg safeout.Text) {
-	_, _ = fmt.Fprintf(w, "%s%s\n", prefix, msg)
+//
+// tag is the one decoration built around a payload rather than beside one:
+// versionTag wraps an already-cleaned version in this package's own escapes,
+// which is the same sanitize-then-decorate order, applied at the tail of the
+// subject instead of at the head of the line.
+func writeLine(w io.Writer, line decorated) {
+	_, _ = fmt.Fprintf(w, "%s%s%s%s\n", line.prefix, line.msg, line.tag, line.tail)
 }

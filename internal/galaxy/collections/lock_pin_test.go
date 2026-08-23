@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,13 +29,32 @@ import (
 // but do not care about the rendered progress output.
 type noopPrinter struct{}
 
-func (noopPrinter) Printf(string, ...any)                 {}
-func (noopPrinter) PersistentPrintf(string, ...any)       {}
-func (noopPrinter) Okf(string, ...any)                    {}
-func (noopPrinter) Errorf(string, ...any)                 {}
-func (noopPrinter) Warnf(string, ...any)                  {}
-func (noopPrinter) Debugf(string, ...any)                 {}
-func (noopPrinter) DebugSincef(time.Time, string, ...any) {}
+func (noopPrinter) Printf(string, ...any)                        {}
+func (noopPrinter) PersistentPrintf(string, ...any)              {}
+func (noopPrinter) Okf(string, ...any)                           {}
+func (noopPrinter) OkVersionf(string, string, ...any)            {}
+func (noopPrinter) Errorf(string, ...any)                        {}
+func (noopPrinter) ErrorVersionf(string, string, string, ...any) {}
+func (noopPrinter) Warnf(string, ...any)                         {}
+func (noopPrinter) Debugf(string, ...any)                        {}
+func (noopPrinter) DebugSincef(time.Time, string, ...any)        {}
+
+// renderVersionLine is what a recording output.Printer double in this package
+// stores for an OkVersionf or ErrorVersionf call: the same message, version
+// tag and cause an operator would read, minus the color internal/progress
+// adds. A double that kept only the format and its args would drop the
+// version and the cause entirely, and a test asserting on what a line does
+// (or must not) contain would then be asserting on half a line.
+func renderVersionLine(version, cause, format string, args ...any) string {
+	line := fmt.Sprintf(format, args...)
+	if version != "" {
+		line += " == " + version
+	}
+	if cause != "" {
+		line += " " + cause
+	}
+	return line
+}
 
 func TestVerifyPinnedSHA(t *testing.T) {
 	t.Parallel()

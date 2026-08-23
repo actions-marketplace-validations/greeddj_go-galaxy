@@ -930,3 +930,31 @@ func TestGalaxyRolePoisonedPinIsRefused(t *testing.T) {
 		t.Fatalf("install from a poisoned pin: %v, want ErrGalaxyRoleInvalid", err)
 	}
 }
+
+// TestRoleInstallLineNamesTheVersion proves the success line an operator
+// reads names the version the role actually settled on, for a role pinned by
+// tag, one taken at HEAD, and one reached only as a dependency - the three
+// ways a role gets its version, which is what makes this more than a
+// rendering check: the line is built from resolvedRole.Version, so a version
+// that never made it out of resolution would leave the line silent about it.
+func TestRoleInstallLineNamesTheVersion(t *testing.T) {
+	t.Parallel()
+	f := newRoleFixture(t)
+	f.writeRequirements(t, "roles:\n  - src: git+"+roleBaseURL+"\n    version: v1.0.0\n    name: pinned\n"+
+		"  - src: git+"+roleAppURL+"\n    name: app\n")
+	printer := &lineCapturingPrinter{}
+	f.runtime = infra.New(printer, f.galaxy.Client())
+	f.runtime.Git = f.git
+
+	f.mustInstall(t)
+
+	for _, want := range []string{
+		"Installed: role pinned == v1.0.0",
+		"Installed: role app == main",
+		"Installed: role base == main",
+	} {
+		if !printer.hasLineContaining(want) {
+			t.Fatalf("install report lacks %q:\n%v", want, printer.snapshot())
+		}
+	}
+}

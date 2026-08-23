@@ -619,9 +619,21 @@ func sanitizingTiers() []tierCase {
 			wantOut: func(_, clean string) string { return okMark() + clean + "\n" },
 		},
 		{
+			name:    "OkVersionf",
+			invoke:  func(p *Progress, msg string) { p.OkVersionf(benignVersion, "%s", msg) },
+			wantOut: func(_, clean string) string { return okMark() + clean + colorVersionTag() + "\n" },
+		},
+		{
 			name:    "Errorf",
 			invoke:  func(p *Progress, msg string) { p.Errorf("%s", msg) },
 			wantErr: func(_, clean string) string { return failMark() + clean + "\n" },
+		},
+		{
+			name:   "ErrorVersionf",
+			invoke: func(p *Progress, msg string) { p.ErrorVersionf(benignVersion, benignCause, "%s", msg) },
+			wantErr: func(_, clean string) string {
+				return failMark() + clean + colorVersionTag() + " " + benignCause + "\n"
+			},
 		},
 		{
 			name:    "Warnf",
@@ -785,16 +797,22 @@ func TestPrintfSpinnerSuffixIsSanitized(t *testing.T) {
 	})
 }
 
-// TestResultMarkerEscapesSurviveAHostileMessage covers Okf/Errorf/Warnf
-// against a hostile message with two independently reachable assertions in
-// a t.Fatalf chain: (1) the line still starts with the raw marker constant
-// (its own ANSI escape bytes intact), reachable on its own by a
-// writer-level sanitizer that would strip the message but also corrupt a
-// decoration this file adds; and (2), reached only once (1) already holds,
-// that the message half is exactly the sanitized form, reachable on its
-// own by a missing Clean call that leaves the marker intact but the
-// message raw. Each assertion therefore pins a distinct failure mode
+// TestResultMarkerEscapesSurviveAHostileMessage covers every result tier -
+// Okf/OkVersionf/Errorf/ErrorVersionf/Warnf - against a hostile message with
+// two independently reachable assertions in a t.Fatalf chain: (1) the line
+// still starts with the raw marker constant (its own ANSI escape bytes
+// intact), reachable on its own by a writer-level sanitizer that would strip
+// the message but also corrupt a decoration this file adds; and (2), reached
+// only once (1) already holds, that the message half is exactly the
+// sanitized form and the tier's own trailing decoration is intact behind it,
+// reachable on its own by a missing Clean call that leaves the marker intact
+// but the message raw. Each assertion therefore pins a distinct failure mode
 // rather than restating the other.
+//
+// The two version tiers carry a benign version and cause here on purpose:
+// this test is about a hostile message surviving beside a decoration, and
+// the hostile version and cause are pinned separately by
+// TestVersionAndCauseAreSanitizedIndependently.
 func TestResultMarkerEscapesSurviveAHostileMessage(t *testing.T) {
 	t.Parallel()
 
@@ -803,6 +821,7 @@ func TestResultMarkerEscapesSurviveAHostileMessage(t *testing.T) {
 		stream func(out, errOut *bytes.Buffer) *bytes.Buffer
 		name   string
 		prefix string
+		suffix string
 	}{
 		{
 			name: "Okf", prefix: okMark(),
@@ -810,8 +829,18 @@ func TestResultMarkerEscapesSurviveAHostileMessage(t *testing.T) {
 			stream: func(out, _ *bytes.Buffer) *bytes.Buffer { return out },
 		},
 		{
+			name: "OkVersionf", prefix: okMark(), suffix: colorVersionTag(),
+			invoke: func(p *Progress, msg string) { p.OkVersionf(benignVersion, "%s", msg) },
+			stream: func(out, _ *bytes.Buffer) *bytes.Buffer { return out },
+		},
+		{
 			name: "Errorf", prefix: failMark(),
 			invoke: func(p *Progress, msg string) { p.Errorf("%s", msg) },
+			stream: func(_, errOut *bytes.Buffer) *bytes.Buffer { return errOut },
+		},
+		{
+			name: "ErrorVersionf", prefix: failMark(), suffix: colorVersionTag() + " " + benignCause,
+			invoke: func(p *Progress, msg string) { p.ErrorVersionf(benignVersion, benignCause, "%s", msg) },
 			stream: func(_, errOut *bytes.Buffer) *bytes.Buffer { return errOut },
 		},
 		{
@@ -834,8 +863,9 @@ func TestResultMarkerEscapesSurviveAHostileMessage(t *testing.T) {
 				t.Fatalf("line %q does not start with raw marker %q", got, tc.prefix)
 			}
 			// (2) reached only when (1) held: the message half is
-			// sanitized.
-			want := tc.prefix + hostileCallerTextClean + "\n"
+			// sanitized, and whatever decoration the tier adds behind it
+			// (a version tag, a cause) is there in full.
+			want := tc.prefix + hostileCallerTextClean + tc.suffix + "\n"
 			if got != want {
 				t.Fatalf("line = %q, want %q", got, want)
 			}

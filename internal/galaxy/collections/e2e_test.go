@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,13 +52,15 @@ const testVersion100 = "1.0.0"
 // Start's runtime needs.
 type noopPrinter struct{}
 
-func (noopPrinter) Printf(string, ...any)                 {}
-func (noopPrinter) PersistentPrintf(string, ...any)       {}
-func (noopPrinter) Okf(string, ...any)                    {}
-func (noopPrinter) Errorf(string, ...any)                 {}
-func (noopPrinter) Warnf(string, ...any)                  {}
-func (noopPrinter) Debugf(string, ...any)                 {}
-func (noopPrinter) DebugSincef(time.Time, string, ...any) {}
+func (noopPrinter) Printf(string, ...any)                        {}
+func (noopPrinter) PersistentPrintf(string, ...any)              {}
+func (noopPrinter) Okf(string, ...any)                           {}
+func (noopPrinter) OkVersionf(string, string, ...any)            {}
+func (noopPrinter) Errorf(string, ...any)                        {}
+func (noopPrinter) ErrorVersionf(string, string, string, ...any) {}
+func (noopPrinter) Warnf(string, ...any)                         {}
+func (noopPrinter) Debugf(string, ...any)                        {}
+func (noopPrinter) DebugSincef(time.Time, string, ...any)        {}
 
 // e2eFixture bundles one scenario's fake server, configuration, and runtime.
 // Every fixture registers the same two collections - acme.app@1.0.0
@@ -185,6 +188,38 @@ func TestFreshInstallDownloadsFromNetwork(t *testing.T) {
 	assertManifestInstalled(t, f.downloadPath, "lib")
 	if got := f.server.Count(fakegalaxy.EndpointArtifact); got < 2 {
 		t.Errorf("EndpointArtifact count = %d, want at least 2 (a real network install happened)", got)
+	}
+}
+
+// TestInstallReportNamesTheResolvedVersion proves both halves of the install
+// report name the version the run settled on: the success line for the
+// collection that installed, and the failure line for the one whose artifact
+// the server refused. Asserted on the same run, so neither result can be the
+// fixture, and asserted on the whole failure line rather than on a substring
+// of it, since where the version sits is the point - behind the cause it
+// would read as part of the error text.
+//
+// The version is the one the solver chose rather than one the requirements
+// spelled: requirements.yml asks for "*" here.
+func TestInstallReportNamesTheResolvedVersion(t *testing.T) {
+	t.Parallel()
+	f := newE2EFixture(t)
+	printer := &lineCapturingPrinter{}
+	f.runtime = infra.New(printer, f.server.Client())
+	f.server.Fail(fakegalaxy.EndpointArtifact, "acme", "app", fakegalaxy.Fault{
+		Status: http.StatusServiceUnavailable, Count: -1,
+	})
+
+	if err := collections.Start(context.Background(), f.cfg, f.runtime); err == nil {
+		t.Fatalf("Start: expected the armed artifact fault to fail the run")
+	}
+
+	if want := "Installed: acme.lib == " + testVersion100; !printer.hasLineContaining(want) {
+		t.Fatalf("install report lacks %q:\n%v", want, printer.snapshot())
+	}
+	failed := "Failed: acme.app == " + testVersion100 + " error: "
+	if !printer.hasLineContaining(failed) {
+		t.Fatalf("install report lacks a failure line starting %q:\n%v", failed, printer.snapshot())
 	}
 }
 
@@ -502,9 +537,9 @@ func installOnceAndPublishNewerVersion(t *testing.T) *e2eFixture {
 // resolveCollectionsInternal's snapshotAllowed expression) confirmed to fail
 // the "with refresh" row with:
 //
-//	e2e_test.go:531: installed acme.app collection_info.version = "1.0.0",
+//	e2e_test.go:566: installed acme.app collection_info.version = "1.0.0",
 //	want "2.0.0"
-//	e2e_test.go:535: server.Total() > 0 = false, want true (Total() = 0)
+//	e2e_test.go:570: server.Total() > 0 = false, want true (Total() = 0)
 //	--- FAIL: TestRefreshReSolvesInsteadOfReplayingTheSnapshot/with_refresh:_re-resolves,_picks_up_the_new_version (0.08s)
 func TestRefreshReSolvesInsteadOfReplayingTheSnapshot(t *testing.T) {
 	t.Parallel()
@@ -551,7 +586,7 @@ func TestRefreshReSolvesInsteadOfReplayingTheSnapshot(t *testing.T) {
 // condition, so refresh forces a cache miss the way forceDownload already
 // does) confirmed to fail with:
 //
-//	e2e_test.go:577: EndpointArtifact count = 2, want 0 (a cached artifact
+//	e2e_test.go:612: EndpointArtifact count = 2, want 0 (a cached artifact
 //	must not be re-downloaded)
 //	--- FAIL: TestRefreshDoesNotRedownloadCachedArtifacts (0.07s)
 func TestRefreshDoesNotRedownloadCachedArtifacts(t *testing.T) {
@@ -598,7 +633,7 @@ func TestRefreshDoesNotRedownloadCachedArtifacts(t *testing.T) {
 // to fail only the warning assertion, with the counts and installed version
 // above it still passing:
 //
-//	e2e_test.go:640: expected a --refresh-skipped warning on stderr, got []
+//	e2e_test.go:675: expected a --refresh-skipped warning on stderr, got []
 //	--- FAIL: TestOfflineOutranksRefresh (0.08s)
 //
 // A second mutation was also tried and did NOT kill this test: dropping the

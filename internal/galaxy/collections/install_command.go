@@ -276,10 +276,11 @@ func runInstallLevel(
 				depsCtx.runtime.Output.Printf("⚠️ Prefetch failed for %s: %v", col.key(), prefetchErr)
 			}
 			if err := installCollection(ctx, col, depsCtx, depKeys, meta, prefetched); err != nil {
-				depsCtx.runtime.Output.Errorf("Failed: %s.%s error: %s", col.Namespace, col.Name, err)
+				depsCtx.runtime.Output.ErrorVersionf(col.Version, fmt.Sprintf("error: %s", err),
+					"Failed: %s.%s", col.Namespace, col.Name)
 				failures.record(err)
 			} else {
-				depsCtx.runtime.Output.Okf("Installed: %s.%s", col.Namespace, col.Name)
+				depsCtx.runtime.Output.OkVersionf(col.Version, "Installed: %s.%s", col.Namespace, col.Name)
 			}
 		})
 	}
