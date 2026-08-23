@@ -110,6 +110,19 @@ go install github.com/greeddj/go-galaxy/cmd/go-galaxy@latest
 
 Binary is installed into `$(go env GOPATH)/bin` (usually `~/go/bin`).
 
+### Homebrew
+
+```bash
+brew install --cask greeddj/tap/go-galaxy
+```
+
+A cask rather than a formula, and installed as one explicitly, because of what
+it does on macOS: it clears the quarantine attribute from the binary it stages.
+These builds are not Apple-notarized and a quarantined one does not run, so
+that is a Gatekeeper check being skipped on your behalf. See
+[Verifying a release](docs/security.md#verifying-a-release) for what to check
+instead. On Linux the cask installs the same archive and the hook does nothing.
+
 ### Binary
 
 ```bash

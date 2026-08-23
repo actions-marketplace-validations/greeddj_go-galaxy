@@ -55,8 +55,20 @@ does not exist.
 
 macOS builds are **not** Apple-notarized, so Gatekeeper has nothing to check
 them against - the signature and provenance above are what to verify instead.
-A binary downloaded by a browser also arrives quarantined; the release ships
-no packaging that clears that flag on your behalf.
+Notarizing would need an Apple Developer ID this project does not have.
+
+That has a consequence worth stating rather than burying. A binary downloaded
+by a browser arrives quarantined, and a quarantined copy of this one does not
+run. The Homebrew cask therefore clears the attribute from what it stages, in
+a post-install hook that runs `xattr -dr com.apple.quarantine` - a packager
+skipping a Gatekeeper check for you, which is the honest description of it.
+The alternative was no cask at all, since one without the hook installs
+something that will not start. Nothing else the release publishes touches the
+flag: the raw binaries, the archives and the container images are handed over
+exactly as built. If you would rather Gatekeeper stayed in the loop, install
+by another route and verify the signature and provenance above; the cask
+carries the same bytes as the archive it is built from, and those bytes are
+listed in the same `checksums.txt`.
 
 ## Security / Trust model
 

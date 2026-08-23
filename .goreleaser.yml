@@ -169,6 +169,50 @@ docker_signs:
       - "${artifact}@${digest}"
       - "--yes"
     artifacts: all
+homebrew_casks:
+  - name: go-galaxy
+    # The tar.gz archives alone. Without this the cask would also be offered
+    # the raw per-platform binaries of the `binary` entry above, which are
+    # published under names they do not carry on disk.
+    ids:
+      - archive
+    repository:
+      owner: greeddj
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: https://github.com/greeddj/go-galaxy
+    description: "Fast Ansible Galaxy collections and roles installer for CI."
+    # No `license:`. Casks accept the key and drop it - goreleaser's own struct
+    # tag says so - and a key that does nothing reads like one that does.
+    binaries:
+      - go-galaxy
+    # `prerelease: auto` below publishes an `-rc` tag as a GitHub prerelease,
+    # but a cask upload has no such notion of its own: without this, tagging a
+    # release candidate would overwrite the tap's only go-galaxy.rb and hand
+    # the prerelease to every `brew upgrade` on every machine. `auto` skips the
+    # tap whenever the version carries a prerelease part.
+    skip_upload: auto
+    # Homebrew quarantines what a cask stages, and macOS refuses to run a
+    # quarantined binary this project cannot get notarized - that needs an
+    # Apple Developer ID it does not have. So the choice is between a cask
+    # that clears the attribute and no cask at all: without this hook
+    # `brew install` would complete and leave behind something that does not
+    # run.
+    #
+    # What that costs is disclosed where the person running the install will
+    # see it - `brew info` prints the caveats - and not only in the README and
+    # docs/security.md, which they may never open.
+    caveats: |
+      These builds are not Apple-notarized, so this cask clears the macOS
+      quarantine attribute from the binary it installs. That skips a Gatekeeper
+      check on your behalf. To verify the download instead, see
+      https://github.com/greeddj/go-galaxy/blob/main/docs/security.md#verifying-a-release
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/go-galaxy"]
+          end
 release:
   github:
     owner: greeddj

@@ -71,6 +71,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          # The Homebrew cask is committed to greeddj/homebrew-tap, another
+          # repository, which GITHUB_TOKEN cannot write to whatever its
+          # permissions say here. This is a PAT that can.
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
       # Provenance answers a question a signature does not: not "is this the
       # file that was published" but "which workflow, at which commit, built
