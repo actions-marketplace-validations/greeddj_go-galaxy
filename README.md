@@ -1,5 +1,9 @@
 # go-galaxy
 
+[![CI](https://github.com/greeddj/go-galaxy/actions/workflows/ci.yml/badge.svg)](https://github.com/greeddj/go-galaxy/actions/workflows/ci.yml)
+[![Release](https://github.com/greeddj/go-galaxy/actions/workflows/release.yml/badge.svg)](https://github.com/greeddj/go-galaxy/actions/workflows/release.yml)
+[![codecov](https://codecov.io/gh/greeddj/go-galaxy/graph/badge.svg)](https://codecov.io/gh/greeddj/go-galaxy)
+
 Fast Ansible Galaxy collections and roles installer for CI.
 
 > **Note:** This project was created in collaboration with the Claude Code.
@@ -190,6 +194,7 @@ pipeline can branch on the failure type without parsing log output. See
 | [Benchmarks](docs/benchmarks.md) | Measurements against `ansible-galaxy`, and how to reproduce them |
 | [How it works](docs/architecture.md) | The solver, the install pipeline, the caching model, the layering |
 | [Development](docs/development.md) | Running the tests, the repository's own gates, lint, the benchmark harness |
+| [Contributing](CONTRIBUTING.md) | Commit subjects the release notes are grouped from, and cutting a release |
 
 ## License
 

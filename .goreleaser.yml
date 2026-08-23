@@ -45,9 +45,12 @@ archives:
       {{- if .Arm }}v{{ .Arm }}{{ end }}
     # docs/ rides along with README.md because the README is an index: on its
     # own it ships a page of links to files the archive would not contain.
+    # CONTRIBUTING.md is in that index too and `docs/*.md` does not reach it,
+    # so it is named on its own rather than left as the one dead link.
     files:
       - LICENSE
       - README.md
+      - CONTRIBUTING.md
       - docs/*.md
   # The raw binaries the README's install snippet curls. An archive cannot
   # serve that flow: `releases/latest/download/<name>` resolves only a name

@@ -84,12 +84,11 @@ tree that had already passed the same suite with `-race` and every static
 check, minutes earlier.
 
 GoReleaser groups the release notes out of commit subjects, so the subject line
-is the only thing deciding where a change is published. `feat:` and `fix:` get
-a section each; a `!` before the colon moves the commit into "Breaking changes"
-whatever its type, so `refactor(collections)!:` is listed there and not among
-the refactors; `docs`, `test` and `chore` are dropped, with or without a scope.
-The body is never read - a `BREAKING CHANGE:` footer reaches nothing, and a
-breaking change that does not mark its subject is published as an ordinary one.
+is the only thing deciding whether a change is published and where. Those rules
+belong to whoever is writing the commit rather than to whoever is reading this,
+and they live in [Contributing](../CONTRIBUTING.md#commit-subjects) - one copy,
+beside the tag conventions they go with, rather than a second one here to drift
+against `.goreleaser.yml`.
 
 ## The repository audits itself
 
