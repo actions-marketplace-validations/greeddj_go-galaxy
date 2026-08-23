@@ -1,40 +1,17 @@
 name: CI
 
 on:
-  # A commit touching only prose cannot change what the build produces, so a
-  # push of one does not spend a full race-enabled suite. The filter is on
-  # push alone: a pull request runs the suite whatever it touches, so a check
-  # required for merging always reports, and a branch of documentation is
-  # still gated before it lands. What a skipped push defers is the dash gate
-  # in internal/proseaudit, which enumerates `git ls-files` and so reads
-  # committed markdown - it runs again on the next change to anything else,
-  # and on the release gate below, which carries no path filter.
   push:
     branches: [ main ]
     paths-ignore:
       - '**.md'
   pull_request:
     branches: [ main ]
-  # Callable so the release workflow gates a tag on the same checks a pull
-  # request gets, instead of on a second, drifting copy of them.
-  #
-  # A called workflow inherits no secrets, so the coverage token has to be
-  # declared here and passed by the caller, or the upload below would run
-  # unauthenticated on the tag path alone. Optional, because the token is
-  # absent on more than the release path: a Dependabot pull request runs with
-  # Dependabot's secrets, not the repository's.
   workflow_call:
     secrets:
       CODECOV_TOKEN:
         required: false
 
-# Stated rather than left to the default, because of the call above: a called
-# workflow that declares nothing inherits the caller's permissions, and the
-# release workflow's are `contents: write`, `packages: write`, `id-token: write`
-# and `attestations: write`. That would run a job which only reads the tree,
-# lints it and tests it with a token that can publish a release and mint an
-# OIDC identity. A callee may hold fewer permissions than its caller, so this
-# narrows the tag path without affecting the call.
 permissions:
   contents: read
 
@@ -53,11 +30,6 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
-      # actionlint's external linters are switched off rather than left to
-      # autodetection: it shells out to shellcheck and pyflakes when they are
-      # on PATH, this runner has shellcheck and a developer's machine may not,
-      # and a check that fires only in CI is one nobody can reproduce before
-      # pushing. `just check` runs the same line.
       - name: Run check
         run: |
           go vet ./...;
@@ -79,13 +51,6 @@ jobs:
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          # `files`, plural. The singular `file` is not an input this action
-          # knows, and an unknown input is a warning rather than an error, so
-          # the misspelling rode along on green runs.
           files: ./coverage.txt
           flags: unittests
-          # Stays false now that there is a token, because the token is not
-          # always there: a Dependabot pull request cannot read it, and an
-          # upload nobody can authenticate should not fail a run that
-          # otherwise passed every gate.
           fail_ci_if_error: false
