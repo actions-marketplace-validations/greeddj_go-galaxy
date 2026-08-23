@@ -68,9 +68,14 @@ does not fail the build.
 
 `.github/workflows/release.yml` fires on a `v*` tag, runs that same CI job
 first, then GoReleaser: per-platform binaries and archives, `checksums.txt`,
-keyless cosign signatures, SPDX SBOMs, multi-arch images, and a build-provenance
-attestation. See [Security](security.md#verifying-a-release) for the verifying
-side of that.
+keyless cosign signatures, SPDX SBOMs, multi-arch images, a Homebrew cask
+committed to `greeddj/homebrew-tap`, and a build-provenance attestation. See
+[Security](security.md#verifying-a-release) for the verifying side of that.
+
+Because that first job is a full gate, `.goreleaser.yml` runs no `before`
+hooks: a plain `go test ./...` inside the release job would be re-testing a
+tree that had already passed the same suite with `-race` and every static
+check, minutes earlier.
 
 GoReleaser groups the release notes out of commit subjects, so the subject line
 is the only thing deciding where a change is published. `feat:` and `fix:` get
@@ -407,9 +412,10 @@ different place:
 itself.
 
 `govulncheck` runs in both `just check` and CI, so a vulnerable dependency fails
-the build. The release configuration deliberately omits `go mod tidy` from its
-hooks: a release must build the dependency set that was committed and reviewed,
-and tidy would rewrite it in the one build that gets published.
+the build. The release configuration runs no `before` hooks at all, and `go mod
+tidy` is the one whose absence is deliberate rather than incidental: a release
+must build the dependency set that was committed and reviewed, and tidy would
+rewrite it in the one build that gets published.
 
 ## Conventions
 

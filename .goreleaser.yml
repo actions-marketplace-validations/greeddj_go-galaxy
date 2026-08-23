@@ -1,11 +1,18 @@
 version: 2
-before:
-  hooks:
-    # No `go mod tidy` here. A release must build the dependency set that was
-    # committed and reviewed, and tidy rewrites go.mod/go.sum in the working
-    # tree the release is cut from - a dependency change nobody signed off on,
-    # landing in the one build that gets published.
-    - go test ./...
+# No `before.hooks` here, and the two things it must not grow back are worth
+# stating rather than rediscovering.
+#
+# Not `go test ./...`. What gates a tag is the release workflow, whose first
+# job calls the CI workflow and whose second waits on it, so by the time
+# goreleaser runs, this tree has already been through go vet, staticcheck,
+# govulncheck, fieldalignment, golangci-lint and a race-enabled test run. A
+# second, weaker pass over the same tree buys nothing and costs a few minutes
+# of every release.
+#
+# Not `go mod tidy`. A release must build the dependency set that was
+# committed and reviewed, and tidy rewrites go.mod/go.sum in the working tree
+# the release is cut from - a dependency change nobody signed off on, landing
+# in the one build that gets published.
 builds:
   - id: go-galaxy
     main: ./cmd/go-galaxy/main.go

@@ -20,6 +20,10 @@ jobs:
   # naming CI's job id alone was never enough to gate anything.
   tests_and_checks:
     uses: ./.github/workflows/ci.yml
+    # Named one at a time rather than `secrets: inherit`, which would also
+    # hand the called workflow the tap token it has no use for.
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   release:
     name: Release
@@ -80,7 +84,17 @@ jobs:
       # file that was published" but "which workflow, at which commit, built
       # it". Recorded per asset, so `gh attestation verify` works on a single
       # downloaded binary without the rest of the release.
+      #
+      # Guarded rather than left to the default `success()`, because goreleaser
+      # publishes the tap last, after the GitHub release and the images are
+      # already up. A tap token that has expired therefore fails the step above
+      # with everything but the cask published, and an unguarded step here
+      # would be skipped - leaving a real release with no provenance at all.
+      # The hashFiles check is what keeps that from becoming a second, noisier
+      # failure when goreleaser instead died before producing anything: no
+      # checksums file, nothing to attest, nothing published either.
       - name: Attest build provenance
+        if: ${{ !cancelled() && hashFiles('dist/checksums.txt') != '' }}
         uses: actions/attest-build-provenance@v4
         with:
           # checksums.txt, not a path glob: goreleaser publishes the raw
