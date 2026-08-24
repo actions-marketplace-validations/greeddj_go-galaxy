@@ -326,7 +326,7 @@ func resolveRootMetadata(
 		if err != nil {
 			return resolvedRoot{}, err
 		}
-		runtime.Output.Debugf("versions URL for %s: %s", label, helpers.WithoutCredentials(versionsURL))
+		runtime.Output.Debugf("Versions URL for %s: %s", label, helpers.WithoutCredentials(versionsURL))
 	}
 	return resolvedRoot{meta: rootMeta, versionsURL: versionsURL, base: base}, nil
 }

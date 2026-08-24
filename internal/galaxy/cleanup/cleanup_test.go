@@ -619,7 +619,7 @@ func TestRemoveInstalledRejectsTraversalVersion(t *testing.T) {
 // produced:
 //
 //	cleanup_test.go:659: recorded output line contains a raw newline,
-//	forged-line defect is not closed: "🧹 removed ns.hostile@1.0.0
+//	forged-line defect is not closed: "Removed ns.hostile@1.0.0
 //	forged plain-text line"
 //	--- FAIL: TestRemoveUnusedCannotForgeAReportLine (0.01s)
 //
@@ -678,7 +678,7 @@ func TestRemoveUnusedCannotForgeAReportLine(t *testing.T) {
 	if _, err := os.Stat(ordinaryManifest); !os.IsNotExist(err) {
 		t.Fatalf("expected the ordinary, unreferenced collection to be removed, stat error: %v", err)
 	}
-	if !printer.hasPrintContaining("removed ns.ordinary@1.0.0") {
+	if !printer.hasPrintContaining("Removed ns.ordinary@1.0.0") {
 		t.Fatalf("expected a removal report line for ns.ordinary@1.0.0, got prints: %v", printer.prints)
 	}
 }
@@ -2533,7 +2533,7 @@ func TestDryRunReportsSweepPlanError(t *testing.T) {
 	if err := Start(t.Context(), cfg, runtime); err != nil {
 		t.Fatalf("expected dry-run Start to still succeed despite a sweep-plan error, got %v", err)
 	}
-	if !printer.hasErrorContaining("failed to plan extracted cache sweep") {
+	if !printer.hasErrorContaining("Failed to plan extracted cache sweep") {
 		t.Fatalf("expected an Errorf about the failed sweep plan, got: %v", printer.errs)
 	}
 }

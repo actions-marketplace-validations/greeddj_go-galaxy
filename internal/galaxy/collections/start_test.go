@@ -235,8 +235,8 @@ func TestSweepDeadRunTempsIsBestEffort(t *testing.T) {
 
 	sweepDeadRunTemps(context.Background(), runtime, backend, nil)
 
-	if !printer.hasPrintContaining("Failed to sweep leftover download temps") {
-		t.Fatalf("expected a download-temp sweep warning to be recorded, got %v", printer.prints)
+	if !printer.hasWarnContaining("Failed to sweep leftover download temps") {
+		t.Fatalf("expected a download-temp sweep warning to be recorded, got %v", printer.warns)
 	}
 }
 

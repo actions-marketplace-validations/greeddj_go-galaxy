@@ -59,7 +59,7 @@ func loadCollectionMetadata(
 	// repository content, not the operator's configuration - and the query a
 	// source: may carry rides along uncut wherever this base is rendered.
 	// apiRootCandidates (server_candidates.go) holds that gap.
-	runtime.Output.Debugf("versions_url resolved: base=%s ref=%q -> %s",
+	runtime.Output.Debugf("Versions_url resolved: base=%s ref=%q -> %s",
 		base, helpers.WithoutCredentials(rootMetadata.VersionsURL), helpers.WithoutCredentials(versionsURL))
 
 	versionURL := rootMetadata.HighestVersion.Href
@@ -159,16 +159,16 @@ func tryServerRootMetadata(
 
 	var lastErr error
 	candidates := rootMetadataURLCandidates(srv.base, col, deps.apiRoots)
-	runtime.Output.Debugf("root metadata candidates for %s on server %s: %s", col.key(), srv.label(), joinCandidateURLs(candidates))
+	runtime.Output.Debugf("Root metadata candidates for %s on server %s: %s", col.key(), srv.label(), joinCandidateURLs(candidates))
 
 	for _, cand := range candidates {
-		runtime.Output.Debugf("root metadata GET %s", cand.url)
+		runtime.Output.Debugf("Root metadata GET %s", cand.url)
 		var root types.GalaxyCollection
 		if err := fetchJSONWithCachePolicy(ctx, runtime, cand.url, st, &root, policy); err != nil {
 			if statusErr, ok := errors.AsType[*cacheManager.HTTPStatusError](err); ok {
 				switch {
 				case statusErr.Code == http.StatusNotFound:
-					runtime.Output.Debugf("root metadata 404 %s", cand.url)
+					runtime.Output.Debugf("Root metadata 404 %s", cand.url)
 					lastErr = err
 					continue
 				case statusErr.Code == http.StatusUnauthorized, statusErr.Code == http.StatusForbidden:
@@ -179,7 +179,7 @@ func tryServerRootMetadata(
 			}
 			return nil, false, err
 		}
-		runtime.Output.Debugf("root metadata OK %s", cand.url)
+		runtime.Output.Debugf("Root metadata OK %s", cand.url)
 		// Record the winner only on success: a 404 here means only that this
 		// collection is absent under this apiRoot, not that the apiRoot is
 		// wrong, so a 404 must never blacklist an apiRoot for the server.

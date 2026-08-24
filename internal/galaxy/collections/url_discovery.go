@@ -399,7 +399,7 @@ func downloadURLToTemp(ctx context.Context, deps collectionDeps, rawURL string) 
 // downloadRetryable and the exit classifier read both paths the same.
 func attemptURLDownload(ctx context.Context, deps collectionDeps, rawURL string) (downloadResult, error) {
 	runtime := deps.runtime
-	runtime.Output.Printf("🌐 Downloading %s", helpers.WithoutCredentials(rawURL))
+	runtime.Output.Printf("Downloading %s", helpers.WithoutCredentials(rawURL))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, http.NoBody)
 	if err != nil {
 		return downloadResult{}, err

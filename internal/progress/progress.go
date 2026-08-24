@@ -42,7 +42,15 @@ const (
 	// sits beside in the same report, so the three verdict lines of one
 	// report align rather than each starting at its own column.
 	updateGlyph = "↑"
-	debugPrefix = "🚧 Debug: "
+	// stepGlyph marks a line that states what the run is doing rather than
+	// what it concluded: a stage starting, a file being fetched, a step
+	// skipped, a total at the end. One glyph covers all of them on purpose -
+	// the distinctions a per-line pictogram used to draw are already in the
+	// words, and a marker that varies line to line makes a log harder to
+	// scan, not easier. Gray and one column wide, so it parts the text from
+	// the margin without competing with the verdict markers above.
+	stepGlyph   = "·"
+	debugPrefix = "Debug: "
 	// versionMark introduces the exact version a result line settled on. It
 	// is spelled as the constraint that pins that one version rather than
 	// joined to the name with an @, so a reader can paste the pair straight
@@ -83,6 +91,7 @@ func (s stream) ok() string     { return marker(okGlyph, ansiGreen, s.color) }
 func (s stream) fail() string   { return marker(failGlyph, ansiRed, s.color) }
 func (s stream) warn() string   { return marker(warnGlyph, ansiYellow, s.color) }
 func (s stream) update() string { return marker(updateGlyph, ansiYellow, s.color) }
+func (s stream) step() string   { return marker(stepGlyph, ansiGray, s.color) }
 
 // versionTag returns the version decoration for this stream, colored only
 // when this destination accepts color - the same per-destination question the
@@ -271,7 +280,10 @@ func (p *Progress) Printf(format string, args ...any) {
 	if p.q {
 		return
 	}
-	p.emit(p.out, decorated{msg: safeout.Clean(fmt.Sprintf(format, args...))})
+	// The marker goes on the line and never on the suffix above: a spinner
+	// draws its own frame glyph in that column already, and a second one
+	// behind it would read as two cursors.
+	p.emit(p.out, decorated{prefix: p.out.step(), msg: safeout.Clean(fmt.Sprintf(format, args...))})
 }
 
 // PersistentPrintf prints a persistent line to stdout that survives spinner
@@ -279,7 +291,7 @@ func (p *Progress) Printf(format string, args ...any) {
 func (p *Progress) PersistentPrintf(format string, args ...any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.emit(p.out, decorated{msg: safeout.Clean(fmt.Sprintf(format, args...))})
+	p.emit(p.out, decorated{prefix: p.out.step(), msg: safeout.Clean(fmt.Sprintf(format, args...))})
 }
 
 // Okf prints a success message with a colored marker to stdout.
@@ -362,7 +374,7 @@ func (p *Progress) Debugf(format string, args ...any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.v {
-		p.emit(p.out, decorated{prefix: debugPrefix, msg: safeout.Clean(fmt.Sprintf(format, args...))})
+		p.emit(p.out, decorated{prefix: p.out.step() + debugPrefix, msg: safeout.Clean(fmt.Sprintf(format, args...))})
 	}
 }
 
@@ -371,7 +383,7 @@ func (p *Progress) DebugSincef(start time.Time, format string, args ...any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.v {
-		prefix := "⏱️ Debug Timing (" + time.Since(start).Round(time.Millisecond).String() + "): "
+		prefix := p.out.step() + debugPrefix + "timing (" + time.Since(start).Round(time.Millisecond).String() + ") "
 		p.emit(p.out, decorated{prefix: prefix, msg: safeout.Clean(fmt.Sprintf(format, args...))})
 	}
 }
@@ -390,7 +402,10 @@ func (p *Progress) Write(payload []byte) (int, error) {
 	if p.q {
 		return len(payload), nil
 	}
-	p.emit(p.out, decorated{msg: safeout.Clean(message)})
+	// Marked like every other line this package writes: under -v the stdlib
+	// logger's output and the run's own lines share one stream, and two left
+	// margins in one log read as two programs talking.
+	p.emit(p.out, decorated{prefix: p.out.step(), msg: safeout.Clean(message)})
 	return len(payload), nil
 }
 

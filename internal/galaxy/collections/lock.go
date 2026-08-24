@@ -418,7 +418,7 @@ func lockDryRunBaseline(runtime *infra.Infra, path string) *lockfile.File {
 		return lf
 	}
 	if !lockfile.IsNotExist(err) {
-		runtime.Output.Warnf("existing lockfile %s cannot be read (%v); reporting every collection as added", path, err)
+		runtime.Output.Warnf("Existing lockfile %s cannot be read (%v); reporting every collection as added", path, err)
 	}
 	return nil
 }

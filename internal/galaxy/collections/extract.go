@@ -80,7 +80,7 @@ func extractTree(
 		return fmt.Errorf("%w: %q", helpers.ErrMalformedArtifactSHA256, artifactSHA)
 	}
 	if verifyExtractMarker(runtime.Output, target, artifactSHA) {
-		runtime.Output.Printf("⏭️ Skipping extraction, already done: %s", display)
+		runtime.Output.Printf("Skipping extraction, already done: %s", display)
 		return nil
 	}
 

@@ -163,7 +163,7 @@ func prewarmRootMetadata(ctx context.Context, deps collectionDeps, roots []colle
 		wg.Go(func() {
 			defer func() { <-sem }()
 			if err := prewarmOne(warmCtx, deps, sources, root); err != nil {
-				deps.runtime.Output.Debugf("prewarm %s.%s: %v", root.Namespace, root.Name, err)
+				deps.runtime.Output.Debugf("Prewarm %s.%s: %v", root.Namespace, root.Name, err)
 				cancel()
 			}
 		})

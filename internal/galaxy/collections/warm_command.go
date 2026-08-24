@@ -32,7 +32,7 @@ func runWarm(ctx context.Context, cfg *config.Config, runtime *infra.Infra) erro
 	if cfg.NoCache {
 		return helpers.ErrWarmCacheDisabled
 	}
-	return withBackend(ctx, cfg, runtime, "🔥 Warming caches", warmWithState)
+	return withBackend(ctx, cfg, runtime, "Warming caches", warmWithState)
 }
 
 // warmWithState performs warm's actual work against an already-initialized
@@ -93,7 +93,7 @@ func warmWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra
 	if saveErr != nil {
 		return saveErr
 	}
-	runtime.Output.PersistentPrintf("🔥 Warm complete: %s cached", counts.describe())
+	runtime.Output.Okf("Warm complete: %s cached", counts.describe())
 	return nil
 }
 
@@ -284,7 +284,7 @@ func warmCollections(
 			defer func() { <-sem }()
 			meta, prefetched, ok, prefetchErr := prefetch.Wait(col.key())
 			if ok && prefetchErr != nil {
-				runtime.Output.Printf("⚠️ Prefetch failed for %s: %v", col.key(), prefetchErr)
+				runtime.Output.Warnf("Prefetch failed for %s: %v", col.key(), prefetchErr)
 			}
 			if err := warmOne(ctx, depsCtx, col, meta, prefetched); err != nil {
 				runtime.Output.ErrorVersionf(col.Version, fmt.Sprintf("error: %s", err),

@@ -111,7 +111,7 @@ func replayURLRolePin(ctx context.Context, deps collectionDeps, ureq urlRoleRequ
 // repack - is the pin: it is what a later run's re-download is compared to.
 func acquireURLRole(ctx context.Context, deps collectionDeps, ureq urlRoleRequest, policy cacheManager.Policy) (rolePin, error) {
 	runtime := deps.runtime
-	runtime.Output.Printf("🎭 fetching role %s from %s", ureq.name, ureq.display)
+	runtime.Output.Printf("Fetching role %s from %s", ureq.name, ureq.display)
 	result, err := downloadURLToTemp(ctx, deps, ureq.rawURL)
 	if err != nil {
 		return rolePin{}, err
@@ -165,7 +165,7 @@ func repackURLRole(ctx context.Context, deps collectionDeps, ureq urlRoleRequest
 	}
 	defer tree.Cleanup()
 	if prefix := tree.SkippedPrefix(); prefix != "" {
-		deps.runtime.Output.Debugf("role %s: the archive wraps the role in %q; the prefix is not installed", ureq.name, prefix)
+		deps.runtime.Output.Debugf("Role %s: the archive wraps the role in %q; the prefix is not installed", ureq.name, prefix)
 	}
 	built, err := rolebuild.Build(ctx, tree, rolebuild.TempFileFunc(gitTempFile(deps)))
 	if err != nil {

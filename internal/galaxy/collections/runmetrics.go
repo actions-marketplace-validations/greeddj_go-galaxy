@@ -107,7 +107,7 @@ func writeRunMetrics(
 		LockfileHash:    tryLockfileHash(cfg),
 	}
 	if err := metrics.Write(cfg.MetricsFile, report); err != nil {
-		runtime.Output.Printf("⚠️ Failed to write metrics %s: %v", cfg.MetricsFile, err)
+		runtime.Output.Warnf("Failed to write metrics %s: %v", cfg.MetricsFile, err)
 	}
 }
 

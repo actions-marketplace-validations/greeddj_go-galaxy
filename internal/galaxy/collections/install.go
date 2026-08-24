@@ -87,7 +87,7 @@ func installCollection(
 		// lives, since nothing else on this path rewrites it.
 		reconcileGalaxyInfo(runtime, target, cfg, col, state.info)
 		deps.verify.recordSkippedUnverified()
-		runtime.Output.Printf("⏭️ Skipping install, already installed: %s/%s/%s", col.Namespace, col.Name, col.Version)
+		runtime.Output.Printf("Skipping install, already installed: %s/%s/%s", col.Namespace, col.Name, col.Version)
 		// installCollection may be handed a prefetched temp on a path that skips the install; release it here rather than
 		// leave it unclaimed until Close. In today's dispatch this branch is not live: a schedulable prefetch task is never
 		// already installed, and an already-installed collection is never scheduled, so its handoff would be empty. This is
@@ -251,7 +251,7 @@ func prepareInstall(
 	cacheHit := isCacheHit(ctx, deps, col, forceDownload)
 
 	if servableFromCacheAlone(deps, cacheHit, meta) {
-		runtime.Output.Printf("📦 Using cached %s", filename)
+		runtime.Output.Printf("Using cached %s", filename)
 		payload, err := prepareFromCache(ctx, deps, col)
 		return payload, true, err
 	}
@@ -341,7 +341,7 @@ func verifyAndExtract(
 	if err != nil {
 		return fmt.Errorf("failed to extract %s: %w", filename, err)
 	}
-	deps.runtime.Output.DebugSincef(extractStart, "%s", "extract "+col.key())
+	deps.runtime.Output.DebugSincef(extractStart, "%s", "Extract "+col.key())
 	return nil
 }
 
@@ -564,7 +564,7 @@ func canRetryCacheHit(deps installDeps, fromCache, forceDownload bool) bool {
 // prepareInstall-level integrity failure and an action-level one - call this
 // so the log line reads identically regardless of which one fired.
 func evictCorruptCachedArtifact(ctx context.Context, deps installDeps, col collection, filename string, cause error) {
-	deps.runtime.Output.Printf("♻️ Evicting corrupt cached %s and refetching: %v", filename, cause)
+	deps.runtime.Output.Printf("Evicting corrupt cached %s and refetching: %v", filename, cause)
 	if deps.artifacts != nil {
 		_ = deps.artifacts.Delete(ctx, artifactKey(col))
 	}
@@ -673,7 +673,7 @@ func writeGalaxyInfoIfPresent(
 		runtime.Output.Warnf("Refusing to write GALAXY.yml: %v", err)
 		return
 	}
-	runtime.Output.Printf("⚠️ Failed to write GALAXY.yml: %v", err)
+	runtime.Output.Printf("Failed to write GALAXY.yml: %v", err)
 }
 
 func recordInstall(st *store.Store, col collection, installPath, artifactSHA string, deps []string) {
@@ -731,7 +731,7 @@ func fetchArtifactMiss(
 	if err != nil {
 		return artifactData{}, err
 	}
-	deps.runtime.Output.DebugSincef(downloadStart, "%s", "download "+col.key())
+	deps.runtime.Output.DebugSincef(downloadStart, "%s", "Download "+col.key())
 	return artifactData{Path: result.Path, Cleanup: result.Cleanup, SHA: result.SHA}, nil
 }
 
@@ -1032,7 +1032,7 @@ func canSkipInstall(target installTarget, col collection, st *store.Store, out o
 // RoundTripper this program installs may render its request URL uncut - which
 // is the rule a reader reasoning only about the display would miss.
 func downloadCollection(ctx context.Context, runtime *infra.Infra, collectionURL string) (*http.Response, error) {
-	runtime.Output.Printf("🌐 Downloading %s", helpers.WithoutCredentials(collectionURL))
+	runtime.Output.Printf("Downloading %s", helpers.WithoutCredentials(collectionURL))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, collectionURL, http.NoBody)
 	if err != nil {
 		return nil, err
@@ -1533,10 +1533,10 @@ func resolveMetadata(
 	}
 	metaStart := time.Now()
 	meta, err := loadCollectionMetadata(ctx, deps, col)
-	runtime.Output.DebugSincef(metaStart, "%s", "metadata "+col.key())
+	runtime.Output.DebugSincef(metaStart, "%s", "Metadata "+col.key())
 	if err != nil {
 		if cacheHit {
-			runtime.Output.Printf("⚠️ Failed to load metadata for %s: %v", col.key(), err)
+			runtime.Output.Warnf("Failed to load metadata for %s: %v", col.key(), err)
 			return nil, helpers.ErrMetadataUnavailable
 		}
 		return nil, fmt.Errorf("failed to load metadata: %w", err)

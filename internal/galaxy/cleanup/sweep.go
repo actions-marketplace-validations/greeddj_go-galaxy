@@ -132,7 +132,7 @@ func reportLegacyArtifactSweepCandidate(ctx context.Context, runtime *infra.Infr
 	// author must not "fix" this into %q to match the extracted-entry line
 	// below: that line's name comes from a raw directory listing with no
 	// escaping step of its own, which is exactly what makes it different.
-	runtime.Output.Printf("🧹 would sweep legacy artifact %s", key)
+	runtime.Output.Printf("Would sweep legacy artifact %s", key)
 }
 
 // sweepExtractedStore drops content-addressable extracted entries whose SHA
@@ -198,7 +198,7 @@ func sweepExtractedStore(
 	// leave an operator with a run that reports success while reclaiming
 	// nothing.
 	if err := extractedStore.Sweep(ctx, keep); err != nil {
-		runtime.Output.Errorf("failed to sweep the extracted cache: %v", err)
+		runtime.Output.Errorf("Failed to sweep the extracted cache: %v", err)
 	}
 }
 
@@ -244,7 +244,7 @@ func extractedKeepSet(
 func reportExtractedSweepPlan(runtime *infra.Infra, extractedStore *extracted.Store, keep map[string]bool) {
 	plan, err := extractedStore.SweepPlan(keep)
 	if err != nil {
-		runtime.Output.Errorf("failed to plan extracted cache sweep: %v", err)
+		runtime.Output.Errorf("Failed to plan extracted cache sweep: %v", err)
 		return
 	}
 	for _, name := range plan {
@@ -256,6 +256,6 @@ func reportExtractedSweepPlan(runtime *infra.Infra, extractedStore *extracted.St
 		// IsPathElement-validated components. A local writer able to plant a
 		// directory there controls this string outright, so it is rendered
 		// %q rather than %s.
-		runtime.Output.Printf("🧹 would sweep extracted %q", name)
+		runtime.Output.Printf("Would sweep extracted %q", name)
 	}
 }

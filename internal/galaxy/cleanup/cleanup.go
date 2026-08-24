@@ -102,7 +102,7 @@ func runCleanup(ctx context.Context, cfg *config.Config, runtime *infra.Infra) e
 	defer func() {
 		if state.release != nil {
 			if err := state.release(); err != nil {
-				runtime.Output.Errorf("lock release: %v", err)
+				runtime.Output.Errorf("Lock release: %v", err)
 			}
 		}
 	}()
@@ -123,7 +123,7 @@ func runCleanup(ctx context.Context, cfg *config.Config, runtime *infra.Infra) e
 // state.release or state.backend.Close itself.
 func cleanupWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra, state *cleanupState) error {
 	if state.registry == nil || len(state.registry.Projects) == 0 {
-		runtime.Output.Printf("ℹ️ No projects recorded for GC.")
+		runtime.Output.Printf("No projects recorded for GC.")
 		return nil
 	}
 	warnIfSnapshotNotPersisted(runtime, state.store)
@@ -191,7 +191,7 @@ func warnIfSnapshotNotPersisted(runtime *infra.Infra, st *store.Store) {
 // backend.Open runs before the lock exists and backend.Close must still run
 // after ownership is gone, so both keep the caller's own ctx.
 func initCleanup(ctx context.Context, cfg *config.Config, runtime *infra.Infra) (context.Context, *cleanupState, error) {
-	runtime.Output.Printf("🚀 init cache backend")
+	runtime.Output.Printf("Init cache backend")
 	backend, err := cacheBackend.New(cfg, runtime)
 	if err != nil {
 		return nil, nil, err
@@ -235,12 +235,12 @@ func initCleanup(ctx context.Context, cfg *config.Config, runtime *infra.Infra) 
 	if err != nil {
 		return nil, nil, err
 	}
-	runtime.Output.Printf("🚀 load storage")
+	runtime.Output.Printf("Load storage")
 	st, err := backend.LoadStore(lockCtx)
 	if err != nil {
 		return lockCtx, nil, err
 	}
-	runtime.Output.Printf("🚀 load projects registry")
+	runtime.Output.Printf("Load projects registry")
 	registry, err := backend.LoadProjectRegistry(lockCtx)
 	if err != nil {
 		return lockCtx, nil, err
@@ -297,9 +297,9 @@ func finalizeCleanup(
 		}
 	}
 	if cfg.DryRun {
-		runtime.Output.PersistentPrintf("🫡 Dry-run cleanup complete. Candidates: %d", removed)
+		runtime.Output.Okf("Dry-run cleanup complete. Candidates: %d", removed)
 		return nil
 	}
-	runtime.Output.PersistentPrintf("✨ Cleanup complete. Removed: %d", removed)
+	runtime.Output.Okf("Cleanup complete. Removed: %d", removed)
 	return nil
 }

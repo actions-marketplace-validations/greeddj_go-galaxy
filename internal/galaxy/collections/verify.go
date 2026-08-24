@@ -209,7 +209,7 @@ func announceVerification(cfg *config.Config, runtime *infra.Infra, keyring *sig
 
 		return
 	}
-	runtime.Output.PersistentPrintf("🔏 Signature verification on: keyring %s, required count %s",
+	runtime.Output.PersistentPrintf("Signature verification on: keyring %s, required count %s",
 		keyring.Path(), cfg.Signature.RequiredCount)
 }
 
@@ -471,7 +471,7 @@ func verifyCollectionSignatures(ctx context.Context, deps installDeps, col colle
 	if err := checkManifestAttribution(col, manifestBytes); err != nil {
 		return fmt.Errorf("%s: %w", col.key(), err)
 	}
-	deps.runtime.Output.Debugf("verified %s against %d key(s)", col.key(), result.Verified)
+	deps.runtime.Output.Debugf("Verified %s against %d key(s)", col.key(), result.Verified)
 
 	return nil
 }

@@ -374,8 +374,8 @@ func TestLockWithStateSaveFailureWritesMetricsAndKeepsLockfile(t *testing.T) {
 
 	// (c) the operator was told the file landed, even though the run still
 	// exits nonzero.
-	if !printer.hasPersistentPrintContaining("Lockfile written") {
-		t.Errorf("expected a persistent \"Lockfile written\" line, got %v", printer.persists)
+	if !printer.hasOkContaining("Lockfile written") {
+		t.Errorf("expected a result-tier \"Lockfile written\" line, got %v", printer.okLines())
 	}
 
 	// (d) last: readMetricsCommand t.Fatalf's on a missing file, which would
@@ -507,8 +507,8 @@ func TestLockWithStateWritesLockfileAndMetrics(t *testing.T) {
 	if got := readMetricsCommand(t, metricsPath); got != metricsCommandLock {
 		t.Errorf("metrics command = %q, want %q", got, metricsCommandLock)
 	}
-	if !printer.hasPersistentPrintContaining("Lockfile written") {
-		t.Errorf("expected a persistent \"Lockfile written\" line, got %v", printer.persists)
+	if !printer.hasOkContaining("Lockfile written") {
+		t.Errorf("expected a result-tier \"Lockfile written\" line, got %v", printer.okLines())
 	}
 }
 

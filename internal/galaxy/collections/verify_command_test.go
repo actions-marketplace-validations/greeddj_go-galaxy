@@ -285,7 +285,7 @@ func TestDryRunDisclosesThatVerificationWasNotExercised(t *testing.T) {
 			t.Fatalf("Start() = %v, want nil", err)
 		}
 		printer := capturedOutput(t, runtime)
-		want := fmt.Sprintf("🔏 Signature verification on: keyring %s, required count 1", cfg.Signature.KeyringPath)
+		want := fmt.Sprintf("Signature verification on: keyring %s, required count 1", cfg.Signature.KeyringPath)
 		if !slices.Contains(printer.persists, want) {
 			t.Fatalf("persists = %v, want it to contain %q", printer.persists, want)
 		}

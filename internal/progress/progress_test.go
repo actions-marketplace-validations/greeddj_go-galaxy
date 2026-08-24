@@ -91,7 +91,7 @@ func TestStateATransient(t *testing.T) {
 		if n != 2 {
 			t.Fatalf("expected n=2, got %d", n)
 		}
-		assertBuf(t, out, "x\n")
+		assertBuf(t, out, stepMark()+"x\n")
 	})
 
 	t.Run("WriteEmptyMessage", func(t *testing.T) {
@@ -115,7 +115,7 @@ func TestStateAResult(t *testing.T) {
 		p, out, errOut := stateA()
 		defer p.Close()
 		p.PersistentPrintf("x")
-		assertBuf(t, out, "x\n")
+		assertBuf(t, out, stepMark()+"x\n")
 		assertEmpty(t, errOut)
 	})
 
@@ -175,7 +175,7 @@ func TestStateBTransient(t *testing.T) {
 		p, out, _ := stateB()
 		defer p.Close()
 		p.Printf("x")
-		assertBuf(t, out, "x\n")
+		assertBuf(t, out, stepMark()+"x\n")
 	})
 
 	t.Run("Write", func(t *testing.T) {
@@ -188,36 +188,51 @@ func TestStateBTransient(t *testing.T) {
 		if n != 2 {
 			t.Fatalf("expected n=2, got %d", n)
 		}
-		assertBuf(t, out, "x\n")
+		assertBuf(t, out, stepMark()+"x\n")
 	})
 }
 
-// TestStateBResult covers the result tier for state B: PersistentPrintf and Okf
-// emit to stdout, Errorf to stderr.
-func TestStateBResult(t *testing.T) {
-	t.Run("PersistentPrintf", func(t *testing.T) {
-		p, out, errOut := stateB()
-		defer p.Close()
-		p.PersistentPrintf("x")
-		assertBuf(t, out, "x\n")
-		assertEmpty(t, errOut)
-	})
+// TestResultTierAcrossStates covers the result tier in the two states that
+// differ only in what they suppress elsewhere: state B (verbose) and state C
+// (quiet). Both must emit every result line, which is the whole point of the
+// tier - quiet suppresses the transient tier and nothing else - and both must
+// keep Errorf on stderr. Written as one table over the two states rather than
+// as two identical blocks, since the assertion is precisely that they do not
+// differ.
+func TestResultTierAcrossStates(t *testing.T) {
+	states := []struct {
+		build func() (*Progress, *bytes.Buffer, *bytes.Buffer)
+		name  string
+	}{
+		{name: "B verbose", build: stateB},
+		{name: "C quiet", build: stateC},
+	}
 
-	t.Run("Okf", func(t *testing.T) {
-		p, out, errOut := stateB()
-		defer p.Close()
-		p.Okf("x")
-		assertBuf(t, out, okMark()+"x\n")
-		assertEmpty(t, errOut)
-	})
+	for _, st := range states {
+		t.Run(st.name+"/PersistentPrintf", func(t *testing.T) {
+			p, out, errOut := st.build()
+			defer p.Close()
+			p.PersistentPrintf("x")
+			assertBuf(t, out, stepMark()+"x\n")
+			assertEmpty(t, errOut)
+		})
 
-	t.Run("Errorf", func(t *testing.T) {
-		p, out, errOut := stateB()
-		defer p.Close()
-		p.Errorf("x")
-		assertBuf(t, errOut, failMark()+"x\n")
-		assertEmpty(t, out)
-	})
+		t.Run(st.name+"/Okf", func(t *testing.T) {
+			p, out, errOut := st.build()
+			defer p.Close()
+			p.Okf("x")
+			assertBuf(t, out, okMark()+"x\n")
+			assertEmpty(t, errOut)
+		})
+
+		t.Run(st.name+"/Errorf", func(t *testing.T) {
+			p, out, errOut := st.build()
+			defer p.Close()
+			p.Errorf("x")
+			assertBuf(t, errOut, failMark()+"x\n")
+			assertEmpty(t, out)
+		})
+	}
 }
 
 // TestStateBDebug covers the debug tier for state B: verbose mode enables
@@ -227,7 +242,7 @@ func TestStateBDebug(t *testing.T) {
 		p, out, _ := stateB()
 		defer p.Close()
 		p.Debugf("x")
-		assertBuf(t, out, "🚧 Debug: x\n")
+		assertBuf(t, out, stepMark()+debugPrefix+"x\n")
 	})
 
 	t.Run("DebugSincef", func(t *testing.T) {
@@ -235,11 +250,11 @@ func TestStateBDebug(t *testing.T) {
 		defer p.Close()
 		p.DebugSincef(time.Now(), "x")
 		got := out.String()
-		if !strings.HasPrefix(got, "⏱️ Debug Timing (") {
-			t.Fatalf("expected prefix %q, got %q", "⏱️ Debug Timing (", got)
+		if !strings.HasPrefix(got, stepMark()+debugPrefix+"timing (") {
+			t.Fatalf("expected prefix %q, got %q", stepMark()+debugPrefix+"timing (", got)
 		}
-		if !strings.HasSuffix(got, "): x\n") {
-			t.Fatalf("expected suffix %q, got %q", "): x\n", got)
+		if !strings.HasSuffix(got, ") x\n") {
+			t.Fatalf("expected suffix %q, got %q", ") x\n", got)
 		}
 	})
 }
@@ -288,34 +303,6 @@ func TestStateCSuppressed(t *testing.T) {
 	})
 }
 
-// TestStateCResult covers the result tier for state C: quiet mode never
-// suppresses PersistentPrintf, Okf or Errorf; Errorf still targets stderr.
-func TestStateCResult(t *testing.T) {
-	t.Run("PersistentPrintf", func(t *testing.T) {
-		p, out, errOut := stateC()
-		defer p.Close()
-		p.PersistentPrintf("x")
-		assertBuf(t, out, "x\n")
-		assertEmpty(t, errOut)
-	})
-
-	t.Run("Okf", func(t *testing.T) {
-		p, out, errOut := stateC()
-		defer p.Close()
-		p.Okf("x")
-		assertBuf(t, out, okMark()+"x\n")
-		assertEmpty(t, errOut)
-	})
-
-	t.Run("Errorf", func(t *testing.T) {
-		p, out, errOut := stateC()
-		defer p.Close()
-		p.Errorf("x")
-		assertBuf(t, errOut, failMark()+"x\n")
-		assertEmpty(t, out)
-	})
-}
-
 // stateD builds a Progress plus its buffers for state D (non-TTY normal:
 // the CI-defect regression case, no spinner, verbose=false, quiet=false).
 func stateD() (*Progress, *bytes.Buffer, *bytes.Buffer) {
@@ -331,7 +318,7 @@ func TestStateDTransient(t *testing.T) {
 		p, out, _ := stateD()
 		defer p.Close()
 		p.Printf("x")
-		assertBuf(t, out, "x\n")
+		assertBuf(t, out, stepGlyph+" x\n")
 	})
 
 	t.Run("Write", func(t *testing.T) {
@@ -344,7 +331,7 @@ func TestStateDTransient(t *testing.T) {
 		if n != 2 {
 			t.Fatalf("expected n=2, got %d", n)
 		}
-		assertBuf(t, out, "x\n")
+		assertBuf(t, out, stepGlyph+" x\n")
 	})
 }
 
@@ -355,7 +342,7 @@ func TestStateDResult(t *testing.T) {
 		p, out, errOut := stateD()
 		defer p.Close()
 		p.PersistentPrintf("x")
-		assertBuf(t, out, "x\n")
+		assertBuf(t, out, stepGlyph+" x\n")
 		assertEmpty(t, errOut)
 	})
 
@@ -472,7 +459,8 @@ func TestConcurrentEmissionSerialized(t *testing.T) {
 	wg.Wait()
 
 	validStdout := func(line string) bool {
-		return strings.HasPrefix(line, "pp ") || strings.HasPrefix(line, okMark()+"ok ") || line == "wr"
+		return strings.HasPrefix(line, stepMark()+"pp ") || strings.HasPrefix(line, okMark()+"ok ") ||
+			line == stepMark()+"wr"
 	}
 	assertLines(t, out.String(), workers*iterations*3, validStdout, "stdout")
 
@@ -606,12 +594,12 @@ func sanitizingTiers() []tierCase {
 		{
 			name:    "Printf",
 			invoke:  func(p *Progress, msg string) { p.Printf("%s", msg) },
-			wantOut: func(_, clean string) string { return clean + "\n" },
+			wantOut: func(_, clean string) string { return stepMark() + clean + "\n" },
 		},
 		{
 			name:    "PersistentPrintf",
 			invoke:  func(p *Progress, msg string) { p.PersistentPrintf("%s", msg) },
-			wantOut: func(_, clean string) string { return clean + "\n" },
+			wantOut: func(_, clean string) string { return stepMark() + clean + "\n" },
 		},
 		{
 			name:    "Okf",
@@ -648,12 +636,12 @@ func sanitizingTiers() []tierCase {
 		{
 			name:    "Debugf",
 			invoke:  func(p *Progress, msg string) { p.Debugf("%s", msg) },
-			wantOut: func(_, clean string) string { return debugPrefix + clean + "\n" },
+			wantOut: func(_, clean string) string { return stepMark() + debugPrefix + clean + "\n" },
 		},
 		{
 			name:    "Write",
 			invoke:  func(p *Progress, msg string) { _, _ = p.Write([]byte(msg)) },
-			wantOut: func(_, clean string) string { return clean + "\n" },
+			wantOut: func(_, clean string) string { return stepMark() + clean + "\n" },
 		},
 	}
 }
@@ -709,7 +697,7 @@ func TestTiersSanitizeCallerText(t *testing.T) {
 func TestDebugSincefSanitizesCallerText(t *testing.T) {
 	t.Parallel()
 
-	const wantPrefix = "⏱️ Debug Timing ("
+	wantPrefix := stepMark() + debugPrefix + "timing ("
 
 	check := func(t *testing.T, msg, wantSuffix string) {
 		t.Helper()
@@ -728,11 +716,11 @@ func TestDebugSincefSanitizesCallerText(t *testing.T) {
 
 	t.Run("benign", func(t *testing.T) {
 		t.Parallel()
-		check(t, "benign text", "): benign text\n")
+		check(t, "benign text", ") benign text\n")
 	})
 	t.Run("hostile", func(t *testing.T) {
 		t.Parallel()
-		check(t, hostileCallerText, "): "+hostileCallerTextClean+"\n")
+		check(t, hostileCallerText, ") "+hostileCallerTextClean+"\n")
 	})
 }
 
@@ -915,6 +903,7 @@ func TestSpinnerWritesOutsideThisPackagesWriters(t *testing.T) {
 // form nothing emits.
 func okMark() string     { return marker(okGlyph, ansiGreen, true) }
 func updateMark() string { return marker(updateGlyph, ansiYellow, true) }
+func stepMark() string   { return marker(stepGlyph, ansiGray, true) }
 func failMark() string   { return marker(failGlyph, ansiRed, true) }
 func warnMark() string   { return marker(warnGlyph, ansiYellow, true) }
 

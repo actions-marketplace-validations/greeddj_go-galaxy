@@ -36,7 +36,7 @@ func Lock(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
 // compares against it, and a single banner cannot truthfully claim either
 // without branching on cfg.Frozen.
 func runLock(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
-	return withBackend(ctx, cfg, runtime, "🔒 Resolving for lockfile", lockWithState)
+	return withBackend(ctx, cfg, runtime, "Resolving for lockfile", lockWithState)
 }
 
 // lockWithState performs lock's actual work against an already-initialized
@@ -87,7 +87,7 @@ func lockWithState(ctx context.Context, cfg *config.Config, runtime *infra.Infra
 	// after the write it describes so the operator is told the file landed
 	// instead of guessing from a nonzero exit code alone; the run still exits
 	// nonzero when the save fails.
-	runtime.Output.PersistentPrintf("✅ Lockfile written to %s (%s)", path, lockCounts(lf).describe())
+	runtime.Output.Okf("Lockfile written to %s (%s)", path, lockCounts(lf).describe())
 	saveErr := state.backend.SaveStore(ctx, state.store)
 	// writeRunMetrics runs unconditionally, after the save, so its recorded
 	// duration includes the save: the report describes the run's work, not

@@ -647,10 +647,9 @@ func TestLockFrozenReportsAServerOnlyChangeAsDrift(t *testing.T) {
 	if !errors.Is(err, helpers.ErrLockfileDrift) {
 		t.Fatalf("Lock error = %v, want errors.Is helpers.ErrLockfileDrift", err)
 	}
-	oks := f.printer.okLines()
-	wantFirst := "Would change: server " + staleServer + " -> " + f.cfg.Server
-	if len(oks) == 0 || !strings.Contains(oks[0], wantFirst) {
-		t.Fatalf("first Okf line = %v, want it to contain %q", oks, wantFirst)
+	want := "Would change: server " + staleServer + " -> " + f.cfg.Server
+	if !f.printer.hasOkContaining(want) {
+		t.Fatalf("Okf lines = %v, want one to contain %q", f.printer.okLines(), want)
 	}
 }
 
@@ -694,7 +693,7 @@ func TestLockFrozenReportsAServerOnlyChangeAsDrift(t *testing.T) {
 // from lockWithState, so a frozen run falls through to lock's ordinary
 // write path) confirmed to fail this test with:
 //
-//	lock_command_test.go:729: persists = [✅ Lockfile written to
+//	lock_command_test.go:728: persists = [✅ Lockfile written to
 //	/.../requirements.lock.yml (1 collections) ✅ Lockfile written to
 //	/.../requirements.lock.yml (1 collections)]
 //	--- FAIL: TestLockFrozenWithoutRefreshIgnoresUpstreamPublication (0.06s)
@@ -791,14 +790,14 @@ func TestLockFrozenWithRefreshDetectsUpstreamPublication(t *testing.T) {
 //   - Dropping the `if cfg.DryRun` branch from lockWithState (so the real
 //     lockfile.Save path runs unconditionally) fails the lockfile-absence
 //     check with:
-//     lock_command_test.go:820: expected no lockfile written, stat err = <nil>
+//     lock_command_test.go:819: expected no lockfile written, stat err = <nil>
 //   - Removing writeRunMetrics's own internal cfg.DryRun guard (leaving
 //     lockDryRun's unconditional call to it) fails the metrics-absence check
 //     with:
-//     lock_command_test.go:836: expected no metrics report, stat err = <nil>
+//     lock_command_test.go:835: expected no metrics report, stat err = <nil>
 //   - Deleting the `if errors.Is(err, fs.ErrNotExist) { return nil, err }`
 //     guard in lockfile.Load fails the no-warning check with:
-//     lock_command_test.go:823: unexpected warning on a cold cache: [--dry-run
+//     lock_command_test.go:822: unexpected warning on a cold cache: [--dry-run
 //     is active: no artifact will be downloaded, installed, or cached; the
 //     resolved metadata caches are still saved existing lockfile
 //     /.../requirements.lock.yml cannot be read (lockfile is invalid: open
@@ -850,7 +849,7 @@ func TestLockDryRunWritesNoLockfileAndReportsAdds(t *testing.T) {
 // Mutation (dropping the `if cfg.DryRun` branch from lockWithState) fails
 // with:
 //
-//	lock_command_test.go:898: dry run rewrote the lockfile:
+//	lock_command_test.go:897: dry run rewrote the lockfile:
 //	server: http://127.0.0.1:PORT
 //	collections:
 //	    - name: acme.widgets
@@ -928,7 +927,7 @@ func TestLockDryRunReportsUpdateAndRemoval(t *testing.T) {
 // Mutation (dropping the `if cfg.DryRun` branch from lockWithState) fails
 // with:
 //
-//	lock_command_test.go:960: persists = [✅ Lockfile written to /.../requirements.lock.yml (1 collections)]
+//	lock_command_test.go:959: persists = [✅ Lockfile written to /.../requirements.lock.yml (1 collections)]
 func TestLockDryRunNoChangeReportsAllUnchanged(t *testing.T) {
 	t.Parallel()
 	f := newLockRun(t)
@@ -1016,7 +1015,7 @@ func TestLockDryRunReportsAServerOnlyChange(t *testing.T) {
 	// Mutation (dropping reportLockfileDiff's `if diff.Server != nil` block
 	// entirely, leaving no server line at all) fails this check with:
 	//
-	//	lock_command_test.go:1021: oks = []
+	//	lock_command_test.go:1020: oks = []
 	if !dryPrinter.hasOkContaining("Would change: server " + staleServer + " -> " + f.cfg.Server) {
 		t.Fatalf("oks = %v", dryPrinter.oks)
 	}
@@ -1026,7 +1025,7 @@ func TestLockDryRunReportsAServerOnlyChange(t *testing.T) {
 	// the check above passing, since the server line survives this mutation
 	// untouched, and fails this one with:
 	//
-	//	lock_command_test.go:1033: persists = [Dry run: 0 would be added, 0
+	//	lock_command_test.go:1032: persists = [Dry run: 0 would be added, 0
 	//	would be updated, 0 would be removed, 1 unchanged (/.../requirements.lock.yml)]
 	wantSummary := "Dry run: lockfile would change; 0 would be added, 0 would be updated, 0 would be removed, 1 unchanged (" + path + ")"
 	if !dryPrinter.hasPersistentPrintContaining(wantSummary) {
@@ -1052,7 +1051,7 @@ func TestLockDryRunReportsAServerOnlyChange(t *testing.T) {
 // Mutation (dropping the Warnf call in lockDryRunBaseline while keeping its
 // nil return) fails with:
 //
-//	lock_command_test.go:1072: warns = [--dry-run is active: no artifact will
+//	lock_command_test.go:1071: warns = [--dry-run is active: no artifact will
 //	be downloaded, installed, or cached; the resolved metadata caches are
 //	still saved no persisted snapshot was found; a dry run will not create
 //	one, so the metadata caches this run built are discarded --dry-run:
@@ -1086,7 +1085,7 @@ func TestLockDryRunWarnsOnAnUnreadableBaseline(t *testing.T) {
 // Mutation (replacing lockDryRun's saveDryRunSnapshotIfPersisted call with a
 // bare state.backend.SaveStore(ctx, state.store)) fails with:
 //
-//	lock_command_test.go:1109: lock --dry-run against a cold cache must not create a persisted snapshot
+//	lock_command_test.go:1108: lock --dry-run against a cold cache must not create a persisted snapshot
 func TestLockDryRunDoesNotFabricateASnapshot(t *testing.T) {
 	t.Parallel()
 	f := newLockRun(t)
@@ -1135,7 +1134,7 @@ func TestLockDryRunDoesNotFabricateASnapshot(t *testing.T) {
 // Lock's own save already made it true - but fails the requirement-spec
 // check with:
 //
-//	lock_command_test.go:1169: expected the dry run's own fresh resolve to
+//	lock_command_test.go:1168: expected the dry run's own fresh resolve to
 //	have saved acme.extra's requirement spec, got map[acme.widgets:{*  galaxy []}]
 func TestLockDryRunSavesMetadataCachesWhenSnapshotExists(t *testing.T) {
 	t.Parallel()
@@ -1187,7 +1186,7 @@ func TestLockDryRunSkipsMetricsAndSaysSo(t *testing.T) {
 	// Mutation (removing writeRunMetrics's own internal cfg.DryRun guard)
 	// fails this check with:
 	//
-	//	lock_command_test.go:1192: expected no metrics report, stat err = <nil>
+	//	lock_command_test.go:1191: expected no metrics report, stat err = <nil>
 	if _, err := os.Stat(f.cfg.MetricsFile); !os.IsNotExist(err) {
 		t.Fatalf("expected no metrics report, stat err = %v", err)
 	}
@@ -1195,7 +1194,7 @@ func TestLockDryRunSkipsMetricsAndSaysSo(t *testing.T) {
 	// leaving the file-absence check above still passing) fails this check
 	// with:
 	//
-	//	lock_command_test.go:1209: warns = [--dry-run is active: no artifact
+	//	lock_command_test.go:1208: warns = [--dry-run is active: no artifact
 	//	will be downloaded, installed, or cached; the resolved metadata
 	//	caches are still saved no persisted snapshot was found; a dry run
 	//	will not create one, so the metadata caches this run built are

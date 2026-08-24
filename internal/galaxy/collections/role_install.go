@@ -122,14 +122,14 @@ func installRoles(ctx context.Context, deps installDeps, res roleResolution, fai
 func installRole(ctx context.Context, deps installDeps, r resolvedRole) error {
 	runtime := deps.runtime
 	start := time.Now()
-	defer func() { runtime.Output.DebugSincef(start, "role %s", r.key()) }()
+	defer func() { runtime.Output.DebugSincef(start, "Role %s", r.key()) }()
 
 	target, ok := newRoleTarget(deps.rolesRoot, deps.cfg, r)
 	if !ok {
 		return fmt.Errorf("%w: role name %q", helpers.ErrUnsafeCollectionIdentifier, r.Name)
 	}
 	if canSkipRoleInstall(target, r, deps.st, runtime.Output) {
-		runtime.Output.Printf("⏭️ Skipping install, already installed: role %s", r.key())
+		runtime.Output.Printf("Skipping install, already installed: role %s", r.key())
 		return nil
 	}
 	owner, err := checkRoleDirectoryOwned(target)
@@ -137,7 +137,7 @@ func installRole(ctx context.Context, deps installDeps, r resolvedRole) error {
 		return err
 	}
 	if owner == roleDirectoryAnsible {
-		runtime.Output.Warnf("role %s: replacing a role ansible-galaxy installed at %s", r.Name, target.path)
+		runtime.Output.Warnf("Role %s: replacing a role ansible-galaxy installed at %s", r.Name, target.path)
 	}
 	artifact, err := fetchRoleArtifact(ctx, deps, r)
 	if err != nil {
@@ -153,7 +153,7 @@ func installRole(ctx context.Context, deps installDeps, r resolvedRole) error {
 	if err := extractTree(ctx, "role "+r.Name, artifact.Path, target, runtime, deps.extractStore, sha, computed, installInfo); err != nil {
 		return fmt.Errorf("failed to extract role %s: %w", r.Name, err)
 	}
-	runtime.Output.DebugSincef(extractStart, "%s", "extract role "+r.Name)
+	runtime.Output.DebugSincef(extractStart, "%s", "Extract role "+r.Name)
 	recordRoleInstall(deps.st, r, target.path, sha, runtime.Now())
 	return nil
 }
@@ -316,7 +316,7 @@ func gitRoleFetchToCache(ctx context.Context, deps installDeps, r resolvedRole, 
 	if err != nil {
 		return downloadResult{}, artifactDeadlineError(ctx, gitCtx, runtime.GitDeadline(), err)
 	}
-	runtime.Output.DebugSincef(start, "fetch %s@%s for role %s (%d bytes)", display, req.Commit, r.Name, result.BytesFetched)
+	runtime.Output.DebugSincef(start, "Fetch %s@%s for role %s (%d bytes)", display, req.Commit, r.Name, result.BytesFetched)
 	runtime.Metrics.AddBytesDownloaded(result.BytesFetched)
 	for _, warning := range result.Warnings {
 		runtime.Output.Warnf("%s: %s", display, warning)

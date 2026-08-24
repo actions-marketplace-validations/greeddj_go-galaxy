@@ -140,17 +140,17 @@ func (i *Infra) DebugAnsibleConfig(cfg *config.Config) {
 	if cfg.AnsibleConfigPath != "" {
 		i.debugAnsiblePaths(cfg)
 		if cfg.AnsibleCacheDirUsed {
-			i.Output.Debugf("ansible.cfg %s: galaxy.cache_dir=%s", cfg.AnsibleConfigPath, cfg.CacheDir)
+			i.Output.Debugf("Ansible.cfg %s: galaxy.cache_dir=%s", cfg.AnsibleConfigPath, cfg.CacheDir)
 		}
 		if cfg.AnsibleServerUsed && !cfg.AnsibleServerEnvUsed {
-			i.Output.Debugf("ansible.cfg %s: galaxy.server=%s", cfg.AnsibleConfigPath, cfg.Server)
+			i.Output.Debugf("Ansible.cfg %s: galaxy.server=%s", cfg.AnsibleConfigPath, cfg.Server)
 		}
 	}
 	// Outside the block above on purpose: ANSIBLE_GALAXY_SERVER supplies this
 	// value whether or not an ansible.cfg was found at all, and crediting the
 	// file for it would name a source that did not provide it.
 	if cfg.AnsibleServerEnvUsed {
-		i.Output.Debugf("env ANSIBLE_GALAXY_SERVER: galaxy.server=%s", cfg.Server)
+		i.Output.Debugf("Env ANSIBLE_GALAXY_SERVER: galaxy.server=%s", cfg.Server)
 	}
 	i.debugServerList(cfg.Servers)
 	i.debugGitCredentials(cfg.GitCredentials)
@@ -200,7 +200,7 @@ func (i *Infra) warn(cfg *config.Config, queue func(*config.Config) []string) {
 // line into a credential leak.
 func (i *Infra) debugServerList(servers []config.Server) {
 	for _, s := range servers {
-		i.Output.Debugf("galaxy server %q: url=%s token=%t insecure_skip_tls_verify=%t",
+		i.Output.Debugf("Galaxy server %q: url=%s token=%t insecure_skip_tls_verify=%t",
 			s.ID, s.URL, s.Token.IsSet(), s.InsecureSkipTLSVerify)
 	}
 }
@@ -216,7 +216,7 @@ func (i *Infra) debugGitCredentials(creds []config.GitCredential) {
 		if c.Kind == config.GitCredentialSSHKey {
 			kind = "ssh-key"
 		}
-		i.Output.Debugf("git credential %q: url=%s kind=%s", c.ID, c.URL.String(), kind)
+		i.Output.Debugf("Git credential %q: url=%s kind=%s", c.ID, c.URL.String(), kind)
 	}
 }
 
@@ -227,7 +227,7 @@ func (i *Infra) debugGitCredentials(creds []config.GitCredential) {
 // already.
 func (i *Infra) debugURLCredentials(creds []config.URLCredential) {
 	for _, c := range creds {
-		i.Output.Debugf("url credential %q: url=%s kind=bearer", c.ID, c.URL.String())
+		i.Output.Debugf("Url credential %q: url=%s kind=bearer", c.ID, c.URL.String())
 	}
 }
 
@@ -235,9 +235,9 @@ func (i *Infra) debugURLCredentials(creds []config.URLCredential) {
 // supplied them.
 func (i *Infra) debugAnsiblePaths(cfg *config.Config) {
 	if cfg.AnsibleCollectionsPathUsed {
-		i.Output.Debugf("ansible.cfg %s: defaults.collections_path=%s", cfg.AnsibleConfigPath, cfg.DownloadPath)
+		i.Output.Debugf("Ansible.cfg %s: defaults.collections_path=%s", cfg.AnsibleConfigPath, cfg.DownloadPath)
 	}
 	if cfg.AnsibleRolesPathUsed {
-		i.Output.Debugf("ansible.cfg %s: defaults.roles_path=%s", cfg.AnsibleConfigPath, cfg.RolesPath)
+		i.Output.Debugf("Ansible.cfg %s: defaults.roles_path=%s", cfg.AnsibleConfigPath, cfg.RolesPath)
 	}
 }

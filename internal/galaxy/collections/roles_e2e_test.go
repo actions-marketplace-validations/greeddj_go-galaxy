@@ -186,7 +186,7 @@ func TestRoleFirstWins(t *testing.T) {
 	if got := loadInstalledRole(t, f, "base").Version; got != "v1.0.0" {
 		t.Fatalf("base installed as %q, want the requirement's v1.0.0 over the dependency's HEAD", got)
 	}
-	if !f.printer.hasWarnContaining("role base: already requested") {
+	if !f.printer.hasWarnContaining("Role base: already requested") {
 		t.Fatalf("expected a first-wins warning, got %q", f.printer.warns)
 	}
 }

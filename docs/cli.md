@@ -401,9 +401,13 @@ but none of the three has a write to suppress or a cache to place.
 
 ## Color
 
-Status markers (`✔` success, `↑` a newer version exists, `✗` failure, `!`
-warning) are colored only when the stream they are written to is a terminal,
-decided per stream: with `go-galaxy install > install.log`, stdout gets plain
+Every line carries a status marker: `✔` success, `↑` a newer version exists,
+`✗` failure, `!` warning, and a gray `·` for everything that reports what the
+run is doing rather than what it concluded. One glyph per kind, one column
+wide, so a log reads as a single column of text with a single column of
+markers beside it. The markers are colored only when the stream they are
+written to is a terminal, decided per stream: with
+`go-galaxy install > install.log`, stdout gets plain
 text while stderr, still a terminal, keeps its color. Redirecting both leaves
 the log free of escape sequences, so `grep '^✗'` matches the lines it names.
 `↑` is yellow like `!` and means the same kind of thing - something to look

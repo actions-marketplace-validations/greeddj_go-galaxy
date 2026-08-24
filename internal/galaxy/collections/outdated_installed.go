@@ -134,11 +134,11 @@ func scanInstalledCollection(
 	kind := installedKindOf(doc)
 	name := doc.Namespace + "." + doc.Name
 	if !installedNameUsable(kind, doc) || !helpers.IsExactVersion(doc.Version) {
-		runtime.Output.Warnf("skipping sidecar %s: it names no collection this tool can look up", displayPath(cfg, rel))
+		runtime.Output.Warnf("Skipping sidecar %s: it names no collection this tool can look up", displayPath(cfg, rel))
 		return lockfile.Entry{}, installedUnusable
 	}
 	if infoName != fmt.Sprintf("%s-%s%s", name, doc.Version, infoDirSuffix) {
-		runtime.Output.Warnf("skipping sidecar %s: it describes %s@%s, not the collection it is filed under",
+		runtime.Output.Warnf("Skipping sidecar %s: it describes %s@%s, not the collection it is filed under",
 			displayPath(cfg, rel), name, doc.Version)
 		return lockfile.Entry{}, installedUnusable
 	}
@@ -229,7 +229,7 @@ func readGalaxyYAML(root *os.Root, cfg *config.Config, runtime *infra.Infra, rel
 	}
 	var doc GalaxyYAML
 	if err := yaml.Unmarshal(data, &doc); err != nil {
-		runtime.Output.Warnf("skipping sidecar %s: %v", displayPath(cfg, rel), err)
+		runtime.Output.Warnf("Skipping sidecar %s: %v", displayPath(cfg, rel), err)
 		return GalaxyYAML{}, false
 	}
 	return doc, true

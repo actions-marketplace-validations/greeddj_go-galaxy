@@ -138,7 +138,7 @@ func lookupGalaxyRole(
 		anyV1     bool
 	)
 	for _, srv := range unpinnedServerCandidates(deps.cfg) {
-		deps.runtime.Output.Debugf("role %s: v1 lookup on server %s", req.Src, srv.label())
+		deps.runtime.Output.Debugf("Role %s: v1 lookup on server %s", req.Src, srv.label())
 		res, found, warnings, err := galaxyv1.Resolve(ctx, fetch, srv.base, owner, name, req.Version, policy)
 		for _, w := range warnings {
 			deps.runtime.Output.Warnf("%s: %s", req.Src, w)

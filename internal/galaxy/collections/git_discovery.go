@@ -327,7 +327,7 @@ func acquireGitRoot(
 	ctx context.Context, deps collectionDeps, req gitRootRequest, policy cacheManager.Policy, commit string,
 ) ([]collection, error) {
 	runtime := deps.runtime
-	runtime.Output.Printf("🌿 fetching %s@%s", req.display, req.ref.Name)
+	runtime.Output.Printf("Fetching %s@%s", req.display, req.ref.Name)
 	start := time.Now()
 	gitCtx, cancel := context.WithTimeout(ctx, runtime.GitDeadline())
 	defer cancel()
@@ -342,7 +342,7 @@ func acquireGitRoot(
 	if err != nil {
 		return nil, artifactDeadlineError(ctx, gitCtx, runtime.GitDeadline(), err)
 	}
-	runtime.Output.DebugSincef(start, "fetch %s@%s (%d bytes, %d collections)",
+	runtime.Output.DebugSincef(start, "Fetch %s@%s (%d bytes, %d collections)",
 		req.display, req.ref.Name, result.BytesFetched, len(result.Collections))
 	runtime.Metrics.AddBytesDownloaded(result.BytesFetched)
 	for _, warning := range result.Warnings {

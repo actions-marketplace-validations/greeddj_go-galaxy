@@ -125,7 +125,7 @@ func withBackend(ctx context.Context, cfg *config.Config, runtime *infra.Infra, 
 	defer func() {
 		if state.release != nil {
 			if err := state.release(); err != nil {
-				runtime.Output.Errorf("lock release: %v", err)
+				runtime.Output.Errorf("Lock release: %v", err)
 			}
 		}
 	}()
@@ -188,7 +188,7 @@ func initInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) 
 	if cfg.Refresh && cfg.Offline {
 		runtime.Output.Warnf("--offline: skipping --refresh; cached state is the only source of truth offline")
 	}
-	runtime.Output.Printf("🚀 init cache backend")
+	runtime.Output.Printf("Init cache backend")
 	backend, err := cacheBackend.New(cfg, runtime)
 	if err != nil {
 		return nil, nil, err
@@ -240,12 +240,12 @@ func initInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) 
 	sweepDeadRunTemps(lockCtx, runtime, backend, extractStore)
 
 	snapshotStart := time.Now()
-	runtime.Output.Printf("🚀 load storage")
+	runtime.Output.Printf("Load storage")
 	st, err := backend.LoadStore(lockCtx)
 	if err != nil {
 		return lockCtx, nil, err
 	}
-	runtime.Output.DebugSincef(snapshotStart, "%s", "load snapshot")
+	runtime.Output.DebugSincef(snapshotStart, "%s", "Load snapshot")
 	if err := clearCacheIfRequested(lockCtx, cfg, runtime, backend, st); err != nil {
 		return lockCtx, nil, err
 	}
@@ -323,7 +323,7 @@ func recordProjectUnlessDryRun(ctx context.Context, cfg *config.Config, runtime 
 		return
 	}
 	if err := backend.RecordProject(ctx, cfg.RequirementsFile, cfg.DownloadPath, cfg.RolesPath); err != nil {
-		runtime.Output.Printf("⚠️ Failed to record project: %v", err)
+		runtime.Output.Warnf("Failed to record project: %v", err)
 	}
 }
 
@@ -349,10 +349,10 @@ func newExtractStore(cfg *config.Config) *extracted.Store {
 // write --dry-run exists to suppress in the first place.
 func sweepDeadRunTemps(ctx context.Context, runtime *infra.Infra, backend cacheManager.Backend, extractStore *extracted.Store) {
 	if err := backend.SweepTemp(ctx); err != nil {
-		runtime.Output.Printf("⚠️ Failed to sweep leftover download temps: %v", err)
+		runtime.Output.Warnf("Failed to sweep leftover download temps: %v", err)
 	}
 	if err := extractStore.SweepTemp(); err != nil {
-		runtime.Output.Printf("⚠️ Failed to sweep leftover extract temps: %v", err)
+		runtime.Output.Warnf("Failed to sweep leftover extract temps: %v", err)
 	}
 }
 
@@ -408,13 +408,13 @@ func prepareInstallPlan(
 	if err != nil {
 		return nil, err
 	}
-	runtime.Output.DebugSincef(levelStart, "%s", "build install levels")
+	runtime.Output.DebugSincef(levelStart, "%s", "Build install levels")
 
 	prefetchStart := time.Now()
 	prefetchDeps := newPrefetchDeps(cfg, runtime, state.store, state.backend.Artifacts(), root)
 	prefetchDeps.collectionDeps = prefetchDeps.withSources(state.backend.Artifacts(), state.gitMemo, state.roleMemo, state.urlMemo)
 	prefetch := startPrefetcher(ctx, prefetchDeps, collections, levels)
-	runtime.Output.DebugSincef(prefetchStart, "%s", "prefetch schedule")
+	runtime.Output.DebugSincef(prefetchStart, "%s", "Prefetch schedule")
 
 	return &installPlan{
 		collections: collections,
@@ -454,7 +454,7 @@ func resolveOrLoadLockfile(
 ) (map[string]collection, map[string][]string, error) {
 	if cfg.Frozen {
 		path := lockfile.ResolveDefaultPath(cfg.RequirementsFile, cfg.LockFile)
-		runtime.Output.Printf("🔒 frozen: using lockfile %s", path)
+		runtime.Output.Printf("Frozen: using lockfile %s", path)
 		lf, err := lockfile.LoadRequired(path)
 		if err != nil {
 			return nil, nil, err
@@ -463,7 +463,7 @@ func resolveOrLoadLockfile(
 	}
 
 	resolveStart := time.Now()
-	runtime.Output.Printf("🧩 resolve dependencies")
+	runtime.Output.Printf("Resolve dependencies")
 	resolved, graph, err := resolveCollectionsInternal(
 		ctx,
 		state.resolveDeps(cfg, runtime),
@@ -473,7 +473,7 @@ func resolveOrLoadLockfile(
 	if err != nil {
 		return nil, nil, annotateOfflineConflict(cfg, fmt.Errorf("failed to resolve dependencies: %w", err))
 	}
-	runtime.Output.DebugSincef(resolveStart, "%s", "resolve dependencies")
+	runtime.Output.DebugSincef(resolveStart, "%s", "Resolve dependencies")
 	return resolved, graph, nil
 }
 
@@ -483,7 +483,7 @@ func resolveOrLoadLockfile(
 // cfg.Server here: an unpinned root walks the whole configured server list
 // at resolve time (see serverCandidates) instead of being nailed to one.
 func loadRoots(cfg *config.Config, runtime *infra.Infra) ([]collection, []requirements.RoleRequirement, error) {
-	runtime.Output.Printf("🗂️ load collections from requirements file")
+	runtime.Output.Printf("Load collections from requirements file")
 	collectionsDirect, file, err := loadRequirements(cfg.RequirementsFile, "")
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to load requirements file: %w", err)
@@ -497,7 +497,7 @@ func loadRoots(cfg *config.Config, runtime *infra.Infra) ([]collection, []requir
 	if len(file.Roles) > 0 {
 		runtime.WarnRoleConfig(cfg)
 	}
-	runtime.Output.Printf("🧩 prepare roots")
+	runtime.Output.Printf("Prepare roots")
 	roots, err := prepareRoots(collectionsDirect)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to prepare requirements: %w", err)

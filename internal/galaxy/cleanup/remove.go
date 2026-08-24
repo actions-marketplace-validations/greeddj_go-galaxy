@@ -57,7 +57,7 @@ func removeUnused(
 		// exact, greppable shape CI tooling matches against (e.g.
 		// "🧹 removed ns.name@1.0.0").
 		if cfg.DryRun {
-			runtime.Output.Printf("🧹 would remove %s", key)
+			runtime.Output.Printf("Would remove %s", key)
 			continue
 		}
 		// The persisted InstalledEntry's own Source - not any field on the
@@ -75,7 +75,7 @@ func removeUnused(
 				return removed, err
 			}
 		}
-		runtime.Output.Printf("🧹 removed %s", key)
+		runtime.Output.Printf("Removed %s", key)
 		if st != nil {
 			st.DeleteInstalled(key)
 			st.DeleteGraph(key)

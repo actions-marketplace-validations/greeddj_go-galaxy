@@ -41,7 +41,7 @@ func gitFetchToCache(ctx context.Context, deps installDeps, col collection, useC
 	if err != nil {
 		return downloadResult{}, artifactDeadlineError(ctx, gitCtx, runtime.GitDeadline(), err)
 	}
-	runtime.Output.DebugSincef(start, "fetch %s@%s for %s (%d bytes)", display, req.Commit, col.key(), result.BytesFetched)
+	runtime.Output.DebugSincef(start, "Fetch %s@%s for %s (%d bytes)", display, req.Commit, col.key(), result.BytesFetched)
 	runtime.Metrics.AddBytesDownloaded(result.BytesFetched)
 	for _, warning := range result.Warnings {
 		runtime.Output.Warnf("%s: %s", display, warning)

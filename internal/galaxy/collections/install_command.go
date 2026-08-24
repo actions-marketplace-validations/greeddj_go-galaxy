@@ -24,7 +24,7 @@ func Start(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error 
 // the lock-loss verdict), with installWithState as its work half. install
 // adds nothing of its own ahead of it.
 func runInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) error {
-	return withBackend(ctx, cfg, runtime, "🚀 Starting installation process", installWithState)
+	return withBackend(ctx, cfg, runtime, "Starting installation process", installWithState)
 }
 
 // installWithState performs install's actual work against an
@@ -273,7 +273,7 @@ func runInstallLevel(
 			defer func() { <-sem }()
 			meta, prefetched, ok, prefetchErr := prefetch.Wait(col.key())
 			if ok && prefetchErr != nil {
-				depsCtx.runtime.Output.Printf("⚠️ Prefetch failed for %s: %v", col.key(), prefetchErr)
+				depsCtx.runtime.Output.Warnf("Prefetch failed for %s: %v", col.key(), prefetchErr)
 			}
 			if err := installCollection(ctx, col, depsCtx, depKeys, meta, prefetched); err != nil {
 				depsCtx.runtime.Output.ErrorVersionf(col.Version, fmt.Sprintf("error: %s", err),
@@ -307,15 +307,15 @@ func finalizeInstall(
 	saveStart := time.Now()
 	saveErr := backend.SaveStore(ctx, st)
 	if saveErr == nil {
-		runtime.Output.DebugSincef(saveStart, "%s", "save snapshot")
+		runtime.Output.DebugSincef(saveStart, "%s", "Save snapshot")
 	}
 	if summary.count > 0 {
-		runtime.Output.PersistentPrintf("⚠️ Completed with errors: %d failed. Took %s", summary.count, time.Since(start).Round(time.Second))
+		runtime.Output.PersistentPrintf("Completed with errors: %d failed. Took %s", summary.count, time.Since(start).Round(time.Second))
 		return annotateSaveFailure(summary.installError(), saveErr)
 	}
 	if saveErr != nil {
 		return saveErr
 	}
-	runtime.Output.PersistentPrintf("🤩 All done. Took %s", time.Since(start).Round(time.Second))
+	runtime.Output.Okf("All done. Took %s", time.Since(start).Round(time.Second))
 	return nil
 }

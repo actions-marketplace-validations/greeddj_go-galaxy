@@ -143,7 +143,7 @@ func outdatedInput(cfg *config.Config, runtime *infra.Infra) (outdatedSource, er
 		}
 		return outdatedSource{}, scanErr
 	}
-	runtime.Output.Printf("🔎 no lockfile at %s; reading installed collections from %s", lockPath, cfg.DownloadPath)
+	runtime.Output.Printf("No lockfile at %s; reading installed collections from %s", lockPath, cfg.DownloadPath)
 	reportInstalledGaps(runtime, scan, installedRoleCount(cfg))
 	return outdatedSource{label: cfg.DownloadPath, collections: scan.entries}, nil
 }

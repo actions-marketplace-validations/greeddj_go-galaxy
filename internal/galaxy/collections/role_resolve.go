@@ -64,7 +64,7 @@ func resolveRoles(ctx context.Context, deps collectionDeps, roots []requirements
 	if len(roots) == 0 {
 		return res, nil
 	}
-	deps.runtime.Output.Printf("🎭 resolve roles")
+	deps.runtime.Output.Printf("Resolve roles")
 	queue := make([]roleRequest, 0, len(roots))
 	for _, root := range roots {
 		queue = append(queue, roleRequest{req: root, declaredBy: "requirements.yml"})
@@ -120,7 +120,7 @@ func dedupeRoleLevel(deps collectionDeps, taken map[string]resolvedRole, level [
 			continue
 		}
 		if prior.Src != rr.req.Src || prior.Version != rr.req.Version {
-			deps.runtime.Output.Warnf("role %s: already requested as %s@%s; ignoring %s@%s asked for by %s (first wins, as in ansible-galaxy)",
+			deps.runtime.Output.Warnf("Role %s: already requested as %s@%s; ignoring %s@%s asked for by %s (first wins, as in ansible-galaxy)",
 				rr.req.Name, prior.Src, displayRoleVersion(prior.Version), rr.req.Src, displayRoleVersion(rr.req.Version), rr.declaredBy)
 		}
 	}
@@ -219,9 +219,9 @@ func roleDependencies(deps collectionDeps, declaredBy string, declared []gitsour
 		}
 		switch skip {
 		case requirements.DependencyLocal:
-			deps.runtime.Output.Debugf("role %s depends on %s, a local role; not installed", declaredBy, roleDepDisplay(dep))
+			deps.runtime.Output.Debugf("Role %s depends on %s, a local role; not installed", declaredBy, roleDepDisplay(dep))
 		case requirements.DependencyCollection:
-			deps.runtime.Output.Warnf("role %s depends on %s, a collection's role; install the collection instead", declaredBy, roleDepDisplay(dep))
+			deps.runtime.Output.Warnf("Role %s depends on %s, a collection's role; install the collection instead", declaredBy, roleDepDisplay(dep))
 		case requirements.DependencyInstalled:
 			out = append(out, roleRequest{req: req, declaredBy: "role " + declaredBy})
 		}
@@ -428,7 +428,7 @@ func acquireRole(
 	ctx context.Context, deps collectionDeps, greq gitRoleRequest, policy cacheManager.Policy, commit, galaxySHA string,
 ) (rolePin, error) {
 	runtime := deps.runtime
-	runtime.Output.Printf("🎭 fetching role %s from %s@%s", greq.name, greq.display, greq.ref.Name)
+	runtime.Output.Printf("Fetching role %s from %s@%s", greq.name, greq.display, greq.ref.Name)
 	start := time.Now()
 	gitCtx, cancel := context.WithTimeout(ctx, runtime.GitDeadline())
 	defer cancel()
@@ -442,7 +442,7 @@ func acquireRole(
 	if err != nil {
 		return rolePin{}, artifactDeadlineError(ctx, gitCtx, runtime.GitDeadline(), err)
 	}
-	runtime.Output.DebugSincef(start, "fetch %s@%s (%d bytes)", greq.display, greq.ref.Name, result.BytesFetched)
+	runtime.Output.DebugSincef(start, "Fetch %s@%s (%d bytes)", greq.display, greq.ref.Name, result.BytesFetched)
 	runtime.Metrics.AddBytesDownloaded(result.BytesFetched)
 	for _, warning := range result.Warnings {
 		runtime.Output.Warnf("%s: %s", greq.display, warning)
