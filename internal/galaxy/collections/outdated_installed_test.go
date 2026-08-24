@@ -355,8 +355,8 @@ func TestOutdatedReadsTheInstalledTreeWithoutALockfile(t *testing.T) {
 		t.Fatalf("Outdated: %v", err)
 	}
 
-	if !printer.hasPersistentPrintContaining("Outdated: acme.widgets 1.0.0 -> 2.0.0") {
-		t.Fatalf("report lacks the drift line: %v", printer.persists)
+	if !printer.hasUpdateContaining("Outdated: acme.widgets 1.0.0 -> 2.0.0") {
+		t.Fatalf("report lacks the drift line: %v", printer.updates)
 	}
 	// The summary line names the tree the answer came from, not a lockfile
 	// path that does not exist.

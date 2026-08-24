@@ -183,7 +183,8 @@ func (p recordingPrinter) Okf(format string, args ...any) { p.recordf("Okf", for
 func (p recordingPrinter) OkVersionf(version, format string, args ...any) {
 	p.recordf("OkVersionf", "%s", renderVersionLine(version, "", format, args...))
 }
-func (p recordingPrinter) Errorf(format string, args ...any) { p.recordf("Errorf", format, args...) }
+func (p recordingPrinter) Updatef(format string, args ...any) { p.recordf("Updatef", format, args...) }
+func (p recordingPrinter) Errorf(format string, args ...any)  { p.recordf("Errorf", format, args...) }
 func (p recordingPrinter) ErrorVersionf(version, cause, format string, args ...any) {
 	p.recordf("ErrorVersionf", "%s", renderVersionLine(version, cause, format, args...))
 }
@@ -200,9 +201,12 @@ func (p recordingPrinter) recordf(tier, format string, args ...any) {
 }
 
 // TestReportOutdatedTiers pins reportOutdated's design table: an up-to-date
-// entry lands on Okf, an outdated entry on PersistentPrintf, a failed lookup
-// on Errorf, and the trailing summary on PersistentPrintf again - never on
-// the transient Printf tier, which --quiet would swallow.
+// entry lands on Okf, an outdated entry on Updatef, a failed lookup on
+// Errorf, and the trailing summary on PersistentPrintf - never on the
+// transient Printf tier, which --quiet would swallow. The three per-entry
+// tiers are three different markers, which is what makes the report read as
+// three verdicts rather than as one marked line and one bare one; the
+// summary is a total about no single collection, so it carries none.
 //
 // Mutation: changing the up-to-date line from Okf to PersistentPrintf makes
 // the "up to date lands on Okf" assertion below fail with
@@ -227,8 +231,8 @@ func TestReportOutdatedTiers(t *testing.T) {
 	if calls[0].tier != "Okf" {
 		t.Errorf("reportOutdated: up-to-date line tier = %q, want %q", calls[0].tier, "Okf")
 	}
-	if calls[1].tier != "PersistentPrintf" {
-		t.Errorf("reportOutdated: outdated line tier = %q, want %q", calls[1].tier, "PersistentPrintf")
+	if calls[1].tier != "Updatef" {
+		t.Errorf("reportOutdated: outdated line tier = %q, want %q", calls[1].tier, "Updatef")
 	}
 	if calls[2].tier != "Errorf" {
 		t.Errorf("reportOutdated: lookup-failed line tier = %q, want %q", calls[2].tier, "Errorf")

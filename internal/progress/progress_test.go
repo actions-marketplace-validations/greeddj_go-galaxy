@@ -624,6 +624,11 @@ func sanitizingTiers() []tierCase {
 			wantOut: func(_, clean string) string { return okMark() + clean + colorVersionTag() + "\n" },
 		},
 		{
+			name:    "Updatef",
+			invoke:  func(p *Progress, msg string) { p.Updatef("%s", msg) },
+			wantOut: func(_, clean string) string { return updateMark() + clean + "\n" },
+		},
+		{
 			name:    "Errorf",
 			invoke:  func(p *Progress, msg string) { p.Errorf("%s", msg) },
 			wantErr: func(_, clean string) string { return failMark() + clean + "\n" },
@@ -834,6 +839,11 @@ func TestResultMarkerEscapesSurviveAHostileMessage(t *testing.T) {
 			stream: func(out, _ *bytes.Buffer) *bytes.Buffer { return out },
 		},
 		{
+			name: "Updatef", prefix: updateMark(),
+			invoke: func(p *Progress, msg string) { p.Updatef("%s", msg) },
+			stream: func(out, _ *bytes.Buffer) *bytes.Buffer { return out },
+		},
+		{
 			name: "Errorf", prefix: failMark(),
 			invoke: func(p *Progress, msg string) { p.Errorf("%s", msg) },
 			stream: func(_, errOut *bytes.Buffer) *bytes.Buffer { return errOut },
@@ -903,9 +913,10 @@ func TestSpinnerWritesOutsideThisPackagesWriters(t *testing.T) {
 // through the production marker builder rather than re-spelled here, so a
 // change to the escape sequences cannot leave these expectations describing a
 // form nothing emits.
-func okMark() string   { return marker(okGlyph, ansiGreen, true) }
-func failMark() string { return marker(failGlyph, ansiRed, true) }
-func warnMark() string { return marker(warnGlyph, ansiYellow, true) }
+func okMark() string     { return marker(okGlyph, ansiGreen, true) }
+func updateMark() string { return marker(updateGlyph, ansiYellow, true) }
+func failMark() string   { return marker(failGlyph, ansiRed, true) }
+func warnMark() string   { return marker(warnGlyph, ansiYellow, true) }
 
 // Printing color from every marker unconditionally, including into a
 // redirected file, means `go-galaxy install > install.log 2>&1` puts
@@ -1010,10 +1021,11 @@ func TestMarkersFollowTheirOwnDestination(t *testing.T) {
 	defer p.Close()
 
 	p.Okf("x")
+	p.Updatef("u")
 	p.Errorf("y")
 	p.Warnf("z")
 
-	assertBuf(t, &out, okGlyph+" x\n")
+	assertBuf(t, &out, okGlyph+" x\n"+updateGlyph+" u\n")
 	if got, want := errOut.String(), failMark()+"y\n"+warnMark()+"z\n"; got != want {
 		t.Errorf("errOut = %q, want %q", got, want)
 	}
@@ -1036,5 +1048,49 @@ func TestPackageLevelHelpersFollowTheEnvironment(t *testing.T) {
 	colored := capturePipe(t, &os.Stderr, func() { Errorf("y") })
 	if want := failMark() + "y\n"; colored != want {
 		t.Errorf("Errorf under FORCE_COLOR = %q, want %q", colored, want)
+	}
+}
+
+// TestUpdateTierEmitsInEveryState pins that Updatef is a result tier like
+// the ones it sits beside in a report: it emits in all four output states -
+// with a spinner running, in verbose, in quiet, and on a non-TTY - and it
+// lands on stdout, where the rest of the report is, never on stderr with the
+// warnings it borrows its color from. Quiet is the row that matters most: a
+// CI run with --quiet still has to say which collections have a newer
+// version.
+func TestUpdateTierEmitsInEveryState(t *testing.T) {
+	states := []struct {
+		build  func() (*Progress, *bytes.Buffer, *bytes.Buffer)
+		name   string
+		prefix string
+	}{
+		{name: "A spinner", build: stateA, prefix: updateMark()},
+		{name: "B verbose", build: stateB, prefix: updateMark()},
+		{name: "C quiet", build: stateC, prefix: updateMark()},
+		{name: "D non-TTY", build: stateD, prefix: updateGlyph + " "},
+	}
+
+	for _, st := range states {
+		t.Run(st.name, func(t *testing.T) {
+			p, out, errOut := st.build()
+			defer p.Close()
+			p.Updatef("Outdated: ns.name 1.0.0 -> 2.0.0")
+			assertBuf(t, out, st.prefix+"Outdated: ns.name 1.0.0 -> 2.0.0\n")
+			assertEmpty(t, errOut)
+		})
+	}
+}
+
+// TestUpdateMarkerIsItsOwnGlyph pins the one property that makes the tier
+// worth having: its marker is neither the success nor the failure one, so a
+// report carrying all three says three different things rather than two.
+// Sharing warn's color is deliberate and is not the same question - the
+// glyph is what tells them apart, and warn lands on the other stream.
+func TestUpdateMarkerIsItsOwnGlyph(t *testing.T) {
+	t.Parallel()
+	for _, other := range []string{okGlyph, failGlyph, warnGlyph} {
+		if updateGlyph == other {
+			t.Fatalf("updateGlyph = %q, which is already some other tier's marker", updateGlyph)
+		}
 	}
 }

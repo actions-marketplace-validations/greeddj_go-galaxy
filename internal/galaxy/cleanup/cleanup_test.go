@@ -40,6 +40,7 @@ func (noopPrinter) Printf(string, ...any)                        {}
 func (noopPrinter) PersistentPrintf(string, ...any)              {}
 func (noopPrinter) Okf(string, ...any)                           {}
 func (noopPrinter) OkVersionf(string, string, ...any)            {}
+func (noopPrinter) Updatef(string, ...any)                       {}
 func (noopPrinter) Errorf(string, ...any)                        {}
 func (noopPrinter) ErrorVersionf(string, string, string, ...any) {}
 func (noopPrinter) Warnf(string, ...any)                         {}
@@ -617,7 +618,7 @@ func TestRemoveInstalledRejectsTraversalVersion(t *testing.T) {
 // -run TestRemoveUnusedCannotForgeAReportLine -v` against that mutation
 // produced:
 //
-//	cleanup_test.go:658: recorded output line contains a raw newline,
+//	cleanup_test.go:659: recorded output line contains a raw newline,
 //	forged-line defect is not closed: "🧹 removed ns.hostile@1.0.0
 //	forged plain-text line"
 //	--- FAIL: TestRemoveUnusedCannotForgeAReportLine (0.01s)
@@ -3766,7 +3767,7 @@ func seedManifestWithIdentity(t *testing.T, root, dirNs, dirName, jsonNs, jsonNa
 // TestRemoveInstalledArtifactAndSidecarFollowWalkedIdentity (see that
 // test's own doc comment for why). This test's own share of that run:
 //
-//	cleanup_test.go:3820: expected victim.collection to survive, stat error: stat .../MANIFEST.json: no such file or directory
+//	cleanup_test.go:3821: expected victim.collection to survive, stat error: stat .../MANIFEST.json: no such file or directory
 //	--- FAIL: TestScanIdentityComesFromWalkedDirectoryNotManifest (0.00s)
 //	    --- PASS: TestScanIdentityComesFromWalkedDirectoryNotManifest/positive_control:_evil.pkg_survives_its_own_requirement (0.02s)
 //	    --- FAIL: TestScanIdentityComesFromWalkedDirectoryNotManifest/hostile_manifest_cannot_redirect_deletion (0.02s)
@@ -3910,7 +3911,7 @@ func seedEmptyDirs(t *testing.T, dirs ...string) {
 // (byKey["evil.pkg@9.9.9"]) finds nothing at all rather than the one record
 // it expects:
 //
-//	cleanup_test.go:3872: expected exactly one scanned record keyed evil.pkg@9.9.9, got 0: []
+//	cleanup_test.go:3873: expected exactly one scanned record keyed evil.pkg@9.9.9, got 0: []
 //	--- FAIL: TestRemoveInstalledArtifactAndSidecarFollowWalkedIdentity (0.00s)
 func TestRemoveInstalledArtifactAndSidecarFollowWalkedIdentity(t *testing.T) {
 	t.Parallel()
@@ -3969,9 +3970,9 @@ func TestRemoveInstalledArtifactAndSidecarFollowWalkedIdentity(t *testing.T) {
 // exactly two top-level failures - this test and
 // TestBuildReachablePhase2FollowsTransitiveDependencyEdge below:
 //
-//	cleanup_test.go:4021: expected foo.bar to survive via project A's
+//	cleanup_test.go:4022: expected foo.bar to survive via project A's
 //	cross-project requirement, stat .../MANIFEST.json: no such file or directory
-//	cleanup_test.go:4074: expected dep.leaf to survive via top.level's
+//	cleanup_test.go:4075: expected dep.leaf to survive via top.level's
 //	transitive dependency, stat .../MANIFEST.json: no such file or directory
 //	--- FAIL: TestBuildReachablePhase2ReachesDirectCrossProjectRequirement (0.01s)
 //	--- FAIL: TestBuildReachablePhase2FollowsTransitiveDependencyEdge (0.01s)
@@ -4136,7 +4137,7 @@ func buildSkippedProjectRootsFixture(t *testing.T, cacheDir string, requireFooBa
 // requirements" property from the opposite direction (an unparseable file
 // must still abort, rather than a valid file still being consulted):
 //
-//	cleanup_test.go:4164: expected foo.bar to survive via the skipped
+//	cleanup_test.go:4165: expected foo.bar to survive via the skipped
 //	project's own requirement, stat .../MANIFEST.json: no such file or directory
 //	--- FAIL: TestBuildReachableSkippedProjectStillContributesRoots (0.01s)
 //
@@ -4334,7 +4335,7 @@ func buildUnscannedProjectFixture(t *testing.T, cacheDir string, reqContent []by
 // something, so the unparseable content is never read and Start returns nil
 // instead of aborting:
 //
-//	cleanup_test.go:4349: expected ErrProjectRequirementsUnreadable, got <nil>
+//	cleanup_test.go:4350: expected ErrProjectRequirementsUnreadable, got <nil>
 //	--- FAIL: TestUnparseableRequirementsAbortsEvenForUnscannedProject (0.01s)
 func TestUnparseableRequirementsAbortsEvenForUnscannedProject(t *testing.T) {
 	t.Parallel()
@@ -4608,7 +4609,7 @@ func TestOpenProjectWorkspaceFallsBackToCollections(t *testing.T) {
 // `go test -run TestOpenProjectWorkspacePrefersRecordedCollectionsPathOverFallback -v`
 // against that mutation produced:
 //
-//	cleanup_test.go:4657: expected the recorded CollectionsPath's unreferenced install to be removed, stat error: <nil>
+//	cleanup_test.go:4658: expected the recorded CollectionsPath's unreferenced install to be removed, stat error: <nil>
 //	--- FAIL: TestOpenProjectWorkspacePrefersRecordedCollectionsPathOverFallback (0.01s)
 //
 // under the mutation, the fallback candidate wins the race instead: it is a

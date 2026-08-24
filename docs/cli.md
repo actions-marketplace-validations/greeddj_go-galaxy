@@ -401,11 +401,15 @@ but none of the three has a write to suppress or a cache to place.
 
 ## Color
 
-Status markers (`✔`, `✗`, `!`) are colored only when the stream they are
-written to is a terminal, decided per stream: with `go-galaxy install >
-install.log`, stdout gets plain text while stderr, still a terminal, keeps its
-color. Redirecting both leaves the log free of escape sequences, so `grep '^✗'`
-matches the lines it names.
+Status markers (`✔` success, `↑` a newer version exists, `✗` failure, `!`
+warning) are colored only when the stream they are written to is a terminal,
+decided per stream: with `go-galaxy install > install.log`, stdout gets plain
+text while stderr, still a terminal, keeps its color. Redirecting both leaves
+the log free of escape sequences, so `grep '^✗'` matches the lines it names.
+`↑` is yellow like `!` and means the same kind of thing - something to look
+at - but it is a verdict about one collection on stdout rather than a warning
+on stderr, so `outdated`'s three per-entry lines each carry their own marker
+and line up under each other.
 
 The version an `Installed:`, `Cached:` or `Failed:` line settled on is the
 other thing this rule governs. It is written as `== <version>` after the name,

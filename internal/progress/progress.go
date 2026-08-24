@@ -28,14 +28,20 @@ import (
 )
 
 const (
-	ansiRed     = "\x1b[1m\x1b[31m"
-	ansiGreen   = "\x1b[1m\x1b[32m"
-	ansiYellow  = "\x1b[1m\x1b[33m"
-	ansiGray    = "\x1b[1m\x1b[90m"
-	ansiReset   = "\x1b[0m"
-	okGlyph     = "✔"
-	failGlyph   = "✗"
-	warnGlyph   = "!"
+	ansiRed    = "\x1b[1m\x1b[31m"
+	ansiGreen  = "\x1b[1m\x1b[32m"
+	ansiYellow = "\x1b[1m\x1b[33m"
+	ansiGray   = "\x1b[1m\x1b[90m"
+	ansiReset  = "\x1b[0m"
+	okGlyph    = "✔"
+	failGlyph  = "✗"
+	warnGlyph  = "!"
+	// updateGlyph marks a result that is neither a success nor a failure:
+	// the subject is fine and something newer exists. It points the way the
+	// version would move, and it is one column wide like the two glyphs it
+	// sits beside in the same report, so the three verdict lines of one
+	// report align rather than each starting at its own column.
+	updateGlyph = "↑"
 	debugPrefix = "🚧 Debug: "
 	// versionMark introduces the exact version a result line settled on. It
 	// is spelled as the constraint that pins that one version rather than
@@ -69,11 +75,14 @@ type stream struct {
 	color bool
 }
 
-// ok, fail and warn return the marker prefix for this stream, colored only
-// when this destination accepts color.
-func (s stream) ok() string   { return marker(okGlyph, ansiGreen, s.color) }
-func (s stream) fail() string { return marker(failGlyph, ansiRed, s.color) }
-func (s stream) warn() string { return marker(warnGlyph, ansiYellow, s.color) }
+// ok, fail, warn and update return the marker prefix for this stream,
+// colored only when this destination accepts color. update shares warn's
+// yellow: both say an operator has something to look at, and they are told
+// apart by their glyph and by the stream they arrive on rather than by hue.
+func (s stream) ok() string     { return marker(okGlyph, ansiGreen, s.color) }
+func (s stream) fail() string   { return marker(failGlyph, ansiRed, s.color) }
+func (s stream) warn() string   { return marker(warnGlyph, ansiYellow, s.color) }
+func (s stream) update() string { return marker(updateGlyph, ansiYellow, s.color) }
 
 // versionTag returns the version decoration for this stream, colored only
 // when this destination accepts color - the same per-destination question the
@@ -296,6 +305,19 @@ func (p *Progress) OkVersionf(version, format string, args ...any) {
 		msg:    safeout.Clean(fmt.Sprintf(format, args...)),
 		tag:    p.out.versionTag(safeout.Clean(version)),
 	})
+}
+
+// Updatef prints a result whose subject is intact but superseded: nothing
+// failed, and something newer is available. It carries its own marker rather
+// than borrowing one, because the two it sits beside would each be a wrong
+// statement about it - a green success mark reads as "nothing to do", and a
+// red failure mark as "something broke" - and it goes to stdout rather than
+// to stderr with the warnings, since it is part of a report a caller reads
+// there.
+func (p *Progress) Updatef(format string, args ...any) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.emit(p.out, decorated{prefix: p.out.update(), msg: safeout.Clean(fmt.Sprintf(format, args...))})
 }
 
 // Errorf prints an error message with a colored marker to stderr, so failures

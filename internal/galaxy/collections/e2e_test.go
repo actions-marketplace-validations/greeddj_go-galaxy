@@ -56,6 +56,7 @@ func (noopPrinter) Printf(string, ...any)                        {}
 func (noopPrinter) PersistentPrintf(string, ...any)              {}
 func (noopPrinter) Okf(string, ...any)                           {}
 func (noopPrinter) OkVersionf(string, string, ...any)            {}
+func (noopPrinter) Updatef(string, ...any)                       {}
 func (noopPrinter) Errorf(string, ...any)                        {}
 func (noopPrinter) ErrorVersionf(string, string, string, ...any) {}
 func (noopPrinter) Warnf(string, ...any)                         {}
@@ -537,9 +538,9 @@ func installOnceAndPublishNewerVersion(t *testing.T) *e2eFixture {
 // resolveCollectionsInternal's snapshotAllowed expression) confirmed to fail
 // the "with refresh" row with:
 //
-//	e2e_test.go:566: installed acme.app collection_info.version = "1.0.0",
+//	e2e_test.go:567: installed acme.app collection_info.version = "1.0.0",
 //	want "2.0.0"
-//	e2e_test.go:570: server.Total() > 0 = false, want true (Total() = 0)
+//	e2e_test.go:571: server.Total() > 0 = false, want true (Total() = 0)
 //	--- FAIL: TestRefreshReSolvesInsteadOfReplayingTheSnapshot/with_refresh:_re-resolves,_picks_up_the_new_version (0.08s)
 func TestRefreshReSolvesInsteadOfReplayingTheSnapshot(t *testing.T) {
 	t.Parallel()
@@ -586,7 +587,7 @@ func TestRefreshReSolvesInsteadOfReplayingTheSnapshot(t *testing.T) {
 // condition, so refresh forces a cache miss the way forceDownload already
 // does) confirmed to fail with:
 //
-//	e2e_test.go:612: EndpointArtifact count = 2, want 0 (a cached artifact
+//	e2e_test.go:613: EndpointArtifact count = 2, want 0 (a cached artifact
 //	must not be re-downloaded)
 //	--- FAIL: TestRefreshDoesNotRedownloadCachedArtifacts (0.07s)
 func TestRefreshDoesNotRedownloadCachedArtifacts(t *testing.T) {
@@ -633,7 +634,7 @@ func TestRefreshDoesNotRedownloadCachedArtifacts(t *testing.T) {
 // to fail only the warning assertion, with the counts and installed version
 // above it still passing:
 //
-//	e2e_test.go:675: expected a --refresh-skipped warning on stderr, got []
+//	e2e_test.go:676: expected a --refresh-skipped warning on stderr, got []
 //	--- FAIL: TestOfflineOutranksRefresh (0.08s)
 //
 // A second mutation was also tried and did NOT kill this test: dropping the

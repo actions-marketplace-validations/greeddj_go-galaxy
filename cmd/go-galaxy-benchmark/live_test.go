@@ -25,6 +25,7 @@ func (p *recordingPrinter) Printf(format string, args ...any) {
 
 func (p *recordingPrinter) PersistentPrintf(format string, args ...any) { p.Printf(format, args...) }
 func (p *recordingPrinter) Okf(format string, args ...any)              { p.Printf(format, args...) }
+func (p *recordingPrinter) Updatef(format string, args ...any)          { p.Printf(format, args...) }
 func (p *recordingPrinter) Errorf(format string, args ...any)           { p.Printf(format, args...) }
 func (p *recordingPrinter) Warnf(format string, args ...any)            { p.Printf(format, args...) }
 func (p *recordingPrinter) Debugf(format string, args ...any)           { p.Printf(format, args...) }

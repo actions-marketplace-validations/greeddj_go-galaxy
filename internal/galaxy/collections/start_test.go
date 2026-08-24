@@ -39,6 +39,7 @@ type capturingPrinter struct {
 	warns    []string
 	debugs   []string
 	oks      []string
+	updates  []string
 	errs     []string
 	mu       sync.Mutex
 }
@@ -66,6 +67,16 @@ func (p *capturingPrinter) OkVersionf(version, format string, args ...any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.oks = append(p.oks, renderVersionLine(version, "", format, args...))
+}
+
+// Updatef records a line on the third verdict tier, the one that says the
+// subject is intact and something newer exists. It gets its own slice rather
+// than joining oks: a test asserting a report said "up to date" must not be
+// satisfied by a line that said the opposite.
+func (p *capturingPrinter) Updatef(format string, args ...any) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.updates = append(p.updates, fmt.Sprintf(format, args...))
 }
 
 // ErrorVersionf records an error-tier line into the same slice Errorf does,
@@ -122,6 +133,19 @@ func (p *capturingPrinter) hasPersistentPrintContaining(substr string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, line := range p.persists {
+		if strings.Contains(line, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasUpdateContaining reports whether any recorded Updatef line contains
+// substr.
+func (p *capturingPrinter) hasUpdateContaining(substr string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, line := range p.updates {
 		if strings.Contains(line, substr) {
 			return true
 		}

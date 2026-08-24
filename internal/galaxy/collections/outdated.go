@@ -341,13 +341,15 @@ func isNewerVersion(latest, locked string) (bool, error) {
 // summary, entirely through the Printer so every line is sanitized and
 // --quiet-aware like the rest of the program's output.
 //
-// Every line here is result tier (Okf/PersistentPrintf/Errorf), matching the
-// fact that this report is itself the run's product: an up-to-date entry
-// uses Okf since there is nothing to do, an outdated entry uses
-// PersistentPrintf since it is a neutral finding rather than a success or a
-// failure, and a failed lookup uses Errorf on stderr so a diagnostic never
-// contaminates stdout. Result tier means --quiet suppresses none of these
-// four lines - it only ever suppresses the transient tier - which is a
+// Every line here is result tier (Okf/Updatef/Errorf/PersistentPrintf),
+// matching the fact that this report is itself the run's product: an
+// up-to-date entry uses Okf since there is nothing to do, an outdated entry
+// uses Updatef, whose marker says neither success nor failure, and a failed
+// lookup uses Errorf on stderr so a diagnostic never contaminates stdout;
+// the trailing summary is a total rather than a verdict about any one
+// collection, so it carries no marker at all. Result tier means --quiet
+// suppresses none of these four lines - it only ever suppresses the
+// transient tier - which is a
 // deliberate divergence from classifyDryRun's own dry-run report mapping:
 // reporting "there is a newer version available" through a green checkmark
 // would be a wrong statement, so the two reports are not aligned on purpose.
@@ -379,7 +381,7 @@ func reportOutdated(runtime *infra.Infra, results []outdatedEntry, lockPath stri
 			runtime.Output.Errorf("Lookup failed: %q@%s: %s", r.Name, r.Locked, r.Err)
 			failed++
 		case r.Newer:
-			runtime.Output.PersistentPrintf("Outdated: %s %s -> %s", r.Name, r.Locked, r.Latest)
+			runtime.Output.Updatef("Outdated: %s %s -> %s", r.Name, r.Locked, r.Latest)
 			outdated++
 		default:
 			runtime.Output.Okf("Up to date: %s@%s", r.Name, r.Locked)

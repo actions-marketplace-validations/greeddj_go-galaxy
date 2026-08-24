@@ -34,6 +34,7 @@ func (noopPrinter) Printf(string, ...any)                        {}
 func (noopPrinter) PersistentPrintf(string, ...any)              {}
 func (noopPrinter) Okf(string, ...any)                           {}
 func (noopPrinter) OkVersionf(string, string, ...any)            {}
+func (noopPrinter) Updatef(string, ...any)                       {}
 func (noopPrinter) Errorf(string, ...any)                        {}
 func (noopPrinter) ErrorVersionf(string, string, string, ...any) {}
 func (noopPrinter) Warnf(string, ...any)                         {}
