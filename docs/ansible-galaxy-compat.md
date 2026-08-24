@@ -228,7 +228,16 @@ does not define is a usage error naming the flag and exits `2`, which is how
   surprises, because it is version-scoped and is not part of the collection's
   own content: deleting or renaming that `GALAXY.yml` forces a full
   re-download and re-extract even though the record, the install path, the
-  server, the pin and the extract marker all still agree. The consequence runs both ways: the
+  server, the pin and the extract marker all still agree. It is read rather
+  than merely found, and has to name this collection at this version, so a
+  truncated write and a document left by another version cost the same
+  re-download - existence alone was never evidence that the tree and the
+  provenance record beside it belong together. One disagreement does not:
+  a sidecar whose `server` fell behind the record is rewritten in place,
+  since the record has already been shown to name this collection and this
+  source and a re-download would change no installed byte. That repair is
+  the only write a skipped install makes, and it happens only when the two
+  actually disagree. The consequence runs both ways: the
   install path carries the namespace and the name but not the version, so a
   resolve that lands lower installs the lower version over a newer tree, and
   there is no "prefer what is there". A rerun is not by itself a new resolve,

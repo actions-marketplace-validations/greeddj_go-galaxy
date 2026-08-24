@@ -1,10 +1,13 @@
 package collections
 
 import (
+	"errors"
+	"io/fs"
 	"path"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
+	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 	"github.com/psvmcc/hub/pkg/types"
 	"go.yaml.in/yaml/v3"
 )
@@ -34,6 +37,82 @@ type GalaxyYAML struct {
 	// URLSHA256 records a url collection's origin sha256, provenance the way
 	// GitCommit is for a git collection; ansible ignores both.
 	URLSHA256 string `yaml:"url_sha256,omitempty"`
+}
+
+// describes reports whether this document names the very collection col is,
+// which is what the install-skip check asks of a sidecar before it accepts
+// one as evidence of an install. The three identity fields are exactly what
+// buildGalaxyYAML fills from col, so a document this tool wrote for col
+// always passes and a document written for anything else - or a truncated
+// one, whose fields are empty - always fails.
+func (g GalaxyYAML) describes(col collection) bool {
+	return g.Namespace == col.Namespace && g.Name == col.Name && g.Version == col.Version
+}
+
+// readGalaxyInfo reads and parses the sidecar beside target. It reports
+// false for every outcome that is not a parseable document - absent,
+// unreadable, not a regular file, or malformed - since none of them is
+// evidence of anything about the collection.
+func readGalaxyInfo(target installTarget) (GalaxyYAML, bool) {
+	data, ok := readRegularFile(target.root, path.Join(target.info, galaxyYAMLFileName))
+	if !ok {
+		return GalaxyYAML{}, false
+	}
+	var doc GalaxyYAML
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return GalaxyYAML{}, false
+	}
+	return doc, true
+}
+
+// reconcileGalaxyInfo repairs the one field of an already-installed
+// collection's sidecar that can drift while the install itself stays valid:
+// the server. It is called on the skip path, where the store's record has
+// just been shown to name this collection, this path and this source, so the
+// record is the authority and the document beside it is a copy that fell
+// behind - a copy written by a version of this tool that recorded the run's
+// default server rather than the one the collection resolved from.
+//
+// Repairing rather than re-installing is the proportionate answer: nothing
+// about the artifact or the extracted tree is in question, so a re-download
+// would change no byte of what is installed. That is also why it is not the
+// same judgment the identity check makes - a document naming a different
+// collection says the tree's provenance is unknown, which only a real
+// install can settle.
+//
+// The document is rewritten whole from what was read, with one field
+// replaced, so download_url, version_url, signatures and the git or url
+// provenance all survive - none of them is available on this path to
+// rebuild. The file is removed before it is written rather than truncated in
+// place, the same discipline writeGalaxyInstallInfo follows for a role: an
+// in-root symlink at that name is a path os.Root will happily resolve, and
+// writing through it would land the document somewhere this run never
+// created.
+//
+// A failure to repair is a warning, never an error: the run's actual product
+// is installed and correct, and refusing to proceed over a metadata field
+// would turn a self-heal into an outage.
+func reconcileGalaxyInfo(runtime *infra.Infra, target installTarget, cfg *config.Config, col collection, doc GalaxyYAML) {
+	want := buildGalaxyYAML(cfg, col, nil).Server
+	if doc.Server == want {
+		return
+	}
+	doc.Server = want
+	data, err := yaml.Marshal(&doc)
+	if err != nil {
+		runtime.Output.Warnf("%s: cannot rebuild %s: %v", col.key(), galaxyYAMLFileName, err)
+		return
+	}
+	rel := path.Join(target.info, galaxyYAMLFileName)
+	if err := target.root.Remove(rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		runtime.Output.Warnf("%s: cannot replace %s: %v", col.key(), galaxyYAMLFileName, err)
+		return
+	}
+	if err := target.root.WriteFile(rel, data, helpers.FileMod); err != nil {
+		runtime.Output.Warnf("%s: cannot write %s: %v", col.key(), galaxyYAMLFileName, err)
+		return
+	}
+	runtime.Output.Debugf("%s: recorded server corrected to %s in %s", col.key(), want, galaxyYAMLFileName)
 }
 
 // writeGalaxyInfo writes GALAXY.yml for the installed collection. When meta

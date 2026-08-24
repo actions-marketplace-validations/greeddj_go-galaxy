@@ -514,7 +514,7 @@ func TestPrefetchScanUsesCheapCheck(t *testing.T) {
 
 	infoDir := filepath.Join(root, "ansible_collections", col.Namespace+"."+col.Name+"-"+col.Version+".info")
 	mustMkdirAll(t, infoDir)
-	mustWriteFile(t, filepath.Join(infoDir, "GALAXY.yml"), []byte("format_version: 1.0.0\n"))
+	mustWriteFile(t, filepath.Join(infoDir, "GALAXY.yml"), sidecarFor(col))
 
 	cfg := &config.Config{DownloadPath: root, Workers: 1}
 	st := store.New()

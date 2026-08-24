@@ -643,7 +643,7 @@ func TestInstallCollectionSkipReleasesPrefetchedTempExactlyOnce(t *testing.T) {
 	if err := os.MkdirAll(infoDir, helpers.DirMod); err != nil {
 		t.Fatalf("mkdir infoDir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(infoDir, "GALAXY.yml"), []byte("format_version: 1.0.0\n"), helpers.FileMod); err != nil {
+	if err := os.WriteFile(filepath.Join(infoDir, "GALAXY.yml"), sidecarFor(col), helpers.FileMod); err != nil {
 		t.Fatalf("write GALAXY.yml: %v", err)
 	}
 

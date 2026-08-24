@@ -23,6 +23,7 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
 	"github.com/psvmcc/hub/pkg/types"
+	"go.yaml.in/yaml/v3"
 )
 
 // noopPrinter is a minimal output.Printer stub for tests that need an Infra
@@ -54,6 +55,17 @@ func renderVersionLine(version, cause, format string, args ...any) string {
 		line += " " + cause
 	}
 	return line
+}
+
+// sidecarFor renders the GALAXY.yml an install of col would leave beside the
+// collection. Tests seed it wherever matchingInstalledRecord will read it
+// back, and it has to name the collection: that check reads the document and
+// requires it to describe col, so the bare `format_version:` line these
+// fixtures used to write is a document about nothing and no longer counts as
+// evidence of an install.
+func sidecarFor(col collection) []byte {
+	return []byte(fmt.Sprintf("format_version: 1.0.0\nnamespace: %s\nname: %s\nversion: %s\n",
+		col.Namespace, col.Name, col.Version))
 }
 
 func TestVerifyPinnedSHA(t *testing.T) {
@@ -390,7 +402,7 @@ func TestCanSkipInstallPinGate(t *testing.T) {
 	if err := os.MkdirAll(infoDir, helpers.DirMod); err != nil {
 		t.Fatalf("mkdir infoDir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(infoDir, "GALAXY.yml"), []byte("format_version: 1.0.0\n"), helpers.FileMod); err != nil {
+	if err := os.WriteFile(filepath.Join(infoDir, "GALAXY.yml"), sidecarFor(col), helpers.FileMod); err != nil {
 		t.Fatalf("write GALAXY.yml: %v", err)
 	}
 
@@ -403,13 +415,13 @@ func TestCanSkipInstallPinGate(t *testing.T) {
 
 	matching := col
 	matching.SHA256 = installedSHA
-	if !canSkipInstall(target, matching, st, noopPrinter{}) {
+	if _, ok := canSkipInstall(target, matching, st, noopPrinter{}); !ok {
 		t.Fatalf("expected canSkipInstall to return true when the pin matches the installed SHA")
 	}
 
 	mismatched := col
 	mismatched.SHA256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	if canSkipInstall(target, mismatched, st, noopPrinter{}) {
+	if _, ok := canSkipInstall(target, mismatched, st, noopPrinter{}); ok {
 		t.Fatalf("expected canSkipInstall to return false when the pin does not match the installed SHA")
 	}
 }
@@ -437,7 +449,7 @@ func TestCanSkipInstallSourceGate(t *testing.T) {
 	if err := os.MkdirAll(infoDir, helpers.DirMod); err != nil {
 		t.Fatalf("mkdir infoDir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(infoDir, "GALAXY.yml"), []byte("format_version: 1.0.0\n"), helpers.FileMod); err != nil {
+	if err := os.WriteFile(filepath.Join(infoDir, "GALAXY.yml"), sidecarFor(col), helpers.FileMod); err != nil {
 		t.Fatalf("write GALAXY.yml: %v", err)
 	}
 
@@ -449,13 +461,13 @@ func TestCanSkipInstallSourceGate(t *testing.T) {
 		InstalledAt:    time.Now().UTC(),
 	})
 
-	if !canSkipInstall(target, col, st, noopPrinter{}) {
+	if _, ok := canSkipInstall(target, col, st, noopPrinter{}); !ok {
 		t.Fatalf("expected canSkipInstall to return true when the source is unchanged")
 	}
 
 	switched := col
 	switched.Source = "https://b.example.com"
-	if canSkipInstall(target, switched, st, noopPrinter{}) {
+	if _, ok := canSkipInstall(target, switched, st, noopPrinter{}); ok {
 		t.Fatalf("expected canSkipInstall to return false when the collection now resolves from a different server")
 	}
 }
@@ -463,4 +475,177 @@ func TestCanSkipInstallSourceGate(t *testing.T) {
 func sha256Hex(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+// TestCanSkipInstallReadsTheSidecar pins that the skip check judges the
+// sidecar by what it says, not by its existence. Every row is a document
+// that used to pass - the file was there, and that was the whole test - while
+// saying nothing that ties the tree to the collection whose install is being
+// skipped. A truncated write, a leftover from another version, or a document
+// planted by hand all land here.
+//
+// The matching row is the positive control on the same fixture: the store
+// record, the marker and the install path are identical across all of them,
+// so a row that fails to skip fails on the document alone.
+func TestCanSkipInstallReadsTheSidecar(t *testing.T) {
+	t.Parallel()
+	col := collection{Namespace: "acme", Name: "widgets", Version: testVersion100}
+
+	cases := []struct {
+		name     string
+		sidecar  []byte
+		wantSkip bool
+	}{
+		{name: "describes this collection", sidecar: sidecarFor(col), wantSkip: true},
+		{name: "empty", sidecar: nil, wantSkip: false},
+		{name: "no identity at all", sidecar: []byte("format_version: 1.0.0\n"), wantSkip: false},
+		{
+			name:    "another version",
+			sidecar: sidecarFor(collection{Namespace: "acme", Name: "widgets", Version: "2.0.0"}),
+		},
+		{
+			name:    "another collection",
+			sidecar: sidecarFor(collection{Namespace: "evil", Name: "pkg", Version: testVersion100}),
+		},
+		{name: "not a document", sidecar: []byte("namespace: [broken\n"), wantSkip: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			target, st := seedInstalledCollection(t, col, tc.sidecar)
+			if _, ok := canSkipInstall(target, col, st, noopPrinter{}); ok != tc.wantSkip {
+				t.Fatalf("canSkipInstall = %v, want %v", ok, tc.wantSkip)
+			}
+		})
+	}
+}
+
+// TestCanSkipInstallRepairsADriftedServer pins the repair the skip path
+// makes: a sidecar whose server fell behind the record that just proved the
+// install valid is rewritten in place, and nothing else about the document
+// is lost. Re-installing instead would change no byte of what is installed,
+// and leaving it alone would leave the file wrong for as long as the tree
+// lives, since a skip rewrites nothing on its own.
+//
+// download_url is asserted afterwards because it is the field that cannot be
+// rebuilt on this path - no version metadata is fetched for a collection
+// that is being skipped - so a repair written as a fresh buildGalaxyYAML
+// would silently drop it.
+func TestCanSkipInstallRepairsADriftedServer(t *testing.T) {
+	t.Parallel()
+	const stale = "https://hub.example/galaxy/ansible"
+	const current = "https://hub.example/galaxy/internal"
+	const downloadURL = "https://objects.example/acme-widgets-1.0.0.tar.gz"
+
+	col := collection{Namespace: "acme", Name: "widgets", Version: testVersion100, Source: current}
+	drifted := GalaxyYAML{
+		FormatVer: "1.0.0", Namespace: col.Namespace, Name: col.Name, Version: col.Version,
+		Server: stale, DownloadURL: downloadURL,
+	}
+	seeded, err := yaml.Marshal(&drifted)
+	if err != nil {
+		t.Fatalf("marshal sidecar: %v", err)
+	}
+	target, st := seedInstalledCollection(t, col, seeded)
+
+	cfg := &config.Config{Server: stale}
+	state, ok := canSkipInstall(target, col, st, noopPrinter{})
+	if !ok {
+		t.Fatalf("canSkipInstall = false; a drifted server must not force a reinstall")
+	}
+	reconcileGalaxyInfo(infra.New(noopPrinter{}, nil), target, cfg, col, state.info)
+
+	repaired, ok := readGalaxyInfo(target)
+	if !ok {
+		t.Fatalf("sidecar unreadable after the repair")
+	}
+	if repaired.Server != current {
+		t.Errorf("server = %q, want the server the record names, %q", repaired.Server, current)
+	}
+	if repaired.DownloadURL != downloadURL {
+		t.Errorf("download_url = %q, want it preserved: %q", repaired.DownloadURL, downloadURL)
+	}
+}
+
+// TestReconcileGalaxyInfoLeavesAnAgreeingSidecarAlone is the negative control
+// for the repair: an ordinary run over an ordinary tree must not rewrite a
+// document that already agrees, since a skip that touches the tree on every
+// run is no longer a skip.
+func TestReconcileGalaxyInfoLeavesAnAgreeingSidecarAlone(t *testing.T) {
+	t.Parallel()
+	const server = "https://hub.example/galaxy/ansible"
+	col := collection{Namespace: "acme", Name: "widgets", Version: testVersion100, Source: server}
+	doc := GalaxyYAML{
+		FormatVer: "1.0.0", Namespace: col.Namespace, Name: col.Name, Version: col.Version, Server: server,
+	}
+	seeded, err := yaml.Marshal(&doc)
+	if err != nil {
+		t.Fatalf("marshal sidecar: %v", err)
+	}
+	target, _ := seedInstalledCollection(t, col, seeded)
+	rel := filepath.Join(target.path, "..", "..",
+		col.Namespace+"."+col.Name+"-"+col.Version+".info", galaxyYAMLFileName)
+	before := mustModTime(t, rel)
+
+	reconcileGalaxyInfo(infra.New(noopPrinter{}, nil), target, &config.Config{Server: server}, col, doc)
+
+	if after := mustModTime(t, rel); !after.Equal(before) {
+		t.Errorf("sidecar was rewritten though it already agreed: %s -> %s", before, after)
+	}
+}
+
+func mustModTime(t *testing.T, path string) time.Time {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return info.ModTime()
+}
+
+// seedInstalledCollection builds the on-disk and in-store shape of a
+// completed install of col - the record, the install path, a valid extract
+// marker and the sidecar bytes given - and returns the target and store the
+// skip check reads them through. sidecar is written verbatim, including
+// empty, so a caller can seed a document the check must refuse.
+func seedInstalledCollection(t *testing.T, col collection, sidecar []byte) (installTarget, *store.Store) {
+	t.Helper()
+	const artifactSHA = "f16682b62c181adfc22929576413890a9e5b338d975c949948262e41345a5c04"
+	downloadPath := t.TempDir()
+	target := newTestInstallTarget(t, &config.Config{DownloadPath: downloadPath}, col)
+	if err := os.MkdirAll(target.path, helpers.DirMod); err != nil {
+		t.Fatalf("mkdir install path: %v", err)
+	}
+	seedValidExtractMarker(t, target, artifactSHA)
+
+	infoDir := filepath.Join(downloadPath, "ansible_collections",
+		col.Namespace+"."+col.Name+"-"+col.Version+".info")
+	if err := os.MkdirAll(infoDir, helpers.DirMod); err != nil {
+		t.Fatalf("mkdir info dir: %v", err)
+	}
+	mustWriteFile(t, filepath.Join(infoDir, galaxyYAMLFileName), sidecar)
+
+	st := store.New()
+	st.SetInstalled(col.key(), store.InstalledEntry{
+		InstallPath: target.path, Source: col.Source, ArtifactSHA256: artifactSHA,
+	})
+	return target, st
+}
+
+// BenchmarkMatchingInstalledRecord measures what one already-installed
+// collection costs the skip check, which is what an install of an unchanged
+// tree pays per collection and nothing else does. The check reads and parses
+// the sidecar rather than stat-ing it, and this is the number that says what
+// that costs; the doc comment on matchingInstalledRecord quotes it.
+func BenchmarkMatchingInstalledRecord(b *testing.B) {
+	col := collection{Namespace: "acme", Name: "widgets", Version: testVersion100}
+	target, st := seedInstalledCollection(&testing.T{}, col, sidecarFor(col))
+
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, ok := matchingInstalledRecord(target, col, st); !ok {
+			b.Fatal("fixture does not match")
+		}
+	}
 }

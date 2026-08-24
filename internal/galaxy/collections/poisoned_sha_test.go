@@ -184,7 +184,7 @@ func TestCanSkipInstallRefusesPoisonedSnapshotSHA(t *testing.T) {
 
 	infoDir := filepath.Join(downloadPath, "ansible_collections", col.Namespace+"."+col.Name+"-"+col.Version+".info")
 	mustMkdirAll(t, infoDir)
-	mustWriteFile(t, filepath.Join(infoDir, "GALAXY.yml"), []byte("format_version: 1.0.0\n"))
+	mustWriteFile(t, filepath.Join(infoDir, "GALAXY.yml"), sidecarFor(col))
 
 	// installPath is DownloadPath/ansible_collections/acme/widgets - three
 	// real path elements under downloadPath - so five ".." segments (no
@@ -203,7 +203,7 @@ func TestCanSkipInstallRefusesPoisonedSnapshotSHA(t *testing.T) {
 		InstalledAt:    time.Now().UTC(),
 	})
 
-	if canSkipInstall(target, col, st, noopPrinter{}) {
+	if _, ok := canSkipInstall(target, col, st, noopPrinter{}); ok {
 		t.Fatal("expected canSkipInstall to refuse a poisoned snapshot sha, not report it as already installed")
 	}
 	assertFileContent(t, victim, victimContent)
@@ -229,7 +229,7 @@ func TestInstallRecordMatchesRefusesUnsafeMarkerSHA(t *testing.T) {
 
 	infoDir := filepath.Join(downloadPath, "ansible_collections", col.Namespace+"."+col.Name+"-"+col.Version+".info")
 	mustMkdirAll(t, infoDir)
-	mustWriteFile(t, filepath.Join(infoDir, "GALAXY.yml"), []byte("format_version: 1.0.0\n"))
+	mustWriteFile(t, filepath.Join(infoDir, "GALAXY.yml"), sidecarFor(col))
 
 	// The coincidental file: exactly where an unguarded
 	// filepath.Join(installPath, helpers.ExtractMarkerPrefix+sha) would land

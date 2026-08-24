@@ -512,6 +512,16 @@ Extraction ends by writing the extract-done marker; recording then adds two
 more, in this order: the `GALAXY.yml` sidecar in the version-scoped `.info`
 directory, and the store entry.
 
+A later run reads all three back to decide whether to skip. The sidecar is
+parsed, not merely found: it has to name the collection at the version being
+installed, so a truncated or foreign document is not evidence of an install
+and the collection is installed for real. The one field allowed to disagree
+is `server`, which a run older than the fix that made it record the resolving
+server left holding the run's default instead; the store entry has already
+been shown to name this collection and this source, so the skip path rewrites
+that field in place and skips anyway. It is the only write a skipped install
+makes, and only when the two disagree.
+
 ### Bounded recovery
 
 A cache-resident artifact that fails its digest check, its manifest chain, or

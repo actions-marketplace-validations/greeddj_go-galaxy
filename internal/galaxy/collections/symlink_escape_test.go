@@ -260,7 +260,7 @@ func TestInstallRecordMatchesSymlinkedPrefixReturnsFalse(t *testing.T) {
 	mustWriteFile(t, markerPath, []byte("go-galaxy-extract-1 entries=0 dirs=0 bytes=0\n"))
 	outsideInfoDir := filepath.Join(filepath.Dir(filepath.Dir(outsideInstallDir)), col.Namespace+"."+col.Name+"-"+col.Version+".info")
 	mustMkdirAll(t, outsideInfoDir)
-	mustWriteFile(t, filepath.Join(outsideInfoDir, galaxyYAMLFileName), []byte("format_version: 1.0.0\n"))
+	mustWriteFile(t, filepath.Join(outsideInfoDir, galaxyYAMLFileName), sidecarFor(col))
 
 	st := store.New()
 	st.SetInstalled(col.key(), store.InstalledEntry{
@@ -289,7 +289,7 @@ func TestInstallRecordMatchesRealInstallReturnsTrue(t *testing.T) {
 	seedValidExtractMarker(t, target, sha)
 	infoDir := filepath.Join(filepath.Dir(filepath.Dir(target.path)), col.Namespace+"."+col.Name+"-"+col.Version+".info")
 	mustMkdirAll(t, infoDir)
-	mustWriteFile(t, filepath.Join(infoDir, galaxyYAMLFileName), []byte("format_version: 1.0.0\n"))
+	mustWriteFile(t, filepath.Join(infoDir, galaxyYAMLFileName), sidecarFor(col))
 
 	st := store.New()
 	st.SetInstalled(col.key(), store.InstalledEntry{
@@ -340,7 +340,7 @@ func TestCanSkipInstallSymlinkedPrefixReturnsFalse(t *testing.T) {
 	mustWriteFile(t, markerPath, []byte("go-galaxy-extract-1 entries=0 dirs=0 bytes=0\n"))
 	outsideInfoDir := filepath.Join(filepath.Dir(filepath.Dir(outsideInstallDir)), col.Namespace+"."+col.Name+"-"+col.Version+".info")
 	mustMkdirAll(t, outsideInfoDir)
-	mustWriteFile(t, filepath.Join(outsideInfoDir, galaxyYAMLFileName), []byte("format_version: 1.0.0\n"))
+	mustWriteFile(t, filepath.Join(outsideInfoDir, galaxyYAMLFileName), sidecarFor(col))
 
 	st := store.New()
 	st.SetInstalled(col.key(), store.InstalledEntry{
@@ -349,7 +349,7 @@ func TestCanSkipInstallSymlinkedPrefixReturnsFalse(t *testing.T) {
 		InstalledAt:    time.Now().UTC(),
 	})
 
-	if canSkipInstall(target, col, st, noopPrinter{}) {
+	if _, ok := canSkipInstall(target, col, st, noopPrinter{}); ok {
 		t.Fatal("expected canSkipInstall to return false when the record, marker, and sidecar are all reachable only through a symlinked prefix")
 	}
 }
@@ -371,7 +371,7 @@ func TestCanSkipInstallRealInstallReturnsTrue(t *testing.T) {
 	seedValidExtractMarker(t, target, sha)
 	infoDir := filepath.Join(filepath.Dir(filepath.Dir(target.path)), col.Namespace+"."+col.Name+"-"+col.Version+".info")
 	mustMkdirAll(t, infoDir)
-	mustWriteFile(t, filepath.Join(infoDir, galaxyYAMLFileName), []byte("format_version: 1.0.0\n"))
+	mustWriteFile(t, filepath.Join(infoDir, galaxyYAMLFileName), sidecarFor(col))
 
 	st := store.New()
 	st.SetInstalled(col.key(), store.InstalledEntry{
@@ -380,7 +380,7 @@ func TestCanSkipInstallRealInstallReturnsTrue(t *testing.T) {
 		InstalledAt:    time.Now().UTC(),
 	})
 
-	if !canSkipInstall(target, col, st, noopPrinter{}) {
+	if _, ok := canSkipInstall(target, col, st, noopPrinter{}); !ok {
 		t.Fatal("expected canSkipInstall to return true against a real, non-symlinked install " +
 			"directory holding a matching record, marker, and sidecar")
 	}
