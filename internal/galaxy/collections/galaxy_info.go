@@ -138,6 +138,20 @@ func buildGalaxyYAML(cfg *config.Config, col collection, meta *types.GalaxyColle
 		g.URLSHA256 = loc.SHA256
 		return g
 	}
+	// The server this collection actually resolved from, which is not always
+	// the run's own default: an entry with its own `source:` resolves from
+	// that one, and on a multi-server run the solver picks a winner per
+	// collection. col.Source carries that winner (see
+	// warnIfOffServerDownloadHost, which relies on the same stamping), while
+	// cfg.Server is only the fallback for a collection that never got one -
+	// so recording cfg.Server here made the document state something about
+	// this collection that is true only of the run. It stayed invisible while
+	// nothing read the field back; outdated's tree-driven report reads it to
+	// decide which server to ask, and a wrong one there is a 404 an operator
+	// cannot explain from what the file says.
+	if col.Source != "" {
+		g.Server = col.Source
+	}
 	if meta != nil {
 		g.DownloadURL = helpers.WithoutCredentials(meta.DownloadURL)
 		g.Signatures = meta.Signatures

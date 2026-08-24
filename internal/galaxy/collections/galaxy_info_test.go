@@ -499,3 +499,41 @@ func TestWriteGalaxyInfoIfPresentPrintsOnOrdinaryFailure(t *testing.T) {
 		t.Errorf("warns = %v, want none: an ordinary I/O failure must not also hit the security-signal tier", printer.warns)
 	}
 }
+
+// TestBuildGalaxyYAMLRecordsTheResolvingServer pins whose server the sidecar
+// names: the one this collection actually resolved from, not the run's
+// default. The two disagree in two ordinary shapes - a requirements entry
+// carrying its own `source:`, and a multi-server run whose solver picked a
+// winner per collection - and in both the document is about one collection,
+// so a field describing the run instead is simply a wrong statement.
+//
+// It is not a cosmetic one. outdated reads this field to decide which server
+// to ask about an installed collection, so a default recorded here sends the
+// lookup to a server that never served the collection and answers 404, with
+// nothing in the file to explain why.
+//
+// The fallback row is the other half of the contract and the reason the
+// field is not simply col.Source: a collection that never got stamped with a
+// winner still has to name something, and the run's own server is the only
+// candidate on hand.
+func TestBuildGalaxyYAMLRecordsTheResolvingServer(t *testing.T) {
+	t.Parallel()
+
+	const runServer = "https://hub.example/galaxy/ansible"
+	const entryServer = "https://hub.example/galaxy/internal"
+	cfg := &config.Config{Server: runServer}
+
+	resolved := buildGalaxyYAML(cfg, collection{
+		Namespace: "sc", Name: "internal", Version: testVersion100, Source: entryServer,
+	}, nil)
+	if resolved.Server != entryServer {
+		t.Errorf("server = %q, want the collection's own source %q", resolved.Server, entryServer)
+	}
+
+	unstamped := buildGalaxyYAML(cfg, collection{
+		Namespace: "acme", Name: "widgets", Version: testVersion100,
+	}, nil)
+	if unstamped.Server != runServer {
+		t.Errorf("server with no source stamped = %q, want the run's server %q", unstamped.Server, runServer)
+	}
+}
