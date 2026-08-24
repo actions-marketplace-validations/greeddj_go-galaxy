@@ -26,14 +26,18 @@ collide:
 |  143 | Interrupted (a caught SIGTERM)                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 Exit `6`'s "missing" half is uniform across every command that requires a
-lockfile: `install --frozen`, `warm --frozen`, `lock --frozen`, `tree`,
-`explain` and `outdated` all exit `6` when the lockfile they were told to read
-is not there, rather than treating its absence as a usage error. A role adds no
-exit code of its own: every role failure classifies into the classes above by
-what failed, so a pipeline branching on these numbers needs no new branch. `hash` is the
-one deliberate exception and exits `0`: with no lockfile it falls back to
-hashing `requirements.yml`, which is the documented behavior for repositories
-that do not lock.
+lockfile: `install --frozen`, `warm --frozen`, `lock --frozen`, `tree` and
+`explain` all exit `6` when the lockfile they were told to read is not there,
+rather than treating its absence as a usage error. A role adds no exit code of
+its own: every role failure classifies into the classes above by what failed,
+so a pipeline branching on these numbers needs no new branch.
+
+Two commands read somewhere else instead of requiring the file, and neither
+adds an exit class for doing so. `hash` exits `0` and falls back to hashing
+`requirements.yml`. `outdated` falls back to the installed collections tree
+and reports from it; it still exits `6` when that tree is missing too, naming
+both paths, so a repository that neither locks nor installs is told the same
+thing it always was.
 
 Exit `7` covers content that failed to authenticate against the sha256 that
 named it - a lockfile pin, a Galaxy server's declared digest, a cache sidecar,

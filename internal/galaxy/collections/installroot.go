@@ -14,6 +14,12 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 )
 
+// collectionsDirName is the one directory ansible looks for a collection
+// under, and therefore the only entry of the collections path this tool
+// writes into or reads back. Named once so a writer and a reader of the same
+// tree cannot spell it differently.
+const collectionsDirName = "ansible_collections"
+
 // errEmptyDownloadPath names the misconfiguration directly rather than
 // letting os.OpenRoot("") surface as a bare ENOENT, which tells an operator
 // nothing about which setting to fix.
@@ -90,8 +96,8 @@ func newInstallTarget(root *os.Root, cfg *config.Config, col collection) (instal
 	if !helpers.IsPathElement(col.Namespace) || !helpers.IsPathElement(col.Name) || !helpers.IsPathElement(col.Version) {
 		return installTarget{}, false
 	}
-	rel := path.Join("ansible_collections", col.Namespace, col.Name)
-	info := path.Join("ansible_collections", fmt.Sprintf("%s.%s-%s.info", col.Namespace, col.Name, col.Version))
+	rel := path.Join(collectionsDirName, col.Namespace, col.Name)
+	info := path.Join(collectionsDirName, fmt.Sprintf("%s.%s-%s%s", col.Namespace, col.Name, col.Version, infoDirSuffix))
 	return installTarget{
 		root: root,
 		rel:  rel,
@@ -175,8 +181,8 @@ func openCollectionsRoot(downloadPath string, create bool) (*os.Root, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := root.MkdirAll("ansible_collections", helpers.DirMod); err != nil {
-		return nil, classifyCollectionsRootError(root, "ansible_collections", err)
+	if err := root.MkdirAll(collectionsDirName, helpers.DirMod); err != nil {
+		return nil, classifyCollectionsRootError(root, collectionsDirName, err)
 	}
 	return root, nil
 }

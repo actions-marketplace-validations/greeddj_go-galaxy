@@ -13,10 +13,10 @@ import (
 // queryLatestRoleVersions is queryLatestVersions for the roles list, on the
 // same worker count and with the same nil store: no backend is opened, so
 // every answer is live.
-func queryLatestRoleVersions(ctx context.Context, deps collectionDeps, lf *lockfile.File) []outdatedEntry {
-	out := make([]outdatedEntry, len(lf.Roles))
-	forEachIndex(len(lf.Roles), max(deps.cfg.Workers, 1), func(i int) {
-		out[i] = lookupRoleOutdated(ctx, deps, lf.Roles[i])
+func queryLatestRoleVersions(ctx context.Context, deps collectionDeps, roles []lockfile.RoleEntry) []outdatedEntry {
+	out := make([]outdatedEntry, len(roles))
+	forEachIndex(len(roles), max(deps.cfg.Workers, 1), func(i int) {
+		out[i] = lookupRoleOutdated(ctx, deps, roles[i])
 	})
 	return out
 }

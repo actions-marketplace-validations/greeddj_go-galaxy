@@ -39,9 +39,11 @@ type outdatedEntry struct {
 	Newer  bool
 }
 
-// Outdated loads the lockfile and queries Galaxy for the latest available
-// version of every locked collection in parallel, printing a summary report.
-// Exit status is non-zero only when at least one query failed.
+// Outdated reads what the project is running - the lockfile, or the
+// installed collections tree when there is no lockfile (see outdatedInput) -
+// and queries Galaxy for the latest available version of every entry in
+// parallel, printing a summary report. Exit status is non-zero only when at
+// least one query failed.
 //
 // outdated deliberately opens no cache backend: it never calls
 // internal/cache.New, so it never takes the exclusive distributed lock (it
@@ -66,20 +68,19 @@ func Outdated(ctx context.Context, cfg *config.Config, runtime *infra.Infra) err
 	warnUnhonoredFlags(runtime, cfg)
 
 	start := time.Now()
-	lockPath := lockfile.ResolveDefaultPath(cfg.RequirementsFile, cfg.LockFile)
-	lf, err := lockfile.LoadRequired(lockPath)
+	src, err := outdatedInput(cfg, runtime)
 	if err != nil {
 		return err
 	}
 
-	results := queryLatestVersions(ctx, cfg, runtime, lf)
-	results = append(results, queryLatestRoleVersions(ctx, newCollectionDeps(cfg, runtime, nil), lf)...)
+	results := queryLatestVersions(ctx, cfg, runtime, src.collections)
+	results = append(results, queryLatestRoleVersions(ctx, newCollectionDeps(cfg, runtime, nil), src.roles)...)
 	// Sorted once, here, before both the report and the error build below, so
 	// the report's line order and the joined-cause order in the returned
 	// error agree with each other. reportOutdated itself mutates nothing.
 	slices.SortFunc(results, func(a, b outdatedEntry) int { return strings.Compare(a.Name, b.Name) })
 
-	reportOutdated(runtime, results, lockPath)
+	reportOutdated(runtime, results, src.label)
 
 	var failures failureRecorder
 	for _, r := range results {
@@ -96,8 +97,55 @@ func Outdated(ctx context.Context, cfg *config.Config, runtime *infra.Infra) err
 	// warnUnhonoredFlags), so passing cfg.Frozen through would re-commit the
 	// exact false claim already fixed for `lock`'s own report.
 	writeRunMetrics(cfg, runtime, "outdated", start,
-		runCounts{Collections: len(lf.Collections), Roles: len(lf.Roles), Failures: int(summary.count)}, false)
+		runCounts{Collections: len(src.collections), Roles: len(src.roles), Failures: int(summary.count)}, false)
 	return summary.outdatedError()
+}
+
+// outdatedSource is the current side of one outdated run: the entries to
+// compare against the servers, and the label the report's summary line names
+// as where they were read from - the lockfile's path, or the collections
+// tree's.
+type outdatedSource struct {
+	label       string
+	collections []lockfile.Entry
+	roles       []lockfile.RoleEntry
+}
+
+// outdatedInput reads the current side, preferring the lockfile and falling
+// back to the installed collections tree when there is none.
+//
+// The fallback exists because a lockfile is where the versions in use are
+// written down, not the only place they can be read: a project that installs
+// without locking still has every version it is running on disk, along with
+// the server each came from, so refusing to answer would be a limitation of
+// this command rather than of the question. It is the same shape `hash`
+// already takes when it falls back to requirements.yml, and it stays a
+// fallback rather than a choice: with a lockfile present that file is the
+// answer, since it covers roles and git refs the tree cannot.
+//
+// A lockfile that exists and does not load is propagated untouched. Only its
+// absence opens the fallback - a malformed lockfile is a defect to fix, and
+// quietly reporting from somewhere else would hide it.
+func outdatedInput(cfg *config.Config, runtime *infra.Infra) (outdatedSource, error) {
+	lockPath := lockfile.ResolveDefaultPath(cfg.RequirementsFile, cfg.LockFile)
+	lf, err := lockfile.Load(lockPath)
+	switch {
+	case err == nil:
+		return outdatedSource{label: lockPath, collections: lf.Collections, roles: lf.Roles}, nil
+	case !lockfile.IsNotExist(err):
+		return outdatedSource{}, err
+	}
+
+	scan, scanErr := scanInstalledTree(cfg, runtime)
+	if scanErr != nil {
+		if isTreeAbsent(scanErr) {
+			return outdatedSource{}, errNoInstalledCollections(lockPath, cfg.DownloadPath, scanErr)
+		}
+		return outdatedSource{}, scanErr
+	}
+	runtime.Output.Printf("🔎 no lockfile at %s; reading installed collections from %s", lockPath, cfg.DownloadPath)
+	reportInstalledGaps(runtime, scan, installedRoleCount(cfg))
+	return outdatedSource{label: cfg.DownloadPath, collections: scan.entries}, nil
 }
 
 // unhonoredFlags returns the human-readable name of every flag this run
@@ -106,13 +154,14 @@ func Outdated(ctx context.Context, cfg *config.Config, runtime *infra.Infra) err
 // returns nil - allocating nothing - when the run configured none of them,
 // which is the common case; this only allocates on a misconfigured run.
 //
-// --cache-dir and --download-path are deliberately excluded, for a reason
-// distinct from every flag checked below: config.Config records a resolved
-// value, not whether the operator actually set the flag, so a defaulted
-// string path is indistinguishable at this layer from one explicitly passed.
-// Telling them apart would require threading cli.Command.IsSet down from the
-// CLI layer into internal/galaxy, which is a layer violation this package
-// does not accept.
+// --download-path is not listed because it is honored: with no lockfile it
+// names the tree outdated reads the current side from (see outdatedInput).
+// --cache-dir is excluded for a reason distinct from every flag checked
+// below: config.Config records a resolved value, not whether the operator
+// actually set the flag, so a defaulted string path is indistinguishable at
+// this layer from one explicitly passed. Telling them apart would require
+// threading cli.Command.IsSet down from the CLI layer into internal/galaxy,
+// which is a layer violation this package does not accept.
 func unhonoredFlags(cfg *config.Config) []string {
 	var names []string
 	if cfg.ClearCache {
@@ -153,25 +202,27 @@ func warnUnhonoredFlags(runtime *infra.Infra, cfg *config.Config) {
 		return
 	}
 	runtime.Output.Warnf(
-		"outdated does not honor %s; it only reads the lockfile and queries each server for the latest version",
+		"outdated does not honor %s; it only reads what the project is running and queries each server for the latest version",
 		strings.Join(names, ", "),
 	)
 }
 
-func queryLatestVersions(ctx context.Context, cfg *config.Config, runtime *infra.Infra, lf *lockfile.File) []outdatedEntry {
+func queryLatestVersions(
+	ctx context.Context, cfg *config.Config, runtime *infra.Infra, entries []lockfile.Entry,
+) []outdatedEntry {
 	deps := newCollectionDeps(cfg, runtime, nil)
-	out := make([]outdatedEntry, len(lf.Collections))
+	out := make([]outdatedEntry, len(entries))
 	var wg sync.WaitGroup
 	workers := max(cfg.Workers, 1)
-	jobs := make(chan int, len(lf.Collections))
-	for i := range lf.Collections {
+	jobs := make(chan int, len(entries))
+	for i := range entries {
 		jobs <- i
 	}
 	close(jobs)
 	for range workers {
 		wg.Go(func() {
 			for i := range jobs {
-				out[i] = lookupOutdated(ctx, deps, lf.Collections[i])
+				out[i] = lookupOutdated(ctx, deps, entries[i])
 			}
 		})
 	}

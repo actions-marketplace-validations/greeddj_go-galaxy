@@ -322,13 +322,19 @@ func TestOutdatedReportsInNameOrder(t *testing.T) {
 // The check runs before any network contact, so the fixture needs no server:
 // the requirements file exists and the lockfile beside it does not, which is
 // the only condition under test.
+//
+// The collections tree is named and absent, deliberately. Since outdated
+// gained its fallback (outdatedInput) a missing lockfile alone no longer
+// ends the run - the tree has to be missing too - so a fixture that left
+// DownloadPath at its zero value would still reach this verdict, but by
+// os.OpenRoot("") failing rather than by the condition this test is about.
 func TestOutdatedMissingLockfileClassifiesAsLockfileError(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	reqPath := filepath.Join(dir, "requirements.yml")
 	mustWriteFile(t, reqPath, []byte("collections:\n  - name: acme.widgets\n    version: \"*\"\n"))
 
-	cfg := &config.Config{RequirementsFile: reqPath}
+	cfg := &config.Config{RequirementsFile: reqPath, DownloadPath: filepath.Join(dir, "collections")}
 	err := Outdated(context.Background(), cfg, infra.New(noopPrinter{}, nil))
 	if !errors.Is(err, helpers.ErrLockfileMissing) {
 		t.Fatalf("Outdated with no lockfile: err = %v, want errors.Is helpers.ErrLockfileMissing", err)
