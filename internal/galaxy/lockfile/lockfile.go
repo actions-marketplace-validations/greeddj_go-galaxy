@@ -62,7 +62,7 @@ const (
 const SchemaVersionURL = 4
 
 // DefaultName is the conventional lockfile name beside requirements.yml.
-const DefaultName = "requirements.lock.yml"
+const DefaultName = "galaxy.lock"
 
 // Entry is a single pinned collection in the lockfile. A Galaxy entry pins a
 // version and the artifact's SHA256 under the server it came from; a git

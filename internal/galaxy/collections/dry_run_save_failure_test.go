@@ -82,7 +82,7 @@ func newDryRunSaveFailureFixture(t *testing.T) (*config.Config, *installState) {
 		CacheDir:         cacheDir,
 		DownloadPath:     filepath.Join(root, "install"),
 		RequirementsFile: reqPath,
-		LockFile:         filepath.Join(root, "requirements.lock.yml"),
+		LockFile:         filepath.Join(root, "galaxy.lock"),
 		Workers:          1,
 		Offline:          true,
 		DryRun:           true,

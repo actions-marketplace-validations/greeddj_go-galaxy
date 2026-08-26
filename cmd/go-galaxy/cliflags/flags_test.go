@@ -101,7 +101,7 @@ func TestLockInspectFlags(t *testing.T) {
 			want: wantStringFlag{
 				name:    "lock-file",
 				aliases: nil,
-				usage:   "Path to lockfile (default: requirements.lock.yml beside requirements file)",
+				usage:   "Path to lockfile (default: galaxy.lock beside requirements file)",
 				envKeys: []string{"GO_GALAXY_LOCK_FILE"},
 			},
 		},

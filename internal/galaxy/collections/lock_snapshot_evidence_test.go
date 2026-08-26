@@ -51,7 +51,7 @@ func TestLockOnAColdCacheLeavesNoEvidenceForCleanupToActOn(t *testing.T) {
 	}
 	reqPath := filepath.Join(root, "requirements.yml")
 	mustWriteFile(t, reqPath, []byte("collections:\n  - name: acme.widgets\n    version: \"*\"\n"))
-	lockPath := filepath.Join(root, "requirements.lock.yml")
+	lockPath := filepath.Join(root, "galaxy.lock")
 
 	srv := fakegalaxy.New(t)
 	srv.AddVersion("acme", "widgets", "1.0.0", nil)

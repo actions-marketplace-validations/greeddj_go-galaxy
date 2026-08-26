@@ -183,7 +183,7 @@ For reproducible CI, pin every transitive collection and role once and install
 from the lockfile thereafter:
 
 ```bash
-go-galaxy lock                 # writes requirements.lock.yml
+go-galaxy lock                 # writes galaxy.lock
 go-galaxy install --frozen     # install exactly the locked versions
 ```
 

@@ -109,7 +109,7 @@ func TestGitSubdirWithin(t *testing.T) {
 // from the entries, and Load, which refuses a git entry that is not canonical.
 func saveAndLoad(t *testing.T, lf *lockfile.File) *lockfile.File {
 	t.Helper()
-	p := filepath.Join(t.TempDir(), "requirements.lock")
+	p := filepath.Join(t.TempDir(), "galaxy.lock")
 	if err := lockfile.Save(p, lf); err != nil {
 		t.Fatalf("Save: %v", err)
 	}

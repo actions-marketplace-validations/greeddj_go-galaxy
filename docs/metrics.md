@@ -9,7 +9,7 @@ JSON report suitable for CI dashboards:
   "finished_at":      "2026-04-28T10:00:08Z",
   "command":          "install",
   "server":           "https://galaxy.ansible.com",
-  "lockfile":         "requirements.lock.yml",
+  "lockfile":         "galaxy.lock",
   "lockfile_hash":    "<sha256-hex>",
   "duration_ns":      8123456789,
   "cache_hits":       12,

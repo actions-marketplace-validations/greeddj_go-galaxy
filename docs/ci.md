@@ -4,7 +4,7 @@ Pin transitive collections with a lockfile, then drive CI from it:
 
 ```bash
 # once, when you change requirements.yml:
-go-galaxy lock             # writes requirements.lock.yml
+go-galaxy lock             # writes galaxy.lock
 
 # in CI:
 go-galaxy install --frozen # install exactly the locked versions
@@ -205,7 +205,7 @@ install_collections:
     # reads.
     key:
       files:
-        - requirements.lock.yml
+        - galaxy.lock
       prefix: go-galaxy
     paths:
       - .cache/go-galaxy
@@ -240,7 +240,7 @@ Trust model](security.md#security--trust-model) for why a prefix alone is not a 
 
 ## Lockfile drift gate
 
-Fail a pull request when `requirements.lock.yml` no longer matches
+Fail a pull request when `galaxy.lock` no longer matches
 `requirements.yml` - a root added, removed, or repinned without regenerating
 the lockfile. `lock --frozen` reads the lockfile as the thing to check rather
 than as the answer, which is the opposite of what install/warm `--frozen` do -
@@ -269,17 +269,17 @@ jobs:
             -o /usr/local/bin/go-galaxy
           chmod +x /usr/local/bin/go-galaxy
 
-      - name: Check requirements.lock.yml matches requirements.yml
+      - name: Check galaxy.lock matches requirements.yml
         run: go-galaxy lock --frozen
 
-      - name: Check requirements.lock.yml is not stale against upstream
+      - name: Check galaxy.lock is not stale against upstream
         run: go-galaxy lock --frozen --refresh
 ```
 
 A nonzero exit from either step (code `6`, the lockfile class - see
 [Exit codes](exit-codes.md)) means the PR needs `go-galaxy lock` (optionally
 `--refresh`, to pick up the newer upstream version too) run and its updated
-`requirements.lock.yml` committed.
+`galaxy.lock` committed.
 
 ## Container image bake
 
@@ -303,7 +303,7 @@ RUN apt-get update -qq \
 ENV GO_GALAXY_CACHE_DIR=/var/cache/go-galaxy
 
 WORKDIR /src
-COPY requirements.yml requirements.lock.yml ./
+COPY requirements.yml galaxy.lock ./
 # The uid your jobs run as. A run needs the cache lock and writes the
 # snapshot back, so a job user that can only read the baked cache fails to
 # start with `cache backend cannot be used as configured` (exit 2) - and so

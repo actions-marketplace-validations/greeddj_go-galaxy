@@ -16,7 +16,7 @@ import (
 func TestSaveLoadRoundTrip(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	path := filepath.Join(dir, "requirements.lock.yml")
+	path := filepath.Join(dir, "galaxy.lock")
 
 	f := &File{
 		Server: "https://galaxy.ansible.com",
@@ -132,7 +132,7 @@ func TestLoadWrapsUnreadableFileAsInvalid(t *testing.T) {
 // helpers.ErrLockfileInvalid wrap instead of helpers.ErrLockfileMissing.
 // It also perturbs lockDryRunBaseline: a cold-cache `lock --dry-run` (no
 // lockfile on disk at all) newly emits "existing lockfile
-// .../requirements.lock.yml cannot be read (lockfile is invalid: ... no
+// .../galaxy.lock cannot be read (lockfile is invalid: ... no
 // such file or directory); reporting every collection as added" - a warning
 // about a file that was never there in the first place. That perturbation
 // is caught, not silent: collections.TestLockDryRunWritesNoLockfileAndReportsAdds
@@ -333,7 +333,7 @@ func equalDeps(a, b [][]string) bool {
 func TestSaveLeavesNoTempFiles(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	path := filepath.Join(dir, "requirements.lock.yml")
+	path := filepath.Join(dir, "galaxy.lock")
 
 	f := &File{Collections: []Entry{{Name: "a.a", Version: "1.0.0"}}}
 	if err := Save(path, f); err != nil {
@@ -355,7 +355,7 @@ func TestSaveDoesNotClobberOnFailure(t *testing.T) {
 		t.Skip("running as root bypasses directory permission checks")
 	}
 	dir := t.TempDir()
-	path := filepath.Join(dir, "requirements.lock.yml")
+	path := filepath.Join(dir, "galaxy.lock")
 
 	original := &File{Collections: []Entry{
 		{Name: "a.a", Version: "1.0.0", SHA256: "original"},
@@ -417,7 +417,7 @@ func TestLoadRejectsAnInvalidCollectionName(t *testing.T) {
 	for _, tc := range invalidCollectionNameCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			path := filepath.Join(t.TempDir(), "requirements.lock.yml")
+			path := filepath.Join(t.TempDir(), "galaxy.lock")
 			body := "schema_version: 1\ncollections:\n  - name: " + tc.entryName + "\n    version: 1.0.0\n"
 			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 				t.Fatalf("write lockfile: %v", err)
@@ -465,7 +465,7 @@ func invalidCollectionNameCases() []invalidCollectionNameCase {
 // left for validate to object to.
 func writeSourceLockfile(t *testing.T, source string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "requirements.lock.yml")
+	path := filepath.Join(t.TempDir(), "galaxy.lock")
 	body := fmt.Sprintf(
 		"schema_version: %d\ncollections:\n  - name: acme.widgets\n    version: 1.0.0\n    source: %q\n",
 		SchemaVersion, source,

@@ -16,7 +16,7 @@ func Lock() *cli.Command {
 	return &cli.Command{
 		Name:    "lock",
 		Aliases: []string{"l"},
-		Usage:   "Resolve dependencies and write requirements.lock.yml",
+		Usage:   "Resolve dependencies and write galaxy.lock",
 		Flags:   flags,
 		Action: func(ctx context.Context, c *cli.Command) error {
 			return runCollectionCommand(ctx, c, collections.Lock)

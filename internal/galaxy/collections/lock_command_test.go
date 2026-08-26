@@ -440,7 +440,7 @@ func TestLockFrozenFailsOnAMissingLockfile(t *testing.T) {
 // fail the "unsupported schema version" subtest with:
 //
 //	lock_command_test.go:478: Lock error = lockfile is out of date:
-//	/.../requirements.lock.yml: run `go-galaxy lock` to update it, want
+//	/.../galaxy.lock: run `go-galaxy lock` to update it, want
 //	errors.Is helpers.ErrLockfileInvalid
 //	--- FAIL: TestLockFrozenFailsClosedOnAnUnloadableLockfile (0.03s)
 //
@@ -694,8 +694,8 @@ func TestLockFrozenReportsAServerOnlyChangeAsDrift(t *testing.T) {
 // write path) confirmed to fail this test with:
 //
 //	lock_command_test.go:728: persists = [✅ Lockfile written to
-//	/.../requirements.lock.yml (1 collections) ✅ Lockfile written to
-//	/.../requirements.lock.yml (1 collections)]
+//	/.../galaxy.lock (1 collections) ✅ Lockfile written to
+//	/.../galaxy.lock (1 collections)]
 //	--- FAIL: TestLockFrozenWithoutRefreshIgnoresUpstreamPublication (0.06s)
 //
 // The server.Total() == 0 check passes even under this mutation - lock's
@@ -800,8 +800,8 @@ func TestLockFrozenWithRefreshDetectsUpstreamPublication(t *testing.T) {
 //     lock_command_test.go:822: unexpected warning on a cold cache: [--dry-run
 //     is active: no artifact will be downloaded, installed, or cached; the
 //     resolved metadata caches are still saved existing lockfile
-//     /.../requirements.lock.yml cannot be read (lockfile is invalid: open
-//     /.../requirements.lock.yml: no such file or directory); reporting every
+//     /.../galaxy.lock cannot be read (lockfile is invalid: open
+//     /.../galaxy.lock: no such file or directory); reporting every
 //     collection as added no persisted snapshot was found; a dry run will not
 //     create one, so the metadata caches this run built are discarded
 //     --dry-run: skipping metrics report to /.../metrics.json]
@@ -927,7 +927,7 @@ func TestLockDryRunReportsUpdateAndRemoval(t *testing.T) {
 // Mutation (dropping the `if cfg.DryRun` branch from lockWithState) fails
 // with:
 //
-//	lock_command_test.go:959: persists = [✅ Lockfile written to /.../requirements.lock.yml (1 collections)]
+//	lock_command_test.go:959: persists = [✅ Lockfile written to /.../galaxy.lock (1 collections)]
 func TestLockDryRunNoChangeReportsAllUnchanged(t *testing.T) {
 	t.Parallel()
 	f := newLockRun(t)
@@ -1026,7 +1026,7 @@ func TestLockDryRunReportsAServerOnlyChange(t *testing.T) {
 	// untouched, and fails this one with:
 	//
 	//	lock_command_test.go:1032: persists = [Dry run: 0 would be added, 0
-	//	would be updated, 0 would be removed, 1 unchanged (/.../requirements.lock.yml)]
+	//	would be updated, 0 would be removed, 1 unchanged (/.../galaxy.lock)]
 	wantSummary := "Dry run: lockfile would change; 0 would be added, 0 would be updated, 0 would be removed, 1 unchanged (" + path + ")"
 	if !dryPrinter.hasPersistentPrintContaining(wantSummary) {
 		t.Fatalf("persists = %v", dryPrinter.persists)

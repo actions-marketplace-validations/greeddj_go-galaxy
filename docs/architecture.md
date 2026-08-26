@@ -47,7 +47,7 @@ internal/galaxy/rolebuild     what makes a tree a role: meta/main.yml, its depen
 internal/galaxy/galaxyv1      the Galaxy v1 role API client and ansible's version selection
 internal/galaxy/requirements  requirements.yml parsing, collections and roles
 internal/galaxy/config        flags + ansible.cfg + environment -> one Config
-internal/galaxy/lockfile      requirements.lock.yml
+internal/galaxy/lockfile      galaxy.lock
 internal/galaxy/infra         the per-run DI container
 internal/galaxy/fetch         the shared HTTP client and its per-origin policy
 internal/galaxy/metrics       the run counters

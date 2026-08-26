@@ -159,7 +159,7 @@ func saveOutdatedLockfile(t *testing.T, requirementsFile, server string, entries
 // `stdout contains a raw ESC byte at index 67: "Lookup failed:
 // \"acme.widgets\"@1.0.0: failed to fetch metadata: 404 \x1b[2J\x1b[1;1H
 // \x1b[32mEVERYTHING IS UP TO DATE\a (http://127.0.0.1:60058/api/collections/
-// acme/widgets)\n.../requirements.lock.yml: 0 up to date, 0 outdated, 1
+// acme/widgets)\n.../galaxy.lock: 0 up to date, 0 outdated, 1
 // failed\n"`, and the two stream-separation assertions plus the positive
 // control fail as well ("expected the failure line to stay off stdout",
 // "expected the failure line on stderr, got stderr=\"\"", and "expected the

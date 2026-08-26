@@ -636,7 +636,7 @@ func TestSaveFailureDoesNotMaskIntegrity(t *testing.T) {
 // on.
 func TestLockDriftOutranksSaveFailure(t *testing.T) {
 	t.Parallel()
-	drift := fmt.Errorf("%w: requirements.lock.yml: run `go-galaxy lock` to update it", helpers.ErrLockfileDrift)
+	drift := fmt.Errorf("%w: galaxy.lock: run `go-galaxy lock` to update it", helpers.ErrLockfileDrift)
 
 	err := fmt.Errorf("%w; snapshot save failed: %w", drift, helpers.ErrStateObjectDeadline)
 	if got := FromError(err); got != ExitLock {

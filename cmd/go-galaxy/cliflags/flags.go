@@ -196,7 +196,7 @@ func lockfileAndMetricsFlags() []cli.Flag {
 	return []cli.Flag{
 		&cli.StringFlag{
 			Name:    "lock-file",
-			Usage:   "Path to lockfile (default: requirements.lock.yml next to requirements file)",
+			Usage:   "Path to lockfile (default: galaxy.lock next to requirements file)",
 			Sources: cli.EnvVars("GO_GALAXY_LOCK_FILE"),
 		},
 		&cli.BoolFlag{
@@ -226,7 +226,7 @@ func LockInspectFlags() []cli.Flag {
 		},
 		&cli.StringFlag{
 			Name:    "lock-file",
-			Usage:   "Path to lockfile (default: requirements.lock.yml beside requirements file)",
+			Usage:   "Path to lockfile (default: galaxy.lock beside requirements file)",
 			Sources: cli.EnvVars("GO_GALAXY_LOCK_FILE"),
 		},
 	}
