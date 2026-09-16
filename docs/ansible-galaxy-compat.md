@@ -222,8 +222,8 @@ does not define is a usage error naming the flag and exits `2`, which is how
   resolved `<namespace>.<name>@<version>`, and a record that exists must
   still name the same install path, name the same server the collection now
   resolves from, and agree with any lockfile pin, with the extract marker and
-  the version's own `<namespace>.<name>-<version>.info/GALAXY.yml` sidecar
-  checked on top. A record that satisfies all of that skips the install
+  the `GALAXY.yml` sidecar - both in the version's own
+  `<namespace>.<name>-<version>.info` directory - checked on top. A record that satisfies all of that skips the install
   rather than downloading anything again. The sidecar is the condition that
   surprises, because it is version-scoped and is not part of the collection's
   own content: deleting or renaming that `GALAXY.yml` forces a full
@@ -232,9 +232,9 @@ does not define is a usage error naming the flag and exits `2`, which is how
   than merely found, and has to name this collection at this version, so a
   truncated write and a document left by another version cost the same
   re-download - existence alone was never evidence that the tree and the
-  provenance record beside it belong together. Two disagreements do not,
-  both left by earlier releases: a sidecar whose `server` fell behind the
-  record, and a sidecar outside ansible's schema (next bullet). Either is
+  provenance record beside it belong together. Two disagreements do not: a
+  sidecar whose `server` fell behind the record, and a sidecar outside
+  ansible's schema (next bullet). Either is
   rewritten in place, since the record has already been shown to name this
   collection and this source and a re-download would change no installed
   byte. That repair is the only write a skipped install makes, and it
@@ -263,15 +263,15 @@ does not define is a usage error naming the flag and exits `2`, which is how
   install `server` names the repository, and for a url install `server` and
   `download_url` both name the tarball. What such an install records beyond
   the schema - the commit, or the sha256 of the fetched bytes - goes into a
-  second file in the same directory, `go-galaxy.yml`, which ansible does not
-  read and removes along with the directory when it reinstalls the
+  file of its own in the same directory, `go-galaxy.yml`, which ansible does
+  not read and removes along with the directory when it reinstalls the
   collection. Earlier releases wrote those keys into `GALAXY.yml` itself, and
   ansible answered each command with `[WARNING]: url_sha256. Supported
-  parameters include: ...` (or `git_commit`) and ignored the file. The next
-  `install` that finds such a collection already installed rewrites the
-  sidecar and moves the key into `go-galaxy.yml` without re-downloading
-  anything, and `outdated` still reads the key where an earlier release left
-  it.
+  parameters include: ...` (or `git_commit`) and ignored the file. The first
+  `install` after upgrading extracts every collection an earlier release
+  installed once more (see the extract marker below), which writes the
+  sidecar anew; until then `outdated` still reads the key where an earlier
+  release left it.
 - **Prereleases are excluded and admitted on different rules than ansible's.**
   Stricter in one direction: a collection publishing only prerelease versions
   satisfies no plain constraint here, so the resolve fails with its proof plus
@@ -348,12 +348,25 @@ does not define is a usage error naming the flag and exits `2`, which is how
   with every other install that references them, so a writable installed file
   would alias a write into all of them. Directories are not read-only, so this
   is about editing an installed file, not about a frozen tree; edit a copy
-  outside the collections tree instead. Each collection directory also carries
-  a `.extract-done.<sha256>` marker this tool writes, which is not part of the
-  collection's own content: it records a count of entries and directories plus
-  those entries' total size, not a hash. An edit that changes any of those
-  makes the next install re-extract the collection over it; an edit that
-  preserves the edited file's exact byte length does not, and survives.
+  outside the collections tree instead. Each installed collection also has a
+  `.extract-done.<sha256>` marker this tool writes: it records a count of
+  entries and directories plus those entries' total size, not a hash. An edit
+  that changes any of those makes the next install re-extract the collection
+  over it; an edit that preserves the edited file's exact byte length does
+  not, and survives. The marker sits in the version's `.info` directory beside
+  `GALAXY.yml`, not in the collection directory, because `ansible-galaxy
+  collection verify` reports every file there that the collection's
+  `FILES.json` does not list and exits `1` over it. Earlier releases put it in
+  the collection directory, so verify failed on every collection they
+  installed, and the first `install` after upgrading extracts each of those
+  once more - from the cache, with no download while the artifact is still
+  there. An extraction also removes every other version's `.info` directory of
+  the same collection, as `ansible-galaxy` does whenever it installs one from
+  an artifact: that directory is scoped to a version and the collection
+  directory is not, so a marker left beside an earlier version would outlive
+  the tree it counted, and installing that version again would take it for
+  proof of an install whenever the tree now in place happened to share its
+  tally.
 
 ## Roles
 

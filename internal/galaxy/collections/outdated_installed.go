@@ -51,8 +51,8 @@ type installedScan struct {
 // that records which server a collection came from, and a collection whose
 // server is unknown is one this command cannot ask about. Every sidecar is
 // still cross-checked against the installed tree before it is trusted (see
-// scanInstalledCollection), so a stale one left behind by an upgrade cannot
-// contribute a version that is no longer installed.
+// scanInstalledCollection), so a stale one an earlier release's upgrade left
+// behind cannot contribute a version that is no longer installed.
 func scanInstalledTree(cfg *config.Config, runtime *infra.Infra) (installedScan, error) {
 	root, err := os.OpenRoot(cfg.DownloadPath)
 	if err != nil {
@@ -114,9 +114,11 @@ const (
 // sidecar can describe itself, and nothing else. The installed tree is then
 // consulted for the same version: `<namespace>/<name>/MANIFEST.json` has to
 // exist and declare it. That check is what discards a stale sidecar, which is
-// a real shape rather than a hypothetical one - install resets only the
-// sidecar of the version it is installing, and only cleanup ever removes the
-// one an earlier version left behind, so an upgraded tree holds two.
+// a real shape rather than a hypothetical one. An install removes every other
+// version's sidecar, as ansible-galaxy does for an artifact install (see
+// resetCollectionInfo), but releases before that reset only the sidecar of
+// the version they installed, so a tree one of them upgraded holds two until
+// something reinstalls it.
 //
 // A git install is classified rather than converted, because the sidecar
 // records the repository and the commit but no ref, and the question outdated
@@ -197,8 +199,8 @@ func installedNameUsable(kind installedKind, doc GalaxyYAML) bool {
 // installedVersionMatches reports whether the installed tree holds the very
 // version doc describes. A sidecar with no tree under it, or one naming a
 // version the tree's own MANIFEST.json does not, is stale: it is what an
-// upgrade leaves behind, and reporting from it would name a version nothing
-// is running.
+// earlier release's upgrade left behind, and reporting from it would name a
+// version nothing is running.
 //
 // A parse failure and a missing file are the same answer here - this
 // collection contributes nothing - and neither is worth a warning: an

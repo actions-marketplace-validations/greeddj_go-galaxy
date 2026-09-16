@@ -240,11 +240,12 @@ func legacySidecar(col collection, provenanceKey string) []byte {
 		provenanceKey + "\n")
 }
 
-// TestReconcileGalaxyInfoRepairsASidecarAnEarlierReleaseWrote pins the
-// migration a tree installed by an earlier release gets without being
-// reinstalled: the next install that skips the collection rewrites
-// GALAXY.yml into ansible's schema and moves the provenance into its own
-// file, and outdated still tells the install's kind afterwards. A second
+// TestReconcileGalaxyInfoRepairsASidecarAnEarlierReleaseWrote pins the repair
+// of a sidecar in the shape an earlier release wrote, found beside an install
+// this release made - restored from an older copy of the tree, say: the next
+// install that skips the collection rewrites GALAXY.yml into ansible's schema
+// and moves the provenance into its own file, and outdated still tells the
+// install's kind afterwards. A second
 // skip then writes nothing, so the repair is a one-time cost rather than a
 // write on every run.
 func TestReconcileGalaxyInfoRepairsASidecarAnEarlierReleaseWrote(t *testing.T) {

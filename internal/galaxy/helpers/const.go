@@ -22,12 +22,14 @@ const (
 	// an aliasing write into the CAS tree the mask exists to protect.
 	WritePermBits = 0o222
 
-	// ExtractMarkerPrefix names the marker file extractCollection writes into
-	// an install path once extraction (or CAS materialization) completes,
-	// suffixed with the artifact's sha256. Its presence is the fast first
-	// signal a later run uses to consider skipping re-extraction; the
-	// collections package's verifyExtractMarker layers a tree-tally check on
-	// top of that presence check before actually trusting it.
+	// ExtractMarkerPrefix names the marker file extraction writes once it (or
+	// CAS materialization) completes, suffixed with the artifact's sha256: in
+	// a collection's version-scoped .info directory, where `ansible-galaxy
+	// collection verify` does not look, and in a role's own install
+	// directory. Its presence is the fast first signal a later run uses to
+	// consider skipping re-extraction; the collections package's
+	// verifyExtractMarker layers a tree-tally check on top of that presence
+	// check before actually trusting it.
 	ExtractMarkerPrefix = ".extract-done."
 
 	// CollectionNameParts is the expected number of parts in a collection name like "namespace.collection".

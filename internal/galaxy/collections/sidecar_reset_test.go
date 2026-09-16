@@ -1,14 +1,18 @@
 package collections
 
-// This file proves writeGalaxyInfo's reset (target.info: RemoveAll then
-// MkdirAll, before the write) actually closes the hole a security audit
-// found: os.Root only constrains which paths a method may traverse to reach
+// This file proves writeGalaxyInfo's removal of each name before it writes
+// it (writeInfoFile), and its replacement of anything at target.info that is
+// not a real directory, actually close the hole a security audit found:
+// os.Root only constrains which paths a method may traverse to reach
 // target.info, it says nothing about what already sits at the GALAXY.yml
-// leaf inside it once traversal succeeds. Before the reset, a symlink or a
-// hardlink pre-planted at that leaf was written straight through. Each test
-// here pre-plants one of the three measured shapes directly, without going
+// leaf inside it once traversal succeeds. Without that removal, a symlink or
+// a hardlink pre-planted at that leaf was written straight through. Each
+// test here pre-plants one of the measured shapes directly, without going
 // through a real extraction, so the write site under test is exactly
-// writeGalaxyInfo and nothing upstream of it.
+// writeGalaxyInfo and nothing upstream of it. The directory is not reset
+// wholesale, because the extract marker lives in it; the last tests pin that
+// the marker survives and that what a whole-directory reset used to clear is
+// still cleared.
 
 import (
 	"os"
@@ -22,8 +26,8 @@ import (
 // TestWriteGalaxyInfoOverwritesRelativeInRootSymlink proves a relative,
 // in-root symlink at the GALAXY.yml leaf - one whose target stays inside the
 // collections root, so os.Root permits traversing it, unlike the escaping
-// symlinks symlink_escape_test.go covers - is severed by the reset rather
-// than followed. Without the reset, target.root.WriteFile would resolve the
+// symlinks symlink_escape_test.go covers - is severed by the removal rather
+// than followed. Without the removal, target.root.WriteFile would resolve the
 // symlink and overwrite whatever real content the leaf pointed at; a
 // hostile requirements.yml can plant this shape purely through its own
 // namespace/name/version (the same three components a fresh checkout could
@@ -54,7 +58,7 @@ func TestWriteGalaxyInfoOverwritesRelativeInRootSymlink(t *testing.T) {
 		t.Fatalf("writeGalaxyInfo: %v", err)
 	}
 
-	// The reset is what makes this assertion pass: without it, the WriteFile
+	// The removal is what makes this assertion pass: without it, the WriteFile
 	// that follows would have resolved the symlink and overwritten victim.txt
 	// with GALAXY.yml's own content instead.
 	assertFileContent(t, victim, victimContent)
@@ -64,7 +68,7 @@ func TestWriteGalaxyInfoOverwritesRelativeInRootSymlink(t *testing.T) {
 		t.Fatalf("lstat %s: %v", leaf, err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		t.Fatalf("expected %s to be a regular file after the reset, still a symlink", leaf)
+		t.Fatalf("expected %s to be a regular file after the write, still a symlink", leaf)
 	}
 	assertGalaxyYAMLIdentity(t, leaf, col)
 }
@@ -72,7 +76,7 @@ func TestWriteGalaxyInfoOverwritesRelativeInRootSymlink(t *testing.T) {
 // TestWriteGalaxyInfoDoesNotCreateDanglingSymlinkTarget proves a dangling
 // in-root symlink at the GALAXY.yml leaf - pointing at a path that does not
 // exist yet, still inside the root - does not get its target materialized.
-// Without the reset, target.root.WriteFile follows the symlink and creates a
+// Without the removal, target.root.WriteFile follows the symlink and creates a
 // brand-new file at whatever location the attacker named, anywhere inside
 // the collections root.
 func TestWriteGalaxyInfoDoesNotCreateDanglingSymlinkTarget(t *testing.T) {
@@ -103,7 +107,7 @@ func TestWriteGalaxyInfoDoesNotCreateDanglingSymlinkTarget(t *testing.T) {
 		t.Fatalf("lstat %s: %v", leaf, err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		t.Fatalf("expected %s to be a regular file after the reset, still a symlink", leaf)
+		t.Fatalf("expected %s to be a regular file after the write, still a symlink", leaf)
 	}
 	assertGalaxyYAMLIdentity(t, leaf, col)
 }
@@ -114,8 +118,8 @@ func TestWriteGalaxyInfoDoesNotCreateDanglingSymlinkTarget(t *testing.T) {
 // the shared content-addressable extracted store under cfg.CacheDir - is
 // unlinked, not written through. os.Root is path-based and cannot see a
 // hardlink at all: unlike a symlink, there is no traversal for it to refuse,
-// so the reset (an unlink of the in-root name) is the only defense that
-// exists at this leaf. Before the reset, WriteFile followed the existing
+// so the removal (an unlink of the in-root name) is the only defense that
+// exists at this leaf. Without it, WriteFile followed the existing
 // directory entry and wrote new bytes into the shared inode, corrupting
 // content every other project hardlinking the same inode still relies on.
 func TestWriteGalaxyInfoDoesNotCorruptHardlinkedContentOutsideRoot(t *testing.T) {
@@ -146,7 +150,7 @@ func TestWriteGalaxyInfoDoesNotCorruptHardlinkedContentOutsideRoot(t *testing.T)
 		t.Fatalf("writeGalaxyInfo: %v", err)
 	}
 
-	// The reset's RemoveAll unlinks the in-root directory entry, which only
+	// The removal unlinks the in-root directory entry, which only
 	// drops the shared inode's link count - it never touches the inode's
 	// content, so the other name (shared) must read back unchanged.
 	assertFileContent(t, shared, sharedContent)
@@ -170,4 +174,84 @@ func assertGalaxyYAMLIdentity(t *testing.T, leaf string, col collection) {
 	if g.Namespace != col.Namespace || g.Name != col.Name || g.Version != col.Version {
 		t.Errorf("identity = %s.%s-%s, want %s.%s-%s", g.Namespace, g.Name, g.Version, col.Namespace, col.Name, col.Version)
 	}
+}
+
+// TestWriteGalaxyInfoKeepsTheExtractMarker pins why the directory is not
+// reset: the extract marker lives in .info, written by the extraction that
+// runs just before this write. A reset here would erase it on every install,
+// so every later run would find no marker and extract every collection
+// again - a regression no other test observes, since each extraction still
+// succeeds.
+func TestWriteGalaxyInfoKeepsTheExtractMarker(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cfg := &config.Config{Server: "https://galaxy.example.com", DownloadPath: root}
+	col := collection{Namespace: "acme", Name: "widgets", Version: testVersion100}
+	target := newTestInstallTarget(t, cfg, col)
+	mustMkdirAll(t, target.path)
+	seedValidExtractMarker(t, target, validMarkerSHA)
+
+	if err := writeGalaxyInfo(target, cfg, col, nil); err != nil {
+		t.Fatalf("writeGalaxyInfo: %v", err)
+	}
+
+	if !verifyExtractMarker(&capturingPrinter{}, target, validMarkerSHA) {
+		t.Fatal("the extract marker did not survive writing GALAXY.yml beside it")
+	}
+}
+
+// TestWriteGalaxyInfoReplacesASymlinkedInfoDirectory is the directory-level
+// counterpart of the leaf tests above: an in-root symlink at target.info
+// itself, pointing at another directory inside the collections root, would
+// have every write below it land in that directory. It is replaced by a real
+// directory instead, and the directory it pointed at is left as it was.
+func TestWriteGalaxyInfoReplacesASymlinkedInfoDirectory(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cfg := &config.Config{Server: "https://galaxy.example.com", DownloadPath: root}
+	col := collection{Namespace: "acme", Name: "widgets", Version: testVersion100}
+	target := newTestInstallTarget(t, cfg, col)
+
+	elsewhere := filepath.Join(root, "ansible_collections", "elsewhere")
+	mustMkdirAll(t, elsewhere)
+	victim := filepath.Join(elsewhere, galaxyYAMLFileName)
+	const victimContent = "# another directory's own document\n"
+	mustWriteFile(t, victim, []byte(victimContent))
+	infoDir := filepath.Join(root, target.info)
+	if err := os.Symlink("elsewhere", infoDir); err != nil {
+		t.Fatalf("symlink %s -> elsewhere: %v", infoDir, err)
+	}
+
+	if err := writeGalaxyInfo(target, cfg, col, nil); err != nil {
+		t.Fatalf("writeGalaxyInfo: %v", err)
+	}
+
+	assertFileContent(t, victim, victimContent)
+	info, err := os.Lstat(infoDir)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("%s is not a real directory after the write (%v)", infoDir, err)
+	}
+	assertGalaxyYAMLIdentity(t, filepath.Join(infoDir, galaxyYAMLFileName), col)
+}
+
+// TestWriteGalaxyInfoRemovesAnotherSourcesProvenance pins the one thing a
+// whole-directory reset used to clear that a file-by-file write would not:
+// a provenance file left by a url install of the same version, now that the
+// same bytes are installed from a Galaxy server. Kept, it would have outdated
+// report the Galaxy install as a url one.
+func TestWriteGalaxyInfoRemovesAnotherSourcesProvenance(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cfg := &config.Config{Server: "https://galaxy.example.com", DownloadPath: root}
+	col := collection{Namespace: "acme", Name: "widgets", Version: testVersion100}
+	target := newTestInstallTarget(t, cfg, col)
+	stale := filepath.Join(root, target.info, provenanceFileName)
+	mustMkdirAll(t, filepath.Dir(stale))
+	mustWriteFile(t, stale, []byte("url_sha256: "+validMarkerSHA+"\n"))
+
+	if err := writeGalaxyInfo(target, cfg, col, nil); err != nil {
+		t.Fatalf("writeGalaxyInfo: %v", err)
+	}
+
+	assertPathAbsent(t, stale)
 }

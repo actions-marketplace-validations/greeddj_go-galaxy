@@ -384,7 +384,7 @@ func TestClassifyDryRunNeverDeletesDriftedExtractMarker(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected acme.app to be recorded installed")
 	}
-	markerPath := filepath.Join(entry.InstallPath, helpers.ExtractMarkerPrefix+entry.ArtifactSHA256)
+	markerPath := collectionMarkerPath(entry.InstallPath, collection{Namespace: "acme", Name: "app", Version: "1.0.0"}, entry.ArtifactSHA256)
 	if _, err := os.Stat(markerPath); err != nil {
 		t.Fatalf("expected the extract marker to exist right after install, stat error: %v", err)
 	}

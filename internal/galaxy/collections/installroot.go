@@ -52,11 +52,23 @@ var errCollectionsTreeNotUsable = errors.New("not usable as a collections direct
 // this run just created empty through root immediately beforehand (see
 // extractCollection's doc comment for why that step cannot itself be rooted),
 // and operator-facing log lines.
+//
+// marker is the root-relative directory the extract marker lives in (see
+// markerRel). For a collection that is info, not rel: `ansible-galaxy
+// collection verify` reports every file in the collection's own directory
+// that its FILES.json does not list, and exits 1 over it, so a marker there
+// failed every verify run over a tree this tool installed. A role keeps its
+// marker in rel, where cleanup and the directory-ownership check look for
+// it, since ansible has no verify for a role. infoPrefix, set for a
+// collection only, is the "<namespace>.<name>-" every version's .info
+// directory of that collection starts with; see resetCollectionInfo.
 type installTarget struct {
-	root *os.Root
-	rel  string
-	path string
-	info string
+	root       *os.Root
+	rel        string
+	path       string
+	info       string
+	marker     string
+	infoPrefix string
 }
 
 // newInstallTarget builds col's installTarget rooted at root, and whether
@@ -97,12 +109,15 @@ func newInstallTarget(root *os.Root, cfg *config.Config, col collection) (instal
 		return installTarget{}, false
 	}
 	rel := path.Join(collectionsDirName, col.Namespace, col.Name)
-	info := path.Join(collectionsDirName, fmt.Sprintf("%s.%s-%s%s", col.Namespace, col.Name, col.Version, infoDirSuffix))
+	infoPrefix := col.Namespace + "." + col.Name + "-"
+	info := path.Join(collectionsDirName, infoPrefix+col.Version+infoDirSuffix)
 	return installTarget{
-		root: root,
-		rel:  rel,
-		path: filepath.Join(cfg.DownloadPath, rel),
-		info: info,
+		root:       root,
+		rel:        rel,
+		path:       filepath.Join(cfg.DownloadPath, rel),
+		info:       info,
+		marker:     info,
+		infoPrefix: infoPrefix,
 	}, true
 }
 

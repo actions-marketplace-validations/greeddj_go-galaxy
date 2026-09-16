@@ -131,7 +131,7 @@ func TestInstallCollectionCacheHitExtractFailureRefetchesOnce(t *testing.T) {
 	assertExists(t, filepath.Join(cacheDir, extracted.RootDirName, correctSHA, extracted.ReadyMarker))
 	assertFileSHA256(t, artifactPath, correctSHA)
 	assertFileContent(t, sidecarPath, correctSHA)
-	assertExists(t, filepath.Join(installPath, ".extract-done."+correctSHA))
+	assertExists(t, collectionMarkerPath(installPath, col, correctSHA))
 }
 
 // TestInstallCollectionCacheHitExtractFailureRefetchOnceThenFails is the

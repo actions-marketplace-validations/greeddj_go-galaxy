@@ -209,7 +209,8 @@ func TestVerifyExtractMarkerSymlinkedPrefixLeavesOutsideMarkerIntact(t *testing.
 
 	const sha = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcd12"
 	const markerContent = "go-galaxy-extract-1 entries=0 dirs=0 bytes=0\n"
-	markerPath := filepath.Join(outsideInstallDir, helpers.ExtractMarkerPrefix+sha)
+	markerPath := collectionMarkerPath(outsideInstallDir, col, sha)
+	mustMkdirAll(t, filepath.Dir(markerPath))
 	mustWriteFile(t, markerPath, []byte(markerContent))
 
 	printer := &capturingPrinter{}
@@ -247,8 +248,10 @@ func TestVerifyExtractMarkerRealInstallReturnsTrue(t *testing.T) {
 // reachable only through the symlinked "ansible_collections" prefix. Unlike
 // that test - which stays true even with either one of two rooting gates
 // reverted, since the other alone still suffices - this one is killed by
-// reverting matchingInstalledRecord's own two target.root.Stat calls to a
-// plain, absolute os.Stat on their own, with no second gate standing behind it.
+// reverting matchingInstalledRecord's own two rooted calls - the marker's
+// target.root.Stat and readGalaxyInfo's sidecar read - to plain, absolute os
+// calls, with no second gate standing behind them. Reverting either one alone
+// is not enough: the other still refuses the symlinked seed by itself.
 func TestInstallRecordMatchesSymlinkedPrefixReturnsFalse(t *testing.T) {
 	t.Parallel()
 	col := collection{Namespace: "acme", Name: "widgets", Version: "1.0.0"}
@@ -256,10 +259,9 @@ func TestInstallRecordMatchesSymlinkedPrefixReturnsFalse(t *testing.T) {
 	mustMkdirAll(t, outsideInstallDir)
 
 	const sha = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
-	markerPath := filepath.Join(outsideInstallDir, helpers.ExtractMarkerPrefix+sha)
-	mustWriteFile(t, markerPath, []byte("go-galaxy-extract-1 entries=0 dirs=0 bytes=0\n"))
 	outsideInfoDir := filepath.Join(filepath.Dir(filepath.Dir(outsideInstallDir)), col.Namespace+"."+col.Name+"-"+col.Version+".info")
 	mustMkdirAll(t, outsideInfoDir)
+	mustWriteFile(t, collectionMarkerPath(outsideInstallDir, col, sha), []byte("go-galaxy-extract-1 entries=0 dirs=0 bytes=0\n"))
 	mustWriteFile(t, filepath.Join(outsideInfoDir, galaxyYAMLFileName), sidecarFor(col))
 
 	st := store.New()
@@ -309,14 +311,14 @@ func TestInstallRecordMatchesRealInstallReturnsTrue(t *testing.T) {
 // extract marker, and a GALAXY.yml sidecar all exist, but only reachable
 // through the symlinked "ansible_collections" prefix, exactly as they would
 // if an earlier, unpatched binary had installed through the symlink. Every
-// check matchingInstalledRecord performs goes through target.root.Stat, which
+// check matchingInstalledRecord performs goes through target.root, which
 // refuses to traverse the escaping component, so this must report false - a
 // silent wrong "true" here would skip a real install and keep serving
 // whatever sits at the symlink's target forever.
 //
 // This test is conjunction-killed by design, not a weak or vacuous check:
 // canSkipInstall layers two independent rooting gates -
-// matchingInstalledRecord's own two target.root.Stat calls, and
+// matchingInstalledRecord's own two rooted calls, and
 // verifyExtractMarker's rooted scanTree/readExtractMarker pass - and
 // reverting only one of them still leaves the other refusing the symlinked
 // seed on its own, so this test stays green either way. That is expected, not
@@ -336,10 +338,9 @@ func TestCanSkipInstallSymlinkedPrefixReturnsFalse(t *testing.T) {
 	mustMkdirAll(t, outsideInstallDir)
 
 	const sha = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
-	markerPath := filepath.Join(outsideInstallDir, helpers.ExtractMarkerPrefix+sha)
-	mustWriteFile(t, markerPath, []byte("go-galaxy-extract-1 entries=0 dirs=0 bytes=0\n"))
 	outsideInfoDir := filepath.Join(filepath.Dir(filepath.Dir(outsideInstallDir)), col.Namespace+"."+col.Name+"-"+col.Version+".info")
 	mustMkdirAll(t, outsideInfoDir)
+	mustWriteFile(t, collectionMarkerPath(outsideInstallDir, col, sha), []byte("go-galaxy-extract-1 entries=0 dirs=0 bytes=0\n"))
 	mustWriteFile(t, filepath.Join(outsideInfoDir, galaxyYAMLFileName), sidecarFor(col))
 
 	st := store.New()

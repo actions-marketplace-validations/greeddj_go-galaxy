@@ -173,7 +173,11 @@ func readGalaxyInfo(target installTarget) (GalaxyYAML, []byte, bool) {
 // GALAXY.yml outside ansible's schema - carrying a git or url install's
 // provenance keys, or a null signatures value - which ansible answers by
 // discarding the document or, for the null, by failing `collection verify
-// --offline`.
+// --offline`. A tree an earlier release installed never reaches this path
+// itself: its extract marker sits in the collection directory rather than in
+// .info, so the install extracts it again and writes both documents anew.
+// Those shapes arrive here only as a sidecar replaced from outside beside an
+// install this release made - restored from an older copy of the tree, say.
 //
 // Repairing rather than re-installing is the proportionate answer: nothing
 // about the artifact or the extracted tree is in question, so a re-download
@@ -250,26 +254,37 @@ func reconcileProvenance(runtime *infra.Infra, target installTarget, col collect
 	return true
 }
 
-// replaceInfoFile replaces name in target's .info directory with data,
-// removing whatever sits at that name first (see reconcileGalaxyInfo for
-// why), and reports whether it did; a failure is warned about here.
+// replaceInfoFile is writeInfoFile for the skip path, where a failure is a
+// warning rather than an error (see reconcileGalaxyInfo), reporting whether
+// the file was written.
 func replaceInfoFile(runtime *infra.Infra, target installTarget, col collection, name string, data []byte) bool {
-	rel := path.Join(target.info, name)
-	if err := target.root.Remove(rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		runtime.Output.Warnf("%s: cannot replace %s: %v", col.key(), name, err)
-		return false
-	}
-	if err := target.root.WriteFile(rel, data, helpers.FileMod); err != nil {
+	if err := writeInfoFile(target, name, data); err != nil {
 		runtime.Output.Warnf("%s: cannot write %s: %v", col.key(), name, err)
 		return false
 	}
 	return true
 }
 
+// writeInfoFile replaces name in target's .info directory with data: whatever
+// sits at that name is removed first, and only then is the file written, so
+// the write lands on a name this call just created. See writeGalaxyInfo for
+// the three shapes that removal closes.
+func writeInfoFile(target installTarget, name string, data []byte) error {
+	rel := path.Join(target.info, name)
+	if err := target.root.Remove(rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return classifyCollectionsRootError(target.root, target.info, err)
+	}
+	if err := target.root.WriteFile(rel, data, helpers.FileMod); err != nil {
+		return classifyCollectionsRootError(target.root, target.info, err)
+	}
+	return nil
+}
+
 // writeGalaxyInfo writes GALAXY.yml for the installed collection, and for a
-// git or url collection its provenanceFileName beside it. When meta is nil
-// (artifact-cache-hit fast path), a minimal GALAXY.yml is written using fields
-// available from the collection identity.
+// git or url collection its provenanceFileName beside it, removing a
+// provenance file a different source's install of the same version left.
+// When meta is nil (artifact-cache-hit fast path), a minimal GALAXY.yml is
+// written using fields available from the collection identity.
 //
 // target's identity was already validated once, by newInstallTarget at the
 // point installCollection built it - this function trusts that and does not
@@ -280,48 +295,74 @@ func replaceInfoFile(runtime *infra.Infra, target installTarget, col collection,
 // symlink planted between newInstallTarget's validation and this call,
 // rather than a fresh identity check.
 //
-// target.info is reset - RemoveAll then MkdirAll, both rooted and classified
-// - before the write, exactly like extractCollection resets target.rel: an
-// os.Root boundary only stops traversal, it says nothing about what already
-// sits at the leaf name inside it. A bare MkdirAll (a no-op when the
-// directory already exists) would leave a pre-planted GALAXY.yml at that
-// leaf untouched, and the write that follows would go straight through it -
-// including through a relative in-root symlink, which os.Root happily
-// resolves as long as its target stays inside the root, and including a
-// dangling in-root symlink, which the write would silently create the file
-// at. Worse, a hardlink at that leaf is written through even when the linked
-// inode lives outside the root entirely: os.Root is path-based, so it
-// constrains which paths a method may traverse, but a hardlink is not a
-// path, it is a second name for an inode the kernel already resolved before
-// os.Root was ever involved - there is nothing for Root to see. The reset,
-// not the root, is what closes all three: it guarantees the write always
-// lands on a name this run just created, the same invariant
-// extractCollection already relies on for target.rel, so both sinks now
-// share one argument instead of one argument with an unstated exception.
+// The directory is not reset here, because the extract marker lives in it:
+// extractTree wipes and recreates it with the tree (resetCollectionInfo) and
+// writes the marker, and a reset here would erase that marker on every
+// install and force a full re-extraction on every run after. What a reset
+// used to buy is kept file by file instead. An os.Root boundary only stops
+// traversal, it says nothing about what already sits at a leaf name inside
+// it, so writing to an existing GALAXY.yml would go straight through a
+// relative in-root symlink planted there, which os.Root happily resolves as
+// long as its target stays inside the root, and through a dangling in-root
+// symlink, which the write would silently create the file at. Worse, a
+// hardlink at that leaf is written through even when the linked inode lives
+// outside the root entirely: os.Root is path-based, so it constrains which
+// paths a method may traverse, but a hardlink is not a path, it is a second
+// name for an inode the kernel already resolved before os.Root was ever
+// involved - there is nothing for Root to see. writeInfoFile removes the
+// name before writing, which closes all three: the write always lands on a
+// name this run just created, the same invariant extractTree relies on for
+// target.rel.
+//
+// The directory's own name gets the same treatment one level up. Anything at
+// target.info that is not a real directory - most pointedly an in-root
+// symlink to some other directory, which os.Root would follow - is removed
+// and a real directory made in its place, before anything is written into
+// it. That costs the extract marker the symlink led to, so the next run
+// re-extracts rather than trusting a record it reached through a link.
 func writeGalaxyInfo(target installTarget, cfg *config.Config, col collection, meta *types.GalaxyCollectionVersionInfo) error {
-	if err := target.root.RemoveAll(target.info); err != nil {
-		return classifyCollectionsRootError(target.root, target.info, err)
-	}
-	if err := target.root.MkdirAll(target.info, helpers.DirMod); err != nil {
-		return classifyCollectionsRootError(target.root, target.info, err)
+	if err := ensureInfoDir(target); err != nil {
+		return err
 	}
 	g := buildGalaxyYAML(cfg, col, meta)
 	data, err := yaml.Marshal(&g)
 	if err != nil {
 		return err
 	}
-	if err := target.root.WriteFile(path.Join(target.info, galaxyYAMLFileName), data, helpers.FileMod); err != nil {
-		return classifyCollectionsRootError(target.root, target.info, err)
+	if err := writeInfoFile(target, galaxyYAMLFileName, data); err != nil {
+		return err
 	}
 	prov := buildProvenance(col)
 	if prov == (sidecarProvenance{}) {
+		rel := path.Join(target.info, provenanceFileName)
+		if err := target.root.Remove(rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return classifyCollectionsRootError(target.root, target.info, err)
+		}
 		return nil
 	}
 	data, err = yaml.Marshal(&prov)
 	if err != nil {
 		return err
 	}
-	if err := target.root.WriteFile(path.Join(target.info, provenanceFileName), data, helpers.FileMod); err != nil {
+	return writeInfoFile(target, provenanceFileName, data)
+}
+
+// ensureInfoDir makes target.info a real directory, leaving one that already
+// is untouched; see writeGalaxyInfo for why anything else at that name is
+// removed first.
+func ensureInfoDir(target installTarget) error {
+	info, err := target.root.Lstat(target.info)
+	switch {
+	case err == nil && info.IsDir():
+		return nil
+	case err == nil:
+		if err := target.root.RemoveAll(target.info); err != nil {
+			return classifyCollectionsRootError(target.root, target.info, err)
+		}
+	case !errors.Is(err, fs.ErrNotExist):
+		return classifyCollectionsRootError(target.root, target.info, err)
+	}
+	if err := target.root.MkdirAll(target.info, helpers.DirMod); err != nil {
 		return classifyCollectionsRootError(target.root, target.info, err)
 	}
 	return nil

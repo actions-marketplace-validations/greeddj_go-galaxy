@@ -71,7 +71,7 @@ func newRoleTarget(root *os.Root, cfg *config.Config, r resolvedRole) (installTa
 	if root == nil || !helpers.IsRoleInstallName(r.Name) {
 		return installTarget{}, false
 	}
-	return installTarget{root: root, rel: r.Name, path: absoluteOrAsIs(filepath.Join(cfg.RolesPath, r.Name))}, true
+	return installTarget{root: root, rel: r.Name, path: absoluteOrAsIs(filepath.Join(cfg.RolesPath, r.Name)), marker: r.Name}, true
 }
 
 // absoluteOrAsIs renders p absolute against the working directory, or as
