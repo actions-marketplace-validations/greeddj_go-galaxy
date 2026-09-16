@@ -89,8 +89,11 @@ two-flag set of their own, listed under
   section's own `token` key does not authorize an override either.
 - `--timeout` (`$GO_GALAXY_SERVER_TIMEOUT`, `$GO_GALAXY_TIMEOUT`, `$ANSIBLE_GALAXY_SERVER_TIMEOUT`)
   It takes either a bare integer number of seconds (`60`, which is ansible's own form) or a Go
-  duration string (`90s`, `1m30s`), and defaults to `30s`. Zero, negative and unparseable values are
-  all refused as a usage error exiting `2` (`invalid timeout`): `--timeout 0` does not mean "no
+  duration string (`90s`, `1m30s`). When neither the flag nor any of its variables is set, the value
+  comes from `server_timeout` in the `[galaxy]` section of `ansible.cfg`, read by the same grammar,
+  and only without that from the `30s` default - the order ansible itself applies to this setting.
+  Zero, negative and unparseable values are all refused as a usage error exiting `2`
+  (`invalid timeout`), whichever of those places supplied them: `--timeout 0` does not mean "no
   timeout", it fails the run before a request is made.
   `--timeout` is a no-progress budget - it bounds the response-header wait and the gap between two
   body reads. It bounds neither total transfer time nor a byte-drip: a server that keeps dribbling a

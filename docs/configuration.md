@@ -26,9 +26,9 @@ name it explicitly, or tighten the directory's mode.
 | `[galaxy] server`                  | `ANSIBLE_GALAXY_SERVER`                                       |
 | `[galaxy] server_list`             | `ANSIBLE_GALAXY_SERVER_LIST`                                  |
 | `[galaxy] cache_dir`               | `ANSIBLE_GALAXY_CACHE_DIR`                                    |
+| `[galaxy] server_timeout`          | `ANSIBLE_GALAXY_SERVER_TIMEOUT`                               |
 | `[galaxy_server.<id>]`             | `ANSIBLE_GALAXY_SERVER_<ID>_URL`, `_TOKEN`, `_VALIDATE_CERTS` |
 | (the config file itself)           | `ANSIBLE_CONFIG`                                              |
-| (request timeout)                  | `ANSIBLE_GALAXY_SERVER_TIMEOUT`                               |
 
 `ANSIBLE_CONFIG` is the one row that is not a setting's environment override:
 it names the file the other rows are read from, and it is a discovery
@@ -258,4 +258,5 @@ roles_path = ./roles
 [galaxy]
 server = https://galaxy.ansible.com
 cache_dir = /home/ci/.cache/go-galaxy
+server_timeout = 60
 ```

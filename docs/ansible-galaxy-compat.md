@@ -316,15 +316,20 @@ does not define is a usage error naming the flag and exits `2`, which is how
   against a server that serves anonymously, as the public Galaxy does, the run
   simply proceeds unauthenticated with nothing said.
 - **The request-timeout default is tighter.** `--timeout` defaults to `30s`
-  here, against ansible-core 2.21.2's 60s, and both tools read the same
-  `ANSIBLE_GALAXY_SERVER_TIMEOUT`: a pipeline that sets it gets the same
-  number in both, and a pipeline relying on the default gets a tighter budget
-  here. go-galaxy takes this setting from `--timeout` and its environment
-  variables only, reading no timeout out of `ansible.cfg` at all, so nothing
-  in that file changes it here. A hub slow to answer headers can therefore sit
-  inside ansible's default and outside this one, with `--timeout` or that
-  same shared variable as the remedy. What the budget bounds is unchanged - see
-  the `--timeout` bullet above and [install options](cli.md#install-options).
+  here, against ansible-core 2.21.2's 60s. Both tools read the same
+  `ANSIBLE_GALAXY_SERVER_TIMEOUT` and the same `[galaxy] server_timeout` in
+  `ansible.cfg`, in the same order - the flag, then the variable, then the
+  file - so a pipeline that sets either gets the same number in both, and
+  only a pipeline relying on the default gets a tighter budget here. A hub
+  slow to answer headers can therefore sit inside ansible's default and
+  outside this one, with any of those three as the remedy. Two narrower
+  differences remain. The file's value is read by the grammar `--timeout`
+  uses, so `90s` works here where ansible refuses anything but whole seconds,
+  and a file both tools read should keep to those. And a per-server
+  `timeout` in a `[galaxy_server.<id>]` section is not read: this tool has
+  one budget for the whole run, so that key is named in the warning about
+  unsupported keys and otherwise ignored. What the budget bounds is unchanged
+  - see the `--timeout` bullet above and [install options](cli.md#install-options).
 - **The exit codes are not ansible's, and the same numbers mean different
   things.** ansible-core 2.21.2 uses a small flat set: `1` generic, `4` parser
   error, `5` options error, `99` interrupt, `250` unexpected. go-galaxy's
