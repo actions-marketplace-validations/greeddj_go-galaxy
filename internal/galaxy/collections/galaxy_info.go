@@ -1,6 +1,7 @@
 package collections
 
 import (
+	"bytes"
 	"errors"
 	"io/fs"
 	"path"
@@ -18,25 +19,120 @@ import (
 // silently reproducing the disagreement this file's chokepoint closes.
 const galaxyYAMLFileName = "GALAXY.yml"
 
-// GalaxyYAML represents the GALAXY.yml metadata file. For a collection built
-// from a git source, Server names the repository URL (credential-free by
-// construction) rather than a Galaxy server, the two URL fields and the
-// signatures are empty, and GitCommit records the commit the tree was built
-// from; ansible-galaxy writes no sidecar at all for a git install, so the
-// extra key is this tool's provenance, and ansible ignores it.
+// provenanceFileName is the one file this tool adds to ansible's .info
+// layout, written beside GALAXY.yml for a git or url install only: it holds
+// the provenance GALAXY.yml has no key for (see sidecarProvenance). ansible
+// reads nothing from it, and removes it with the rest of the directory when
+// it reinstalls the collection, as this tool's own install and cleanup do - so
+// it cannot outlive the install it describes.
+const provenanceFileName = "go-galaxy.yml"
+
+// GalaxyYAML represents the GALAXY.yml metadata file, held to exactly the
+// schema ansible-core validates it against when it reads an installed
+// collection (_validate_v1_source_info_schema): these eight keys and no
+// other. That schema is closed, not advisory - one key outside it and ansible
+// warns and discards the whole document, on every command that reads the
+// installed tree - so a fact this tool wants to record beyond it goes into
+// provenanceFileName instead.
+//
+// For a collection built from a git source, Server names the repository URL
+// (credential-free by construction) rather than a Galaxy server; for a url
+// source, Server and DownloadURL both name the tarball URL. ansible-galaxy
+// writes no sidecar at all for either kind of install.
 type GalaxyYAML struct {
-	DownloadURL string `yaml:"download_url"`
-	FormatVer   string `yaml:"format_version"`
-	Name        string `yaml:"name"`
-	Namespace   string `yaml:"namespace"`
-	Server      string `yaml:"server"`
-	Signatures  any    `yaml:"signatures"`
-	Version     string `yaml:"version"`
-	VersionURL  string `yaml:"version_url"`
-	GitCommit   string `yaml:"git_commit,omitempty"`
-	// URLSHA256 records a url collection's origin sha256, provenance the way
-	// GitCommit is for a git collection; ansible ignores both.
+	DownloadURL string           `yaml:"download_url"`
+	FormatVer   string           `yaml:"format_version"`
+	Name        string           `yaml:"name"`
+	Namespace   string           `yaml:"namespace"`
+	Server      string           `yaml:"server"`
+	Version     string           `yaml:"version"`
+	VersionURL  string           `yaml:"version_url"`
+	Signatures  galaxySignatures `yaml:"signatures"`
+}
+
+// galaxySignature is one entry of GALAXY.yml's signatures list, with exactly
+// the keys ansible's schema admits there. ansible reads Signature by indexing
+// the entry, so an entry without one is never kept.
+type galaxySignature struct {
+	PubkeyFingerprint string `yaml:"pubkey_fingerprint,omitempty"`
+	PulpCreated       string `yaml:"pulp_created,omitempty"`
+	Signature         string `yaml:"signature"`
+	SigningService    string `yaml:"signing_service,omitempty"`
+}
+
+// galaxySignatures is GALAXY.yml's signatures list. It renders as a list even
+// when empty - yaml.v3 renders a nil slice as [] - and that is load-bearing:
+// ansible's schema lets a null through, and `ansible-galaxy collection verify
+// --offline` then fails with a Python TypeError when it iterates the value.
+//
+// Decoding it never fails. A value that is not a list reads as no signatures,
+// and an entry that is not a mapping, has a value that is not a scalar, or
+// carries no signature text is dropped, as is an entry holding anything but a
+// scalar under one of the four keys galaxySignature names; every other key is
+// dropped from the entry. A sidecar is read to prove an install and to find
+// its server, and neither depends on the signatures, so an odd shape there
+// costs the signatures rather than the whole document. What was read then
+// renders in the conforming shape, which is what lets the skip path repair a
+// document instead of reinstalling the collection.
+type galaxySignatures []galaxySignature
+
+// UnmarshalYAML implements yaml.Unmarshaler; see galaxySignatures for the
+// rule it applies.
+func (s *galaxySignatures) UnmarshalYAML(node *yaml.Node) error {
+	*s = nil
+	if node.Kind != yaml.SequenceNode {
+		return nil
+	}
+	for _, item := range node.Content {
+		var entry galaxySignature
+		if item.Kind != yaml.MappingNode || item.Decode(&entry) != nil || entry.Signature == "" {
+			continue
+		}
+		*s = append(*s, entry)
+	}
+	return nil
+}
+
+// sidecarSignatures converts the signatures a server attached to a version
+// document - a decoded JSON value of whatever shape the server chose - into
+// the list GALAXY.yml carries. It goes through the same decode a sidecar read
+// does, so what an entry has to be is one rule rather than one per source.
+func sidecarSignatures(raw any) galaxySignatures {
+	var node yaml.Node
+	if err := node.Encode(raw); err != nil {
+		return nil
+	}
+	var signatures galaxySignatures
+	if err := signatures.UnmarshalYAML(&node); err != nil {
+		return nil
+	}
+	return signatures
+}
+
+// sidecarProvenance is what provenanceFileName holds: the commit a git
+// install's tree was built from, or the sha256 of the bytes a url install was
+// fetched as. Which of the two is set is also what says which kind of install
+// the directory describes, and that is what outdated reads it for (see
+// installedKindOf). A Galaxy install has neither, and no such file.
+//
+// The keys are the ones releases before this file existed wrote into
+// GALAXY.yml itself, so a sidecar written by one of them decodes into this
+// same type; see readInstalledSidecar for the fallback that relies on it.
+type sidecarProvenance struct {
+	GitCommit string `yaml:"git_commit,omitempty"`
 	URLSHA256 string `yaml:"url_sha256,omitempty"`
+}
+
+// buildProvenance builds col's provenance document, which is empty for a
+// collection from a Galaxy server.
+func buildProvenance(col collection) sidecarProvenance {
+	if loc, err := col.gitLocator(); err == nil && col.isGit() {
+		return sidecarProvenance{GitCommit: loc.Commit}
+	}
+	if loc, err := col.urlLocator(); err == nil && col.isURL() {
+		return sidecarProvenance{URLSHA256: loc.SHA256}
+	}
+	return sidecarProvenance{}
 }
 
 // describes reports whether this document names the very collection col is,
@@ -49,29 +145,35 @@ func (g GalaxyYAML) describes(col collection) bool {
 	return g.Namespace == col.Namespace && g.Name == col.Name && g.Version == col.Version
 }
 
-// readGalaxyInfo reads and parses the sidecar beside target. It reports
-// false for every outcome that is not a parseable document - absent,
-// unreadable, not a regular file, or malformed - since none of them is
-// evidence of anything about the collection.
-func readGalaxyInfo(target installTarget) (GalaxyYAML, bool) {
+// readGalaxyInfo reads and parses the sidecar beside target, returning the
+// bytes it parsed alongside the document so the skip path can tell whether a
+// re-rendering would change the file. It reports false for every outcome that
+// is not a parseable document - absent, unreadable, not a regular file, or
+// malformed - since none of them is evidence of anything about the
+// collection.
+func readGalaxyInfo(target installTarget) (GalaxyYAML, []byte, bool) {
 	data, ok := readRegularFile(target.root, path.Join(target.info, galaxyYAMLFileName))
 	if !ok {
-		return GalaxyYAML{}, false
+		return GalaxyYAML{}, nil, false
 	}
 	var doc GalaxyYAML
 	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return GalaxyYAML{}, false
+		return GalaxyYAML{}, nil, false
 	}
-	return doc, true
+	return doc, data, true
 }
 
-// reconcileGalaxyInfo repairs the one field of an already-installed
-// collection's sidecar that can drift while the install itself stays valid:
-// the server. It is called on the skip path, where the store's record has
-// just been shown to name this collection, this path and this source, so the
-// record is the authority and the document beside it is a copy that fell
-// behind - a copy written by a version of this tool that recorded the run's
-// default server rather than the one the collection resolved from.
+// reconcileGalaxyInfo repairs what can drift in an already-installed
+// collection's .info directory while the install itself stays valid. It is
+// called on the skip path, where the store's record has just been shown to
+// name this collection, this path and this source, so the record is the
+// authority and the documents beside it are copies that fell behind. Earlier
+// versions of this tool left two such copies: a GALAXY.yml naming the run's
+// default server rather than the one the collection resolved from, and a
+// GALAXY.yml outside ansible's schema - carrying a git or url install's
+// provenance keys, or a null signatures value - which ansible answers by
+// discarding the document or, for the null, by failing `collection verify
+// --offline`.
 //
 // Repairing rather than re-installing is the proportionate answer: nothing
 // about the artifact or the extracted tree is in question, so a re-download
@@ -80,44 +182,94 @@ func readGalaxyInfo(target installTarget) (GalaxyYAML, bool) {
 // collection says the tree's provenance is unknown, which only a real
 // install can settle.
 //
-// The document is rewritten whole from what was read, with one field
-// replaced, so download_url, version_url, signatures and the git or url
-// provenance all survive - none of them is available on this path to
-// rebuild. The file is removed before it is written rather than truncated in
-// place, the same discipline writeGalaxyInstallInfo follows for a role: an
-// in-root symlink at that name is a path os.Root will happily resolve, and
-// writing through it would land the document somewhere this run never
-// created.
+// GALAXY.yml is rewritten whole from what was read, with the server replaced
+// and the rest re-rendered through GalaxyYAML, so download_url, version_url
+// and the signatures survive - none of them is available on this path to
+// rebuild - and nothing outside the schema does. Whether to rewrite is
+// decided by comparing that rendering with the bytes read rather than field
+// by field, since the question is whether the file is exactly what this tool
+// writes; a file that already is costs no write, so a skip over a tree that
+// needs no repair touches nothing.
+//
+// The provenance file is settled first, and from col rather than from what
+// was read, because a GALAXY.yml an earlier release wrote can hold the only
+// copy of that provenance on disk: rewriting it and then failing the
+// provenance write would erase the one record that tells outdated a git or
+// url install from a Galaxy one. A provenance write that fails therefore
+// leaves GALAXY.yml as it was.
+//
+// Each file is removed before it is written rather than truncated in place,
+// the same discipline writeGalaxyInstallInfo follows for a role: an in-root
+// symlink at that name is a path os.Root will happily resolve, and writing
+// through it would land the document somewhere this run never created.
 //
 // A failure to repair is a warning, never an error: the run's actual product
 // is installed and correct, and refusing to proceed over a metadata field
 // would turn a self-heal into an outage.
-func reconcileGalaxyInfo(runtime *infra.Infra, target installTarget, cfg *config.Config, col collection, doc GalaxyYAML) {
-	want := buildGalaxyYAML(cfg, col, nil).Server
-	if doc.Server == want {
+func reconcileGalaxyInfo(runtime *infra.Infra, target installTarget, cfg *config.Config, col collection, state installedState) {
+	if !reconcileProvenance(runtime, target, col) {
 		return
 	}
-	doc.Server = want
+	doc := state.info
+	doc.Server = buildGalaxyYAML(cfg, col, nil).Server
 	data, err := yaml.Marshal(&doc)
 	if err != nil {
 		runtime.Output.Warnf("%s: cannot rebuild %s: %v", col.key(), galaxyYAMLFileName, err)
 		return
 	}
-	rel := path.Join(target.info, galaxyYAMLFileName)
-	if err := target.root.Remove(rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		runtime.Output.Warnf("%s: cannot replace %s: %v", col.key(), galaxyYAMLFileName, err)
+	if bytes.Equal(data, state.infoData) {
 		return
 	}
-	if err := target.root.WriteFile(rel, data, helpers.FileMod); err != nil {
-		runtime.Output.Warnf("%s: cannot write %s: %v", col.key(), galaxyYAMLFileName, err)
-		return
+	if replaceInfoFile(runtime, target, col, galaxyYAMLFileName, data) {
+		runtime.Output.Debugf("%s: %s rewritten to match the install record and ansible's schema", col.key(), galaxyYAMLFileName)
 	}
-	runtime.Output.Debugf("%s: recorded server corrected to %s in %s", col.key(), want, galaxyYAMLFileName)
 }
 
-// writeGalaxyInfo writes GALAXY.yml for the installed collection. When meta
-// is nil (artifact-cache-hit fast path), a minimal GALAXY.yml is written
-// using fields available from the collection identity.
+// reconcileProvenance makes provenanceFileName hold what col's install
+// record implies, and reports whether it does. A collection from a Galaxy
+// server has nothing to hold, and no stray file is looked for on its behalf:
+// an install resets the whole .info directory, so no run of this tool leaves
+// one behind, and a skip should not pay a stat to find what nothing writes.
+func reconcileProvenance(runtime *infra.Infra, target installTarget, col collection) bool {
+	prov := buildProvenance(col)
+	if prov == (sidecarProvenance{}) {
+		return true
+	}
+	data, err := yaml.Marshal(&prov)
+	if err != nil {
+		runtime.Output.Warnf("%s: cannot rebuild %s: %v", col.key(), provenanceFileName, err)
+		return false
+	}
+	if have, ok := readRegularFile(target.root, path.Join(target.info, provenanceFileName)); ok && bytes.Equal(have, data) {
+		return true
+	}
+	if !replaceInfoFile(runtime, target, col, provenanceFileName, data) {
+		return false
+	}
+	runtime.Output.Debugf("%s: %s rewritten to match the install record", col.key(), provenanceFileName)
+	return true
+}
+
+// replaceInfoFile replaces name in target's .info directory with data,
+// removing whatever sits at that name first (see reconcileGalaxyInfo for
+// why), and reports whether it did; a failure is warned about here.
+func replaceInfoFile(runtime *infra.Infra, target installTarget, col collection, name string, data []byte) bool {
+	rel := path.Join(target.info, name)
+	if err := target.root.Remove(rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		runtime.Output.Warnf("%s: cannot replace %s: %v", col.key(), name, err)
+		return false
+	}
+	if err := target.root.WriteFile(rel, data, helpers.FileMod); err != nil {
+		runtime.Output.Warnf("%s: cannot write %s: %v", col.key(), name, err)
+		return false
+	}
+	return true
+}
+
+// writeGalaxyInfo writes GALAXY.yml for the installed collection, and for a
+// git or url collection its provenanceFileName beside it. When meta is nil
+// (artifact-cache-hit fast path), a minimal GALAXY.yml is written using fields
+// available from the collection identity.
 //
 // target's identity was already validated once, by newInstallTarget at the
 // point installCollection built it - this function trusts that and does not
@@ -161,6 +313,17 @@ func writeGalaxyInfo(target installTarget, cfg *config.Config, col collection, m
 	if err := target.root.WriteFile(path.Join(target.info, galaxyYAMLFileName), data, helpers.FileMod); err != nil {
 		return classifyCollectionsRootError(target.root, target.info, err)
 	}
+	prov := buildProvenance(col)
+	if prov == (sidecarProvenance{}) {
+		return nil
+	}
+	data, err = yaml.Marshal(&prov)
+	if err != nil {
+		return err
+	}
+	if err := target.root.WriteFile(path.Join(target.info, provenanceFileName), data, helpers.FileMod); err != nil {
+		return classifyCollectionsRootError(target.root, target.info, err)
+	}
 	return nil
 }
 
@@ -189,15 +352,14 @@ func writeGalaxyInfo(target installTarget, cfg *config.Config, col collection, m
 // itself.
 //
 // The parenthetical above covers only the download and version URLs, not the
-// signatures value alongside them in that same sentence: meta.Signatures is
-// copied through untyped and uncut, exactly as the server sent it. No cut is
-// available for it the way helpers.WithoutCredentials is for a URL, because the
-// field is `any` - a JSON shape the server picks, not this program - and
-// walking an arbitrary decoded tree to rewrite every string inside it would be
-// a sanitizer whose coverage depends on guessing that shape right; a partial
-// one would read as a guarantee this comment cannot make. Whether that value
-// can itself carry something worth stripping is a question this comment does
-// not answer, only discloses.
+// signatures value alongside them in that same sentence. meta.Signatures is
+// reshaped into the list ansible's schema admits (see sidecarSignatures), which
+// decides which entries and keys are kept, but every string it keeps is copied
+// uncut, exactly as the server sent it. No cut is available for those the way
+// helpers.WithoutCredentials is for a URL: they are signature text, a key
+// fingerprint, a signing-service name and a timestamp, none of which has a
+// part a cut could recognize. Whether one of them can itself carry something
+// worth stripping is a question this comment does not answer, only discloses.
 func buildGalaxyYAML(cfg *config.Config, col collection, meta *types.GalaxyCollectionVersionInfo) GalaxyYAML {
 	g := GalaxyYAML{
 		FormatVer: "1.0.0",
@@ -208,13 +370,11 @@ func buildGalaxyYAML(cfg *config.Config, col collection, meta *types.GalaxyColle
 	}
 	if loc, err := col.gitLocator(); err == nil && col.isGit() {
 		g.Server = helpers.WithoutCredentials(loc.URL)
-		g.GitCommit = loc.Commit
 		return g
 	}
 	if loc, err := col.urlLocator(); err == nil && col.isURL() {
 		g.Server = helpers.WithoutCredentials(loc.URL)
 		g.DownloadURL = helpers.WithoutCredentials(loc.URL)
-		g.URLSHA256 = loc.SHA256
 		return g
 	}
 	// The server this collection actually resolved from, which is not always
@@ -233,7 +393,7 @@ func buildGalaxyYAML(cfg *config.Config, col collection, meta *types.GalaxyColle
 	}
 	if meta != nil {
 		g.DownloadURL = helpers.WithoutCredentials(meta.DownloadURL)
-		g.Signatures = meta.Signatures
+		g.Signatures = sidecarSignatures(meta.Signatures)
 		g.VersionURL = helpers.WithoutCredentials(meta.Href)
 	}
 	return g

@@ -117,8 +117,8 @@ would wrongly conclude the environment names are dead too - they are not.
   `MANIFEST.json` and `FILES.json` an `ansible-galaxy collection build` would
   into an artifact, and from there on treats it exactly like a downloaded
   one: cached under a key that carries the commit, extracted by the same
-  extractor, recorded with its commit in `GALAXY.yml`, and pinned in the
-  lockfile. The consequences, each deliberate:
+  extractor, recorded with its commit in the `.info` directory's
+  `go-galaxy.yml`, and pinned in the lockfile. The consequences, each deliberate:
   - The pin is the commit. `lock` records `type: git`, the repository URL,
     the ref as written, the commit and the subdir, and no `sha256` - the
     artifact is rebuilt deterministically from the commit, and the gzip
@@ -232,12 +232,13 @@ does not define is a usage error naming the flag and exits `2`, which is how
   than merely found, and has to name this collection at this version, so a
   truncated write and a document left by another version cost the same
   re-download - existence alone was never evidence that the tree and the
-  provenance record beside it belong together. One disagreement does not:
-  a sidecar whose `server` fell behind the record is rewritten in place,
-  since the record has already been shown to name this collection and this
-  source and a re-download would change no installed byte. That repair is
-  the only write a skipped install makes, and it happens only when the two
-  actually disagree. The consequence runs both ways: the
+  provenance record beside it belong together. Two disagreements do not,
+  both left by earlier releases: a sidecar whose `server` fell behind the
+  record, and a sidecar outside ansible's schema (next bullet). Either is
+  rewritten in place, since the record has already been shown to name this
+  collection and this source and a re-download would change no installed
+  byte. That repair is the only write a skipped install makes, and it
+  happens only when the file on disk is not already what this tool writes. The consequence runs both ways: the
   install path carries the namespace and the name but not the version, so a
   resolve that lands lower installs the lower version over a newer tree, and
   there is no "prefer what is there". A rerun is not by itself a new resolve,
@@ -249,6 +250,28 @@ does not define is a usage error naming the flag and exits `2`, which is how
   because it is folded into the same signature the other two are: toggling it
   between two otherwise identical runs re-resolves. To hold versions still across runs, lock them - see
   [lock](cli.md#lock).
+- **`GALAXY.yml` is written for every install, and held to ansible's schema.**
+  ansible-core writes that sidecar only for a collection a Galaxy server
+  served; go-galaxy writes it for git and url installs too, because its
+  install-skip check and `outdated` read it. ansible validates the file
+  against a closed schema - `download_url`, `format_version`, `name`,
+  `namespace`, `server`, `signatures`, `version`, `version_url` and nothing
+  else - on every command that reads the installed tree, so the document
+  carries exactly those keys, and `signatures` is always a list: a null
+  there passes ansible's validation and then makes `ansible-galaxy
+  collection verify --offline` fail with a Python `TypeError`. For a git
+  install `server` names the repository, and for a url install `server` and
+  `download_url` both name the tarball. What such an install records beyond
+  the schema - the commit, or the sha256 of the fetched bytes - goes into a
+  second file in the same directory, `go-galaxy.yml`, which ansible does not
+  read and removes along with the directory when it reinstalls the
+  collection. Earlier releases wrote those keys into `GALAXY.yml` itself, and
+  ansible answered each command with `[WARNING]: url_sha256. Supported
+  parameters include: ...` (or `git_commit`) and ignored the file. The next
+  `install` that finds such a collection already installed rewrites the
+  sidecar and moves the key into `go-galaxy.yml` without re-downloading
+  anything, and `outdated` still reads the key where an earlier release left
+  it.
 - **Prereleases are excluded and admitted on different rules than ansible's.**
   Stricter in one direction: a collection publishing only prerelease versions
   satisfies no plain constraint here, so the resolve fails with its proof plus

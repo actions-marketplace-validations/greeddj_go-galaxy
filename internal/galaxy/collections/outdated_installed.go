@@ -127,11 +127,11 @@ func scanInstalledCollection(
 	root *os.Root, cfg *config.Config, runtime *infra.Infra, infoName string,
 ) (lockfile.Entry, installedKind) {
 	rel := path.Join(collectionsDirName, infoName, galaxyYAMLFileName)
-	doc, ok := readGalaxyYAML(root, cfg, runtime, rel)
+	doc, prov, ok := readInstalledSidecar(root, cfg, runtime, infoName)
 	if !ok {
 		return lockfile.Entry{}, installedUnusable
 	}
-	kind := installedKindOf(doc)
+	kind := installedKindOf(prov)
 	name := doc.Namespace + "." + doc.Name
 	if !installedNameUsable(kind, doc) || !helpers.IsExactVersion(doc.Version) {
 		runtime.Output.Warnf("Skipping sidecar %s: it names no collection this tool can look up", displayPath(cfg, rel))
@@ -164,11 +164,11 @@ func scanInstalledCollection(
 // only that source writes: a git install records the commit its tree was
 // built from and a url install the sha256 of the bytes it was fetched as,
 // while a Galaxy install writes neither.
-func installedKindOf(doc GalaxyYAML) installedKind {
+func installedKindOf(prov sidecarProvenance) installedKind {
 	switch {
-	case doc.GitCommit != "":
+	case prov.GitCommit != "":
 		return installedGit
-	case doc.URLSHA256 != "":
+	case prov.URLSHA256 != "":
 		return installedURL
 	default:
 		return installedGalaxy
@@ -217,22 +217,44 @@ func installedVersionMatches(root *os.Root, doc GalaxyYAML) bool {
 	return manifest.CollectionInfo.Version == doc.Version
 }
 
-// readGalaxyYAML reads and parses one sidecar. A sidecar that is absent is
-// silent - a directory ending in .info need not be one - while one that
-// exists and does not parse is named, since an operator who sees a
-// collection missing from the report deserves to know which file this
+// readInstalledSidecar reads one sidecar directory: its GALAXY.yml, and the
+// provenance that says which kind of install it describes. A GALAXY.yml that
+// is absent is silent - a directory ending in .info need not be one - while
+// a file that exists and does not parse is named, since an operator who sees
+// a collection missing from the report deserves to know which file this
 // command could not read.
-func readGalaxyYAML(root *os.Root, cfg *config.Config, runtime *infra.Infra, rel string) (GalaxyYAML, bool) {
+//
+// The provenance comes from provenanceFileName when that file is there, and
+// from GALAXY.yml itself otherwise, which is where every release before that
+// file existed wrote the same two keys. Without the fallback, a tree one of
+// those releases installed and nothing has reinstalled since would report its
+// git and url installs as Galaxy ones and send a repository or tarball URL a
+// Galaxy API lookup. An install's skip path moves the keys into their own file
+// (see reconcileGalaxyInfo), so the fallback serves only a tree no install
+// has run over yet.
+func readInstalledSidecar(
+	root *os.Root, cfg *config.Config, runtime *infra.Infra, infoName string,
+) (GalaxyYAML, sidecarProvenance, bool) {
+	rel := path.Join(collectionsDirName, infoName, galaxyYAMLFileName)
 	data, ok := readRegularFile(root, rel)
 	if !ok {
-		return GalaxyYAML{}, false
+		return GalaxyYAML{}, sidecarProvenance{}, false
 	}
 	var doc GalaxyYAML
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		runtime.Output.Warnf("Skipping sidecar %s: %v", displayPath(cfg, rel), err)
-		return GalaxyYAML{}, false
+		return GalaxyYAML{}, sidecarProvenance{}, false
 	}
-	return doc, true
+	provRel := path.Join(collectionsDirName, infoName, provenanceFileName)
+	if provData, ok := readRegularFile(root, provRel); ok {
+		data, rel = provData, provRel
+	}
+	var prov sidecarProvenance
+	if err := yaml.Unmarshal(data, &prov); err != nil {
+		runtime.Output.Warnf("Skipping sidecar %s: %v", displayPath(cfg, rel), err)
+		return GalaxyYAML{}, sidecarProvenance{}, false
+	}
+	return doc, prov, true
 }
 
 // readRegularFile reads rel through root when it is a regular file, and

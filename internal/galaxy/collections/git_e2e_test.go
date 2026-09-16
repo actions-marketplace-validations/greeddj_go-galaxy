@@ -142,14 +142,7 @@ func TestGitInstallFromRepository(t *testing.T) {
 		t.Fatalf("installed record Source = %q, want locator %q", entry.Source, locator)
 	}
 	assertArtifactFilePresent(t, f.cacheDir, locator, acmeArtifactFilename("app", "1.2.3"))
-	sidecar := filepath.Join(f.downloadPath, "ansible_collections", "acme.app-1.2.3.info", "GALAXY.yml")
-	data, err := os.ReadFile(sidecar) //nolint:gosec // path is built from this test's own temp dirs.
-	if err != nil {
-		t.Fatalf("read sidecar: %v", err)
-	}
-	if !strings.Contains(string(data), "server: "+gitAppURL) || !strings.Contains(string(data), "git_commit: "+fakeCommit("app-1")) {
-		t.Fatalf("sidecar lacks git provenance:\n%s", data)
-	}
+	assertInstalledProvenance(t, f.downloadPath, "app", "1.2.3", gitAppURL, "git_commit: "+fakeCommit("app-1"))
 	assertTempFilesGone(t, f.cacheDir)
 	if _, acquires := f.git.counts(); acquires != 1 {
 		t.Fatalf("acquires = %d, want 1", acquires)

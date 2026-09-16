@@ -510,17 +510,28 @@ directory.
 
 Extraction ends by writing the extract-done marker; recording then adds two
 more, in this order: the `GALAXY.yml` sidecar in the version-scoped `.info`
-directory, and the store entry.
+directory, and the store entry. `GALAXY.yml` carries exactly the keys of the
+schema ansible-core validates it against, since ansible discards a document
+with any other key; a git or url install's provenance - the commit, or the
+sha256 of the fetched bytes - goes into `go-galaxy.yml` beside it instead,
+which is what `outdated` tells the install's kind by.
 
-A later run reads all three back to decide whether to skip. The sidecar is
-parsed, not merely found: it has to name the collection at the version being
-installed, so a truncated or foreign document is not evidence of an install
-and the collection is installed for real. The one field allowed to disagree
-is `server`, which a run older than the fix that made it record the resolving
-server left holding the run's default instead; the store entry has already
-been shown to name this collection and this source, so the skip path rewrites
-that field in place and skips anyway. It is the only write a skipped install
-makes, and only when the two disagree.
+A later run reads the marker, the sidecar and the store entry back to decide
+whether to skip. The sidecar is parsed, not merely found: it has to name the
+collection at the version being installed, so a truncated or foreign document
+is not evidence of an install and the collection is installed for real. What
+may still disagree is what earlier releases wrote: a `server` holding the
+run's default rather than the resolving server, a document outside ansible's
+schema, with the provenance key inside it or a null `signatures`, and - for
+every sidecar they wrote - `signatures` in a different place among the keys.
+The store entry has already been shown to name this collection and this
+source, so the skip path writes `go-galaxy.yml` from that entry first, then
+re-renders `GALAXY.yml` with the server corrected and every key outside the
+schema dropped, and skips anyway. The order is what keeps the provenance: a
+failed first write leaves the old document, which may hold the only copy, as
+it was. These are the only writes a skipped install makes, and each happens
+only when the file on disk is not already byte for byte what this tool
+writes.
 
 ### Bounded recovery
 
