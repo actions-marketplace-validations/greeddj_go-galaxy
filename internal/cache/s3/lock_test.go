@@ -385,7 +385,7 @@ func TestLockWaitsThenTimesOutOnLiveLock(t *testing.T) {
 // context, so nothing on the way in consults the caller's context; newRequest
 // only hands that context to http.NewRequestWithContext; and Client.do reads
 // req.Context().Err() only once an error has already come back. Measured on
-// go1.27.0, the toolchain go.mod pins: http.Client.Do calls a custom
+// go1.27.1, the toolchain go.mod pins: http.Client.Do calls a custom
 // RoundTripper for a request whose context has already expired, and delivers
 // the response intact.
 //

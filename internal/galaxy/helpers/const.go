@@ -169,8 +169,9 @@ const (
 	// than as a list of the functions performing them deliberately: a reading
 	// path this comment does not name is then covered by the sentence instead of
 	// missed by the list. Every archive/tar figure and message this comment
-	// states was measured on go1.27.0, the toolchain go.mod pins, so a bump to
-	// that directive re-opens all of them at once.
+	// states was measured on go1.27.0; go1.27.1, the toolchain go.mod pins,
+	// ships a byte-identical archive/tar, so they carry over. A bump to that
+	// directive that changes archive/tar re-opens all of them at once.
 	//
 	// At most four of those reads can precede that first header - one body for
 	// each of the three chainable kinds, plus at most one sparse map, since

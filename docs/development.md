@@ -26,8 +26,12 @@ go test -v -race -coverprofile=coverage.txt ./...
 ```
 
 The four `go tool` binaries come from the `tool` directive in `go.mod`, so
-neither the Justfile nor CI installs them separately. Run the suite with
-`-race` before considering any concurrency work done.
+neither the Justfile nor CI installs them separately. Their own dependencies
+resolve in the same module graph as the product's, so `go get -u tool` can move
+one past what its tool compiles against: `go.yaml.in/yaml/v4` is required only
+by actionlint, its `v4.0.0-rc.6` changes API actionlint v1.7.12 compiles against, and it
+stays at the `v4.0.0-rc.3` actionlint names until a release of actionlint moves
+it. Run the suite with `-race` before considering any concurrency work done.
 
 actionlint's own external linters are switched off in both spellings rather
 than left to autodetection: it shells out to shellcheck and pyflakes when they
