@@ -212,7 +212,7 @@ func TestCanSkipInstallRefusesPoisonedSnapshotSHA(t *testing.T) {
 // TestInstallRecordMatchesRefusesUnsafeMarkerSHA proves
 // matchingInstalledRecord's own markerRel call specifically, independent of
 // canSkipInstall's separate verifyExtractMarker backstop: a file is seeded at
-// exactly the location a naive filepath.Join(installPath,
+// exactly the location a naive filepath.Join(<marker dir>,
 // helpers.ExtractMarkerPrefix+entry.ArtifactSHA256) would find present - so
 // a bare os.Stat-based check using that join would coincidentally succeed
 // and falsely report a match - and installRecordMatches must still return
@@ -231,11 +231,11 @@ func TestInstallRecordMatchesRefusesUnsafeMarkerSHA(t *testing.T) {
 	mustMkdirAll(t, infoDir)
 	mustWriteFile(t, filepath.Join(infoDir, "GALAXY.yml"), sidecarFor(col))
 
-	// The coincidental file: exactly where an unguarded
-	// filepath.Join(installPath, helpers.ExtractMarkerPrefix+sha) would land
-	// for this traversal sha, so a bare os.Stat would find it and, with no
-	// shape guard on the sha, treat it as "marker present".
-	const traversalSHA = "../../../../../home/ci/.ssh/authorized_keys"
+	// The coincidental file: exactly where an unguarded join of the marker
+	// directory - the version's .info, two elements under downloadPath - with
+	// helpers.ExtractMarkerPrefix+sha would land for this traversal sha, so a
+	// bare os.Stat would find it and, with no shape guard, "marker present".
+	const traversalSHA = "../../../../home/ci/.ssh/authorized_keys"
 	coincidental := filepath.Join(downloadPath, "home", "ci", ".ssh", "authorized_keys")
 	mustMkdirAll(t, filepath.Dir(coincidental))
 	mustWriteFile(t, coincidental, []byte("not actually an extract marker"))

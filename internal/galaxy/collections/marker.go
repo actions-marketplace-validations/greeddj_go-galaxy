@@ -63,9 +63,13 @@ const extractMarkerMaxReadSize = 256
 //
 // target.rel itself is excluded from the tally, and so is any top-level entry
 // (a direct child of target.rel) whose name starts with
-// helpers.ExtractMarkerPrefix - this is what stops the marker file from
-// counting itself, and what stops a tarball that happens to ship a
-// same-prefixed file from skewing the tally it is itself compared against.
+// helpers.ExtractMarkerPrefix - this is what stops a role's marker, which
+// lives in target.rel, from counting itself, and what stops a tarball that
+// happens to ship a same-prefixed file from skewing the tally it is itself
+// compared against. A collection's marker lives in target.info instead, so
+// for a collection the exclusion only ever meets such a tarball file, or the
+// marker an earlier release left in the tree, which the next extraction
+// removes with the tree.
 func scanTree(target installTarget) (treeTally, error) {
 	var tally treeTally
 	err := fs.WalkDir(target.root.FS(), target.rel, func(p string, d fs.DirEntry, err error) error {
@@ -187,16 +191,18 @@ func readExtractMarker(target installTarget, rel string) (string, bool) {
 }
 
 // writeExtractMarker computes target's current tree tally via scanTree and
-// persists it as sha's extract-done marker, so a later verifyExtractMarker
-// call has something authoritative to compare against. The write always
-// removes any existing marker under sha's name first (ignoring
-// fs.ErrNotExist): extractCollection always wipes target.path with
-// target.root.RemoveAll before a real extraction, so a leftover marker here
-// would only happen if this were ever called a second time against the same
-// sha without that wipe in between - remove-then-write keeps that case
-// correct too rather than relying on target.root.WriteFile's own
-// truncate-on-write, which is already what happens but is worth making an
-// explicit step rather than an implicit side effect.
+// persists it as sha's extract-done marker in target.marker, so a later
+// verifyExtractMarker call has something authoritative to compare against.
+// The write always removes any existing marker under sha's name first
+// (ignoring fs.ErrNotExist): extractTree always wipes the directory the
+// marker lives in before a real extraction - a role's tree, a collection's
+// .info directory - so a leftover marker here would only happen if this were
+// ever called a second time against the same sha without that wipe in
+// between - remove-then-write keeps that case correct too rather than
+// relying on target.root.WriteFile's own truncate-on-write, which is already
+// what happens but is worth making an explicit step rather than an implicit
+// side effect. The directory itself is extractTree's to create; this never
+// creates one.
 func writeExtractMarker(target installTarget, sha string) error {
 	rel, ok := markerRel(target, sha)
 	if !ok {
@@ -280,9 +286,9 @@ func (o extractMarkerOutcome) matches() bool {
 // leading ".." in sha into the constant helpers.ExtractMarkerPrefix element
 // (".extract-done."), turning it into ".extract-done.." - a real "up one
 // directory" element - so the join absorbs sha's first ".." for free and
-// every later ".." in sha pops a real path component off target.rel. A
-// leading "./" makes this unbounded rather than capped at target.rel's own
-// depth: "./../../../../../../etc/passwd" walks all the way past target.rel's
+// every later ".." in sha pops a real path component off target.marker. A
+// leading "./" makes this unbounded rather than capped at target.marker's own
+// depth: "./../../../../../../etc/passwd" walks all the way past target.marker's
 // components before the extra ".." tokens run out, rather than stopping once
 // they are exhausted. Validating the joined result after the fact cannot
 // close this - by the time a path exists to inspect, the escape has already
@@ -301,7 +307,7 @@ func markerRel(target installTarget, sha string) (string, bool) {
 	if !helpers.IsSHA256Hex(sha) {
 		return "", false
 	}
-	return path.Join(target.rel, helpers.ExtractMarkerPrefix+sha), true
+	return path.Join(target.marker, helpers.ExtractMarkerPrefix+sha), true
 }
 
 // checkExtractMarker reports whether target's on-disk extract-done marker
@@ -398,10 +404,10 @@ func verifyExtractMarker(out output.Printer, target installTarget, sha string) b
 		return false
 	}
 	// markerDisplay renders the same location rel refers to as a plain,
-	// OS-native absolute path, purely for these log lines: every actual
-	// filesystem operation below still goes through target.root and rel, this
-	// is display-only.
-	markerDisplay := filepath.Join(target.path, helpers.ExtractMarkerPrefix+sha)
+	// OS-native path under the root's own name, purely for these log lines:
+	// every actual filesystem operation below still goes through target.root
+	// and rel, this is display-only.
+	markerDisplay := filepath.Join(target.root.Name(), filepath.FromSlash(rel))
 	outcome := checkExtractMarker(target, sha)
 
 	switch outcome.status {

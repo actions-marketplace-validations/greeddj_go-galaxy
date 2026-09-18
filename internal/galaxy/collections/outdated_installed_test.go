@@ -67,6 +67,19 @@ func (tr *installedTree) install(doc GalaxyYAML) {
 	tr.manifest(doc.Namespace, doc.Name, doc.Version)
 }
 
+// installFrom is install for a git or url collection: both halves, plus the
+// provenanceFileName that says which of the two it came from.
+func (tr *installedTree) installFrom(doc GalaxyYAML, prov sidecarProvenance) {
+	tr.t.Helper()
+	tr.install(doc)
+	data, err := yaml.Marshal(&prov)
+	if err != nil {
+		tr.t.Fatalf("marshal provenance: %v", err)
+	}
+	dir := fmt.Sprintf("%s.%s-%s%s", doc.Namespace, doc.Name, doc.Version, infoDirSuffix)
+	tr.writeUnder(filepath.Join(collectionsDirName, dir, provenanceFileName), data)
+}
+
 func (tr *installedTree) writeUnder(rel string, data []byte) {
 	tr.t.Helper()
 	full := filepath.Join(tr.path, rel)
@@ -110,12 +123,10 @@ func TestScanInstalledTreeBuildsEntriesFromSidecars(t *testing.T) {
 	// No server of its own: an install that predates the field, or one whose
 	// sidecar was written before a server was configured.
 	tr.install(galaxyDoc("acme", "gadgets", "2.1.0", ""))
-	urlDoc := galaxyDoc("acme", "fetched", "3.0.0", "https://files.example/c.tar.gz")
-	urlDoc.URLSHA256 = strings.Repeat("a", 64)
-	tr.install(urlDoc)
-	gitDoc := galaxyDoc("acme", "cloned", "4.0.0", "https://git.example/acme/c.git")
-	gitDoc.GitCommit = strings.Repeat("b", 40)
-	tr.install(gitDoc)
+	tr.installFrom(galaxyDoc("acme", "fetched", "3.0.0", "https://files.example/c.tar.gz"),
+		sidecarProvenance{URLSHA256: strings.Repeat("a", 64)})
+	tr.installFrom(galaxyDoc("acme", "cloned", "4.0.0", "https://git.example/acme/c.git"),
+		sidecarProvenance{GitCommit: strings.Repeat("b", 40)})
 
 	scan, printer, err := tr.scan()
 	if err != nil {
@@ -464,9 +475,8 @@ func TestScanInstalledTreeAcceptsAMixedCaseURLCollection(t *testing.T) {
 	t.Run("url install", func(t *testing.T) {
 		t.Parallel()
 		tr := newInstalledTree(t)
-		doc := galaxyDoc("StephenSorriaux", "ansible_kafka_admin", "0.24.0", "https://files.example/k.tar.gz")
-		doc.URLSHA256 = strings.Repeat("a", 64)
-		tr.install(doc)
+		tr.installFrom(galaxyDoc("StephenSorriaux", "ansible_kafka_admin", "0.24.0", "https://files.example/k.tar.gz"),
+			sidecarProvenance{URLSHA256: strings.Repeat("a", 64)})
 
 		scan, printer, err := tr.scan()
 		if err != nil {

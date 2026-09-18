@@ -555,9 +555,9 @@ func TestCanSkipInstallRepairsADriftedServer(t *testing.T) {
 	if !ok {
 		t.Fatalf("canSkipInstall = false; a drifted server must not force a reinstall")
 	}
-	reconcileGalaxyInfo(infra.New(noopPrinter{}, nil), target, cfg, col, state.info)
+	reconcileGalaxyInfo(infra.New(noopPrinter{}, nil), target, cfg, col, state)
 
-	repaired, ok := readGalaxyInfo(target)
+	repaired, _, ok := readGalaxyInfo(target)
 	if !ok {
 		t.Fatalf("sidecar unreadable after the repair")
 	}
@@ -589,7 +589,8 @@ func TestReconcileGalaxyInfoLeavesAnAgreeingSidecarAlone(t *testing.T) {
 		col.Namespace+"."+col.Name+"-"+col.Version+".info", galaxyYAMLFileName)
 	before := mustModTime(t, rel)
 
-	reconcileGalaxyInfo(infra.New(noopPrinter{}, nil), target, &config.Config{Server: server}, col, doc)
+	reconcileGalaxyInfo(infra.New(noopPrinter{}, nil), target, &config.Config{Server: server}, col,
+		installedState{info: doc, infoData: seeded})
 
 	if after := mustModTime(t, rel); !after.Equal(before) {
 		t.Errorf("sidecar was rewritten though it already agreed: %s -> %s", before, after)

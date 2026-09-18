@@ -129,14 +129,7 @@ func TestURLInstallFromTarball(t *testing.T) {
 		t.Fatalf("installed record sha = %q, want the origin bytes' %q", entry.ArtifactSHA256, f.tarballSHA)
 	}
 	assertArtifactFilePresent(t, f.cacheDir, f.locator(), acmeArtifactFilename("kafka", urlKafkaVersion))
-	sidecar := filepath.Join(f.downloadPath, "ansible_collections", "acme.kafka-"+urlKafkaVersion+".info", "GALAXY.yml")
-	data, err := os.ReadFile(sidecar) //nolint:gosec // path is built from this test's own temp dirs.
-	if err != nil {
-		t.Fatalf("read sidecar: %v", err)
-	}
-	if !strings.Contains(string(data), "server: "+f.tarballURL) || !strings.Contains(string(data), "url_sha256: "+f.tarballSHA) {
-		t.Fatalf("sidecar lacks url provenance:\n%s", data)
-	}
+	assertInstalledProvenance(t, f.downloadPath, "kafka", urlKafkaVersion, f.tarballURL, "url_sha256: "+f.tarballSHA)
 	assertTempFilesGone(t, f.cacheDir)
 	if got := f.galaxy.Count(fakegalaxy.EndpointTarball); got != 1 {
 		t.Fatalf("tarball downloads = %d, want 1", got)

@@ -145,6 +145,9 @@ func (i *Infra) DebugAnsibleConfig(cfg *config.Config) {
 		if cfg.AnsibleServerUsed && !cfg.AnsibleServerEnvUsed {
 			i.Output.Debugf("Ansible.cfg %s: galaxy.server=%s", cfg.AnsibleConfigPath, cfg.Server)
 		}
+		if cfg.AnsibleServerTimeoutUsed {
+			i.Output.Debugf("Ansible.cfg %s: galaxy.server_timeout=%s", cfg.AnsibleConfigPath, cfg.Timeout)
+		}
 	}
 	// Outside the block above on purpose: ANSIBLE_GALAXY_SERVER supplies this
 	// value whether or not an ansible.cfg was found at all, and crediting the

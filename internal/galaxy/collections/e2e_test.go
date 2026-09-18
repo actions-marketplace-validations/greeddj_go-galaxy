@@ -1122,3 +1122,25 @@ func TestNoDepsSnapshotNotReusedIncrementally(t *testing.T) {
 	assertManifestInstalled(t, f.downloadPath, "lib")
 	assertManifestInstalled(t, f.downloadPath, "tool")
 }
+
+// assertInstalledProvenance fails the test unless the .info directory of
+// the installed acme.<name>-<version> names server in its GALAXY.yml, keeps
+// provenanceLine out of that document - ansible discards a GALAXY.yml
+// carrying any key outside its schema - and holds that line, and only it, in
+// go-galaxy.yml beside it.
+func assertInstalledProvenance(t *testing.T, downloadPath, name, version, server, provenanceLine string) {
+	t.Helper()
+	infoDir := filepath.Join(downloadPath, "ansible_collections", "acme."+name+"-"+version+".info")
+	data, err := os.ReadFile(filepath.Join(infoDir, "GALAXY.yml")) //nolint:gosec // path is built from this test's own temp dirs.
+	if err != nil {
+		t.Fatalf("read sidecar: %v", err)
+	}
+	key, _, _ := strings.Cut(provenanceLine, ":")
+	if !strings.Contains(string(data), "server: "+server) || strings.Contains(string(data), key) {
+		t.Fatalf("sidecar does not name %s, or carries %s outside ansible's schema:\n%s", server, key, data)
+	}
+	provenance, err := os.ReadFile(filepath.Join(infoDir, "go-galaxy.yml")) //nolint:gosec // path is built from this test's own temp dirs.
+	if err != nil || string(provenance) != provenanceLine+"\n" {
+		t.Fatalf("go-galaxy.yml = %q (%v), want %q", provenance, err, provenanceLine+"\n")
+	}
+}

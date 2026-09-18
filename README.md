@@ -85,8 +85,8 @@ and is checked against a brute-force oracle and a fuzzer. See
   anything else is refused.
 - `ansible.cfg` is read for `[defaults] collections_path`,
   `[defaults] roles_path`, `[galaxy] server`, `[galaxy] server_list`,
-  `[galaxy] cache_dir`, and `[galaxy_server.<id>]` sections (`url`, `token`,
-  `validate_certs`). Everything else in that file is ignored or refused - see
+  `[galaxy] cache_dir`, `[galaxy] server_timeout`, and `[galaxy_server.<id>]`
+  sections (`url`, `token`, `validate_certs`). Everything else in that file is ignored or refused - see
   [Configuration](docs/configuration.md).
 - A token you supply is never paired with a server address, or a relaxed TLS
   policy, that an `ansible.cfg` file chose rather than you. See

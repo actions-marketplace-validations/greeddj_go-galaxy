@@ -10,9 +10,11 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/infra"
 )
@@ -49,4 +51,41 @@ func TestExtractCollectionRefusesNonCanonicalSHABeforeDestroyingTree(t *testing.
 		t.Errorf("extractCollection error = %v, want errors.Is helpers.ErrMalformedArtifactSHA256", err)
 	}
 	assertFileContent(t, preexisting, preexistingContent)
+}
+
+// TestResetCollectionInfoSweepsOnlyThisCollectionsVersions pins what the
+// sweep a collection extraction makes may remove: every .info directory of
+// this collection, whatever version it names, and nothing else. A directory
+// that merely starts with the same characters - one whose remainder is not an
+// exact version - and another collection's directory both survive, and the
+// extracted version's own directory comes back empty.
+func TestResetCollectionInfoSweepsOnlyThisCollectionsVersions(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cfg := &config.Config{DownloadPath: root}
+	col := collection{Namespace: "acme", Name: "widgets", Version: testVersion100}
+	target := newTestInstallTarget(t, cfg, col)
+	collectionsDir := filepath.Join(root, "ansible_collections")
+	for _, dir := range []string{
+		"acme.widgets-1.0.0.info", "acme.widgets-2.1.0.info", "acme.widgets-3.0.0-rc.1.info",
+		"acme.widgets-notes.info", "acme.widgets_extra-1.0.0.info", "other.widgets-1.0.0.info",
+	} {
+		mustMkdirAll(t, filepath.Join(collectionsDir, dir))
+		mustWriteFile(t, filepath.Join(collectionsDir, dir, galaxyYAMLFileName), []byte("seeded\n"))
+	}
+
+	if err := resetCollectionInfo(target); err != nil {
+		t.Fatalf("resetCollectionInfo: %v", err)
+	}
+
+	for _, gone := range []string{"acme.widgets-2.1.0.info", "acme.widgets-3.0.0-rc.1.info"} {
+		assertPathAbsent(t, filepath.Join(collectionsDir, gone))
+	}
+	for _, kept := range []string{"acme.widgets-notes.info", "acme.widgets_extra-1.0.0.info", "other.widgets-1.0.0.info"} {
+		assertExists(t, filepath.Join(collectionsDir, kept, galaxyYAMLFileName))
+	}
+	entries, err := os.ReadDir(filepath.Join(collectionsDir, "acme.widgets-1.0.0.info"))
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("own .info directory = %v (%v), want it recreated empty", entries, err)
+	}
 }

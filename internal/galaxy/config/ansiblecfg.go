@@ -36,6 +36,10 @@ type ansibleGalaxyConfig struct {
 	CacheDir   string
 	Server     string
 	ServerList string
+	// ServerTimeout is server_timeout exactly as written; it is judged only
+	// where it is applied, by applyAnsibleTimeout, since only a command with a
+	// request budget has any use for it.
+	ServerTimeout string
 	// SignatureKeys names the signature keys this file carried, and holds no
 	// value any of them was set to. Recording the NAME and never the value is
 	// the security property rather than an economy: no ansible.cfg-sourced
@@ -163,6 +167,8 @@ func assignAnsibleValue(cfg *ansibleConfig, section, key, value string) {
 			cfg.Galaxy.Server = value
 		case "server_list":
 			cfg.Galaxy.ServerList = value
+		case "server_timeout":
+			cfg.Galaxy.ServerTimeout = value
 		default:
 			recordSignatureKey(cfg, key)
 		}

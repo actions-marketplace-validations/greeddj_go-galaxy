@@ -61,5 +61,5 @@ func newFlatInstallTarget(t *testing.T, dir string) installTarget {
 	t.Cleanup(func() {
 		_ = root.Close()
 	})
-	return installTarget{root: root, rel: ".", path: dir}
+	return installTarget{root: root, rel: ".", path: dir, marker: "."}
 }

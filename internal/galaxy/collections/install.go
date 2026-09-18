@@ -85,7 +85,7 @@ func installCollection(
 		// with the record that just proved this install valid: without it a
 		// document that fell behind stays wrong for as long as the tree
 		// lives, since nothing else on this path rewrites it.
-		reconcileGalaxyInfo(runtime, target, cfg, col, state.info)
+		reconcileGalaxyInfo(runtime, target, cfg, col, state)
 		deps.verify.recordSkippedUnverified()
 		runtime.Output.Printf("Skipping install, already installed: %s/%s/%s", col.Namespace, col.Name, col.Version)
 		// installCollection may be handed a prefetched temp on a path that skips the install; release it here rather than
@@ -907,13 +907,15 @@ func installEntryMatches(col collection, entry store.InstalledEntry, installPath
 }
 
 // installedState is what a matching install looks like on disk: the store's
-// record for the collection and the sidecar document beside it. Both are
-// carried past the check rather than looked up again - the record for its
-// artifact sha, the document because the skip path repairs the one field of
-// it that can drift (see reconcileGalaxyInfo).
+// record for the collection and the sidecar document beside it, with the
+// bytes that document was parsed from. All three are carried past the check
+// rather than looked up again - the record for its artifact sha, the document
+// and its bytes because the skip path repairs a document that drifted and
+// needs both to tell whether one did (see reconcileGalaxyInfo).
 type installedState struct {
-	info  GalaxyYAML
-	entry store.InstalledEntry
+	info     GalaxyYAML
+	infoData []byte
+	entry    store.InstalledEntry
 }
 
 // matchingInstalledRecord reports whether a collection's store entry, extract
@@ -968,12 +970,12 @@ func matchingInstalledRecord(target installTarget, col collection, st *store.Sto
 		return installedState{}, false
 	}
 
-	info, ok := readGalaxyInfo(target)
+	info, infoData, ok := readGalaxyInfo(target)
 	if !ok || !info.describes(col) {
 		return installedState{}, false
 	}
 
-	return installedState{entry: entry, info: info}, true
+	return installedState{entry: entry, info: info, infoData: infoData}, true
 }
 
 // installRecordMatches is matchingInstalledRecord's boolean form.

@@ -22,12 +22,14 @@ const (
 	// an aliasing write into the CAS tree the mask exists to protect.
 	WritePermBits = 0o222
 
-	// ExtractMarkerPrefix names the marker file extractCollection writes into
-	// an install path once extraction (or CAS materialization) completes,
-	// suffixed with the artifact's sha256. Its presence is the fast first
-	// signal a later run uses to consider skipping re-extraction; the
-	// collections package's verifyExtractMarker layers a tree-tally check on
-	// top of that presence check before actually trusting it.
+	// ExtractMarkerPrefix names the marker file extraction writes once it (or
+	// CAS materialization) completes, suffixed with the artifact's sha256: in
+	// a collection's version-scoped .info directory, where `ansible-galaxy
+	// collection verify` does not look, and in a role's own install
+	// directory. Its presence is the fast first signal a later run uses to
+	// consider skipping re-extraction; the collections package's
+	// verifyExtractMarker layers a tree-tally check on top of that presence
+	// check before actually trusting it.
 	ExtractMarkerPrefix = ".extract-done."
 
 	// CollectionNameParts is the expected number of parts in a collection name like "namespace.collection".
@@ -169,8 +171,9 @@ const (
 	// than as a list of the functions performing them deliberately: a reading
 	// path this comment does not name is then covered by the sentence instead of
 	// missed by the list. Every archive/tar figure and message this comment
-	// states was measured on go1.27.0, the toolchain go.mod pins, so a bump to
-	// that directive re-opens all of them at once.
+	// states was measured on go1.27.0; go1.27.1, the toolchain go.mod pins,
+	// ships a byte-identical archive/tar, so they carry over. A bump to that
+	// directive that changes archive/tar re-opens all of them at once.
 	//
 	// At most four of those reads can precede that first header - one body for
 	// each of the three chainable kinds, plus at most one sparse map, since

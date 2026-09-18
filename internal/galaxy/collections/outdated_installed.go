@@ -51,8 +51,8 @@ type installedScan struct {
 // that records which server a collection came from, and a collection whose
 // server is unknown is one this command cannot ask about. Every sidecar is
 // still cross-checked against the installed tree before it is trusted (see
-// scanInstalledCollection), so a stale one left behind by an upgrade cannot
-// contribute a version that is no longer installed.
+// scanInstalledCollection), so a stale one an earlier release's upgrade left
+// behind cannot contribute a version that is no longer installed.
 func scanInstalledTree(cfg *config.Config, runtime *infra.Infra) (installedScan, error) {
 	root, err := os.OpenRoot(cfg.DownloadPath)
 	if err != nil {
@@ -114,9 +114,11 @@ const (
 // sidecar can describe itself, and nothing else. The installed tree is then
 // consulted for the same version: `<namespace>/<name>/MANIFEST.json` has to
 // exist and declare it. That check is what discards a stale sidecar, which is
-// a real shape rather than a hypothetical one - install resets only the
-// sidecar of the version it is installing, and only cleanup ever removes the
-// one an earlier version left behind, so an upgraded tree holds two.
+// a real shape rather than a hypothetical one. An install removes every other
+// version's sidecar, as ansible-galaxy does for an artifact install (see
+// resetCollectionInfo), but releases before that reset only the sidecar of
+// the version they installed, so a tree one of them upgraded holds two until
+// something reinstalls it.
 //
 // A git install is classified rather than converted, because the sidecar
 // records the repository and the commit but no ref, and the question outdated
@@ -127,11 +129,11 @@ func scanInstalledCollection(
 	root *os.Root, cfg *config.Config, runtime *infra.Infra, infoName string,
 ) (lockfile.Entry, installedKind) {
 	rel := path.Join(collectionsDirName, infoName, galaxyYAMLFileName)
-	doc, ok := readGalaxyYAML(root, cfg, runtime, rel)
+	doc, prov, ok := readInstalledSidecar(root, cfg, runtime, infoName)
 	if !ok {
 		return lockfile.Entry{}, installedUnusable
 	}
-	kind := installedKindOf(doc)
+	kind := installedKindOf(prov)
 	name := doc.Namespace + "." + doc.Name
 	if !installedNameUsable(kind, doc) || !helpers.IsExactVersion(doc.Version) {
 		runtime.Output.Warnf("Skipping sidecar %s: it names no collection this tool can look up", displayPath(cfg, rel))
@@ -164,11 +166,11 @@ func scanInstalledCollection(
 // only that source writes: a git install records the commit its tree was
 // built from and a url install the sha256 of the bytes it was fetched as,
 // while a Galaxy install writes neither.
-func installedKindOf(doc GalaxyYAML) installedKind {
+func installedKindOf(prov sidecarProvenance) installedKind {
 	switch {
-	case doc.GitCommit != "":
+	case prov.GitCommit != "":
 		return installedGit
-	case doc.URLSHA256 != "":
+	case prov.URLSHA256 != "":
 		return installedURL
 	default:
 		return installedGalaxy
@@ -197,8 +199,8 @@ func installedNameUsable(kind installedKind, doc GalaxyYAML) bool {
 // installedVersionMatches reports whether the installed tree holds the very
 // version doc describes. A sidecar with no tree under it, or one naming a
 // version the tree's own MANIFEST.json does not, is stale: it is what an
-// upgrade leaves behind, and reporting from it would name a version nothing
-// is running.
+// earlier release's upgrade left behind, and reporting from it would name a
+// version nothing is running.
 //
 // A parse failure and a missing file are the same answer here - this
 // collection contributes nothing - and neither is worth a warning: an
@@ -217,22 +219,44 @@ func installedVersionMatches(root *os.Root, doc GalaxyYAML) bool {
 	return manifest.CollectionInfo.Version == doc.Version
 }
 
-// readGalaxyYAML reads and parses one sidecar. A sidecar that is absent is
-// silent - a directory ending in .info need not be one - while one that
-// exists and does not parse is named, since an operator who sees a
-// collection missing from the report deserves to know which file this
+// readInstalledSidecar reads one sidecar directory: its GALAXY.yml, and the
+// provenance that says which kind of install it describes. A GALAXY.yml that
+// is absent is silent - a directory ending in .info need not be one - while
+// a file that exists and does not parse is named, since an operator who sees
+// a collection missing from the report deserves to know which file this
 // command could not read.
-func readGalaxyYAML(root *os.Root, cfg *config.Config, runtime *infra.Infra, rel string) (GalaxyYAML, bool) {
+//
+// The provenance comes from provenanceFileName when that file is there, and
+// from GALAXY.yml itself otherwise, which is where every release before that
+// file existed wrote the same two keys. Without the fallback, a tree one of
+// those releases installed and nothing has reinstalled since would report its
+// git and url installs as Galaxy ones and send a repository or tarball URL a
+// Galaxy API lookup. An install's skip path moves the keys into their own file
+// (see reconcileGalaxyInfo), so the fallback serves only a tree no install
+// has run over yet.
+func readInstalledSidecar(
+	root *os.Root, cfg *config.Config, runtime *infra.Infra, infoName string,
+) (GalaxyYAML, sidecarProvenance, bool) {
+	rel := path.Join(collectionsDirName, infoName, galaxyYAMLFileName)
 	data, ok := readRegularFile(root, rel)
 	if !ok {
-		return GalaxyYAML{}, false
+		return GalaxyYAML{}, sidecarProvenance{}, false
 	}
 	var doc GalaxyYAML
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		runtime.Output.Warnf("Skipping sidecar %s: %v", displayPath(cfg, rel), err)
-		return GalaxyYAML{}, false
+		return GalaxyYAML{}, sidecarProvenance{}, false
 	}
-	return doc, true
+	provRel := path.Join(collectionsDirName, infoName, provenanceFileName)
+	if provData, ok := readRegularFile(root, provRel); ok {
+		data, rel = provData, provRel
+	}
+	var prov sidecarProvenance
+	if err := yaml.Unmarshal(data, &prov); err != nil {
+		runtime.Output.Warnf("Skipping sidecar %s: %v", displayPath(cfg, rel), err)
+		return GalaxyYAML{}, sidecarProvenance{}, false
+	}
+	return doc, prov, true
 }
 
 // readRegularFile reads rel through root when it is a regular file, and

@@ -117,8 +117,8 @@ would wrongly conclude the environment names are dead too - they are not.
   `MANIFEST.json` and `FILES.json` an `ansible-galaxy collection build` would
   into an artifact, and from there on treats it exactly like a downloaded
   one: cached under a key that carries the commit, extracted by the same
-  extractor, recorded with its commit in `GALAXY.yml`, and pinned in the
-  lockfile. The consequences, each deliberate:
+  extractor, recorded with its commit in the `.info` directory's
+  `go-galaxy.yml`, and pinned in the lockfile. The consequences, each deliberate:
   - The pin is the commit. `lock` records `type: git`, the repository URL,
     the ref as written, the commit and the subdir, and no `sha256` - the
     artifact is rebuilt deterministically from the commit, and the gzip
@@ -222,8 +222,8 @@ does not define is a usage error naming the flag and exits `2`, which is how
   resolved `<namespace>.<name>@<version>`, and a record that exists must
   still name the same install path, name the same server the collection now
   resolves from, and agree with any lockfile pin, with the extract marker and
-  the version's own `<namespace>.<name>-<version>.info/GALAXY.yml` sidecar
-  checked on top. A record that satisfies all of that skips the install
+  the `GALAXY.yml` sidecar - both in the version's own
+  `<namespace>.<name>-<version>.info` directory - checked on top. A record that satisfies all of that skips the install
   rather than downloading anything again. The sidecar is the condition that
   surprises, because it is version-scoped and is not part of the collection's
   own content: deleting or renaming that `GALAXY.yml` forces a full
@@ -232,12 +232,13 @@ does not define is a usage error naming the flag and exits `2`, which is how
   than merely found, and has to name this collection at this version, so a
   truncated write and a document left by another version cost the same
   re-download - existence alone was never evidence that the tree and the
-  provenance record beside it belong together. One disagreement does not:
-  a sidecar whose `server` fell behind the record is rewritten in place,
-  since the record has already been shown to name this collection and this
-  source and a re-download would change no installed byte. That repair is
-  the only write a skipped install makes, and it happens only when the two
-  actually disagree. The consequence runs both ways: the
+  provenance record beside it belong together. Two disagreements do not: a
+  sidecar whose `server` fell behind the record, and a sidecar outside
+  ansible's schema (next bullet). Either is
+  rewritten in place, since the record has already been shown to name this
+  collection and this source and a re-download would change no installed
+  byte. That repair is the only write a skipped install makes, and it
+  happens only when the file on disk is not already what this tool writes. The consequence runs both ways: the
   install path carries the namespace and the name but not the version, so a
   resolve that lands lower installs the lower version over a newer tree, and
   there is no "prefer what is there". A rerun is not by itself a new resolve,
@@ -249,6 +250,28 @@ does not define is a usage error naming the flag and exits `2`, which is how
   because it is folded into the same signature the other two are: toggling it
   between two otherwise identical runs re-resolves. To hold versions still across runs, lock them - see
   [lock](cli.md#lock).
+- **`GALAXY.yml` is written for every install, and held to ansible's schema.**
+  ansible-core writes that sidecar only for a collection a Galaxy server
+  served; go-galaxy writes it for git and url installs too, because its
+  install-skip check and `outdated` read it. ansible validates the file
+  against a closed schema - `download_url`, `format_version`, `name`,
+  `namespace`, `server`, `signatures`, `version`, `version_url` and nothing
+  else - on every command that reads the installed tree, so the document
+  carries exactly those keys, and `signatures` is always a list: a null
+  there passes ansible's validation and then makes `ansible-galaxy
+  collection verify --offline` fail with a Python `TypeError`. For a git
+  install `server` names the repository, and for a url install `server` and
+  `download_url` both name the tarball. What such an install records beyond
+  the schema - the commit, or the sha256 of the fetched bytes - goes into a
+  file of its own in the same directory, `go-galaxy.yml`, which ansible does
+  not read and removes along with the directory when it reinstalls the
+  collection. Earlier releases wrote those keys into `GALAXY.yml` itself, and
+  ansible answered each command with `[WARNING]: url_sha256. Supported
+  parameters include: ...` (or `git_commit`) and ignored the file. The first
+  `install` after upgrading extracts every collection an earlier release
+  installed once more (see the extract marker below), which writes the
+  sidecar anew; until then `outdated` still reads the key where an earlier
+  release left it.
 - **Prereleases are excluded and admitted on different rules than ansible's.**
   Stricter in one direction: a collection publishing only prerelease versions
   satisfies no plain constraint here, so the resolve fails with its proof plus
@@ -293,15 +316,20 @@ does not define is a usage error naming the flag and exits `2`, which is how
   against a server that serves anonymously, as the public Galaxy does, the run
   simply proceeds unauthenticated with nothing said.
 - **The request-timeout default is tighter.** `--timeout` defaults to `30s`
-  here, against ansible-core 2.21.2's 60s, and both tools read the same
-  `ANSIBLE_GALAXY_SERVER_TIMEOUT`: a pipeline that sets it gets the same
-  number in both, and a pipeline relying on the default gets a tighter budget
-  here. go-galaxy takes this setting from `--timeout` and its environment
-  variables only, reading no timeout out of `ansible.cfg` at all, so nothing
-  in that file changes it here. A hub slow to answer headers can therefore sit
-  inside ansible's default and outside this one, with `--timeout` or that
-  same shared variable as the remedy. What the budget bounds is unchanged - see
-  the `--timeout` bullet above and [install options](cli.md#install-options).
+  here, against ansible-core 2.21.2's 60s. Both tools read the same
+  `ANSIBLE_GALAXY_SERVER_TIMEOUT` and the same `[galaxy] server_timeout` in
+  `ansible.cfg`, in the same order - the flag, then the variable, then the
+  file - so a pipeline that sets either gets the same number in both, and
+  only a pipeline relying on the default gets a tighter budget here. A hub
+  slow to answer headers can therefore sit inside ansible's default and
+  outside this one, with any of those three as the remedy. Two narrower
+  differences remain. The file's value is read by the grammar `--timeout`
+  uses, so `90s` works here where ansible refuses anything but whole seconds,
+  and a file both tools read should keep to those. And a per-server
+  `timeout` in a `[galaxy_server.<id>]` section is not read: this tool has
+  one budget for the whole run, so that key is named in the warning about
+  unsupported keys and otherwise ignored. What the budget bounds is unchanged
+  - see the `--timeout` bullet above and [install options](cli.md#install-options).
 - **The exit codes are not ansible's, and the same numbers mean different
   things.** ansible-core 2.21.2 uses a small flat set: `1` generic, `4` parser
   error, `5` options error, `99` interrupt, `250` unexpected. go-galaxy's
@@ -320,12 +348,25 @@ does not define is a usage error naming the flag and exits `2`, which is how
   with every other install that references them, so a writable installed file
   would alias a write into all of them. Directories are not read-only, so this
   is about editing an installed file, not about a frozen tree; edit a copy
-  outside the collections tree instead. Each collection directory also carries
-  a `.extract-done.<sha256>` marker this tool writes, which is not part of the
-  collection's own content: it records a count of entries and directories plus
-  those entries' total size, not a hash. An edit that changes any of those
-  makes the next install re-extract the collection over it; an edit that
-  preserves the edited file's exact byte length does not, and survives.
+  outside the collections tree instead. Each installed collection also has a
+  `.extract-done.<sha256>` marker this tool writes: it records a count of
+  entries and directories plus those entries' total size, not a hash. An edit
+  that changes any of those makes the next install re-extract the collection
+  over it; an edit that preserves the edited file's exact byte length does
+  not, and survives. The marker sits in the version's `.info` directory beside
+  `GALAXY.yml`, not in the collection directory, because `ansible-galaxy
+  collection verify` reports every file there that the collection's
+  `FILES.json` does not list and exits `1` over it. Earlier releases put it in
+  the collection directory, so verify failed on every collection they
+  installed, and the first `install` after upgrading extracts each of those
+  once more - from the cache, with no download while the artifact is still
+  there. An extraction also removes every other version's `.info` directory of
+  the same collection, as `ansible-galaxy` does whenever it installs one from
+  an artifact: that directory is scoped to a version and the collection
+  directory is not, so a marker left beside an earlier version would outlive
+  the tree it counted, and installing that version again would take it for
+  proof of an install whenever the tree now in place happened to share its
+  tally.
 
 ## Roles
 

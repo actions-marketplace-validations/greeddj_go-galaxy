@@ -111,6 +111,9 @@ type Config struct {
 	AnsibleRolesPathUsed       bool
 	AnsibleCacheDirUsed        bool
 	AnsibleServerUsed          bool
+	// AnsibleServerTimeoutUsed reports that Timeout came from ansible.cfg's
+	// [galaxy] server_timeout, so debug output can credit the file for it.
+	AnsibleServerTimeoutUsed bool
 	// AnsibleServerEnvUsed narrows AnsibleServerUsed: the ansible-side server
 	// value was taken, and it came from ANSIBLE_GALAXY_SERVER rather than from
 	// the ansible.cfg file, so debug output does not credit a file that did
@@ -208,10 +211,17 @@ func BuildCollectionConfig(c *cli.Command) (*Config, error) {
 	}
 	cfg.S3Cache = s3Cfg
 
-	// Last, deliberately: every config error above keeps the precedence it
+	// Late, deliberately: every config error above keeps the precedence it
 	// already had, so which failure a broken configuration reports first does
 	// not change because a signature surface was added behind it.
 	if err := applySignatureConfig(cfg, c); err != nil {
+		return nil, err
+	}
+
+	// After the signature surface, for the same reason: a malformed
+	// server_timeout became an error only once the file's value was read at
+	// all, so it takes its place behind every failure that already had one.
+	if err := applyAnsibleTimeout(cfg, c, ansibleConfig.Galaxy.ServerTimeout, ansiblePath); err != nil {
 		return nil, err
 	}
 
@@ -261,12 +271,54 @@ func newConfigFromCLI(c *cli.Command) *Config {
 // parseTimeout. Commands that do not register the flag (e.g. cleanup) read
 // it as an empty string, which parseTimeout maps to the default, so they
 // never end up with an unbounded-timeout HTTP client.
+//
+// ansible.cfg's [galaxy] server_timeout is not read here but by
+// applyAnsibleTimeout, once the file has been loaded. Parsing the flag first,
+// before the file is even looked for, keeps an invalid --timeout the error
+// the run reports ahead of anything wrong with the file.
 func applyTimeout(cfg *Config, c *cli.Command) error {
 	timeout, err := parseTimeout(c.String("timeout"))
 	if err != nil {
 		return err
 	}
 	cfg.Timeout = timeout
+	return nil
+}
+
+// applyAnsibleTimeout replaces the --timeout default with ansible.cfg's
+// [galaxy] server_timeout when the file sets one and no source of the flag
+// did. That is the precedence every other ansible.cfg setting here takes
+// (see pickConfigValue), and the one ansible applies to this setting itself:
+// --timeout, then ANSIBLE_GALAXY_SERVER_TIMEOUT, then the file, then the
+// default. The environment needs no step of its own, because every timeout
+// variable is a source of the flag and so already counts as set. Only
+// [galaxy] is read: a [galaxy_server.<id>] timeout would bound one server
+// where this tool has one budget for the whole run, so that key stays among
+// the ones resolveServers warns it ignores.
+//
+// The value is judged by parseTimeout, the rule --timeout and
+// ANSIBLE_GALAXY_SERVER_TIMEOUT (the environment spelling of this very
+// setting) are already judged by, so the setting has one grammar whichever
+// spelling carries it. That admits a Go duration ansible refuses as not an
+// integer; a file ansible-galaxy also reads should keep to whole seconds. A
+// value parseTimeout refuses fails the run with the file named, rather than
+// falling back to the default: a budget quietly replaced by one nobody chose
+// is exactly what ignoring this key used to do.
+//
+// A command that does not register --timeout (cleanup) reads the flag as the
+// empty string and makes no request this budget bounds, so the file's value
+// is not parsed for it at all: a malformed key must not fail a command that
+// could never have used it.
+func applyAnsibleTimeout(cfg *Config, c *cli.Command, raw, ansiblePath string) error {
+	if raw == "" || c.IsSet("timeout") || c.String("timeout") == "" {
+		return nil
+	}
+	timeout, err := parseTimeout(raw)
+	if err != nil {
+		return fmt.Errorf("%s: [galaxy] server_timeout: %w", ansiblePath, err)
+	}
+	cfg.Timeout = timeout
+	cfg.AnsibleServerTimeoutUsed = true
 	return nil
 }
 
@@ -694,6 +746,8 @@ cache_dir // env:ANSIBLE_GALAXY_CACHE_DIR // default {{ ANSIBLE_HOME ~ "/galaxy_
 server // env:ANSIBLE_GALAXY_SERVER // default https://galaxy.ansible.com
 server_list // env:ANSIBLE_GALAXY_SERVER_LIST // comma-separated ids, each resolved
             // against its own [galaxy_server.<id>] section; see servers.go.
+server_timeout // env:ANSIBLE_GALAXY_SERVER_TIMEOUT // default 60 in ansible, 30s here;
+               // see applyAnsibleTimeout.
 
 [galaxy_server.<id>]
 url // env:ANSIBLE_GALAXY_SERVER_<ID>_URL

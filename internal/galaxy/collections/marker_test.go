@@ -50,6 +50,11 @@ const validMarkerSHA = "0123456789abcdef0123456789abcdef0123456789abcdef01234567
 // to be found by a Stat is not enough here.
 func seedValidExtractMarker(t *testing.T, target installTarget, sha string) {
 	t.Helper()
+	// extractTree creates the marker's directory before it writes the
+	// marker; a seed standing in for that extraction does the same.
+	if err := target.root.MkdirAll(target.marker, helpers.DirMod); err != nil {
+		t.Fatalf("create the marker directory: %v", err)
+	}
 	if err := writeExtractMarker(target, sha); err != nil {
 		t.Fatalf("seed extract marker: %v", err)
 	}
@@ -495,8 +500,8 @@ func testCheckExtractMarkerMissing(t *testing.T) {
 
 // TestPrefetchScanUsesCheapCheck proves shouldSchedulePrefetch calls
 // installRecordMatches - the cheap check, which roots the marker path through
-// markerRel and then only asks target.root.Stat whether it and the sidecar
-// are there, reading neither - rather than
+// markerRel and only asks target.root.Stat whether it is there, without
+// reading it, before reading the sidecar - rather than
 // canSkipInstall's strict tally verification: a seeded install whose marker
 // is in the legacy "ok" format (which canSkipInstall rejects) must
 // still make the prefetch scan report "already installed", so the prefetch
@@ -510,10 +515,9 @@ func TestPrefetchScanUsesCheapCheck(t *testing.T) {
 	mustMkdirAll(t, installPath)
 
 	const installedSHA = "8888888888888888888888888888888888888888888888888888888888888888"
-	mustWriteFile(t, filepath.Join(installPath, helpers.ExtractMarkerPrefix+installedSHA), []byte("ok"))
-
 	infoDir := filepath.Join(root, "ansible_collections", col.Namespace+"."+col.Name+"-"+col.Version+".info")
 	mustMkdirAll(t, infoDir)
+	mustWriteFile(t, collectionMarkerPath(installPath, col, installedSHA), []byte("ok"))
 	mustWriteFile(t, filepath.Join(infoDir, "GALAXY.yml"), sidecarFor(col))
 
 	cfg := &config.Config{DownloadPath: root, Workers: 1}
@@ -775,4 +779,13 @@ func BenchmarkScanTree(b *testing.B) {
 			b.Fatalf("scanTree: %v", err)
 		}
 	}
+}
+
+// collectionMarkerPath is where a collection installed at installPath - the
+// ansible_collections/<namespace>/<name> directory - keeps its extract marker
+// for sha: the version's .info directory beside the namespace, not the
+// install directory itself.
+func collectionMarkerPath(installPath string, col collection, sha string) string {
+	infoDir := filepath.Join(filepath.Dir(filepath.Dir(installPath)), col.Namespace+"."+col.Name+"-"+col.Version+infoDirSuffix)
+	return filepath.Join(infoDir, helpers.ExtractMarkerPrefix+sha)
 }

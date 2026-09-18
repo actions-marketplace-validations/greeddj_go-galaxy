@@ -3,6 +3,9 @@ package collections
 import (
 	"context"
 	"fmt"
+	"io/fs"
+	"path"
+	"strings"
 
 	"github.com/greeddj/go-galaxy/internal/galaxy/archive"
 	"github.com/greeddj/go-galaxy/internal/galaxy/extracted"
@@ -21,8 +24,9 @@ import (
 // once more before extracting under that sha. The empty-artifactSHA fallback
 // below hashes the file right here, so it always yields a self-computed sha.
 //
-// The reset (RemoveAll then MkdirAll) and the extract-marker read/write are
-// the only writes here that go through target.root: unpack itself is handed
+// The resets (RemoveAll then MkdirAll, of the tree and of the collection's
+// .info directories) and the extract-marker read/write are the only writes
+// here that go through target.root: unpack itself is handed
 // target.path, a plain string, and operates below root's own reach. This is
 // deliberate, not an oversight - rooting per-archive-entry writes was
 // measured at 1.5x-2.3x the cost of this function for zero marginal
@@ -84,17 +88,8 @@ func extractTree(
 		return nil
 	}
 
-	// The severest primitive in this whole pipeline: unlike every other
-	// rooted call here, a failure is not "nothing was written yet", it is
-	// "the previous tree may be gone". Its error is therefore checked and
-	// classified, not discarded - a symlinked ansible_collections (or a
-	// symlinked namespace/name component) makes this refuse atomically,
-	// inside the kernel, before anything is destroyed.
-	if err := target.root.RemoveAll(target.rel); err != nil {
-		return classifyCollectionsRootError(target.root, target.rel, err)
-	}
-	if err := target.root.MkdirAll(target.rel, helpers.DirMod); err != nil {
-		return classifyCollectionsRootError(target.root, target.rel, err)
+	if err := resetExtractionTarget(target); err != nil {
+		return err
 	}
 
 	if err := unpack(ctx, tarPath, target.path, extractStore, artifactSHA, artifactSHAComputed); err != nil {
@@ -107,6 +102,71 @@ func extractTree(
 	}
 
 	return writeExtractMarker(target, artifactSHA)
+}
+
+// resetExtractionTarget empties everything a real extraction is about to
+// rewrite: the tree, and for a collection its .info directories as well (see
+// resetCollectionInfo), before anything is unpacked.
+func resetExtractionTarget(target installTarget) error {
+	// The severest primitive in this whole pipeline: unlike every other
+	// rooted call here, a failure is not "nothing was written yet", it is
+	// "the previous tree may be gone". Its error is therefore checked and
+	// classified, not discarded - a symlinked ansible_collections (or a
+	// symlinked namespace/name component) makes this refuse atomically,
+	// inside the kernel, before anything is destroyed.
+	if err := target.root.RemoveAll(target.rel); err != nil {
+		return classifyCollectionsRootError(target.root, target.rel, err)
+	}
+	if err := target.root.MkdirAll(target.rel, helpers.DirMod); err != nil {
+		return classifyCollectionsRootError(target.root, target.rel, err)
+	}
+	if target.infoPrefix == "" {
+		return nil
+	}
+	return resetCollectionInfo(target)
+}
+
+// resetCollectionInfo removes every version's .info directory of target's
+// collection and creates an empty one for target's own version, the same
+// "<namespace>.<name>-*.info" sweep ansible-galaxy makes whenever it installs
+// a collection from an artifact. It runs with the tree's own reset, before anything is unpacked,
+// because the extract marker lives in .info and .info is scoped to a version
+// while the tree is not: a marker left in an earlier version's directory
+// would outlive the tree it counted, and a later install of that version -
+// whose store record and GALAXY.yml are still there - would take it for
+// proof of an install whenever the tree now in place happened to share its
+// tally, which a same-length patch edit is enough for. Removing them here
+// leaves at most one marker for the collection, beside the version its tree
+// holds.
+//
+// A name counts only when what sits between the prefix and the ".info"
+// suffix is an exact version, so a directory merely starting with the same
+// characters is never taken for one of this collection's. The listing and
+// every removal go through target.root, which refuses to follow a symlinked
+// ansible_collections out of the tree.
+func resetCollectionInfo(target installTarget) error {
+	entries, err := fs.ReadDir(target.root.FS(), collectionsDirName)
+	if err != nil {
+		return classifyCollectionsRootError(target.root, collectionsDirName, err)
+	}
+	for _, entry := range entries {
+		version, ok := strings.CutPrefix(entry.Name(), target.infoPrefix)
+		if !ok {
+			continue
+		}
+		version, ok = strings.CutSuffix(version, infoDirSuffix)
+		if !ok || !helpers.IsExactVersion(version) {
+			continue
+		}
+		rel := path.Join(collectionsDirName, entry.Name())
+		if err := target.root.RemoveAll(rel); err != nil {
+			return classifyCollectionsRootError(target.root, rel, err)
+		}
+	}
+	if err := target.root.MkdirAll(target.info, helpers.DirMod); err != nil {
+		return classifyCollectionsRootError(target.root, target.info, err)
+	}
+	return nil
 }
 
 func unpack(
