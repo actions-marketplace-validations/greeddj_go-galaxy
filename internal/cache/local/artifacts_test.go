@@ -63,11 +63,9 @@ func TestArtifactsCommitWritesSHASidecar(t *testing.T) {
 	}
 }
 
-// TestArtifactsCommitSwallowsSidecarWriteFailure proves that Commit still
-// reports success (with the tarball in place) when the sidecar cannot be
-// written - here because a directory occupies the sidecar's path - since the
-// artifact itself was already committed by that point, and a missing
-// sidecar merely falls back to hashing on the next Fetch.
+// TestArtifactsCommitSwallowsSidecarWriteFailure pins that Commit succeeds
+// with the tarball in place when a directory blocks the sidecar's path, and
+// leaves no sidecar temp behind in the cache directory.
 func TestArtifactsCommitSwallowsSidecarWriteFailure(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -97,6 +95,15 @@ func TestArtifactsCommitSwallowsSidecarWriteFailure(t *testing.T) {
 	}
 	if _, statErr := os.Stat(result.Path); statErr != nil {
 		t.Fatalf("expected the tarball to be committed, stat error: %v", statErr)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read cache directory: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), helpers.ArtifactDownloadTempPrefix) {
+			t.Errorf("expected the failed sidecar write to remove its temp, found %q", entry.Name())
+		}
 	}
 }
 
@@ -211,16 +218,12 @@ func TestArtifactsDeleteToleratesMissingSidecar(t *testing.T) {
 	}
 }
 
-// The digest-shape predicate itself (valid hex, wrong length, uppercase,
-// non-hex characters) lives in helpers.IsSHA256Hex and is exercised by
-// helpers.TestIsSHA256Hex; this package only calls it, so it keeps no
-// copy of that table here.
+// The digest-shape table lives in helpers.TestIsSHA256Hex; this package only
+// calls helpers.IsSHA256Hex, so it keeps no copy of it.
 
-// assertLocalMetaFoundMatchesHas re-probes testArtifactKey with Has and
-// fails the test unless it reports the identical presence metaFound just
-// reported - the equality cacheManager.ArtifactStore's own doc comment
-// requires between the two methods, and the one dryRunArtifactMeta
-// (internal/galaxy/collections) depends on to keep mirroring isCacheHit.
+// assertLocalMetaFoundMatchesHas fails the test unless Has reports the same
+// presence for testArtifactKey that Meta just did, the equality
+// cacheManager.ArtifactStore requires and dryRunArtifactMeta relies on.
 func assertLocalMetaFoundMatchesHas(t *testing.T, a *Artifacts, metaFound bool) {
 	t.Helper()
 	hasFound, err := a.Has(context.Background(), testArtifactKey)
@@ -274,11 +277,9 @@ func TestArtifactsMetaPresentWithValidDigestReturnsIt(t *testing.T) {
 	assertLocalMetaFoundMatchesHas(t, a, found)
 }
 
-// TestArtifactsMetaPresentWithNoSidecarReportsFoundNilMeta proves Meta still
-// reports found=true for a committed artifact with no sidecar (committed
-// with no sha256 in meta), while its own meta map is nil: "cached, no
-// recorded metadata", exactly the tri-state cacheManager.ArtifactStore's own
-// doc comment names.
+// TestArtifactsMetaPresentWithNoSidecarReportsFoundNilMeta pins the "cached,
+// no recorded metadata" state: an artifact committed with no sha256 reports
+// found=true with a nil meta map.
 func TestArtifactsMetaPresentWithNoSidecarReportsFoundNilMeta(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -298,10 +299,9 @@ func TestArtifactsMetaPresentWithNoSidecarReportsFoundNilMeta(t *testing.T) {
 	assertLocalMetaFoundMatchesHas(t, a, found)
 }
 
-// TestArtifactsMetaPresentWithNonHexSidecarReportsFoundNilMeta proves Meta
-// applies the identical helpers.IsSHA256Hex gate Fetch does: a present but
-// non-hex sidecar is reported as found=true (the tarball itself is still
-// cached) with a nil meta map, never the unverifiable garbage.
+// TestArtifactsMetaPresentWithNonHexSidecarReportsFoundNilMeta pins that Meta
+// applies Fetch's helpers.IsSHA256Hex gate: a non-hex sidecar yields
+// found=true, since the tarball is cached, with a nil meta map.
 func TestArtifactsMetaPresentWithNonHexSidecarReportsFoundNilMeta(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -327,53 +327,40 @@ func TestArtifactsMetaPresentWithNonHexSidecarReportsFoundNilMeta(t *testing.T) 
 	assertLocalMetaFoundMatchesHas(t, a, found)
 }
 
-// TestArtifactsNeverActThroughASymlinkedCacheEntry pins why this backend's
-// flat layout needs no containment root of its own, rather than leaving that
-// as an assertion in prose.
-//
-// Every path it builds is the cache directory plus exactly one element -
-// helpers.ArtifactKey percent-escapes the filename, so no key can contain a
-// separator - which leaves the entry itself as the only thing an attacker
-// with write access to the cache directory could turn into a symlink. Both
-// mutating operations refuse to act through one for a structural reason
-// rather than a check: os.Rename replaces the link, and os.Remove unlinks it,
-// so neither follows it to a target. The victim file's survival is what
-// proves that, and the cache entry's own state afterwards is what proves the
-// operation still did its job.
+// TestArtifactsNeverActThroughASymlinkedCacheEntry pins why the flat layout
+// needs no os.Root: a key is one path element, Commit renames onto the entry
+// and its sidecar, and Delete unlinks, so a planted symlink's target survives.
 func TestArtifactsNeverActThroughASymlinkedCacheEntry(t *testing.T) {
 	t.Parallel()
 
 	t.Run("Commit replaces the symlink", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
-		victim := seedSymlinkedCacheEntry(t, dir)
+		victim := seedSymlinkedCacheEntry(t, dir, testArtifactKey)
 
 		a := NewArtifacts(dir)
 		commitTempArtifact(t, a, []byte("committed bytes"), map[string]string{"sha256": testSHA})
 
 		assertVictimIntact(t, victim)
-		entry := filepath.Join(dir, testArtifactKey)
-		info, err := os.Lstat(entry)
-		if err != nil {
-			t.Fatalf("lstat committed entry: %v", err)
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			t.Error("expected Commit to replace the symlink with a real file, it is still a symlink")
-		}
-		//nolint:gosec // entry is under this test's own t.TempDir fixture.
-		body, err := os.ReadFile(entry)
-		if err != nil {
-			t.Fatalf("read committed entry: %v", err)
-		}
-		if string(body) != "committed bytes" {
-			t.Errorf("committed entry = %q, want the freshly committed bytes", body)
-		}
+		assertCommittedRegularFile(t, filepath.Join(dir, testArtifactKey), "committed bytes")
+	})
+
+	t.Run("Commit replaces a symlinked sidecar", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		victim := seedSymlinkedCacheEntry(t, dir, testArtifactKey+helpers.ArtifactSHASidecarSuffix)
+
+		a := NewArtifacts(dir)
+		commitTempArtifact(t, a, []byte("committed bytes"), map[string]string{"sha256": testSHA})
+
+		assertVictimIntact(t, victim)
+		assertCommittedRegularFile(t, filepath.Join(dir, testArtifactKey)+helpers.ArtifactSHASidecarSuffix, testSHA)
 	})
 
 	t.Run("Delete unlinks the symlink", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
-		victim := seedSymlinkedCacheEntry(t, dir)
+		victim := seedSymlinkedCacheEntry(t, dir, testArtifactKey)
 
 		a := NewArtifacts(dir)
 		if err := a.Delete(context.Background(), testArtifactKey); err != nil {
@@ -387,20 +374,41 @@ func TestArtifactsNeverActThroughASymlinkedCacheEntry(t *testing.T) {
 	})
 }
 
-// seedSymlinkedCacheEntry plants a symlink at the cache entry testArtifactKey
-// resolves to, pointing at a file outside the cache directory, and returns
-// that file's path.
-func seedSymlinkedCacheEntry(t *testing.T, cacheDir string) string {
+// seedSymlinkedCacheEntry plants a symlink named name in cacheDir, pointing
+// at a file outside the cache directory, and returns that file's path.
+func seedSymlinkedCacheEntry(t *testing.T, cacheDir, name string) string {
 	t.Helper()
 
 	victim := filepath.Join(t.TempDir(), "victim")
 	if err := os.WriteFile(victim, []byte(victimContent), helpers.FileMod); err != nil {
 		t.Fatalf("write victim: %v", err)
 	}
-	if err := os.Symlink(victim, filepath.Join(cacheDir, testArtifactKey)); err != nil {
+	if err := os.Symlink(victim, filepath.Join(cacheDir, name)); err != nil {
 		t.Fatalf("symlink cache entry: %v", err)
 	}
 	return victim
+}
+
+// assertCommittedRegularFile fails the test unless Commit left a regular file
+// at path, not the symlink planted there, holding exactly want.
+func assertCommittedRegularFile(t *testing.T, path, want string) {
+	t.Helper()
+
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("lstat committed %s: %v", filepath.Base(path), err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Errorf("expected Commit to replace the symlink at %s with a regular file, mode = %v", filepath.Base(path), info.Mode())
+	}
+	//nolint:gosec // path is under this test's own t.TempDir fixture.
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read committed %s: %v", filepath.Base(path), err)
+	}
+	if string(body) != want {
+		t.Errorf("committed %s = %q, want %q", filepath.Base(path), body, want)
+	}
 }
 
 // victimContent is the body seedSymlinkedCacheEntry writes and

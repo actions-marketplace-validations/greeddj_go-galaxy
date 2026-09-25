@@ -10,11 +10,9 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/lockfile"
 )
 
-// TestGitOutdatedReportsCommitDrift drives Outdated over the schema-2
-// lockfile Lock writes for a git root: once the branch moves, the git entry
-// is reported as drift between two full commits, the Galaxy dependency keeps
-// its ordinary up-to-date line, the summary counts both, and the remote is
-// asked once - the lib lookup goes to Galaxy, never to git.
+// TestGitOutdatedReportsCommitDrift asserts that once the locked branch moves,
+// Outdated reports the git entry as drift between two full commits, reports the
+// Galaxy dependency as up to date, and advertises to the remote exactly once.
 func TestGitOutdatedReportsCommitDrift(t *testing.T) {
 	t.Parallel()
 	f := newGitFixture(t)
@@ -31,6 +29,8 @@ func TestGitOutdatedReportsCommitDrift(t *testing.T) {
 	f.runtime = infra.New(printer, f.galaxy.Client())
 	f.runtime.Git = f.git
 	f.cfg.MetricsFile = filepath.Join(t.TempDir(), "metrics.json")
+	// Verbose, because the lib's up-to-date line is printed only then.
+	f.cfg.Verbose = true
 	if err := collections.Outdated(context.Background(), f.cfg, f.runtime); err != nil {
 		t.Fatalf("Outdated: %v", err)
 	}
@@ -39,7 +39,7 @@ func TestGitOutdatedReportsCommitDrift(t *testing.T) {
 	if !printer.hasLineContaining(wantApp) {
 		t.Fatalf("report lacks %q:\n%v", wantApp, printer.snapshot())
 	}
-	if wantLib := "Up to date: acme.lib@" + lib.Version; !printer.hasLineContaining(wantLib) {
+	if wantLib := "Up to date: acme.lib == " + lib.Version; !printer.hasLineContaining(wantLib) {
 		t.Fatalf("report lacks %q:\n%v", wantLib, printer.snapshot())
 	}
 	lockPath := lockfile.ResolveDefaultPath(f.reqPath, "")

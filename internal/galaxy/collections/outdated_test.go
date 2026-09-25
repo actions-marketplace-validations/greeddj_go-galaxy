@@ -18,21 +18,12 @@ import (
 )
 
 // errTestBoom stands in for a lookup failure's cause in
-// TestReportOutdatedTiers. Declared as a static package-level sentinel,
-// rather than an inline fmt.Errorf/errors.New call, purely to satisfy err113 -
-// production code never compares against it.
+// TestReportOutdatedTiers; a package-level sentinel only to satisfy err113.
 var errTestBoom = errors.New("boom")
 
-// TestOutdatedNilConfig pins the nil-config guard split out of the offline
-// check: before that split, cfg == nil fell into "cfg == nil || cfg.Offline"
-// and returned the misleading helpers.ErrOfflineMode - a nil config is not
-// offline mode, it is a defensive-only condition that deserves its own
-// sentinel. This can never happen from a production call site - every
-// caller in cmd/go-galaxy/commands builds a non-nil *config.Config before
-// reaching here - so this test is documentary rather than pinned against a
-// reachable production state; it exists on the same convention
-// server_candidates_test.go's serverCandidatesCases already follows for its
-// own "cfg == nil" row.
+// TestOutdatedNilConfig pins that a nil config is refused as
+// helpers.ErrConfigIsNil and not reported as helpers.ErrOfflineMode; no
+// production caller passes nil, so the guard is defensive only.
 func TestOutdatedNilConfig(t *testing.T) {
 	t.Parallel()
 	err := Outdated(context.Background(), nil, infra.New(noopPrinter{}, nil))
@@ -47,15 +38,6 @@ func TestOutdatedNilConfig(t *testing.T) {
 // TestClassifyOutdated checks the locked-vs-latest comparison, including the
 // two failure modes where either side does not parse as semver: these must
 // be reported through Err rather than silently treated as up-to-date.
-//
-// Mutation: dropping classifyOutdated's err != nil branch (returning
-// outdatedEntry{Name: name, Locked: locked, Latest: latest, Newer: newer}
-// unconditionally, discarding isNewerVersion's error) makes the
-// "locked does not parse as semver" subtest fail with
-// `classifyOutdated("garbage", "2.0.0").Err is nil, want a parse-failure error`
-// and the "latest does not parse as semver" subtest fail with
-// `classifyOutdated("1.0.0", "garbage").Err is nil, want a parse-failure error`
-// - run and confirmed.
 func TestClassifyOutdated(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -89,21 +71,9 @@ func TestClassifyOutdated(t *testing.T) {
 	}
 }
 
-// TestUnhonoredFlags pins unhonoredFlags' detection rule (a boolean flag's
-// configured value, never whether it was explicitly set) and its fixed
-// append order, since warnUnhonoredFlags' single warning line depends on
-// that order being deterministic across runs.
-//
-// The "none set" row is this test's positive control: it proves an empty
-// result is achievable from this fixture, so the "all set" row's non-empty
-// result is meaningful evidence the function actually inspected cfg rather
-// than always returning the same fixed slice.
-//
-// Mutation: swapping the --no-cache and --refresh appends inside
-// unhonoredFlags makes the "all set" row's exact-order assertion fail with
-// "unhonoredFlags() = [--clear-cache --refresh --no-cache --no-deps --frozen
-// --s3-bucket], want [--clear-cache --no-cache --refresh --no-deps --frozen
-// --s3-bucket]" - run and confirmed.
+// TestUnhonoredFlags pins that unhonoredFlags judges a flag by its configured
+// value, not by whether it was set, and keeps a fixed order, so the single
+// warning line warnUnhonoredFlags prints is the same on every run.
 func TestUnhonoredFlags(t *testing.T) {
 	t.Parallel()
 	allFlags := []string{"--clear-cache", "--no-cache", "--refresh", "--no-deps", "--frozen", "--s3-bucket"}
@@ -155,12 +125,8 @@ func TestUnhonoredFlags(t *testing.T) {
 }
 
 // recordingPrinter implements output.Printer and records every call as a
-// (tier, formatted message) pair, so TestReportOutdatedTiers can assert each
-// of reportOutdated's four lines lands on the tier the design table
-// specifies, rather than merely that some text was printed somewhere. The
-// call slice lives behind a pointer so every method value (all take a value
-// receiver, matching noopPrinter's own shape in lock_pin_test.go) shares one
-// recording.
+// (tier, formatted message) pair; the slice sits behind a pointer so every
+// value-receiver method appends to one shared recording.
 type recordingPrinter struct {
 	calls *[]recordedCall
 }
@@ -200,36 +166,35 @@ func (p recordingPrinter) recordf(tier, format string, args ...any) {
 	*p.calls = append(*p.calls, recordedCall{tier: tier, msg: fmt.Sprintf(format, args...)})
 }
 
-// TestReportOutdatedTiers pins reportOutdated's design table: an up-to-date
-// entry lands on Okf, an outdated entry on Updatef, a failed lookup on
-// Errorf, and the trailing summary on PersistentPrintf - never on the
-// transient Printf tier, which --quiet would swallow. The three per-entry
-// tiers are three different markers, which is what makes the report read as
-// three verdicts rather than as one marked line and one bare one; the
-// summary is a total about no single collection, so it carries none.
-//
-// Mutation: changing the up-to-date line from Okf to PersistentPrintf makes
-// the "up to date lands on Okf" assertion below fail with
-// `reportOutdated: up-to-date line tier = "PersistentPrintf", want "Okf"` -
-// run and confirmed.
+// outdatedTierFixture is one entry of each verdict reportOutdated tells
+// apart, in report order: up to date, outdated, failed.
+func outdatedTierFixture() []outdatedEntry {
+	return []outdatedEntry{
+		{Name: "ns.current", Locked: "1.0.0", Newer: false},
+		{Name: "ns.stale", Locked: "1.0.0", Latest: "2.0.0", Newer: true},
+		{Name: "ns.broken", Locked: "1.0.0", Err: errTestBoom},
+	}
+}
+
+// TestReportOutdatedTiers pins reportOutdated's tiers under --verbose: up to
+// date on OkVersionf, outdated on Updatef, failed on Errorf, and the summary
+// on PersistentPrintf, never the transient Printf tier --quiet would swallow.
 func TestReportOutdatedTiers(t *testing.T) {
 	t.Parallel()
 	printer := newRecordingPrinter()
 	runtime := infra.New(printer, nil)
 
-	results := []outdatedEntry{
-		{Name: "ns.current", Locked: "1.0.0", Newer: false},
-		{Name: "ns.stale", Locked: "1.0.0", Latest: "2.0.0", Newer: true},
-		{Name: "ns.broken", Locked: "1.0.0", Err: errTestBoom},
-	}
-	reportOutdated(runtime, results, "/tmp/lockfile.yml")
+	reportOutdated(runtime, outdatedTierFixture(), "/tmp/lockfile.yml", true)
 
 	calls := *printer.calls
 	if len(calls) != 4 {
 		t.Fatalf("reportOutdated recorded %d calls, want 4: %+v", len(calls), calls)
 	}
-	if calls[0].tier != "Okf" {
-		t.Errorf("reportOutdated: up-to-date line tier = %q, want %q", calls[0].tier, "Okf")
+	if calls[0].tier != "OkVersionf" {
+		t.Errorf("reportOutdated: up-to-date line tier = %q, want %q", calls[0].tier, "OkVersionf")
+	}
+	if want := "Up to date: ns.current == 1.0.0"; calls[0].msg != want {
+		t.Errorf("reportOutdated: up-to-date line = %q, want %q", calls[0].msg, want)
 	}
 	if calls[1].tier != "Updatef" {
 		t.Errorf("reportOutdated: outdated line tier = %q, want %q", calls[1].tier, "Updatef")
@@ -240,13 +205,8 @@ func TestReportOutdatedTiers(t *testing.T) {
 	if calls[3].tier != "PersistentPrintf" {
 		t.Errorf("reportOutdated: summary line tier = %q, want %q", calls[3].tier, "PersistentPrintf")
 	}
-	// Documentary, not pinned: a fifth recorded call would already trip the
-	// len(calls) != 4 check above, and a call recorded on the Printf tier in
-	// one of the four known slots would already trip that slot's own
-	// tier-equality check above it - so no reachable state makes this loop the
-	// first assertion to fail. It states the invariant explicitly anyway, for
-	// a reader who does not want to infer "never Printf" from four positive
-	// checks.
+	// Documentary: the checks above already imply it, but "never Printf" is
+	// the invariant, so it is stated outright.
 	for _, c := range calls {
 		if c.tier == "Printf" {
 			t.Errorf("reportOutdated must never use the transient Printf tier, got %+v", c)
@@ -254,23 +214,33 @@ func TestReportOutdatedTiers(t *testing.T) {
 	}
 }
 
-// TestOutdatedReportsInNameOrder pins the direction of the comparison
-// Outdated sorts its results with, which no other test in this package
-// reaches: TestReportOutdatedTiers hands reportOutdated an already-ordered
-// slice, so it exercises the report and never the sort ahead of it.
-//
-// The lockfile lists the three collections in an order that is neither
-// ascending nor descending, and queryLatestVersions fills its result slice by
-// lockfile index, so the sort is the only thing between that order and the
-// report. Workers is 1 deliberately: with a parallel pool the incoming order
-// would be nondeterministic, which would let a run pass by luck rather than
-// by the sort.
-//
-// KILLING MUTATION, run for real: swapping the comparison to
-// strings.Compare(b.Name, a.Name) fails this test on the loop below, with
-// `report line 0 = "Up to date: acme.gamma@1.0.0", want a line for
-// acme.alpha` - never on the length check above it, which a reordering
-// leaves satisfied. Reverting the argument order made it pass again.
+// TestReportOutdatedHidesUpToDateUnlessVerbose pins that a default run
+// prints only what needs attention: the outdated line, the failed lookup and
+// the summary, with the up-to-date entry still counted in that summary.
+func TestReportOutdatedHidesUpToDateUnlessVerbose(t *testing.T) {
+	t.Parallel()
+	printer := newRecordingPrinter()
+	runtime := infra.New(printer, nil)
+
+	reportOutdated(runtime, outdatedTierFixture(), "/tmp/lockfile.yml", false)
+
+	calls := *printer.calls
+	if len(calls) != 3 {
+		t.Fatalf("reportOutdated recorded %d calls, want 3: %+v", len(calls), calls)
+	}
+	for i, tier := range []string{"Updatef", "Errorf", "PersistentPrintf"} {
+		if calls[i].tier != tier {
+			t.Errorf("reportOutdated: line %d tier = %q, want %q", i, calls[i].tier, tier)
+		}
+	}
+	if want := "/tmp/lockfile.yml: 1 up to date, 1 outdated, 1 failed"; calls[2].msg != want {
+		t.Errorf("reportOutdated: summary = %q, want %q", calls[2].msg, want)
+	}
+}
+
+// TestOutdatedReportsInNameOrder pins that Outdated reports in ascending name
+// order from a lockfile listed in neither order; Workers is 1 so the incoming
+// order is deterministic and only the sort can put it right.
 func TestOutdatedReportsInNameOrder(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -298,13 +268,14 @@ func TestOutdatedReportsInNameOrder(t *testing.T) {
 	}
 
 	printer := &capturingPrinter{}
-	cfg := &config.Config{Server: srv.URL(), RequirementsFile: reqPath, Workers: 1}
+	// Verbose, because an up-to-date entry is reported only then.
+	cfg := &config.Config{Server: srv.URL(), RequirementsFile: reqPath, Workers: 1, Verbose: true}
 	if err := Outdated(context.Background(), cfg, infra.New(printer, srv.Client())); err != nil {
 		t.Fatalf("Outdated: err = %v, want nil", err)
 	}
 
-	// Every collection is at its latest version, so each lands on the Okf tier
-	// and the summary line lands elsewhere - leaving oks holding exactly the
+	// Every collection is at its latest version, so each lands on the success
+	// tier and the summary line lands elsewhere - leaving oks holding exactly the
 	// per-collection lines, in report order.
 	if len(printer.oks) != len(names) {
 		t.Fatalf("recorded %d up-to-date lines, want %d: %v", len(printer.oks), len(names), printer.oks)
@@ -316,22 +287,9 @@ func TestOutdatedReportsInNameOrder(t *testing.T) {
 	}
 }
 
-// TestOutdatedMissingLockfileClassifiesAsLockfileError is outdated's share of
-// the unified verdict for a missing lockfile: the same fact that reaches
-// install --frozen, warm --frozen, lock --frozen, tree and explain must reach
-// this command as the same sentinel and the same exit class. It used to
-// arrive here as a bare fs.ErrNotExist and land in the environment-usage
-// class instead.
-//
-// The check runs before any network contact, so the fixture needs no server:
-// the requirements file exists and the lockfile beside it does not, which is
-// the only condition under test.
-//
-// The collections tree is named and absent, deliberately. Since outdated
-// gained its fallback (outdatedInput) a missing lockfile alone no longer
-// ends the run - the tree has to be missing too - so a fixture that left
-// DownloadPath at its zero value would still reach this verdict, but by
-// os.OpenRoot("") failing rather than by the condition this test is about.
+// TestOutdatedMissingLockfileClassifiesAsLockfileError pins that no lockfile
+// and no collections tree (named, not left empty) reach outdated as
+// helpers.ErrLockfileMissing and ExitLock, as for the --frozen commands.
 func TestOutdatedMissingLockfileClassifiesAsLockfileError(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -347,10 +305,8 @@ func TestOutdatedMissingLockfileClassifiesAsLockfileError(t *testing.T) {
 		t.Errorf("exitcode.FromError(err) = %d, want ExitLock (%d)", got, exitcode.ExitLock)
 	}
 
-	// Positive control on the same fixture: with a lockfile in place the
-	// command gets past this gate, so the failure above is the absence of the
-	// file and not the fixture failing to reach the load at all. Offline
-	// stops it at the next step, which is not the sentinel under test.
+	// Positive control: with a lockfile present the run passes this gate and
+	// stops at the offline check instead, a different sentinel.
 	mustWriteFile(t, filepath.Join(dir, lockfile.DefaultName),
 		[]byte("schema_version: 1\ncollections: []\n"))
 	cfg.Offline = true

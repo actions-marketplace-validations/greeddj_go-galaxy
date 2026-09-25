@@ -101,12 +101,9 @@ func sortedStrings(in []string) []string {
 	return out
 }
 
-// TestURLRoleInstallFromTarball proves the whole url role pipeline for both
-// layouts a real tarball takes: the archive is downloaded once, normalized
-// (the wrapping directory cut), repacked, and installed under roles_path
-// with ansible's install record carrying the sha-derived version label; the
-// record and the artifact carry the url locator, and a rerun replays the
-// pin without touching the origin.
+// TestURLRoleInstallFromTarball pins flat and wrapped role tarballs: one
+// download, installed under roles_path with the sha-derived version label and
+// the url locator, and a rerun that replays the pin without the origin.
 func TestURLRoleInstallFromTarball(t *testing.T) {
 	t.Parallel()
 	for name, prefix := range map[string]string{"flat": "", "wrapped": "myrole-1.2.3"} {
@@ -160,6 +157,67 @@ func TestURLRoleVersionLabel(t *testing.T) {
 	assertArtifactFilePresent(t, f.cacheDir, locator, helpers.RoleArtifactFilename("labeled", "1.2.3"))
 }
 
+// TestURLRoleVersionRelabel pins a changed version: label as a pin miss:
+// refused as offline under --offline, else downloaded again and the pin
+// rewritten under the new label, which the next run replays.
+func TestURLRoleVersionRelabel(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct{ from, to string }{
+		"changed": {from: "1.2.3", to: "1.2.4"},
+		"dropped": {from: "1.2.3", to: ""},
+		"added":   {from: "", to: "1.2.3"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newURLRoleFixture(t)
+			data, originSHA := buildRoleTarGz(t, "", map[string]string{"tasks/main.yml": "- debug: msg=x\n"})
+			roleURL := f.galaxy.AddTarball("dl/relabel.tar.gz", data)
+			f.writeRequirements(t, urlRoleRequirements(roleURL, "relabel", tc.from))
+			f.mustInstall(t)
+
+			f.writeRequirements(t, urlRoleRequirements(roleURL, "relabel", tc.to))
+			f.cfg.Offline = true
+			if err := f.install(t); !errors.Is(err, helpers.ErrOfflineMode) {
+				t.Fatalf("relabel under --offline: %v, want ErrOfflineMode", err)
+			}
+			f.cfg.Offline = false
+			f.mustInstall(t)
+
+			label := tc.to
+			if label == "" {
+				label = originSHA[:12]
+			}
+			assertFileContains(t, filepath.Join(f.rolePath("relabel"), "meta", ".galaxy_install_info"), "version: "+label)
+			locator := urlsource.Locator{URL: roleURL, SHA256: originSHA}.String()
+			assertArtifactFilePresent(t, f.cacheDir, locator, helpers.RoleArtifactFilename("relabel", label))
+			st := loadStoreSnapshot(t, f.cfg, f.runtime)
+			if pin, ok := st.GetRolePin("url\n" + roleURL); !ok || pin.Version != label || pin.SHA256 != originSHA {
+				t.Fatalf("role pin = %+v (recorded %v), want version %q and sha256 %s", pin, ok, label, originSHA)
+			}
+			if got := f.galaxy.Count(fakegalaxy.EndpointTarball); got != 2 {
+				t.Fatalf("tarball downloads after the relabel = %d, want 2", got)
+			}
+			f.mustInstall(t)
+			if got := f.galaxy.Count(fakegalaxy.EndpointTarball); got != 2 {
+				t.Fatalf("the rewritten pin did not replay: downloads = %d, want still 2", got)
+			}
+			if f.printer.hasWarnContaining("no longer matches its extract marker") {
+				t.Fatalf("the rewritten install info read as drift: %q", f.printer.warns)
+			}
+		})
+	}
+}
+
+// urlRoleRequirements is a requirements file holding one url role, with a
+// version: line only when label is set.
+func urlRoleRequirements(roleURL, name, label string) string {
+	body := "roles:\n  - src: " + roleURL + "\n    name: " + name + "\n"
+	if label != "" {
+		body += "    version: " + label + "\n"
+	}
+	return body
+}
+
 // TestURLRoleDependencyWalk proves a url role's meta dependencies are
 // walked: a dependency naming another url tarball installs beside it, and a
 // local name is left alone.
@@ -180,10 +238,9 @@ func TestURLRoleDependencyWalk(t *testing.T) {
 	assertPathAbsent(t, f.rolePath("common"))
 }
 
-// TestURLRoleLockAndFrozenInstall proves the lockfile half for roles: lock
-// writes a schema-4 url role entry pinned by the origin sha256, a frozen
-// cache miss re-downloads and repacks, and an origin serving different
-// bytes fails the integrity class.
+// TestURLRoleLockAndFrozenInstall pins a schema-4 url role lock entry by
+// origin sha256, a frozen cache miss that re-downloads and repacks, and an
+// origin serving different bytes failing the integrity class.
 func TestURLRoleLockAndFrozenInstall(t *testing.T) {
 	t.Parallel()
 	f := newURLRoleFixture(t)

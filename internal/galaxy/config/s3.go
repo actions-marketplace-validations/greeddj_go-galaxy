@@ -5,15 +5,9 @@ import (
 	"github.com/urfave/cli/v3"
 )
 
-// S3CacheConfig defines configuration for S3 cache backend.
-//
-// SecretKey and SessionToken are credentials and carry the Secret type, so
-// no %v, %+v, %#v, JSON, or YAML rendering of this struct - or of the
-// *Config that holds it - can print them. AccessKey deliberately stays a
-// plain string: an AWS access key id travels in cleartext inside the
-// Authorization header of every signed request by construction, so redacting
-// it in logs prevents no disclosure while adding a third Reveal call site
-// that buys nothing. That asymmetry is a decision, not an oversight.
+// S3CacheConfig defines configuration for S3 cache backend. SecretKey and
+// SessionToken are Secret so no rendering prints them; AccessKey stays a plain
+// string on purpose, as it rides in cleartext in every signed request anyway.
 type S3CacheConfig struct {
 	SecretKey    Secret
 	SessionToken Secret
@@ -50,4 +44,13 @@ func loadS3CacheConfig(c *cli.Command) (S3CacheConfig, error) {
 	cfg.PathStyle = !c.Bool("s3-path-style-disabled")
 
 	return cfg, nil
+}
+
+// checkS3CacheOffline refuses an enabled S3 cache under --offline: its bucket
+// is reached only over the network, so the backend could never open.
+func checkS3CacheOffline(cfg *Config) error {
+	if cfg.Offline && cfg.S3Cache.Enabled {
+		return helpers.ErrS3CacheOffline
+	}
+	return nil
 }

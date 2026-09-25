@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/greeddj/go-galaxy/cmd/go-galaxy/cliflags"
+	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/lockfile"
 	"github.com/greeddj/go-galaxy/internal/safeout"
 	"github.com/urfave/cli/v3"
@@ -18,7 +19,14 @@ import (
 const requirementsYAML = "requirements.yml"
 
 var (
-	errExplainNoTarget = errors.New("explain: collection name (ns.name) is required")
+	// errExplainNoTarget wraps helpers.ErrMissingArgument, so explain run with
+	// no name exits as the usage error it is, the class an argument explain
+	// does not take already exits with.
+	errExplainNoTarget = fmt.Errorf("%w: explain takes one, a collection name (namespace.name) or a role name",
+		helpers.ErrMissingArgument)
+	// errExplainNotFound wraps no sentinel, so it exits 1 (generic): the lockfile
+	// loaded and is valid, so not 6, and explain looks a name up without judging
+	// its shape, so not 2.
 	errExplainNotFound = errors.New("collection or role not found in lockfile")
 )
 
@@ -26,15 +34,13 @@ var (
 // version was chosen and which other collections depend on it.
 func Explain() *cli.Command {
 	return &cli.Command{
-		Name:      "explain",
-		Aliases:   []string{"why"},
-		Usage:     "Explain why a collection or role was resolved to its locked version",
-		ArgsUsage: "<namespace.name | role name>",
-		Flags:     cliflags.LockInspectFlags(),
+		Name:         "explain",
+		Aliases:      []string{"why"},
+		Usage:        "Explain why a collection or role was resolved to its locked version",
+		ArgsUsage:    "<namespace.name | role name>",
+		Flags:        cliflags.LockInspectFlags(),
+		ArgValidator: explainArguments,
 		Action: func(_ context.Context, c *cli.Command) error {
-			if c.NArg() < 1 {
-				return errExplainNoTarget
-			}
 			target := c.Args().First()
 			reqPath := c.String("requirements-file")
 			lockPath := lockfile.ResolveDefaultPath(reqPath, c.String("lock-file"))
@@ -56,18 +62,24 @@ func Explain() *cli.Command {
 	}
 }
 
-// printExplain writes why target was resolved to its locked version and
-// which other collections depend on it. A target may name a collection, a
-// role (by install name or Galaxy name), or both - the two are different
-// objects and neither outranks the other, so both sections are printed, the
-// collection first.
-//
-// w is wrapped in safeout.NewWriter as the first statement so every write
-// this function and the helpers it calls (printEntryHeader,
-// printRequiredBy, printDepends) make is sanitized, regardless of what a
-// lockfile entry's Name/Version/Source/SHA256/Deps contain - a lockfile
-// can be edited by hand or reach this command from an untrusted source,
-// and its fields are otherwise printed verbatim.
+// explainArguments replaces the root's NoArguments for explain and demands one
+// target. Extra arguments are refused by name rather than dropped, because
+// "explain a b" answering only a would read as an answer about both.
+func explainArguments(_ context.Context, c *cli.Command) error {
+	args := c.Args().Slice()
+	switch {
+	case len(args) == 0:
+		return errExplainNoTarget
+	case len(args) > 1:
+		return unexpectedArguments(c, args[1:], "one")
+	default:
+		return nil
+	}
+}
+
+// printExplain writes why target was locked and what depends on it; a name that
+// is both a collection and a role prints both, the collection first. w is
+// wrapped in safeout because lockfile fields are untrusted and printed verbatim.
 func printExplain(w io.Writer, lf *lockfile.File, target string, roots, roleRoots map[string]bool) error {
 	w = safeout.NewWriter(w)
 	entry, rdeps, found := findExplainTarget(lf, target)
@@ -89,21 +101,27 @@ func printExplain(w io.Writer, lf *lockfile.File, target string, roots, roleRoot
 }
 
 // findExplainRole matches target against the roles list by install name or
-// Galaxy name, and collects the roles whose deps name it.
+// Galaxy name, then collects the roles whose deps name the match's install
+// name, since role deps hold install names, not the Galaxy name typed.
 func findExplainRole(lf *lockfile.File, target string) (lockfile.RoleEntry, []lockfile.RoleEntry, bool) {
 	var entry lockfile.RoleEntry
 	found := false
-	rdeps := make([]lockfile.RoleEntry, 0)
 	for _, e := range lf.Roles {
 		if e.Name == target || e.Galaxy == target {
 			entry = e
 			found = true
 		}
-		if slices.Contains(e.Deps, target) {
+	}
+	rdeps := make([]lockfile.RoleEntry, 0)
+	if !found {
+		return entry, rdeps, false
+	}
+	for _, e := range lf.Roles {
+		if slices.Contains(e.Deps, entry.Name) {
 			rdeps = append(rdeps, e)
 		}
 	}
-	return entry, rdeps, found
+	return entry, rdeps, true
 }
 
 func printRoleHeader(w io.Writer, entry lockfile.RoleEntry) {
@@ -116,8 +134,15 @@ func printRoleHeader(w io.Writer, entry lockfile.RoleEntry) {
 	if entry.Repository != "" {
 		_, _ = fmt.Fprintf(w, "  repository : %s\n", entry.Repository)
 	}
-	_, _ = fmt.Fprintf(w, "  ref        : %s\n", entry.Ref)
-	_, _ = fmt.Fprintf(w, "  commit     : %s\n", entry.Commit)
+	if entry.Ref != "" {
+		_, _ = fmt.Fprintf(w, "  ref        : %s\n", entry.Ref)
+	}
+	if entry.Commit != "" {
+		_, _ = fmt.Fprintf(w, "  commit     : %s\n", entry.Commit)
+	}
+	if entry.SHA256 != "" {
+		_, _ = fmt.Fprintf(w, "  sha256     : %s\n", entry.SHA256)
+	}
 }
 
 func printRoleRequiredBy(w io.Writer, entry lockfile.RoleEntry, rdeps []lockfile.RoleEntry, roots map[string]bool) {

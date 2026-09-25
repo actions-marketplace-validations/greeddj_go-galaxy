@@ -1,42 +1,12 @@
 package collections
 
-// This file pins failureRecorder/failureSummary/summaryError's contract in
-// isolation, one layer below the end-to-end propagation covered in
-// failure_propagation_test.go. Each test below was verified against
-// the specific killing mutation named in its own comment, with the real
-// observed failure output quoted:
-//
-//   - TestFailureRecorderIsConcurrencySafe: dropping the mutex in record
-//     (appending to r.causes with no lock, leaving only n.Add(1) atomic)
-//     makes `go test -race -run TestFailureRecorderIsConcurrencySafe` fail
-//     with a real data race, both of whose conflicting frames are
-//     failureRecorder.record:
-//     "WARNING: DATA RACE
-//     Write at 0x00c0000a9ce0 by goroutine 11:
-//       github.com/greeddj/go-galaxy/internal/galaxy/collections.(*failureRecorder).record()
-//     Previous read at 0x00c0000a9ce0 by goroutine 10:
-//       github.com/greeddj/go-galaxy/internal/galaxy/collections.(*failureRecorder).record()"
-//     (the race detector reports several overlapping read/write races across
-//     the 64 goroutines; this is the first one it surfaces. The source
-//     position each frame carried is left out deliberately: it named a line
-//     of the mutated tree, which no longer exists for anyone to check the
-//     number against, whereas the function name stays checkable)
-//   - TestSummaryHeadlineCases's "install" row: changing wrap to
-//     `return errors.Join(headline, s.cause)` unconditionally (skipping the
-//     one-line *summaryError wrapper) makes that row fail with:
-//     "Error() = \"installation failed for 3 collections\\ncause 0\\ncause 1\\ncause 2\",
-//     want \"installation failed for 3 collections\""
-//   - TestFailureRecorderSummaryIsEmptyWhenNothingRecorded: pre-sizing causes
-//     with `make([]error, 0, 1)` in a zero-value recorder is not itself
-//     observable through this test (errors.Join treats a slice of len 0 the
-//     same regardless of capacity), which is exactly why this test exists as
-//     the positive control instead: it is the one place a reader can confirm
-//     the whole zero-value path returns nil/zero end to end before trusting
-//     the concurrency and rendering tests below to mean anything.
+// Unit tests for failureRecorder, failureSummary and summaryError, one layer
+// below TestFrozenInstallCorruptedPinPropagatesBothSentinels.
 
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -44,11 +14,8 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 )
 
-// errTestCause0/1/2 and errTestWarmCause0/1 stand in for distinct
-// per-collection failure causes recorded by a failureRecorder in this file's
-// tests. Declared as static package-level sentinels, rather than inline
-// errors.New calls, purely to satisfy err113 - production code never compares
-// against them.
+// Distinct per-collection causes for this file's tests, declared as static
+// sentinels only to satisfy err113.
 var (
 	errTestCause0 = errors.New("cause 0")
 	errTestCause1 = errors.New("cause 1")
@@ -60,16 +27,15 @@ var (
 	errTestOutdatedCause0 = errors.New("outdated cause 0")
 	errTestOutdatedCause1 = errors.New("outdated cause 1")
 
+	errTestRoleCause0 = errors.New("role cause 0")
+	errTestRoleCause1 = errors.New("role cause 1")
+
 	errTestSaveFailure     = errors.New("simulated save failure")
 	errTestCollectionCause = errors.New("collection cause")
 )
 
-// TestFailureRecorderSummaryIsEmptyWhenNothingRecorded is the positive
-// control for the whole failureRecorder/failureSummary/summaryError chain: a
-// zero-value recorder that never observed a single record call must report
-// zero everywhere, including nil-valued headline errors, so the other tests
-// in this file (which only check one failure mode each) are meaningful
-// against a baseline that is known to succeed.
+// TestFailureRecorderSummaryIsEmptyWhenNothingRecorded pins that a zero-value
+// recorder reports a zero count, a nil cause and nil headline errors.
 func TestFailureRecorderSummaryIsEmptyWhenNothingRecorded(t *testing.T) {
 	t.Parallel()
 	var r failureRecorder
@@ -93,13 +59,9 @@ func TestFailureRecorderSummaryIsEmptyWhenNothingRecorded(t *testing.T) {
 	}
 }
 
-// TestFailureRecorderIsConcurrencySafe drives 64 goroutines that each record
-// a distinct, wrapped sentinel concurrently, then asserts the recorder
-// observed all 64 and that every one of them is still reachable via
-// errors.Is through the summary's installError. Run with -race: the killing
-// mutation is dropping the mutex from record, which turns the concurrent
-// append into a data race the detector catches (see this file's header
-// comment for the real observed race report).
+// TestFailureRecorderIsConcurrencySafe pins that 64 concurrent record calls
+// are all counted and all reachable via errors.Is through installError; under
+// -race it also catches record appending without the mutex.
 func TestFailureRecorderIsConcurrencySafe(t *testing.T) {
 	t.Parallel()
 	const workers = 64
@@ -135,30 +97,25 @@ func TestFailureRecorderIsConcurrencySafe(t *testing.T) {
 }
 
 // summaryHeadlineCase is one table entry for TestSummaryHeadlineCases: the
-// causes a failureRecorder observes, the failureSummary method under test,
-// and the exact message and sentinel that method must produce.
+// collection and role causes two recorders observe, the failureSummary method
+// under test, and the exact message and sentinel that method must produce.
 type summaryHeadlineCase struct {
 	name         string
 	build        func(s failureSummary) error
 	wantMsg      string
 	wantSentinel error
 	causes       []error
+	roleCauses   []error
 }
 
-// summaryHeadlineCases enumerates one row per failureSummary headline method,
-// each recording its own causes so a row's count is visible in the message it
-// demands.
+// summaryHeadlineCases enumerates each failureSummary headline method over
+// collection failures, role failures and both, each row recording its own
+// causes so its counts are visible in the message it demands.
 func summaryHeadlineCases() []summaryHeadlineCase {
 	return []summaryHeadlineCase{
 		{
-			// Asserts installError's message stays exactly the one-line
-			// headline - "installation failed for 3 collections", with no
-			// cause text appended - while errors.Is still reaches
-			// helpers.ErrInstallationFailed and every recorded cause through
-			// Unwrap. The killing mutation is building wrap's non-nil-cause
-			// branch as errors.Join(headline, s.cause) directly instead of
-			// through *summaryError: see this file's header comment for the
-			// real observed message that mutation produces.
+			// installError's message is the bare headline with no cause text,
+			// while Unwrap still reaches the sentinel and every cause.
 			name:         "install",
 			build:        func(s failureSummary) error { return s.installError() },
 			wantMsg:      "installation failed for 3 collections",
@@ -166,9 +123,7 @@ func summaryHeadlineCases() []summaryHeadlineCase {
 			causes:       []error{errTestCause0, errTestCause1, errTestCause2},
 		},
 		{
-			// Pins warmError's distinct headline wording, byte for byte,
-			// alongside the same one-line-message / full-cause-tree contract
-			// the "install" row above pins for installError.
+			// warmError renders its own headline under the same one-line contract.
 			name:         "warm",
 			build:        func(s failureSummary) error { return s.warmError() },
 			wantMsg:      "installation failed: warm failed for 2 collections",
@@ -176,41 +131,72 @@ func summaryHeadlineCases() []summaryHeadlineCase {
 			causes:       []error{errTestWarmCause0, errTestWarmCause1},
 		},
 		{
-			// Pins outdatedError's distinct headline wording, byte for byte,
-			// alongside the same one-line-message / full-cause-tree contract
-			// the "install" and "warm" rows above pin for installError and
-			// warmError.
+			// outdatedError renders its own headline and sentinel under the
+			// same one-line contract.
 			name:         "outdated",
 			build:        func(s failureSummary) error { return s.outdatedError() },
 			wantMsg:      "latest version lookup failed for 2 collections",
 			wantSentinel: helpers.ErrLatestVersionLookupFailed,
 			causes:       []error{errTestOutdatedCause0, errTestOutdatedCause1},
 		},
+		{
+			// Role failures alone are named as roles, the collections left out.
+			name:         "install roles only",
+			build:        func(s failureSummary) error { return s.installError() },
+			wantMsg:      "installation failed for 2 roles",
+			wantSentinel: helpers.ErrInstallationFailed,
+			roleCauses:   []error{errTestRoleCause0, errTestRoleCause1},
+		},
+		{
+			name:         "warm one role",
+			build:        func(s failureSummary) error { return s.warmError() },
+			wantMsg:      "installation failed: warm failed for 1 role",
+			wantSentinel: helpers.ErrInstallationFailed,
+			roleCauses:   []error{errTestRoleCause0},
+		},
+		{
+			name:         "outdated roles only",
+			build:        func(s failureSummary) error { return s.outdatedError() },
+			wantMsg:      "latest version lookup failed for 2 roles",
+			wantSentinel: helpers.ErrLatestVersionLookupFailed,
+			roleCauses:   []error{errTestRoleCause0, errTestRoleCause1},
+		},
+		{
+			// Both kinds are named, each with its own count and number.
+			name:         "install one collection and roles",
+			build:        func(s failureSummary) error { return s.installError() },
+			wantMsg:      "installation failed for 1 collection and 2 roles",
+			wantSentinel: helpers.ErrInstallationFailed,
+			causes:       []error{errTestCause0},
+			roleCauses:   []error{errTestRoleCause0, errTestRoleCause1},
+		},
 	}
 }
 
-// TestSummaryHeadlineCases drives every failureSummary headline method over
-// its own row: the message a method renders is its headline and nothing else,
-// while errors.Is still reaches both that method's sentinel and every cause
-// the recorder observed.
+// TestSummaryHeadlineCases pins that each headline method renders only its
+// headline, over a collection summary joined with a role summary, while
+// errors.Is reaches its sentinel and every recorded cause.
 func TestSummaryHeadlineCases(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range summaryHeadlineCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var r failureRecorder
+			var cols, roles failureRecorder
 			for _, c := range tc.causes {
-				r.record(c)
+				cols.record(c)
 			}
-			err := tc.build(r.summary())
+			for _, c := range tc.roleCauses {
+				roles.recordRole(c)
+			}
+			err := tc.build(cols.summary().join(roles.summary()))
 			if got := err.Error(); got != tc.wantMsg {
 				t.Fatalf("Error() = %q, want %q", got, tc.wantMsg)
 			}
 			if !errors.Is(err, tc.wantSentinel) {
 				t.Fatalf("expected errors.Is %v, got %v", tc.wantSentinel, err)
 			}
-			for i, c := range tc.causes {
+			for i, c := range slices.Concat(tc.causes, tc.roleCauses) {
 				if !errors.Is(err, c) {
 					t.Fatalf("expected errors.Is causes[%d] = %v, got %v", i, c, err)
 				}
@@ -219,11 +205,31 @@ func TestSummaryHeadlineCases(t *testing.T) {
 	}
 }
 
-// TestFailureSummarySurvivesSaveAnnotation proves the summary's joined error
-// still passes through annotateSaveFailure without losing any of its three
-// independently matchable errors: the ErrInstallationFailed headline, the
-// recorded per-collection cause, and the save failure itself - and that the
-// combined message stays one line containing the save-failure annotation.
+// TestFailureRecorderCountsRolesApart pins that one recorder fed both kinds,
+// as outdated feeds it, keeps the role count apart from the total.
+func TestFailureRecorderCountsRolesApart(t *testing.T) {
+	t.Parallel()
+	var r failureRecorder
+	r.recordRole(errTestRoleCause0)
+	r.record(errTestCause0)
+	r.recordRole(errTestRoleCause1)
+
+	if got := r.count(); got != 3 {
+		t.Fatalf("count() = %d, want 3", got)
+	}
+	summary := r.summary()
+	if summary.count != 3 || summary.roles != 2 {
+		t.Fatalf("summary counts = %d total, %d roles; want 3 and 2", summary.count, summary.roles)
+	}
+	const want = "latest version lookup failed for 1 collection and 2 roles"
+	if got := summary.outdatedError().Error(); got != want {
+		t.Fatalf("Error() = %q, want %q", got, want)
+	}
+}
+
+// TestFailureSummarySurvivesSaveAnnotation pins that annotateSaveFailure keeps
+// the headline, the per-collection cause and the save failure matchable, and
+// the message on one line.
 func TestFailureSummarySurvivesSaveAnnotation(t *testing.T) {
 	t.Parallel()
 

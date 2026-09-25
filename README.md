@@ -175,7 +175,9 @@ go-galaxy install -r requirements.yml -p ./collections --roles-path ./roles
 ```
 
 Running `go-galaxy` with no command runs `install`, so a bare invocation
-performs a full install rather than printing help. One `install` handles the
+performs a full install rather than printing help; a word that names no
+command is refused as an argument to `install` rather than ignored, since
+nothing is named on the command line. One `install` handles the
 `collections:` and the `roles:` lists of the same file, as `ansible-galaxy
 install -r` does; there is no separate role subcommand.
 
@@ -196,6 +198,7 @@ pipeline can branch on the failure type without parsing log output. See
 | Document | What it covers |
 | :-- | :-- |
 | [CLI reference](docs/cli.md) | Every command and option, `--dry-run`, output and color |
+| [Command flows](docs/commands.md) | Each command's control flow as a diagram, branch by branch over its flags |
 | [Configuration](docs/configuration.md) | `ansible.cfg` discovery and keys, the environment surface, `requirements.yml` |
 | [Galaxy servers and authentication](docs/servers-and-auth.md) | `server_list`, tokens, precedence, TLS, refused configurations |
 | [Signature verification](docs/signatures.md) | Keyrings, required counts, tolerated statuses, the manifest chain |

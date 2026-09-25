@@ -1,19 +1,19 @@
 package s3
 
-// This file pins the cache-backend exit-code classification variables.go's
-// partition doc describes: a status-level failure exhausting its retry
-// budget and a transport-level failure that never reached an HTTP response
-// both carry helpers.ErrCacheBackendUnavailable, a probe failure discovered
-// once at Open carries helpers.ErrCacheBackendUnusable instead, and neither
-// ever carries the other - nor does either ever carry a context signal a
-// caller-driven cancellation should keep for itself.
+// Tests for the cache-backend classes: exhausted retries, transport failures,
+// cut-off or undecodable bodies and an overwrite's 412 are ErrCacheBackendUnavailable,
+// an Open probe failure only ErrCacheBackendUnusable, and a cancellation neither.
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,13 +23,9 @@ import (
 	"github.com/greeddj/go-galaxy/internal/galaxy/store"
 )
 
-// TestLoadStoreClassifiesExhaustedGetRetriesAsCacheBackendUnavailable forces
-// the snapshot object's GET to fail with a retryable 500 on every one of
-// s3RetryMaxAttempts attempts: LoadStore's final error must still match both
-// errS3GetFailed (the specific verb that failed) and
-// helpers.ErrCacheBackendUnavailable (the class exitcode.FromError branches
-// on), since errS3GetFailed's own declaration in variables.go now wraps the
-// latter.
+// TestLoadStoreClassifiesExhaustedGetRetriesAsCacheBackendUnavailable proves a
+// snapshot GET failing with 500 on every retry matches both errS3GetFailed and
+// helpers.ErrCacheBackendUnavailable.
 func TestLoadStoreClassifiesExhaustedGetRetriesAsCacheBackendUnavailable(t *testing.T) {
 	t.Parallel()
 	b, fake := newTestBackendAndFake(t)
@@ -48,10 +44,8 @@ func TestLoadStoreClassifiesExhaustedGetRetriesAsCacheBackendUnavailable(t *test
 	}
 }
 
-// TestSaveStoreClassifiesExhaustedPutRetriesAsCacheBackendUnavailable is
-// TestLoadStoreClassifiesExhaustedGetRetriesAsCacheBackendUnavailable's PUT
-// counterpart: SaveStore's final error over an unconditional PUT that fails
-// with a retryable 500 on every attempt matches both errS3PutFailed and
+// TestSaveStoreClassifiesExhaustedPutRetriesAsCacheBackendUnavailable proves a
+// snapshot PUT failing with 500 on every retry matches both errS3PutFailed and
 // helpers.ErrCacheBackendUnavailable.
 func TestSaveStoreClassifiesExhaustedPutRetriesAsCacheBackendUnavailable(t *testing.T) {
 	t.Parallel()
@@ -73,27 +67,260 @@ func TestSaveStoreClassifiesExhaustedPutRetriesAsCacheBackendUnavailable(t *test
 	}
 }
 
-// TestClientDoClassifiesConnectionFailureAsCacheBackendUnavailable is the
-// headline case this whole item exists for: a bucket that is DOWN (nobody
-// listening) rather than merely slow. It points a Backend at a closed
-// httptest listener - a connect refusal, not a status response - and
-// confirms (a) Client.do's normalization reaches LoadStore's returned error
-// as helpers.ErrCacheBackendUnavailable, and, separately, (b) that error
-// satisfies NEITHER context.Canceled NOR context.DeadlineExceeded. Without
-// (b) this test would prove nothing about the funnel's context exclusion:
-// TestClientDoExcludesCallerCancellationFromCacheBackendUnavailable below
-// names this test as its positive control precisely because (b) confirms
-// helpers.ErrCacheBackendUnavailable is reachable through errors.Is here,
-// which is what makes that test's own negative assertion meaningful rather
-// than vacuous.
+// TestSaveStoreClassifiesOverwritePreconditionFailureAsCacheBackendUnavailable
+// proves a 412 to the snapshot's unconditional PUT is errS3PutFailed, after one
+// attempt, and never the lock loop's errS3PreconditionFailed.
+func TestSaveStoreClassifiesOverwritePreconditionFailureAsCacheBackendUnavailable(t *testing.T) {
+	t.Parallel()
+	b, fake := newTestBackendAndFake(t)
+	ctx := t.Context()
+
+	if err := b.Open(ctx); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	key := b.key(statePrefix, storeObject)
+	fake.failNext(key, http.MethodPut, http.StatusPreconditionFailed, 1)
+
+	err := b.SaveStore(ctx, store.New())
+	if !errors.Is(err, helpers.ErrCacheBackendUnavailable) {
+		t.Fatalf("expected errors.Is(err, helpers.ErrCacheBackendUnavailable), got %v", err)
+	}
+	if !errors.Is(err, errS3PutFailed) {
+		t.Fatalf("expected errors.Is(err, errS3PutFailed), got %v", err)
+	}
+	if errors.Is(err, errS3PreconditionFailed) {
+		t.Fatalf("expected NOT errors.Is(err, errS3PreconditionFailed), got %v", err)
+	}
+	if got := fake.requestCount(key, http.MethodPut); got != 1 {
+		t.Fatalf("expected exactly 1 PUT attempt for a 412, got %d", got)
+	}
+}
+
+// TestClearFilesClassifiesUndecodableListingAsCacheBackendUnavailable proves a
+// listing page answered 200 with a body that is not XML is errS3BucketRequestFailed
+// naming the listing response, after one request.
+func TestClearFilesClassifiesUndecodableListingAsCacheBackendUnavailable(t *testing.T) {
+	t.Parallel()
+	b, fake := newTestBackendAndFake(t)
+	ctx := t.Context()
+
+	if err := b.Open(ctx); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	fake.failNextWithBody(bucketListKey, http.MethodGet, http.StatusOK, 1, []byte("not a listing"))
+
+	err := b.ClearFiles(ctx)
+	if !errors.Is(err, helpers.ErrCacheBackendUnavailable) {
+		t.Fatalf("expected errors.Is(err, helpers.ErrCacheBackendUnavailable), got %v", err)
+	}
+	if !errors.Is(err, errS3BucketRequestFailed) {
+		t.Fatalf("expected errors.Is(err, errS3BucketRequestFailed), got %v", err)
+	}
+	if !strings.Contains(err.Error(), "s3 listing response does not decode") {
+		t.Fatalf("expected the error to name the s3 listing response, got %q", err.Error())
+	}
+	if got := fake.requestCount(bucketListKey, http.MethodGet); got != 1 {
+		t.Fatalf("expected exactly 1 listing request, got %d", got)
+	}
+}
+
+// TestClearFilesClassifiesUndecodableBatchDeleteAsCacheBackendUnavailable proves
+// a batch delete answered 200 with a body that is not XML is errS3DeleteFailed
+// naming the batch-delete response, after one request.
+func TestClearFilesClassifiesUndecodableBatchDeleteAsCacheBackendUnavailable(t *testing.T) {
+	t.Parallel()
+	b, fake := newTestBackendAndFake(t)
+	ctx := t.Context()
+
+	if err := b.Open(ctx); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	key := b.key(artifactsPrefix, "a.tar.gz")
+	if err := b.client.putObject(ctx, key, bytes.NewReader([]byte("x")), 1,
+		putObjectAttrs{contentType: "application/gzip"}, putCondition{}); err != nil {
+		t.Fatalf("putObject(%q): %v", key, err)
+	}
+	fake.failNextWithBody(bucketDeleteObjectsKey, http.MethodPost, http.StatusOK, 1, []byte("not a delete result"))
+
+	err := b.ClearFiles(ctx)
+	if !errors.Is(err, helpers.ErrCacheBackendUnavailable) {
+		t.Fatalf("expected errors.Is(err, helpers.ErrCacheBackendUnavailable), got %v", err)
+	}
+	if !errors.Is(err, errS3DeleteFailed) {
+		t.Fatalf("expected errors.Is(err, errS3DeleteFailed), got %v", err)
+	}
+	if !strings.Contains(err.Error(), "s3 batch-delete response does not decode") {
+		t.Fatalf("expected the error to name the s3 batch-delete response, got %q", err.Error())
+	}
+	if got := fake.requestCount(bucketDeleteObjectsKey, http.MethodPost); got != 1 {
+		t.Fatalf("expected exactly 1 batch-delete request, got %d", got)
+	}
+}
+
+// TestDeleteAllUnderPrefixClassifiesTruncatedListingAsCacheBackendUnavailable
+// proves a listing body that breaks off partway is errS3BucketRequestFailed
+// naming the listing response, not a bare unexpected EOF.
+func TestDeleteAllUnderPrefixClassifiesTruncatedListingAsCacheBackendUnavailable(t *testing.T) {
+	t.Parallel()
+	client := newHandlerTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeTruncatedBody(w, `<?xml version="1.0"?><ListBucketResult>`)
+	}, nil)
+
+	err := client.deleteAllUnderPrefix(t.Context(), "artifacts")
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("precondition: expected the listing read to fail with io.ErrUnexpectedEOF, got %v", err)
+	}
+	if !errors.Is(err, helpers.ErrCacheBackendUnavailable) {
+		t.Fatalf("expected errors.Is(err, helpers.ErrCacheBackendUnavailable), got %v", err)
+	}
+	if !errors.Is(err, errS3BucketRequestFailed) {
+		t.Fatalf("expected errors.Is(err, errS3BucketRequestFailed), got %v", err)
+	}
+	if !strings.Contains(err.Error(), "s3 listing response") {
+		t.Fatalf("expected the error to name the s3 listing response, got %q", err.Error())
+	}
+}
+
+// TestDeleteAllUnderPrefixClassifiesTruncatedBatchDeleteAsCacheBackendUnavailable
+// proves a batch-delete body that breaks off partway is errS3DeleteFailed
+// naming the batch-delete response, not a bare unexpected EOF.
+func TestDeleteAllUnderPrefixClassifiesTruncatedBatchDeleteAsCacheBackendUnavailable(t *testing.T) {
+	t.Parallel()
+	client := newHandlerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			writeTruncatedBody(w, `<?xml version="1.0"?><DeleteResult>`)
+			return
+		}
+		_, _ = io.WriteString(w, `<ListBucketResult><Contents><Key>artifacts/a.tar.gz</Key></Contents></ListBucketResult>`)
+	}, nil)
+
+	err := client.deleteAllUnderPrefix(t.Context(), "artifacts")
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("precondition: expected the batch-delete read to fail with io.ErrUnexpectedEOF, got %v", err)
+	}
+	if !errors.Is(err, helpers.ErrCacheBackendUnavailable) {
+		t.Fatalf("expected errors.Is(err, helpers.ErrCacheBackendUnavailable), got %v", err)
+	}
+	if !errors.Is(err, errS3DeleteFailed) {
+		t.Fatalf("expected errors.Is(err, errS3DeleteFailed), got %v", err)
+	}
+	if !strings.Contains(err.Error(), "s3 batch-delete response") {
+		t.Fatalf("expected the error to name the s3 batch-delete response, got %q", err.Error())
+	}
+}
+
+// TestListingBodyReadCanceledPartwayStaysUnclassified proves a listing body read
+// the caller cancels partway reaches it as context.Canceled and not as
+// ErrCacheBackendUnavailable, as a canceled round trip does in do.
+func TestListingBodyReadCanceledPartwayStaysUnclassified(t *testing.T) {
+	t.Parallel()
+	headers := make(chan struct{}, 1)
+	client := newHandlerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1024")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `<ListBucketResult>`)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}, func(base http.RoundTripper) http.RoundTripper {
+		return headersSeenTransport{base: base, seen: headers}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- client.deleteAllUnderPrefix(ctx, "artifacts") }()
+
+	// Cancel only once the response is in hand, so the cancellation lands in
+	// the body read rather than in the round trip do already covers.
+	select {
+	case <-headers:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the listing response headers never arrived")
+	}
+	cancel()
+
+	var err error
+	select {
+	case err = <-errCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("deleteAllUnderPrefix did not return after the caller canceled")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected errors.Is(err, context.Canceled), got %v", err)
+	}
+	if errors.Is(err, helpers.ErrCacheBackendUnavailable) {
+		t.Fatalf("expected NOT errors.Is(err, helpers.ErrCacheBackendUnavailable), got %v", err)
+	}
+}
+
+// headersSeenTransport signals seen, without blocking, each time base returns
+// a response, which is when the caller starts reading its body.
+type headersSeenTransport struct {
+	base http.RoundTripper
+	seen chan<- struct{}
+}
+
+// RoundTrip delegates to base and signals seen on a response.
+func (h headersSeenTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := h.base.RoundTrip(req)
+	if err == nil {
+		select {
+		case h.seen <- struct{}{}:
+		default:
+		}
+	}
+	return resp, err
+}
+
+// newHandlerTestClient builds a *Client against a server running handler, over
+// the server's transport as wrap returns it (unchanged for a nil wrap), for a
+// response the fake cannot shape, such as a body that breaks off partway.
+func newHandlerTestClient(
+	t *testing.T,
+	handler http.HandlerFunc,
+	wrap func(http.RoundTripper) http.RoundTripper,
+) *Client {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	httpClient := srv.Client()
+	if wrap != nil {
+		httpClient.Transport = wrap(httpClient.Transport)
+	}
+	cfg := config.S3CacheConfig{
+		Endpoint:  srv.URL,
+		Bucket:    "test",
+		Region:    "us-east-1",
+		AccessKey: "x",
+		SecretKey: config.NewSecret("y"),
+		PathStyle: true,
+		Enabled:   true,
+	}
+	client, err := newClient(cfg, httpClient)
+	if err != nil {
+		t.Fatalf("newClient: %v", err)
+	}
+	return client
+}
+
+// writeTruncatedBody answers 200 promising more bytes than partial holds, so
+// the server drops the connection after it and the client's read fails partway.
+func writeTruncatedBody(w http.ResponseWriter, partial string) {
+	w.Header().Set("Content-Length", strconv.Itoa(len(partial)+1024))
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, partial)
+}
+
+// TestClientDoClassifiesConnectionFailureAsCacheBackendUnavailable proves a
+// bucket nobody listens on is ErrCacheBackendUnavailable from LoadStore, and
+// matches neither context.Canceled nor context.DeadlineExceeded.
 func TestClientDoClassifiesConnectionFailureAsCacheBackendUnavailable(t *testing.T) {
 	t.Parallel()
 
-	// A server that is started and immediately closed leaves its port
-	// refusing connections, unlike an unroutable address (which would hang on
-	// dial instead of failing fast) or a running server answering a non-2xx
-	// status (a different failure shape, already covered by the two tests
-	// above).
+	// A closed server's port refuses connections at once, where an unroutable
+	// address would hang on dial.
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	closedURL := srv.URL
 	srv.Close()
@@ -125,44 +352,9 @@ func TestClientDoClassifiesConnectionFailureAsCacheBackendUnavailable(t *testing
 	}
 }
 
-// TestClientDoClassifiesLiveTimeoutShapesAsCacheBackendUnavailable is the
-// test the closed-listener headline case above cannot be: that fixture
-// produces a connect refusal, the one shape an error-shape predicate would
-// exclude from context.DeadlineExceeded anyway, so it is structurally
-// incapable of killing a regression from Client.do's req.Context().Err()
-// test back to that shape-based predicate. Both
-// rows below instead reproduce the two outage shapes that DO satisfy
-// errors.Is(err, context.DeadlineExceeded) while the caller's own context
-// stays live - a black-holed endpoint (dial times out) and one that accepts a
-// connection and then never answers (headers never arrive) - fully local and
-// deterministic, with no external network dependency and no black-holed
-// public address.
-//
-// Each row runs its precondition as a control FIRST: it calls c.client.Do(req)
-// directly (bypassing Client.do entirely) and asserts the raw error satisfies
-// errors.Is(rawErr, context.DeadlineExceeded) while req.Context().Err() is
-// still nil. This is what stops the row passing vacuously if a future Go
-// toolchain changes how a dial or response-header timeout is mapped to an
-// error: the row fails loudly at the precondition instead of silently
-// proving nothing about Client.do. Only once that precondition holds does the
-// row call c.do(req) and assert the sentinel.
-//
-// KILLING MUTATION, run and reverted: restoring the old error-shape predicate
-// (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
-// in place of req.Context().Err() != nil makes both rows fail, quoting the
-// real transport error each shape produces on this toolchain (reported at the
-// caller's line, since the helper calls t.Helper()):
-//
-//	cache_backend_classification_test.go:202: expected errors.Is(err, helpers.ErrCacheBackendUnavailable),
-//	got Get "http://127.0.0.1:<port>/test/some-key": dial tcp 127.0.0.1:<port>: i/o timeout
-//
-//	cache_backend_classification_test.go:202: expected errors.Is(err, helpers.ErrCacheBackendUnavailable),
-//	got Get "http://127.0.0.1:<port>/test/some-key": net/http: timeout awaiting response headers
-//
-// while TestClientDoClassifiesConnectionFailureAsCacheBackendUnavailable and
-// TestClientDoExcludesCallerCancellationFromCacheBackendUnavailable both still
-// PASS under the identical mutation - confirming neither of those tests can
-// catch this regression, only these two rows can.
+// TestClientDoClassifiesLiveTimeoutShapesAsCacheBackendUnavailable proves a
+// dial or response-header timeout, which matches context.DeadlineExceeded with
+// the caller's context live, is still ErrCacheBackendUnavailable.
 func TestClientDoClassifiesLiveTimeoutShapesAsCacheBackendUnavailable(t *testing.T) {
 	t.Parallel()
 
@@ -171,10 +363,8 @@ func TestClientDoClassifiesLiveTimeoutShapesAsCacheBackendUnavailable(t *testing
 		name         string
 	}{
 		{
-			// A 1ns dial timeout expires before even a local TCP handshake can
-			// complete, so pointing it at a live listener (rather than an address
-			// nobody listens on) reliably reproduces a genuine dial timeout - not
-			// the connect-refusal shape the headline case above already covers.
+			// A 1ns dial timeout expires before a local handshake completes,
+			// giving a genuine dial timeout rather than a connect refusal.
 			name: "dial timeout",
 			newTransport: func(t *testing.T, _ string) http.RoundTripper {
 				t.Helper()
@@ -184,10 +374,8 @@ func TestClientDoClassifiesLiveTimeoutShapesAsCacheBackendUnavailable(t *testing
 			},
 		},
 		{
-			// ResponseHeaderTimeout fires once the connection is established (the
-			// dial itself succeeds against a real, accepting listener) but no
-			// response headers ever arrive, reproducing an endpoint that accepts a
-			// connection and then never answers.
+			// The dial succeeds but no headers ever arrive: an endpoint that
+			// accepts a connection and then never answers.
 			name: "response header timeout",
 			newTransport: func(t *testing.T, _ string) http.RoundTripper {
 				t.Helper()
@@ -204,13 +392,9 @@ func TestClientDoClassifiesLiveTimeoutShapesAsCacheBackendUnavailable(t *testing
 	}
 }
 
-// assertLiveTimeoutClassifiesAsCacheBackendUnavailable runs one row's body:
-// build a Client against a live listener using newTransport, run the
-// precondition control against the raw *http.Client, then assert Client.do's
-// own normalization. Split out of
-// TestClientDoClassifiesLiveTimeoutShapesAsCacheBackendUnavailable purely to
-// stay under the funlen budget; the two together still cover exactly the
-// same two rows.
+// assertLiveTimeoutClassifiesAsCacheBackendUnavailable checks the raw
+// transport error really is a DeadlineExceeded with a live caller context,
+// then asserts Client.do classifies it as ErrCacheBackendUnavailable.
 func assertLiveTimeoutClassifiesAsCacheBackendUnavailable(
 	t *testing.T,
 	newTransport func(t *testing.T, addr string) http.RoundTripper,
@@ -262,29 +446,9 @@ func assertLiveTimeoutClassifiesAsCacheBackendUnavailable(
 	}
 }
 
-// TestClientDoExcludesCallerCancellationFromCacheBackendUnavailable is the
-// refusal companion to TestClientDoClassifiesConnectionFailureAsCacheBackendUnavailable,
-// named above as this test's positive control: that test already proves
-// helpers.ErrCacheBackendUnavailable is reachable through errors.Is out of
-// Client.do's normalization when it should be, so this test's own negative
-// assertion below actually discriminates rather than passing vacuously
-// against a classifier that never produces the sentinel at all.
-//
-// It points Client.do at a handler that never writes a response - so the
-// round trip is still in flight inside c.client.Do itself, not in a later
-// body read - then cancels the caller's own context while that call is
-// blocked, and asserts context.Canceled reaches the caller FIRST, then that
-// helpers.ErrCacheBackendUnavailable does NOT.
-//
-// KILLING MUTATION, run and reverted: deleting the
-// "if req.Context().Err() != nil { return nil, err }" branch from Client.do
-// makes this test fail with:
-//
-//	cache_backend_classification_test.go:348: expected NOT errors.Is(err, helpers.ErrCacheBackendUnavailable),
-//	got cache backend unavailable: s3 request failed: Get "http://127.0.0.1:<port>/test/some-key": context canceled
-//
-// while TestClientDoClassifiesConnectionFailureAsCacheBackendUnavailable
-// still passes, confirming that test alone cannot catch this regression.
+// TestClientDoExcludesCallerCancellationFromCacheBackendUnavailable proves a
+// caller cancellation during an in-flight round trip reaches the caller as
+// context.Canceled and not as ErrCacheBackendUnavailable.
 func TestClientDoExcludesCallerCancellationFromCacheBackendUnavailable(t *testing.T) {
 	t.Parallel()
 
@@ -310,10 +474,8 @@ func TestClientDoExcludesCallerCancellationFromCacheBackendUnavailable(t *testin
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	// Idempotent backstop for the early-exit paths below: httptest.Server.Close
-	// blocks until every outstanding request completes, and the handler only
-	// returns once this context ends, so a t.Fatal between here and the explicit
-	// cancel() would leave the cleanup deadlocked on a request nobody cancels.
+	// Backstop for early exits: srv.Close waits for the handler, which only
+	// returns once this context ends.
 	defer cancel()
 	req, err := client.newReadRequest(ctx, http.MethodGet, "some-key", nil)
 	if err != nil {
@@ -349,27 +511,9 @@ func TestClientDoExcludesCallerCancellationFromCacheBackendUnavailable(t *testin
 	}
 }
 
-// TestOpenProbeFailureClassifiesAsCacheBackendUnusableNotUnavailable is the
-// refusal companion to TestOpenProbeFailsOnNonConformingBackend (probe_test.go),
-// naming TestClientDoClassifiesConnectionFailureAsCacheBackendUnavailable as
-// its positive control for the identical reason described on
-// TestClientDoExcludesCallerCancellationFromCacheBackendUnavailable above.
-// Assertion order is deliberate: errS3ConditionalPutUnsupported must still
-// classify as helpers.ErrCacheBackendUnusable (checked FIRST, and unaffected
-// by the mutation below), which is what makes the second assertion
-// pinnable rather than moot.
-//
-// KILLING MUTATION, run and reverted: adding helpers.ErrCacheBackendUnavailable
-// to errS3ConditionalPutUnsupported's wrap (`fmt.Errorf("%w: %w: ...",
-// helpers.ErrCacheBackendUnusable, helpers.ErrCacheBackendUnavailable)`)
-// makes this test fail with:
-//
-//	cache_backend_classification_test.go:384: expected NOT errors.Is(err, helpers.ErrCacheBackendUnavailable),
-//	got cache backend cannot be used as configured: cache backend unavailable: s3 backend does not enforce
-//	conditional PUT (If-None-Match); distributed locking cannot guarantee mutual exclusion
-//
-// while its first assertion (helpers.ErrCacheBackendUnusable) still passes,
-// exactly as the task instructions describe.
+// TestOpenProbeFailureClassifiesAsCacheBackendUnusableNotUnavailable proves a
+// store failing Open's conditional-write probe is ErrCacheBackendUnusable and
+// never also ErrCacheBackendUnavailable.
 func TestOpenProbeFailureClassifiesAsCacheBackendUnusableNotUnavailable(t *testing.T) {
 	t.Parallel()
 	b := newNonConformingTestBackend(t)

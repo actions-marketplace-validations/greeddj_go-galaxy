@@ -10,12 +10,15 @@ go-galaxy lock             # writes galaxy.lock
 go-galaxy install --frozen # install exactly the locked versions
 ```
 
-A frozen install fails loudly if a cached or downloaded artifact does not match the
-lockfile's recorded SHA256, so a poisoned cache or a mutated upstream artifact cannot
-install silently; lockfiles with no recorded SHA (older lockfiles) are not pin-checked.
-A role is pinned by commit rather than by digest: a frozen install serves it from the
-cache, and on a miss fetches exactly the pinned commit and refuses a repository that
-serves another one (exit `7`).
+A frozen install never installs an artifact that does not match the lockfile's recorded
+SHA256, so a poisoned cache or a mutated upstream artifact cannot be installed: a cached
+artifact that does not match is evicted and downloaded again once (never under
+`--offline`), and a mismatch that is still there fails the run (exit `7`). Lockfiles with
+no recorded SHA (older lockfiles) are not pin-checked. A git or Galaxy role is pinned by
+commit rather than by digest: a frozen install serves it from the cache, and on a miss
+fetches exactly the pinned commit and refuses a repository that serves another one (exit
+`7`); a url role is pinned by its origin bytes' SHA256 and refused the same way when the
+URL serves other bytes.
 
 `--frozen` decides *what* gets installed and needs no cache to do it. `--offline`
 is a separate, stronger promise: no network call at all, so an artifact that is
@@ -28,6 +31,16 @@ lockfile change misses by construction, because the key just changed.
 
 `go-galaxy hash` prints a deterministic `sha256:…` of the lockfile (or `requirements.yml`
 when no lockfile is present) - perfect as a CI cache key.
+
+**Upgrade note (after v1.2.3):** the lockfile is now written with a two-space
+indent instead of yaml's default four. The hash is computed over the file as
+`lock` writes it, so upgrading past v1.2.3 changes `go-galaxy hash` (and the
+metrics report's `lockfile_hash`) for every lockfile once, and the first CI run
+after it misses the cache. An existing four-space file still loads and still
+passes `--frozen` unchanged; the next plain `lock` rewrites it with the new
+indent, which shows as a whitespace-only diff. Both binaries read either
+layout, but they print different hashes for the same file, so jobs sharing a
+cache key must run the same release.
 
 ## Roles
 
@@ -55,8 +68,8 @@ holds a url source (a collection's or a role's) as `schema_version: 4`; a
 go-galaxy binary predating those features refuses such a file (exit `6`)
 rather than installing what it understands and silently skipping the rest;
 pin the binary version across the jobs that share the lockfile. A file
-without roles or url sources is byte-identical to what earlier versions
-wrote, so adding this version to such a pipeline changes no cache key.
+without roles or url sources keeps the schema its collections warrant, which
+every release reads.
 
 ## GitHub Actions
 
@@ -124,7 +137,7 @@ job-level `env`, and `env` on the step that calls the action all reach it.
           GO_GALAXY_GIT_HUB_PASSWORD: ${{ secrets.GH_PAT }}
         with:
           frozen: true
-          args: --no-deps --required-valid-signature-count 1
+          args: --required-valid-signature-count 1
 ```
 
 **Put no secret in `args`.** That input becomes argv, and argv is readable by
@@ -149,6 +162,14 @@ another track `@v1` without the two sharing a cache. They must not: the cache
 snapshot is versioned, and a binary handed a snapshot from a newer one refuses
 it rather than rebuilding. The price is a cold run on the first job after an
 upgrade.
+
+When the action installs the latest release (`@v1` or a branch, with no
+`version` input), it learns which release it got from the first word of
+`go-galaxy --version`: the version, starting with a digit and with any leading
+`v` dropped. That word becomes both the `version` output and the release in the
+cache key, so `--version` has to keep printing the version first. Output that
+does not start that way leaves `version` empty and gives every release one
+shared cache key - the very case the release in the key exists to prevent.
 
 ### Without the action
 
@@ -228,7 +249,9 @@ every runner one shared artifact cache: set `GO_GALAXY_S3_BUCKET`,
 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` as masked project variables,
 which go-galaxy reads directly. Keep the `cache:` block alongside it: the
 extracted-tree store stays local to `GO_GALAXY_CACHE_DIR` even with the S3
-backend, so the job cache is what saves re-extracting every collection.
+backend, so the job cache is what saves re-extracting every collection. Such a
+job cannot also run `--offline`: the bucket is reached over the network, so the
+pair exits `2` before the cache is opened.
 
 Two runtime consequences of a shared S3 cache are worth knowing before you
 enable it. Jobs sharing one bucket serialize: a run holds the backend's

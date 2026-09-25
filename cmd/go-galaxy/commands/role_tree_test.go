@@ -24,10 +24,9 @@ func roleLockfile() *lockfile.File {
 	}
 }
 
-// TestPrintRoleTreeRendersRoles pins the roles half of tree's output: a
-// header of its own, one tree per requirements root, each dependency with
-// its provenance, a missing one named as such, and nothing at all for a
-// lockfile without roles.
+// TestPrintRoleTreeRendersRoles pins the roles half of tree's output: its own
+// header, one tree per root, provenance on each dependency, a missing one named,
+// and nothing for a lockfile without roles.
 func TestPrintRoleTreeRendersRoles(t *testing.T) {
 	t.Parallel()
 	var buf strings.Builder
@@ -97,6 +96,46 @@ func TestPrintExplainRoleParents(t *testing.T) {
 	}
 	if !strings.Contains(base.String(), "    - role geerlingguy.docker 7.4.1") || strings.Contains(base.String(), "orphan") {
 		t.Fatalf("base's parents:\n%s", base.String())
+	}
+}
+
+// TestPrintExplainRoleHeaderByType pins that a role's header prints the pin its
+// type carries, a url role's sha256 where the others print ref and commit, and
+// no line for a field its type leaves empty.
+func TestPrintExplainRoleHeaderByType(t *testing.T) {
+	t.Parallel()
+	const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	path := filepath.Join(t.TempDir(), "galaxy.lock")
+	body := "schema_version: 4\nroles:\n" +
+		"  - {name: base, type: git, version: main, source: '" + gitTestSource + "', ref: main, commit: " + gitTestCommit + "}\n" +
+		"  - {name: docker, type: galaxy, version: 7.4.1, galaxy: geerlingguy.docker, source: 'https://galaxy.example'," +
+		" repository: 'https://github.com/geerlingguy/ansible-role-docker', ref: 7.4.1, commit: " + gitTestCommit + "}\n" +
+		"  - {name: myrole, type: url, version: 0123456789ab, source: 'https://example.com/roles/myrole.tar.gz', sha256: " + digest + "}\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	lf, err := lockfile.LoadRequired(path)
+	if err != nil {
+		t.Fatalf("LoadRequired: %v", err)
+	}
+	roots := map[string]bool{"base": true, "docker": true, "myrole": true}
+	for target, header := range map[string][]string{
+		"base": {"role base main", "  type       : git", "  source     : " + gitTestSource,
+			"  ref        : main", "  commit     : " + gitTestCommit},
+		"docker": {"role docker 7.4.1", "  type       : galaxy", "  galaxy     : geerlingguy.docker",
+			"  source     : https://galaxy.example", "  repository : https://github.com/geerlingguy/ansible-role-docker",
+			"  ref        : 7.4.1", "  commit     : " + gitTestCommit},
+		"myrole": {"role myrole 0123456789ab", "  type       : url",
+			"  source     : https://example.com/roles/myrole.tar.gz", "  sha256     : " + digest},
+	} {
+		var buf strings.Builder
+		if err := printExplain(&buf, lf, target, nil, roots); err != nil {
+			t.Fatalf("printExplain(%s): %v", target, err)
+		}
+		want := strings.Join(append(header, "  required by:", "    - requirements.yml (root)", ""), "\n")
+		if buf.String() != want {
+			t.Errorf("printExplain(%s) =\n%s\nwant\n%s", target, buf.String(), want)
+		}
 	}
 }
 

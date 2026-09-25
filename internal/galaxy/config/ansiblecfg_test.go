@@ -67,10 +67,9 @@ func TestParseAnsibleConfigDelimiters(t *testing.T) {
 	})
 }
 
-// TestParseAnsibleConfigValueFidelity checks that values are stored
-// verbatim: quotes and inline comments are not stripped. ansible.cfg is
-// read by CPython's configparser, not a TOML parser, so drop-in fidelity
-// requires reproducing that behavior rather than "helpfully" cleaning it up.
+// TestParseAnsibleConfigValueFidelity checks that values are stored as
+// ansible's configparser reads them: quotes are kept and a trailing '#' is
+// part of the value.
 func TestParseAnsibleConfigValueFidelity(t *testing.T) {
 	t.Parallel()
 	runParseAnsibleConfigCases(t, []parseAnsibleConfigCase{
@@ -84,10 +83,65 @@ func TestParseAnsibleConfigValueFidelity(t *testing.T) {
 			input: "[galaxy]\nserver = https://x # prod",
 			want:  ansibleConfig{Galaxy: ansibleGalaxyConfig{Server: "https://x # prod"}},
 		},
+	})
+}
+
+// TestParseAnsibleConfigInlineSemicolonComment pins configparser's ';' inline
+// comment on key lines and headers alike, each want taken from CPython 3.14;
+// the glued rows are the control against cutting at every ';'.
+func TestParseAnsibleConfigInlineSemicolonComment(t *testing.T) {
+	t.Parallel()
+	runParseAnsibleConfigCases(t, []parseAnsibleConfigCase{
 		{
-			name:  "inline trailing semicolon comment preserved",
+			name:  "semicolon after a space starts a comment",
 			input: "[galaxy]\ncache_dir = /c ; note",
-			want:  ansibleConfig{Galaxy: ansibleGalaxyConfig{CacheDir: "/c ; note"}},
+			want:  ansibleConfig{Galaxy: ansibleGalaxyConfig{CacheDir: "/c"}},
+		},
+		{
+			name:  "semicolon after a tab starts a comment",
+			input: "[galaxy]\nserver = https://x\t;prod",
+			want:  ansibleConfig{Galaxy: ansibleGalaxyConfig{Server: "https://x"}},
+		},
+		{
+			name:  "an information separator counts as whitespace",
+			input: "[galaxy]\nserver = https://x\x1c;prod",
+			want:  ansibleConfig{Galaxy: ansibleGalaxyConfig{Server: "https://x"}},
+		},
+		{
+			name:  "the first semicolon after whitespace wins",
+			input: "[galaxy]\nserver_list = a;b c ;d ;e",
+			want:  ansibleConfig{Galaxy: ansibleGalaxyConfig{ServerList: "a;b c"}},
+		},
+		{
+			name:  "a hash before the comment stays in the value",
+			input: "[galaxy]\nserver = https://x # prod ; note",
+			want:  ansibleConfig{Galaxy: ansibleGalaxyConfig{Server: "https://x # prod"}},
+		},
+		{
+			name:  "comment on a section header",
+			input: "[galaxy] ; main section\nserver = https://x",
+			want:  ansibleConfig{Galaxy: ansibleGalaxyConfig{Server: "https://x"}},
+		},
+		{
+			name:  "comment after a galaxy_server url",
+			input: "[galaxy_server.prod]\nurl = https://prod.example ; primary hub",
+			want: ansibleConfig{GalaxyServers: map[string]map[string]string{
+				"prod": {"url": "https://prod.example"},
+			}},
+		},
+		{
+			name:  "glued semicolon stays in a token",
+			input: "[galaxy_server.prod]\ntoken = abc;def",
+			want: ansibleConfig{GalaxyServers: map[string]map[string]string{
+				"prod": {"token": "abc;def"},
+			}},
+		},
+		{
+			name:  "glued semicolons stay in a url query",
+			input: "[galaxy_server.prod]\nurl = https://x/api/?a=1;b=2",
+			want: ansibleConfig{GalaxyServers: map[string]map[string]string{
+				"prod": {"url": "https://x/api/?a=1;b=2"},
+			}},
 		},
 	})
 }
@@ -121,10 +175,9 @@ func TestParseAnsibleConfigCommentsAndBlanks(t *testing.T) {
 	})
 }
 
-// TestParseAnsibleConfigSections checks section- and key-scoping rules:
-// keys before any section header, unknown sections, and unknown keys
-// within a known section are all ignored; duplicate keys resolve to the
-// last occurrence; and section names are matched case-sensitively.
+// TestParseAnsibleConfigSections checks that keys before any header, unknown
+// sections and unknown keys are ignored, a duplicate key keeps its last
+// value, and section names are matched case-sensitively.
 func TestParseAnsibleConfigSections(t *testing.T) {
 	t.Parallel()
 	runParseAnsibleConfigCases(t, []parseAnsibleConfigCase{
@@ -163,6 +216,69 @@ func TestParseAnsibleConfigSections(t *testing.T) {
 	})
 }
 
+// TestParseAnsibleConfigSectionHeaderGrammar pins sectionName to configparser's
+// SECTCRE: text after the last ']' is ignored, the name runs to that last ']'
+// and is not trimmed. Each want is what CPython 3.14 returned.
+func TestParseAnsibleConfigSectionHeaderGrammar(t *testing.T) {
+	t.Parallel()
+	runParseAnsibleConfigCases(t, []parseAnsibleConfigCase{
+		{
+			name:  "a hash comment after the header is ignored",
+			input: "[galaxy] # note\nserver = https://x",
+			want:  ansibleConfig{Galaxy: ansibleGalaxyConfig{Server: "https://x"}},
+		},
+		{
+			name:  "text glued after the header is ignored",
+			input: "[galaxy]x\nserver = https://x",
+			want:  ansibleConfig{Galaxy: ansibleGalaxyConfig{Server: "https://x"}},
+		},
+		{
+			name:  "a glued semicolon after the header is ignored",
+			input: "[galaxy];note\nserver = https://x",
+			want:  ansibleConfig{Galaxy: ansibleGalaxyConfig{Server: "https://x"}},
+		},
+		{
+			name:  "trailing text after a galaxy_server header is ignored",
+			input: "[galaxy_server.prod] primary hub\nurl = https://x",
+			want: ansibleConfig{GalaxyServers: map[string]map[string]string{
+				"prod": {"url": "https://x"},
+			}},
+		},
+		{
+			name:  "a header line wins over the delimiter after it",
+			input: "[galaxy_server.prod]\nurl = https://prod\n[galaxy] = oops\nserver = https://x",
+			want: ansibleConfig{
+				GalaxyServers: map[string]map[string]string{"prod": {"url": "https://prod"}},
+				Galaxy:        ansibleGalaxyConfig{Server: "https://x"},
+			},
+		},
+		{
+			name:  "the last bracket ends the name",
+			input: "[galaxy] [note]\nserver = https://x",
+			want:  ansibleConfig{},
+		},
+		{
+			name:  "brackets with nothing between them are not a header",
+			input: "[galaxy_server.prod]\n[]: note\nurl = https://x",
+			want: ansibleConfig{GalaxyServers: map[string]map[string]string{
+				"prod": {"[]": "note", "url": "https://x"},
+			}},
+		},
+		{
+			name:  "spaces inside the brackets are part of the name",
+			input: "[ galaxy ]\nserver = https://x",
+			want:  ansibleConfig{},
+		},
+		{
+			name:  "spaces inside a galaxy_server header are part of the id",
+			input: "[galaxy_server. prod ]\nurl = https://x",
+			want: ansibleConfig{GalaxyServers: map[string]map[string]string{
+				" prod ": {"url": "https://x"},
+			}},
+		},
+	})
+}
+
 // TestParseAnsibleConfigLexicalQuirks checks line-ending, BOM, whitespace,
 // key-case, and empty-input handling.
 func TestParseAnsibleConfigLexicalQuirks(t *testing.T) {
@@ -174,7 +290,7 @@ func TestParseAnsibleConfigLexicalQuirks(t *testing.T) {
 			want:  ansibleConfig{Galaxy: ansibleGalaxyConfig{Server: "https://x"}},
 		},
 		{
-			name:  "leading BOM stripped",
+			name:  "leading BOM stripped, a file ansible refuses",
 			input: "\uFEFF[defaults]\ncollections_path=x",
 			want:  ansibleConfig{Defaults: ansibleDefaultsConfig{CollectionsPath: "x"}},
 		},
@@ -196,9 +312,8 @@ func TestParseAnsibleConfigLexicalQuirks(t *testing.T) {
 	})
 }
 
-// TestParseAnsibleConfigServerList checks that [galaxy] server_list is
-// captured as a plain string, with the same drop-in ansible.cfg fidelity
-// (verbatim value, last-occurrence-wins) as every other [galaxy] key.
+// TestParseAnsibleConfigServerList checks that [galaxy] server_list is kept
+// as a plain string, read like every other [galaxy] key.
 func TestParseAnsibleConfigServerList(t *testing.T) {
 	t.Parallel()
 	runParseAnsibleConfigCases(t, []parseAnsibleConfigCase{
@@ -215,36 +330,9 @@ func TestParseAnsibleConfigServerList(t *testing.T) {
 	})
 }
 
-// TestParseAnsibleConfigSignatureKeysAreNotRead pins a decision rather than a
-// behavior: the signature policy is configured from flags and environment
-// variables only, so a [galaxy] section carrying all four of ansible's
-// signature keys contributes their NAMES and not one of their values.
-//
-// The reason is that this program cannot establish who authored a discovered
-// ansible.cfg, and a setting that can relax a verification check must not come
-// from a file whose author is unknown. cliflags.SignatureFlags holds that
-// argument, including why each proxy for the authorship question leaks.
-//
-// Binding absence is what makes this stronger than a deny-list, and recording
-// names sharpens rather than weakens it: the want value below is the whole
-// ansibleConfig, compared structurally, so every value-carrying field of it has
-// to stay zero. It needs no list to keep current, and it fails the moment
-// anyone teaches the parser to store one of these VALUES without answering the
-// authorship question first.
-//
-// The second row is what makes the names a fact about the file rather than
-// about the parser's own table: keys ansible does not define are not recorded,
-// so the first row's four cannot be "every unrecognized [galaxy] key".
-//
-// KILLING MUTATION, run and reverted: recordSignatureKey's membership test
-// (`!slices.Contains(signatureKeyNames[:], key)`) deleted, so every
-// unrecognized [galaxy] key is recorded. The second row fails:
-//
-//	ansiblecfg_test.go:35: parseAnsibleConfig() = {GalaxyServers:map[]
-//	Defaults:{CollectionsPath:} Galaxy:{CacheDir: Server: ServerList:
-//	SignatureKeys:[gpg_keyrings verify_signatures]}}, want {GalaxyServers:map[]
-//	Defaults:{CollectionsPath:} Galaxy:{CacheDir: Server: ServerList:
-//	SignatureKeys:[]}}
+// TestParseAnsibleConfigSignatureKeysAreNotRead pins that ansible's signature
+// keys contribute their names and no value, compared over the whole
+// ansibleConfig, and that a [galaxy] key ansible does not define is not named.
 func TestParseAnsibleConfigSignatureKeysAreNotRead(t *testing.T) {
 	t.Parallel()
 	runParseAnsibleConfigCases(t, []parseAnsibleConfigCase{
@@ -277,11 +365,9 @@ func TestParseAnsibleConfigSignatureKeysAreNotRead(t *testing.T) {
 	})
 }
 
-// TestParseAnsibleConfigGalaxyServerSections checks that every
-// [galaxy_server.<id>] section is captured in full into GalaxyServers,
-// keyed by the id exactly as written after the dot, with the outer map
-// staying nil when no such section is present (the overwhelmingly common
-// case must not pay for an allocation it never uses).
+// TestParseAnsibleConfigGalaxyServerSections checks that each
+// [galaxy_server.<id>] section is kept whole, keyed by the id as written, and
+// that GalaxyServers stays nil when no such section exists.
 func TestParseAnsibleConfigGalaxyServerSections(t *testing.T) {
 	t.Parallel()
 	runParseAnsibleConfigCases(t, []parseAnsibleConfigCase{
@@ -345,14 +431,13 @@ func TestParseAnsibleConfigGalaxyServerSections(t *testing.T) {
 }
 
 // TestParseAnsibleConfigGalaxyServerSectionsFidelity checks that a
-// [galaxy_server.<id>] section gets the same drop-in ansible.cfg fidelity
-// (verbatim values, case-sensitive section matching, lowercased keys) as
-// every other section this parser tracks.
+// [galaxy_server.<id>] section follows the same value, section-case and
+// key-case rules as every other section.
 func TestParseAnsibleConfigGalaxyServerSectionsFidelity(t *testing.T) {
 	t.Parallel()
 	runParseAnsibleConfigCases(t, []parseAnsibleConfigCase{
 		{
-			name: "quoted value and inline comment preserved verbatim",
+			name: "quoted value and trailing hash preserved verbatim",
 			input: "[galaxy_server.prod]\n" +
 				`url = "https://prod.example"` + "\n" +
 				"token = abc123 # comment\n",
@@ -379,10 +464,64 @@ func TestParseAnsibleConfigGalaxyServerSectionsFidelity(t *testing.T) {
 	})
 }
 
-// TestLoadAnsibleConfig checks that loadAnsibleConfig opens and parses a
-// real file from disk, and surfaces a wrapped os.ErrNotExist for a missing
-// path (the existing swallow-and-continue behavior in
-// loadAnsibleConfigFromCLI depends on this).
+// TestParseAnsibleConfigInformationSeparatorTrim pins that U+001C is trimmed,
+// as configparser trims it, from a header line, a key and a value, one row per
+// trim. Each want is what CPython 3.14 returned.
+func TestParseAnsibleConfigInformationSeparatorTrim(t *testing.T) {
+	t.Parallel()
+	runParseAnsibleConfigCases(t, []parseAnsibleConfigCase{
+		{
+			name:  "an information separator is trimmed around a section header",
+			input: "\x1c[galaxy]\x1c\nserver = https://x",
+			want:  ansibleConfig{Galaxy: ansibleGalaxyConfig{Server: "https://x"}},
+		},
+		{
+			name:  "an information separator is trimmed from a key",
+			input: "[galaxy]\nserver\x1c = https://x",
+			want:  ansibleConfig{Galaxy: ansibleGalaxyConfig{Server: "https://x"}},
+		},
+		{
+			name:  "an information separator is trimmed from the start of a value",
+			input: "[galaxy]\nserver =\x1chttps://x",
+			want:  ansibleConfig{Galaxy: ansibleGalaxyConfig{Server: "https://x"}},
+		},
+	})
+}
+
+// TestParseAnsibleConfigRefusedHeaderClosesSection pins that a broken header
+// closes the section above it, so a dev url never pairs with prod's token; the
+// last row is the control that a key line starting with '[' keeps its section.
+func TestParseAnsibleConfigRefusedHeaderClosesSection(t *testing.T) {
+	t.Parallel()
+	runParseAnsibleConfigCases(t, []parseAnsibleConfigCase{
+		{
+			name: "a header cut short by a comment closes the section before it",
+			input: "[galaxy_server.prod]\nurl = https://prod.example\ntoken = t\n" +
+				"[galaxy_server.dev ;scratch hub]\nurl = https://dev.example\n",
+			want: ansibleConfig{GalaxyServers: map[string]map[string]string{
+				"prod": {"url": "https://prod.example", "token": "t"},
+			}},
+		},
+		{
+			name:  "a header never closed closes the section before it",
+			input: "[galaxy_server.prod]\ntoken = t\n[galaxy_server.dev\nurl = https://dev.example\n",
+			want: ansibleConfig{GalaxyServers: map[string]map[string]string{
+				"prod": {"token": "t"},
+			}},
+		},
+		{
+			name:  "a key line starting with a bracket keeps its section",
+			input: "[galaxy_server.prod]\n[note = x\nurl = https://prod.example\n",
+			want: ansibleConfig{GalaxyServers: map[string]map[string]string{
+				"prod": {"[note": "x", "url": "https://prod.example"},
+			}},
+		},
+	})
+}
+
+// TestLoadAnsibleConfig checks that loadAnsibleConfig parses a file from disk
+// and wraps os.ErrNotExist for a missing path, which loadAnsibleConfigFromCLI
+// relies on to tell a missing file from a broken one.
 func TestLoadAnsibleConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ansible.cfg")
