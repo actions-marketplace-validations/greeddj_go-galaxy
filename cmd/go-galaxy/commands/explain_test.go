@@ -47,7 +47,7 @@ func TestPrintExplainOrphan(t *testing.T) {
 	roots := map[string]bool{}
 
 	var buf strings.Builder
-	if err := printExplain(&buf, lf, "ns.orphan", roots, nil); err != nil {
+	if err := printExplain(&buf, lf, "ns.orphan", "requirements.yml", roots, nil); err != nil {
 		t.Fatalf("printExplain() error = %v, want nil", err)
 	}
 
@@ -59,6 +59,30 @@ func TestPrintExplainOrphan(t *testing.T) {
 	// on em dashes in committed text.
 	if strings.ContainsRune(out, '\u2014') {
 		t.Errorf("printExplain() output contains an em dash (U+2014); got:\n%s", out)
+	}
+}
+
+// TestPrintExplainGalaxyEntryNamesItsDownloadURL pins that a Galaxy entry's
+// header carries the download_url a frozen install fetches, between its
+// source and its sha256, as the lockfile spells them.
+func TestPrintExplainGalaxyEntryNamesItsDownloadURL(t *testing.T) {
+	t.Parallel()
+	downloadURL := testDownloadURL("acme.app", "1.0.0")
+	lf := &lockfile.File{Collections: []lockfile.Entry{{
+		Name: "acme.app", Version: "1.0.0", Source: "https://galaxy.example", DownloadURL: downloadURL,
+		SHA256: strings.Repeat("ab", 32),
+	}}}
+
+	var buf strings.Builder
+	if err := printExplain(&buf, lf, "acme.app", "requirements.yml", map[string]bool{"acme.app": true}, nil); err != nil {
+		t.Fatalf("printExplain() error = %v", err)
+	}
+	want := "acme.app 1.0.0\n" +
+		"  source       : https://galaxy.example\n" +
+		"  download_url : " + downloadURL + "\n" +
+		"  sha256       : " + strings.Repeat("ab", 32) + "\n"
+	if out := buf.String(); !strings.HasPrefix(out, want) {
+		t.Fatalf("printExplain() header = %q, want it to start with %q", out, want)
 	}
 }
 
@@ -77,7 +101,7 @@ func TestPrintExplainRequiredByAndDepends(t *testing.T) {
 	roots := map[string]bool{"community.general": true}
 
 	var buf strings.Builder
-	if err := printExplain(&buf, lf, "community.general", roots, nil); err != nil {
+	if err := printExplain(&buf, lf, "community.general", "requirements.yml", roots, nil); err != nil {
 		t.Fatalf("printExplain() error = %v, want nil", err)
 	}
 
@@ -91,6 +115,31 @@ func TestPrintExplainRequiredByAndDepends(t *testing.T) {
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printExplain() output missing %q; got:\n%s", want, out)
+		}
+	}
+}
+
+// TestPrintExplainRootLabel pins that the (root) line names the requirements
+// file explain was run against, for a collection and a role alike, so a
+// project read from galaxy.toml is not credited to requirements.yml.
+func TestPrintExplainRootLabel(t *testing.T) {
+	t.Parallel()
+	lf := &lockfile.File{
+		SchemaVersion: lockfile.SchemaVersionRoles,
+		Collections:   []lockfile.Entry{{Name: "acme.app", Version: "1.0.0", Source: "galaxy"}},
+		Roles:         []lockfile.RoleEntry{{Name: "base", Type: lockfile.RoleTypeGit, Version: "main", Source: gitTestSource}},
+	}
+	for _, target := range []string{"acme.app", "base"} {
+		var buf strings.Builder
+		err := printExplain(&buf, lf, target, "galaxy.toml", map[string]bool{"acme.app": true}, map[string]bool{"base": true})
+		if err != nil {
+			t.Fatalf("printExplain(%s) error = %v, want nil", target, err)
+		}
+		if !strings.Contains(buf.String(), "    - galaxy.toml (root)") {
+			t.Errorf("printExplain(%s) output missing the galaxy.toml root line; got:\n%s", target, buf.String())
+		}
+		if strings.Contains(buf.String(), "requirements.yml") {
+			t.Errorf("printExplain(%s) still names requirements.yml; got:\n%s", target, buf.String())
 		}
 	}
 }
@@ -111,7 +160,7 @@ func TestPrintExplainRequiredByIsNameSorted(t *testing.T) {
 	}
 
 	var buf strings.Builder
-	if err := printExplain(&buf, lf, "ns.target", map[string]bool{}, nil); err != nil {
+	if err := printExplain(&buf, lf, "ns.target", "requirements.yml", map[string]bool{}, nil); err != nil {
 		t.Fatalf("printExplain() error = %v, want nil", err)
 	}
 	out := buf.String()
@@ -156,7 +205,7 @@ func TestPrintExplainRoleParentsByGalaxyName(t *testing.T) {
 	outputs := make(map[string]string, 2)
 	for _, target := range []string{"nginx", "owner.nginx"} {
 		var buf strings.Builder
-		if err := printExplain(&buf, lf, target, nil, roleRoots); err != nil {
+		if err := printExplain(&buf, lf, target, "requirements.yml", nil, roleRoots); err != nil {
 			t.Fatalf("printExplain(%s) error = %v, want nil", target, err)
 		}
 		out := buf.String()
@@ -177,7 +226,7 @@ func TestPrintExplainNotFound(t *testing.T) {
 	t.Parallel()
 	lf := &lockfile.File{SchemaVersion: lockfile.SchemaVersion}
 	var buf strings.Builder
-	err := printExplain(&buf, lf, "ns.missing", map[string]bool{}, nil)
+	err := printExplain(&buf, lf, "ns.missing", "requirements.yml", map[string]bool{}, nil)
 	if err == nil {
 		t.Fatal("printExplain() error = nil, want non-nil")
 	}
@@ -228,7 +277,7 @@ func TestPrintExplainSanitizesLockfileText(t *testing.T) {
 	roots := map[string]bool{hostileLockfileName: true}
 
 	var buf strings.Builder
-	if err := printExplain(&buf, lf, hostileLockfileName, roots, nil); err != nil {
+	if err := printExplain(&buf, lf, hostileLockfileName, "requirements.yml", roots, nil); err != nil {
 		t.Fatalf("printExplain() error = %v, want nil", err)
 	}
 	out := buf.String()

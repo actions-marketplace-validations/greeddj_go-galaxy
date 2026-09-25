@@ -12,11 +12,11 @@ collide:
 |-----:|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------                                                                                                                         |
 |    0 | Success                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 |    1 | Generic failure (does not match any class below)                                                                                                                                                                                                                                                                                                                                                                                                                  |
-|    2 | Usage or configuration error (invalid flags, a positional argument missing where a command requires one (`explain` with no name) or given where it takes none - a word that names no command included, since it reaches `install` as one - requirements, `ansible.cfg` - the files themselves included: a requirements file that is missing, cannot be read or is not YAML, an `--ansible-config` path that does not exist, or an `ansible.cfg`, named or discovered, that cannot be read to the end - an unsupported collection source (`file`, `dir`), a git source this tool refuses as written - a malformed or credential-bearing URL, an abbreviated or invalid ref, an unsafe subdir, a credential binding that does not parse, an ssh repository with neither a bound key nor an agent, a repository or subdir holding no collection or naming one the requirement did not ask for, a `galaxy.yml` that cannot be built from or whose version is not exact - a url source this tool refuses as written - a malformed, credential-bearing or fragment-bearing URL, a non-exact `version:` assertion, a `source:`, `namespace:` or `signatures:` key on a url entry, a url credential binding that does not parse, a role tarball that does not hold exactly one role - an explicit namespace conflicting with a dotted collection name, a `roles:` entry this tool refuses as written - not a list, a shape ansible would not take either, a collection key (`source:`, `signatures:`, `type:`) on a role entry, a name, install name or version outside the role alphabets, a local-path, non-http or non-`.tar.gz` `src:`, an `scm` other than `git`, an `include:`, or two entries installing into one directory - no configured Galaxy server serving the v1 role API, a v1 role record this tool cannot compose a repository URL from, a repository that is not a role (no `meta/main.yml` at its root) or whose meta this tool cannot read, an unsupported cache-snapshot schema version, an unreadable or unparseable project requirements file, a cache backend that cannot be used as configured, or `--offline` together with `--s3-bucket`, refused before any backend opens since the S3 cache is reached over the network). The Go runtime also exits a fatal error - a stack overflow, an out-of-memory kill - with this same status, without running any cleanup; a run that ended that way prints a line beginning `fatal error:` to stderr, so it is the output rather than the status that tells the two apart |
+|    2 | Usage or configuration error (invalid flags, a positional argument missing where a command requires one (`explain` with no name) or given where it takes none - a word that names no command included, since it reaches `install` as one - requirements, `ansible.cfg` - the files themselves included: a requirements file that is missing, cannot be read, is not YAML or TOML, or is a `galaxy.toml` whose schema this tool refuses (an unknown table or key, a non-string `[project]` field, a `[tool.go-galaxy]` value of the wrong TOML type, a server entry without both `id` and `url`, a collection version constraint the solver could not parse) or whose `[tool.go-galaxy]` names an unset environment variable, an `--ansible-config` path that does not exist, or an `ansible.cfg`, named or discovered, that cannot be read to the end - an unsupported collection source (`file`, `dir`), a git source this tool refuses as written - a malformed or credential-bearing URL, an abbreviated or invalid ref, an unsafe subdir, a credential binding that does not parse, an ssh repository with neither a bound key nor an agent, a repository or subdir holding no collection or naming one the requirement did not ask for, a `galaxy.yml` that cannot be built from or whose version is not exact - a url source this tool refuses as written - a malformed, credential-bearing or fragment-bearing URL, a non-exact `version:` assertion, a `source:`, `namespace:` or `signatures:` key on a url entry, a url credential binding that does not parse, a role tarball that does not hold exactly one role - an explicit namespace conflicting with a dotted collection name, a `roles:` entry this tool refuses as written - not a list, a shape ansible would not take either, a collection key (`source:`, `signatures:`, `type:`) on a role entry, a name, install name or version outside the role alphabets, a local-path, non-http or non-`.tar.gz` `src:`, an `scm` other than `git`, an `include:`, or two entries installing into one directory - no configured Galaxy server serving the v1 role API, a v1 role record this tool cannot compose a repository URL from, a repository that is not a role (no `meta/main.yml` at its root) or whose meta this tool cannot read, an unsupported cache-snapshot schema version, an unreadable or unparseable project requirements file, a cache backend that cannot be used as configured, or an S3 bucket - from `--s3-bucket`, its variable or `[tool.go-galaxy.s3]` - configured without both keys from any of those sources or together with `--offline`, both refused before any backend opens, the latter since the S3 cache is reached over the network). The Go runtime also exits a fatal error - a stack overflow, an out-of-memory kill - with this same status, without running any cleanup; a run that ended that way prints a line beginning `fatal error:` to stderr, so it is the output rather than the status that tells the two apart |
 |    3 | Dependency resolution failure (conflicts, missing candidates, cycle, a git ref or commit the remote does not have, a Galaxy role no v1-serving server knows, a role version the server does not list, or a role whose version names cannot be ordered so no highest one can be chosen)                                                                                                                                                                                                                                                                                                                                                                                              |
 |    4 | Network or Galaxy API failure (timeouts, stalled transfers, metadata and cache-state deadlines, a git transport failure or a git credential or host key the remote refused, a git pack that exceeded its on-disk ceiling, a Galaxy metadata URL no HTTP request can be built from, a versions listing that exceeded its page ceiling (a collection's, or a role's v1 version list past 20 pages), a response body that exceeded its size ceiling (an artifact, a metadata document, or a bucket listing), a v1 role API request that failed in transport or with a 5xx, offline-mode violations that end the run by themselves (a role with no recorded pin, or no cached artifact behind its pin, under `--offline` without `--frozen` included), an unreachable cache backend, or an `outdated` run in which at least one latest-version lookup failed for a reason not classified below - a lookup that failed on a userinfo refusal reports `5`)                                                                        |
-|    5 | Install-time failure (unsafe archive/symlink content, empty file, missing artifact cache, a git tree this tool will not materialize - an unsafe entry name, case-folded duplicates, a symlink that resolves nowhere - or a git artifact that failed its own build self-check, a role directory that already exists and was installed neither by this tool nor by `ansible-galaxy` so it is not replaced, a role artifact that failed to extract, an artifact a resolved collection or role needs that is not in the cache under `--offline` (a `--frozen --offline` miss included), or a URL a Galaxy server supplied that this tool refuses to fetch from because it embeds a credential in its userinfo - an artifact download URL or a metadata URL alike, so a `lock` or `outdated` run can report `5` without ever installing anything)                                                                                                                |
-|    6 | Lockfile error (missing, invalid, mismatched with requirements, or out of date under `lock --frozen`; for a role, a `roles:` entry the lockfile lacks or locks from a different Galaxy version, repository or ref, a role entry whose fields are not canonical, or a role entry in a file whose `schema_version` is below 3)                                                                                                                                                                                                                                                                                                                                                             |
+|    5 | Install-time failure (unsafe archive/symlink content, empty file, missing artifact cache, a git tree this tool will not materialize - an unsafe entry name, case-folded duplicates, a symlink that resolves nowhere - or a git artifact that failed its own build self-check, a role directory that already exists and was installed neither by this tool nor by `ansible-galaxy` so it is not replaced, a role artifact that failed to extract, an artifact a resolved collection or role needs that is not in the cache under `--offline` (a `--frozen --offline` miss included), or a URL a Galaxy server supplied that this tool refuses to fetch from because it embeds a credential in its userinfo - an artifact download URL or a metadata URL alike, so a `lock` or `outdated` run can report `5` without ever installing anything - or a download URL `lock` refuses to write into the lockfile because it carries a query string or is not its server's own artifact URL)                                                                                                                |
+|    6 | Lockfile error (missing, invalid, mismatched with requirements, or out of date under `lock --check`; a lockfile an older release wrote, whose Galaxy entries carry no `download_url`, is invalid, and so under `--frozen` is one whose `download_url` is not its server's own artifact URL; for a role, a `roles:` entry the lockfile lacks or locks from a different Galaxy version, repository or ref, a role entry whose fields are not canonical, or a role entry in a file whose `schema_version` is below 3)                                                                                                                                                                                                                                                                                                                                                             |
 |    7 | Artifact-integrity failure (content does not authenticate against its naming sha256, or the digest is malformed; for a git source, a remote that advertised one commit and shipped another, or a pinned commit that no longer builds the collection it was pinned as; for a role, a repository that serves a different commit than the lockfile pins when the artifact has to be rebuilt)                                                                                                                                                                                                                                                                                                                                                  |
 |    8 | Cache contention (the cache lock is held elsewhere, the S3 lock's wait ceiling elapsed after this run observed another holder, or a lock this run did hold was taken away by another holder mid-run)                                                                                                                                                                                                                                                              |
 |    9 | Persisted cache state is corrupt or oversized and must be discarded (a project registry that fails to decode, a state object that exceeds its size ceiling or cannot be read back as what go-galaxy writes there, or - local backend only - a Bolt snapshot file that fails one of its own corruption checks)                                                                                                                                                                                                           |
@@ -26,26 +26,53 @@ collide:
 |  143 | Interrupted (a caught SIGTERM)                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 Exit `6`'s "missing" half is uniform across every command that requires a
-lockfile: `install --frozen`, `warm --frozen`, `lock --frozen`, `tree` and
+lockfile: `install --frozen`, `warm --frozen`, `lock --check`, `tree` and
 `explain` all exit `6` when the lockfile they were told to read is not there,
 rather than treating its absence as a usage error. A role adds no exit code of
 its own: every role failure classifies into the classes above by what failed,
 so a pipeline branching on these numbers needs no new branch.
 
 A requirements file that is missing, cannot be read (`requirements file is
-unreadable`: permission denied, a directory) or is not YAML (`requirements
-file is not valid YAML`) exits `2` on every command that parses it -
-`install`, `warm`, `lock` and `tree`, while `explain` discards the load error.
+unreadable`: permission denied, a directory), is not YAML (`requirements
+file is not valid YAML`) or, for a `.toml` path, is not TOML (`requirements
+file is not valid TOML`, naming the line and the last key read but never the
+text, since the lexer would echo it) exits `2` on every command that parses it -
+`install`, `warm`, `lock` and `tree`, while `explain` discards the load error -
+except that, without `--lock-file`, a `galaxy.toml` is loaded first for its
+`lock_file`, and one that exists but cannot be read, is not TOML, breaks the
+schema or names an unset variable exits `2` on `explain` and `hash` too.
+A `galaxy.toml` that is TOML but not this tool's schema (`unknown table`,
+`unknown key`, `[project] has neither collections nor roles`, and in its
+settings table `[tool.go-galaxy] workers is not an integer`,
+`[tool.go-galaxy.s3] path_style_disabled is not a boolean`,
+`[[tool.go-galaxy.servers]] entry N: ... needs both id and url`) exits `2` the
+same way, as does one whose `[tool.go-galaxy]` names a variable the
+environment lacks (`project file references unset environment variables: A,
+B`, every unset name once, sorted, never a value), and so does a collection
+version constraint semver cannot parse
+(`invalid collection version constraint`), which only a `galaxy.toml` raises:
+the same constraint in `requirements.yml` is handed to the solver as written
+and fails there, once resolution reaches it, with the generic code (`1`).
+The unset variable is the one of these `tree` refuses only without
+`--lock-file`: its roots are read without expanding anything, so it meets the
+variable only in the `lock_file` load above, as `explain` and `hash` do.
 An `ansible.cfg` exits `2` when the path `--ansible-config` names does not
 exist, and, named or discovered, when it exists and cannot be read to the end
 (`ansible config file is unreadable`: permission denied, a directory, a line
 longer than 64 KiB).
 
 Two commands read somewhere else instead of requiring the file, and neither
-adds an exit class for doing so. `hash` falls back to hashing
-`requirements.yml` and exits `0`; if that file is missing too, or cannot be
-read, it exits `2`, while one that is not YAML still yields a key, since the
-key covers its bytes as they are. The fallback applies only to an absent
+adds an exit class for doing so. `hash` falls back to hashing the requirements
+file - the one `--requirements-file` or its variables named, else the one
+discovery picked, `galaxy.toml` or `requirements.yml` - and exits `0`; if that
+file is missing too, or cannot be read, it exits `2`, while a
+`requirements.yml` that is not YAML still yields a key, since the key covers
+its bytes as they are. A `galaxy.toml` is decoded before the key is computed,
+to read `lock_file` from its `[tool.go-galaxy]` table unless `--lock-file` or
+its variable is set at all, an exported-empty value included (an empty value
+then falls to `galaxy.lock` beside the requirements file), so one that is not
+TOML, breaks the schema or names an unset variable exits `2` on `hash` as on
+every other command; one that loads is hashed byte for byte. The fallback applies only to an absent
 lockfile: one that is present but unreadable or invalid still exits `6`, since
 a key hashed from the requirements file would hide the broken lockfile.
 `outdated` falls back to the installed collections tree and reports from it;
@@ -107,14 +134,14 @@ for N collections`, which counts and names roles the same way, and whose class
 is `4`.
 
 The snapshot save at the end of `install`, `warm` and `lock` never replaces the
-run's own failure. When collections or roles also failed, or `lock --frozen`
+run's own failure. When collections or roles also failed, or `lock --check`
 found drift, the save error is appended to that failure's message after
 `snapshot save failed:` and the run keeps the class the failure decides, `6`
 for the drift; the save error decides the exit code only when nothing else
 failed, as `cache backend unavailable` exiting `4` does. A plain `lock` writes
 the lockfile, and prints `Lockfile written`, before it saves the snapshot, so a
 `lock` that exits nonzero on a failed save still leaves a valid new lockfile on
-disk; `lock --frozen` never writes one.
+disk; `lock --check` never writes one.
 
 A stalled or byte-dripped transfer is never reported as an interrupt, even
 though the underlying mechanism that unblocks it is a context cancellation:
@@ -234,7 +261,7 @@ reaching it: a value naming nothing fetchable (no scheme, a scheme outside
 `https:///sig.asc`, or a `file` URL naming another host or a relative path),
 or one embedding a credential in its userinfo
 (`https://user:pass@hub/sig.asc`), is refused before any request is
-composed, and the remedy is editing the entry in `requirements.yml`. A source
+composed, and the remedy is editing the entry in the requirements file. A source
 this tool would have fetched and could not obtain - a network failure, an
 unreadable `file://` path, an offline-mode refusal - or a signature phase that
 overran its deadline, is a network-class cause (`4`) rather than a verdict;

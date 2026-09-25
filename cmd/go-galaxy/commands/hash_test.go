@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/greeddj/go-galaxy/cmd/go-galaxy/exitcode"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/lockfile"
 )
@@ -41,7 +43,7 @@ func setupValidLockfile(t *testing.T, dir string) (string, string) {
 		Server:        "https://galaxy.ansible.com",
 		SchemaVersion: lockfile.SchemaVersion,
 		Collections: []lockfile.Entry{
-			{Name: "ns.name", Version: "1.0.0", Source: "galaxy", SHA256: "deadbeef"},
+			{Name: "ns.name", Version: "1.0.0", Source: "galaxy", DownloadURL: testDownloadURL("ns.name", "1.0.0"), SHA256: "deadbeef"},
 		},
 	}
 	if err := lockfile.Save(lockPath, lf); err != nil {
@@ -63,7 +65,7 @@ func checkValidLockfile(t *testing.T, got string, err error) {
 		Server:        "https://galaxy.ansible.com",
 		SchemaVersion: lockfile.SchemaVersion,
 		Collections: []lockfile.Entry{
-			{Name: "ns.name", Version: "1.0.0", Source: "galaxy", SHA256: "deadbeef"},
+			{Name: "ns.name", Version: "1.0.0", Source: "galaxy", DownloadURL: testDownloadURL("ns.name", "1.0.0"), SHA256: "deadbeef"},
 		},
 	}
 	wantHash, hashErr := lf.Hash()
@@ -176,6 +178,28 @@ func checkRequirementsNotYAMLHashed(t *testing.T, got string, err error) {
 	sum := sha256.Sum256([]byte(notYAMLContent))
 	if want := "sha256:" + hex.EncodeToString(sum[:]); got != want {
 		t.Errorf("computeHash() = %q, want %q", got, want)
+	}
+}
+
+// notTOMLContent is a .toml requirements file whose bytes are not TOML. The
+// not-YAML row is its control: those bytes still hash, while a .toml is decoded
+// for its lock_file before any key is computed, so these are refused.
+const notTOMLContent = "[project]\ncollections = [\n"
+
+// TestHashRefusesRequirementsNotTOML runs the command over a broken.toml with
+// no lockfile beside it: ErrInvalidRequirementsTOML and exit 2, where the same
+// bytes under a .yml name would have yielded a key.
+func TestHashRefusesRequirementsNotTOML(t *testing.T) {
+	t.Parallel()
+	reqPath := filepath.Join(t.TempDir(), "broken.toml")
+	writeTestFile(t, reqPath, []byte(notTOMLContent))
+
+	err := Hash().Run(context.Background(), []string{"hash", "-r", reqPath})
+	if !errors.Is(err, helpers.ErrInvalidRequirementsTOML) {
+		t.Fatalf("hash over a broken .toml: error = %v, want errors.Is helpers.ErrInvalidRequirementsTOML", err)
+	}
+	if got := exitcode.FromError(err); got != exitcode.ExitUsage {
+		t.Errorf("exitcode.FromError(err) = %d, want ExitUsage (%d)", got, exitcode.ExitUsage)
 	}
 }
 

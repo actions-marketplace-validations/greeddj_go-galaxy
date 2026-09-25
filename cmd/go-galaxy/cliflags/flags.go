@@ -44,7 +44,17 @@ func CommonFlags() []cli.Flag {
 func CollectionFlags() []cli.Flag {
 	flags := collectionPathFlags()
 	flags = append(flags, collectionBehaviorFlags()...)
-	flags = append(flags, lockfileAndMetricsFlags()...)
+	flags = append(flags, lockFileFlag(), frozenFlag(), metricsFileFlag())
+	return flags
+}
+
+// LockFlags is CollectionFlags for the lock command, with --check in place of
+// --frozen: lock resolves fresh on every run, so its only lockfile-reading
+// mode is the comparison --check asks for.
+func LockFlags() []cli.Flag {
+	flags := collectionPathFlags()
+	flags = append(flags, collectionBehaviorFlags()...)
+	flags = append(flags, lockFileFlag(), checkFlag(), metricsFileFlag())
 	return flags
 }
 
@@ -94,16 +104,7 @@ func collectionPathFlags() []cli.Flag {
 			// flag above.
 			Sources: cli.EnvVars("GO_GALAXY_ROLES_PATH", "ANSIBLE_ROLES_PATH"),
 		},
-		&cli.StringFlag{
-			Name: "requirements-file",
-			// --role-file is ansible-galaxy's own spelling of this flag for
-			// the install command; one file names both collections and roles
-			// there as it does here.
-			Aliases: []string{"r", "role-file"},
-			Usage:   "Path to requirements.yml file",
-			Value:   defaultRequirementsFilePath,
-			Sources: cli.EnvVars("GO_GALAXY_REQUIREMENTS_FILE", envRequirementsFileAnsible),
-		},
+		RequirementsFileFlag(),
 		&cli.StringFlag{
 			Name: "ansible-config",
 			Usage: "Path to ansible.cfg file; if unset, discovered in ansible's order " +
@@ -162,23 +163,35 @@ func collectionBehaviorFlags() []cli.Flag {
 	}
 }
 
-func lockfileAndMetricsFlags() []cli.Flag {
-	return []cli.Flag{
-		&cli.StringFlag{
-			Name:    "lock-file",
-			Usage:   "Path to lockfile (default: galaxy.lock next to requirements file)",
-			Sources: cli.EnvVars("GO_GALAXY_LOCK_FILE"),
-		},
-		&cli.BoolFlag{
-			Name:    "frozen",
-			Usage:   "Fail if lockfile is missing or does not match resolved requirements",
-			Sources: cli.EnvVars("GO_GALAXY_FROZEN"),
-		},
-		&cli.StringFlag{
-			Name:    "metrics-file",
-			Usage:   "Write a JSON metrics report to this path on completion",
-			Sources: cli.EnvVars("GO_GALAXY_METRICS_FILE"),
-		},
+func lockFileFlag() cli.Flag {
+	return &cli.StringFlag{
+		Name:    "lock-file",
+		Usage:   "Path to lockfile (default: galaxy.lock next to requirements file)",
+		Sources: cli.EnvVars("GO_GALAXY_LOCK_FILE"),
+	}
+}
+
+func frozenFlag() cli.Flag {
+	return &cli.BoolFlag{
+		Name:    "frozen",
+		Usage:   "Fail if lockfile is missing or does not match resolved requirements",
+		Sources: cli.EnvVars("GO_GALAXY_FROZEN"),
+	}
+}
+
+func checkFlag() cli.Flag {
+	return &cli.BoolFlag{
+		Name:    "check",
+		Usage:   "Fail if the lockfile is missing or differs from what lock would write, instead of writing it",
+		Sources: cli.EnvVars("GO_GALAXY_CHECK"),
+	}
+}
+
+func metricsFileFlag() cli.Flag {
+	return &cli.StringFlag{
+		Name:    "metrics-file",
+		Usage:   "Write a JSON metrics report to this path on completion",
+		Sources: cli.EnvVars("GO_GALAXY_METRICS_FILE"),
 	}
 }
 
@@ -187,18 +200,29 @@ func lockfileAndMetricsFlags() []cli.Flag {
 // file and, optionally, an override lockfile path.
 func LockInspectFlags() []cli.Flag {
 	return []cli.Flag{
-		&cli.StringFlag{
-			Name:    "requirements-file",
-			Aliases: []string{"r", "role-file"},
-			Usage:   "Path to requirements.yml",
-			Value:   defaultRequirementsFilePath,
-			Sources: cli.EnvVars("GO_GALAXY_REQUIREMENTS_FILE", envRequirementsFileAnsible),
-		},
+		RequirementsFileFlag(),
 		&cli.StringFlag{
 			Name:    "lock-file",
 			Usage:   "Path to lockfile (default: galaxy.lock beside requirements file)",
 			Sources: cli.EnvVars("GO_GALAXY_LOCK_FILE"),
 		},
+	}
+}
+
+// RequirementsFileFlag declares the one flag naming the requirements file,
+// requirements.yml or galaxy.toml by extension; unset, config.RequirementsPath
+// discovers galaxy.toml, then requirements.yml, which DefaultText states.
+func RequirementsFileFlag() cli.Flag {
+	return &cli.StringFlag{
+		Name: "requirements-file",
+		// --role-file is ansible-galaxy's own spelling of this flag for
+		// the install command; one file names both collections and roles
+		// there as it does here.
+		Aliases: []string{"r", "role-file"},
+		Usage: "Path to the requirements file: requirements.yml, or galaxy.toml by its .toml extension; " +
+			"unset, ./galaxy.toml is read when present, else ./requirements.yml",
+		DefaultText: "galaxy.toml if present, else requirements.yml",
+		Sources:     cli.EnvVars("GO_GALAXY_REQUIREMENTS_FILE", envRequirementsFileAnsible),
 	}
 }
 

@@ -51,7 +51,7 @@ var fromErrorCases = []exitCase{
 		wantCode: ExitLock,
 	},
 	{
-		// lock --frozen's own drift-gate verdict: a fresh resolve disagrees
+		// lock --check's own drift-gate verdict: a fresh resolve disagrees
 		// with the lockfile already on disk. Exit 6 is the same class as
 		// every other lockfile sentinel, per ExitLock's own doc comment.
 		name:     "lockfile drift",
@@ -105,6 +105,24 @@ var fromErrorCases = []exitCase{
 		wantCode: ExitInstall,
 	},
 	{
+		// Refused by lock before it is written: the same deterministic
+		// server-supplied answer, so the same class as the userinfo rows.
+		name:     "download url with a query string",
+		err:      fmt.Errorf("lockfile: a.b: %w", helpers.ErrDownloadURLQuery),
+		wantCode: ExitInstall,
+	},
+	{
+		name:     "download url off its server's artifact",
+		err:      fmt.Errorf("lockfile: a.b: %w", helpers.ErrDownloadURLNotServerArtifact),
+		wantCode: ExitInstall,
+	},
+	{
+		// The same refusal met under --frozen is a lockfile verdict first.
+		name:     "frozen download url off its server's artifact",
+		err:      fmt.Errorf("%w: a.b: %w", helpers.ErrLockfileInvalid, helpers.ErrDownloadURLNotServerArtifact),
+		wantCode: ExitLock,
+	},
+	{
 		name:     "galaxy server auth failed",
 		err:      fmt.Errorf("%w: server a: ctx", helpers.ErrGalaxyAuthFailed),
 		wantCode: ExitNetwork,
@@ -154,6 +172,13 @@ var fromErrorCases = []exitCase{
 		wantCode: ExitUsage,
 	},
 	{
+		// A galaxy.toml constraint semver refuses at load, before any cache or
+		// network work, so it classifies as usage like the version row above.
+		name:     "invalid collection constraint",
+		err:      fmt.Errorf("%w: %q for acme.app", helpers.ErrInvalidCollectionConstraint, ">= 0..20"),
+		wantCode: ExitUsage,
+	},
+	{
 		name:     "invalid timeout",
 		err:      fmt.Errorf("%w: ctx", helpers.ErrInvalidTimeout),
 		wantCode: ExitUsage,
@@ -181,6 +206,16 @@ var fromErrorCases = []exitCase{
 	{
 		name:     "requirements not valid YAML",
 		err:      fmt.Errorf("load requirements requirements.yml: %w: %w", helpers.ErrInvalidRequirementsYAML, errTestUnreadableCause),
+		wantCode: ExitUsage,
+	},
+	{
+		name:     "requirements not valid TOML",
+		err:      fmt.Errorf("load requirements galaxy.toml: %w: line 3", helpers.ErrInvalidRequirementsTOML),
+		wantCode: ExitUsage,
+	},
+	{
+		name:     "galaxy.toml names an unset variable",
+		err:      fmt.Errorf("galaxy.toml: %w: HUB_TOKEN", helpers.ErrProjectFileEnvUnset),
 		wantCode: ExitUsage,
 	},
 	{
@@ -430,8 +465,8 @@ var galaxyServerConfigSentinels = []struct {
 	{name: "conflicting tls policy", err: helpers.ErrConflictingServerTLSPolicy},
 	{name: "conflicting token", err: helpers.ErrConflictingServerToken},
 	{name: "ambiguous --token", err: helpers.ErrAmbiguousGalaxyToken},
-	{name: "token destination from ansible.cfg", err: helpers.ErrTokenDestinationFromAnsibleConfig},
-	{name: "token tls policy from ansible.cfg", err: helpers.ErrTokenTLSPolicyFromAnsibleConfig},
+	{name: "token destination from a configuration file", err: helpers.ErrTokenDestinationFromFile},
+	{name: "token tls policy from a configuration file", err: helpers.ErrTokenTLSPolicyFromFile},
 }
 
 // TestGalaxyServerConfigErrorsMapToUsage pins every Galaxy server config
@@ -543,7 +578,7 @@ func TestSaveFailureDoesNotMaskIntegrity(t *testing.T) {
 	}
 }
 
-// TestLockDriftOutranksSaveFailure pins that lock --frozen's drift verdict
+// TestLockDriftOutranksSaveFailure pins that lock --check's drift verdict
 // wrapped by annotateSaveFailure still exits ExitLock: the drift, not the
 // save failure's network-class cause, is what the operator must act on.
 func TestLockDriftOutranksSaveFailure(t *testing.T) {
@@ -908,7 +943,7 @@ type serverSuppliedURLPolicyCase struct {
 	name string
 }
 
-// serverSuppliedURLPolicyCases is the full cross-product of both sentinels and
+// serverSuppliedURLPolicyCases is the full cross-product of every sentinel and
 // three shapes (bare, install headline, outdated headline), reachable today or
 // not, since the class must not depend on what a sentinel is joined behind.
 func serverSuppliedURLPolicyCases() []serverSuppliedURLPolicyCase {
@@ -916,14 +951,22 @@ func serverSuppliedURLPolicyCases() []serverSuppliedURLPolicyCase {
 	outdatedHeadline := fmt.Errorf("%w for 1 collections", helpers.ErrLatestVersionLookupFailed)
 	download := fmt.Errorf("%w: %q", helpers.ErrDownloadURLUserinfo, "https://h/a.tar.gz")
 	metadata := fmt.Errorf("%w: %q", helpers.ErrMetadataURLUserinfo, "https://h/api/v3/versions/")
+	query := fmt.Errorf("lockfile: a.b: %w", helpers.ErrDownloadURLQuery)
+	offServer := fmt.Errorf("lockfile: a.b: %w", helpers.ErrDownloadURLNotServerArtifact)
 
 	return []serverSuppliedURLPolicyCase{
 		{name: "download url, bare", err: download},
 		{name: "metadata url, bare", err: metadata},
+		{name: "query download url, bare", err: query},
+		{name: "off-server download url, bare", err: offServer},
 		{name: "download url, behind the install-failure headline", err: errors.Join(installHeadline, download)},
 		{name: "metadata url, behind the install-failure headline", err: errors.Join(installHeadline, metadata)},
+		{name: "query download url, behind the install-failure headline", err: errors.Join(installHeadline, query)},
+		{name: "off-server download url, behind the install-failure headline", err: errors.Join(installHeadline, offServer)},
 		{name: "download url, behind the latest-version-lookup headline", err: errors.Join(outdatedHeadline, download)},
 		{name: "metadata url, behind the latest-version-lookup headline", err: errors.Join(outdatedHeadline, metadata)},
+		{name: "query download url, behind the latest-version-lookup headline", err: errors.Join(outdatedHeadline, query)},
+		{name: "off-server download url, behind the latest-version-lookup headline", err: errors.Join(outdatedHeadline, offServer)},
 	}
 }
 

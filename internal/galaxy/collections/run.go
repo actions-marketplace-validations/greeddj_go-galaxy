@@ -98,7 +98,7 @@ func initInstall(ctx context.Context, cfg *config.Config, runtime *infra.Infra) 
 		dryRunBanner(runtime)
 	}
 	// A warning, not a usage error: both flags often arrive from an ambient CI
-	// environment. cfg.Frozen is deliberately not read, since lock --frozen
+	// environment. cfg.Check is deliberately not read, since lock --check
 	// --refresh still honors --refresh.
 	if cfg.Refresh && cfg.Offline {
 		runtime.Output.Warnf("--offline: skipping --refresh; cached state is the only source of truth offline")
@@ -241,7 +241,7 @@ func prepareInstallPlan(
 		return nil, err
 	}
 
-	resolved, graph, err := resolveOrLoadLockfile(ctx, cfg, runtime, state, roots)
+	resolved, graph, err := resolveOrLoadLockfile(ctx, cfg, runtime, state, roots, verify)
 	if err != nil {
 		return nil, err
 	}
@@ -292,13 +292,15 @@ func resolveOrLoadRoles(
 }
 
 // resolveOrLoadLockfile resolves through the solver, or under --frozen
-// builds resolved and graph from the lockfile with no network calls.
+// builds resolved and graph from the lockfile with no network calls; the
+// locked download URLs stand in for metadata only when verify is off.
 func resolveOrLoadLockfile(
 	ctx context.Context,
 	cfg *config.Config,
 	runtime *infra.Infra,
 	state *installState,
 	roots []collection,
+	verify *verifyContext,
 ) (map[string]collection, map[string][]string, error) {
 	if cfg.Frozen {
 		path := lockfile.ResolveDefaultPath(cfg.RequirementsFile, cfg.LockFile)
@@ -307,7 +309,9 @@ func resolveOrLoadLockfile(
 		if err != nil {
 			return nil, nil, err
 		}
-		return resolveFromLockfile(cfg, lf, roots)
+		// A server's signatures ride on the version metadata, so a verifying
+		// run must still fetch it and cannot take the locked URL alone.
+		return resolveFromLockfile(cfg, lf, roots, !verify.enabled())
 	}
 
 	resolveStart := time.Now()
@@ -325,9 +329,9 @@ func resolveOrLoadLockfile(
 	return resolved, graph, nil
 }
 
-// loadRoots parses requirements.yml into collection and role roots. A
-// collection without source: keeps an empty Source, so it walks the whole
-// configured server list rather than being nailed to cfg.Server.
+// loadRoots parses the requirements file, galaxy.toml or requirements.yml,
+// into collection and role roots. A collection without source: keeps an empty
+// Source, so it walks the whole server list rather than being nailed to one.
 func loadRoots(cfg *config.Config, runtime *infra.Infra) ([]collection, []requirements.RoleRequirement, error) {
 	runtime.Output.Printf("Load collections from requirements file")
 	collectionsDirect, file, err := loadRequirements(cfg.RequirementsFile, "")

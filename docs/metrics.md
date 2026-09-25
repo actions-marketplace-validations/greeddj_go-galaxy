@@ -1,7 +1,7 @@
 # Metrics
 
-Pass `--metrics-file path/to/run.json` to install/warm/lock/outdated to emit a
-JSON report suitable for CI dashboards:
+Pass `--metrics-file path/to/run.json` (or `$GO_GALAXY_METRICS_FILE`) to
+install/warm/lock/outdated to emit a JSON report suitable for CI dashboards:
 
 ```json
 {
@@ -22,14 +22,19 @@ JSON report suitable for CI dashboards:
 }
 ```
 
+A `galaxy.toml` can name the path too, as `metrics_file` in its
+`[tool.go-galaxy]` table, a relative path resolved against the file's
+directory; the flag or the variable wins whenever either is set, a variable
+exported empty included, which then names no report.
+
 The report is written atomically (temp file plus rename), so a consumer never
 reads a partial JSON, and a symlink at the operator-specified path is replaced
 rather than followed.
 
 The report is written whenever a run reaches its finalize step - including a
 run that failed to install some collections, a run whose snapshot save itself
-failed, and a `lock --frozen` run that found drift - and is not written when
-the run aborts earlier (unreadable `requirements.yml`, a resolution failure,
+failed, and a `lock --check` run that found drift - and is not written when
+the run aborts earlier (an unreadable requirements file, a resolution failure,
 or a missing or unloadable lockfile). A `--dry-run` run is the one exception on
 the other side: it reaches finalize and still writes nothing, because the report
 carries no field that would distinguish a preview from a real run. All four
@@ -40,14 +45,14 @@ signal: gate automation on the process exit code (see
 on whether the metrics file exists or looks clean. This matters most for
 `lock`: `failures` is always `0` in a `lock` report, so the report carries no
 failure signal at all for that command, and a `lock` run whose snapshot save
-failed, or whose `--frozen` gate found drift, still leaves a clean-looking
+failed, or whose `--check` gate found drift, still leaves a clean-looking
 report next to a nonzero exit code. `frozen` is `true` exactly when the run
-honored `--frozen`, for every command that reads the flag, `lock` included:
-for `install`/`warm` that means resolving from the lockfile, and for `lock`
-it means gating the fresh resolve against the lockfile instead of overwriting
-it - not merely whether the flag was passed. `outdated` never honors
-`--frozen`, so its report always omits `frozen`, whatever the flag or
-`$GO_GALAXY_FROZEN` said.
+honored `--frozen`, which only `install` and `warm` do: it means resolving
+from the lockfile, not merely that the flag was passed. `outdated` never
+honors `--frozen`, so its report always omits `frozen`, whatever the flag or
+`$GO_GALAXY_FROZEN` said, and `lock` does not register the flag at all: its
+report omits `frozen` too, a `--check` run's included, and no field tells a
+check from a write.
 
 `offline` asks a different question than `frozen` does. It does not report
 whether anything was honored during the run: `--offline` (or

@@ -6,17 +6,18 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
 	"github.com/greeddj/go-galaxy/cmd/go-galaxy/cliflags"
+	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/helpers"
 	"github.com/greeddj/go-galaxy/internal/galaxy/lockfile"
+	"github.com/greeddj/go-galaxy/internal/progress"
 	"github.com/greeddj/go-galaxy/internal/safeout"
 	"github.com/urfave/cli/v3"
 )
-
-const requirementsYAML = "requirements.yml"
 
 var (
 	// errExplainNoTarget wraps helpers.ErrMissingArgument, so explain run with
@@ -42,8 +43,14 @@ func Explain() *cli.Command {
 		ArgValidator: explainArguments,
 		Action: func(_ context.Context, c *cli.Command) error {
 			target := c.Args().First()
-			reqPath := c.String("requirements-file")
-			lockPath := lockfile.ResolveDefaultPath(reqPath, c.String("lock-file"))
+			reqPath, warning := config.RequirementsPath(c)
+			if warning != "" {
+				progress.Warnf("%s", warning)
+			}
+			lockPath, err := lockfilePath(c, reqPath)
+			if err != nil {
+				return err
+			}
 			lf, err := lockfile.LoadRequired(lockPath)
 			if err != nil {
 				return err
@@ -57,7 +64,7 @@ func Explain() *cli.Command {
 			for _, r := range roleRoots {
 				roleRootSet[r] = true
 			}
-			return printExplain(os.Stdout, lf, target, rootSet, roleRootSet)
+			return printExplain(os.Stdout, lf, target, filepath.Base(reqPath), rootSet, roleRootSet)
 		},
 	}
 }
@@ -78,9 +85,9 @@ func explainArguments(_ context.Context, c *cli.Command) error {
 }
 
 // printExplain writes why target was locked and what depends on it; a name that
-// is both a collection and a role prints both, the collection first. w is
-// wrapped in safeout because lockfile fields are untrusted and printed verbatim.
-func printExplain(w io.Writer, lf *lockfile.File, target string, roots, roleRoots map[string]bool) error {
+// is both a collection and a role prints both, the collection first. rootLabel
+// names the requirements file a root is required by; w is wrapped in safeout.
+func printExplain(w io.Writer, lf *lockfile.File, target, rootLabel string, roots, roleRoots map[string]bool) error {
 	w = safeout.NewWriter(w)
 	entry, rdeps, found := findExplainTarget(lf, target)
 	role, roleRdeps, roleFound := findExplainRole(lf, target)
@@ -89,12 +96,12 @@ func printExplain(w io.Writer, lf *lockfile.File, target string, roots, roleRoot
 	}
 	if found {
 		printEntryHeader(w, entry)
-		printRequiredBy(w, target, rdeps, roots)
+		printRequiredBy(w, target, rootLabel, rdeps, roots)
 		printDepends(w, entry)
 	}
 	if roleFound {
 		printRoleHeader(w, role)
-		printRoleRequiredBy(w, role, roleRdeps, roleRoots)
+		printRoleRequiredBy(w, role, rootLabel, roleRdeps, roleRoots)
 		printRoleDepends(w, role)
 	}
 	return nil
@@ -145,10 +152,10 @@ func printRoleHeader(w io.Writer, entry lockfile.RoleEntry) {
 	}
 }
 
-func printRoleRequiredBy(w io.Writer, entry lockfile.RoleEntry, rdeps []lockfile.RoleEntry, roots map[string]bool) {
+func printRoleRequiredBy(w io.Writer, entry lockfile.RoleEntry, rootLabel string, rdeps []lockfile.RoleEntry, roots map[string]bool) {
 	_, _ = fmt.Fprintln(w, "  required by:")
 	if roots[entry.Name] {
-		_, _ = fmt.Fprintln(w, "    - "+requirementsYAML+" (root)")
+		_, _ = fmt.Fprintln(w, "    - "+rootLabel+" (root)")
 	}
 	slices.SortFunc(rdeps, func(a, b lockfile.RoleEntry) int { return strings.Compare(a.Name, b.Name) })
 	for _, r := range rdeps {
@@ -189,29 +196,32 @@ func findExplainTarget(lf *lockfile.File, target string) (lockfile.Entry, []lock
 func printEntryHeader(w io.Writer, entry lockfile.Entry) {
 	_, _ = fmt.Fprintf(w, "%s %s\n", entry.Name, entry.Version)
 	if entry.Type != "" {
-		_, _ = fmt.Fprintf(w, "  type   : %s\n", entry.Type)
+		_, _ = fmt.Fprintf(w, "  type         : %s\n", entry.Type)
 	}
 	if entry.Source != "" {
-		_, _ = fmt.Fprintf(w, "  source : %s\n", entry.Source)
+		_, _ = fmt.Fprintf(w, "  source       : %s\n", entry.Source)
+	}
+	if entry.DownloadURL != "" {
+		_, _ = fmt.Fprintf(w, "  download_url : %s\n", entry.DownloadURL)
 	}
 	if entry.Ref != "" {
-		_, _ = fmt.Fprintf(w, "  ref    : %s\n", entry.Ref)
+		_, _ = fmt.Fprintf(w, "  ref          : %s\n", entry.Ref)
 	}
 	if entry.Commit != "" {
-		_, _ = fmt.Fprintf(w, "  commit : %s\n", entry.Commit)
+		_, _ = fmt.Fprintf(w, "  commit       : %s\n", entry.Commit)
 	}
 	if entry.Subdir != "" {
-		_, _ = fmt.Fprintf(w, "  subdir : %s\n", entry.Subdir)
+		_, _ = fmt.Fprintf(w, "  subdir       : %s\n", entry.Subdir)
 	}
 	if entry.SHA256 != "" {
-		_, _ = fmt.Fprintf(w, "  sha256 : %s\n", entry.SHA256)
+		_, _ = fmt.Fprintf(w, "  sha256       : %s\n", entry.SHA256)
 	}
 }
 
-func printRequiredBy(w io.Writer, target string, rdeps []lockfile.Entry, roots map[string]bool) {
+func printRequiredBy(w io.Writer, target, rootLabel string, rdeps []lockfile.Entry, roots map[string]bool) {
 	_, _ = fmt.Fprintln(w, "  required by:")
 	if roots[target] {
-		_, _ = fmt.Fprintln(w, "    - "+requirementsYAML+" (root)")
+		_, _ = fmt.Fprintln(w, "    - "+rootLabel+" (root)")
 	}
 	slices.SortFunc(rdeps, func(a, b lockfile.Entry) int { return strings.Compare(a.Name, b.Name) })
 	for _, r := range rdeps {

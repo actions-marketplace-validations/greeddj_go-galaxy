@@ -7,8 +7,10 @@ import (
 	"fmt"
 
 	"github.com/greeddj/go-galaxy/cmd/go-galaxy/cliflags"
+	"github.com/greeddj/go-galaxy/internal/galaxy/config"
 	"github.com/greeddj/go-galaxy/internal/galaxy/lockfile"
 	"github.com/greeddj/go-galaxy/internal/galaxy/requirements"
+	"github.com/greeddj/go-galaxy/internal/progress"
 	"github.com/urfave/cli/v3"
 )
 
@@ -22,8 +24,14 @@ func Hash() *cli.Command {
 		Usage:   "Print a deterministic cache key for CI (sha256 of lockfile or requirements)",
 		Flags:   cliflags.LockInspectFlags(),
 		Action: func(_ context.Context, c *cli.Command) error {
-			req := c.String("requirements-file")
-			lockPath := lockfile.ResolveDefaultPath(req, c.String("lock-file"))
+			req, warning := config.RequirementsPath(c)
+			if warning != "" {
+				progress.Warnf("%s", warning)
+			}
+			lockPath, err := lockfilePath(c, req)
+			if err != nil {
+				return err
+			}
 			key, err := computeHash(req, lockPath)
 			if err != nil {
 				return err

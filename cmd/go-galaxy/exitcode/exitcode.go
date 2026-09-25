@@ -155,7 +155,7 @@ func isSignatureError(err error) bool {
 }
 
 // isLockError reports whether err is a lockfile sentinel: missing, invalid,
-// not covering the requirements roots, or lock --frozen's drift verdict.
+// not covering the requirements roots, or lock --check's drift verdict.
 func isLockError(err error) bool {
 	return errors.Is(err, helpers.ErrLockfileMismatch) ||
 		errors.Is(err, helpers.ErrLockfileMissing) ||
@@ -173,10 +173,12 @@ func isCacheBusyError(err error) bool {
 }
 
 // isServerSuppliedURLPolicyError reports whether a Galaxy server supplied a
-// download or metadata URL embedding userinfo. It is ExitInstall, not
-// ExitNetwork: the refusal is deterministic, so a CI retry would only loop.
+// download or metadata URL embedding userinfo, or a download URL `lock` will
+// not commit. ExitInstall, not ExitNetwork: a CI retry would only loop.
 func isServerSuppliedURLPolicyError(err error) bool {
 	return errors.Is(err, helpers.ErrDownloadURLUserinfo) ||
+		errors.Is(err, helpers.ErrDownloadURLQuery) ||
+		errors.Is(err, helpers.ErrDownloadURLNotServerArtifact) ||
 		errors.Is(err, helpers.ErrMetadataURLUserinfo)
 }
 
@@ -479,12 +481,14 @@ func isEnvironmentUsageError(err error) bool {
 }
 
 // isInputFileUsageError reports whether the requirements file or ansible.cfg
-// cannot be used: an explicit ansible.cfg that is missing, either file
-// unreadable, or requirements that are not YAML or not a supported shape.
+// cannot be used: a missing explicit ansible.cfg, either file unreadable, or
+// requirements not YAML or TOML, not a supported shape, or naming an unset variable.
 func isInputFileUsageError(err error) bool {
 	return errors.Is(err, helpers.ErrUnsupportedRequirementsFormat) ||
 		errors.Is(err, helpers.ErrRequirementsUnreadable) ||
 		errors.Is(err, helpers.ErrInvalidRequirementsYAML) ||
+		errors.Is(err, helpers.ErrInvalidRequirementsTOML) ||
+		errors.Is(err, helpers.ErrProjectFileEnvUnset) ||
 		errors.Is(err, helpers.ErrAnsibleConfigNotFound) ||
 		errors.Is(err, helpers.ErrAnsibleConfigUnreadable)
 }
@@ -526,8 +530,8 @@ func isGalaxyServerPolicyError(err error) bool {
 		errors.Is(err, helpers.ErrConflictingServerTLSPolicy) ||
 		errors.Is(err, helpers.ErrConflictingServerToken) ||
 		errors.Is(err, helpers.ErrAmbiguousGalaxyToken) ||
-		errors.Is(err, helpers.ErrTokenDestinationFromAnsibleConfig) ||
-		errors.Is(err, helpers.ErrTokenTLSPolicyFromAnsibleConfig)
+		errors.Is(err, helpers.ErrTokenDestinationFromFile) ||
+		errors.Is(err, helpers.ErrTokenTLSPolicyFromFile)
 }
 
 // isCollectionNameUsageError reports whether a requirements entry's collection
@@ -553,7 +557,8 @@ func isCollectionListUsageError(err error) bool {
 		errors.Is(err, helpers.ErrDuplicateCollectionRequirement) ||
 		errors.Is(err, helpers.ErrDuplicateCollectionKey) ||
 		errors.Is(err, helpers.ErrUnsafeCollectionIdentifier) ||
-		errors.Is(err, helpers.ErrInvalidCollectionVersion)
+		errors.Is(err, helpers.ErrInvalidCollectionVersion) ||
+		errors.Is(err, helpers.ErrInvalidCollectionConstraint)
 }
 
 // FromSignal converts an OS signal into a shell-convention exit code

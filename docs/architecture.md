@@ -45,8 +45,10 @@ internal/galaxy/collectionbuild  what makes a tree a collection: ignore rules, M
 internal/galaxy/rolebuild     what makes a tree a role: meta/main.yml, its dependencies,
                               no lead documents; drives treearchive
 internal/galaxy/galaxyv1      the Galaxy v1 role API client and ansible's version selection
-internal/galaxy/requirements  requirements.yml parsing, collections and roles
-internal/galaxy/config        flags + ansible.cfg + environment -> one Config
+internal/galaxy/projectfile   galaxy.toml decoding and its [tool.go-galaxy] settings,
+                              the only BurntSushi/toml importer
+internal/galaxy/requirements  requirements.yml and galaxy.toml parsing, collections and roles
+internal/galaxy/config        flags + galaxy.toml + ansible.cfg + environment -> one Config
 internal/galaxy/lockfile      galaxy.lock
 internal/galaxy/infra         the per-run DI container
 internal/galaxy/fetch         the shared HTTP client and its per-origin policy
@@ -106,7 +108,11 @@ artifact download. Nothing wires those overrides to a flag, an environment
 variable or an ansible.cfg key. A nil `URLHTTP` or `Git` met at acquisition
 time is reported as a wiring error and never replaced by the shared client,
 which would attach Galaxy tokens and relaxed TLS to repository-authored URLs.
-Its `--verbose` configuration lines render a Galaxy token only as a presence
+Its `--verbose` configuration lines, `DebugConfigSources`, open with one
+`Galaxy.toml <file> supplied: <keys>` line naming the `[tool.go-galaxy]` keys
+the run took a value from (`Config.ProjectSettingsUsed`), when there are any,
+then credit ansible.cfg for each value it supplied and list the servers and
+the credential bindings; they render a Galaxy token only as a presence
 boolean, and a git or url credential's secret not even that. Extend `Infra`
 rather than adding a global or widening a signature.
 
@@ -140,14 +146,22 @@ declares its flags and hands the parsed command to an entry point under
 `runCollectionCommand`, which builds the `Config`, the printer and the
 `Infra`, and wires the git client and the url client for every one of them
 alike - neither holds a connection until a requirement needs one. `hash`,
-`tree` and `explain` build no config, cache backend or HTTP client.
+`tree` and `explain` build no config, cache backend or HTTP client; the one
+setting they read is a galaxy.toml's `lock_file`, through `lockfilePath`,
+which returns `--lock-file` when it is set at all, else for a `.toml` path
+loads the file through `projectfile.LoadSettings` and takes its `lock_file`,
+already resolved against the file's directory, else `galaxy.lock` beside the
+requirements file. A galaxy.toml that does not load is an error there (exit
+`2`) for all three, `hash` included, even though only `lock_file` is read:
+the whole table is expanded by one rule, and an absent file supplies nothing.
 
-`internal/galaxy/config` turns the parsed command, the environment and a named
-or discovered ansible.cfg into one `Config` per run; see
-[Configuration](#configuration). `internal/galaxy/fetch` builds every
-`*http.Client` the program uses and owns their per-origin credential and TLS
-policy; see [The HTTP clients](#the-http-clients). It never imports `config`,
-the layer above it. `internal/galaxy/output` declares only the `Printer`
+`internal/galaxy/config` turns the parsed command, the environment, a `.toml`
+requirements file's `[tool.go-galaxy]` table and a named or discovered
+ansible.cfg into one `Config` per run; see [Configuration](#configuration).
+`internal/galaxy/fetch` builds every `*http.Client` the program uses and owns
+their per-origin credential and TLS policy; see
+[The HTTP clients](#the-http-clients). It never imports `config`, the layer
+above it. `internal/galaxy/output` declares only the `Printer`
 interface and imports nothing but `time`, so any package, and any test through
 a recorder, can take a printer without pulling in the renderer;
 `internal/progress` is its one implementation and `internal/safeout` the
@@ -170,12 +184,20 @@ blocks consumes wire bytes without producing any and the decompressed-side
 checks in `archive` and `manifest` never fire on it; it returns `ctx.Err()`
 unwrapped, so the exit code still classifies a cancellation or a deadline.
 
-`internal/galaxy/requirements` is where requirements.yml, which is repository
-content, enters the program, and every value in it is judged there rather than
-downstream. The file itself is judged there first: one that exists and cannot
-be read is `ErrRequirementsUnreadable`, bytes that are not YAML
-`ErrInvalidRequirementsYAML`, and `hash`, which keys on the raw bytes, reads
-them through the same `Read`, so an unreadable file fails it the same way. The
+`internal/galaxy/requirements` is where the requirements file - requirements.yml
+or galaxy.toml, both repository content - enters the program, and every value
+in it is judged there rather than downstream. The file itself is judged there
+first: one that exists and cannot be read is `ErrRequirementsUnreadable`, bytes
+that are not YAML `ErrInvalidRequirementsYAML`, bytes of a `.toml` file that
+are not TOML `ErrInvalidRequirementsTOML`, and `hash`, which keys on the raw
+bytes, reads them through the same `Read`, so an unreadable file fails it the
+same way - having first, for a `.toml` path with `--lock-file` unset, loaded
+the file through `projectfile.LoadSettings` for its `lock_file`, so a
+galaxy.toml that does not decode fails `hash` with exit `2` before a byte is
+hashed, where a requirements.yml that is not YAML still yields a key over its
+bytes. `Load` picks the format by the path's extension alone, without regard
+to case - `.toml` goes to `ParseTOML`, anything else to `Parse` - so a
+`galaxy.txt` holding TOML is read as YAML and fails as such. The
 collection name alphabet is applied once an entry's string and mapping shapes
 converge, not inside `helpers.SplitFQDN`, which a mapping's explicit
 `namespace:`/`name:` pair never passes through. A `signatures:` source is
@@ -188,6 +210,83 @@ those same grammars. An unnamed git entry and every url entry have no identity
 at load, so their name is judged at discovery instead: `IsCollectionNamePart`
 over the repository's `galaxy.yml`, `IsURLCollectionNamePart` over the
 artifact's `MANIFEST.json`.
+
+`ParseTOML` is a front end to that same judgement, not a second parser.
+`internal/galaxy/projectfile`, the module's only importer of
+`BurntSushi/toml`, decodes galaxy.toml into the `any` tree yaml would have
+produced (the `[[project.collections]]` spelling, which decodes as a slice of
+tables, is folded into the `[]any` an inline array gives) and holds the
+document to its closed schema: a `[project]` table, beside it at most a
+`[tool]` table holding `[tool.go-galaxy]` alone, and nothing else; in
+`[project]` only `name`, `version` and `description` - strings, checked for
+type and otherwise unused - plus `collections` and `roles`, at least one of
+them present. Anything else is `ErrUnsupportedRequirementsFormat` naming the
+key, never its value. The requirements side then reshapes each entry into what
+`parseRaw` already judges and hands the tree over, so a galaxy.toml entry
+meets every rule a requirements.yml entry meets, in the same order, and a
+refusal of the roles list still arrives as a `RolesError` beside the parsed
+collections. A collection string is split into name and constraint - the
+longest run of `[A-Za-z0-9_.]` is the name, and the rest, which must open
+with a space, a tab or an operator byte, is the constraint - and becomes the
+`name`/`version` mapping; a git pointer, an http(s) URL and any other value
+`looksLikeSourceName` admits pass whole, since a ref, a subdir or a query is
+not a constraint, and so does a bare name. The constraint is checked at load
+with `semver`, after `helpers.NormalizeConstraint`, which requirements.yml
+leaves to the solver: one semver refuses is `ErrInvalidCollectionConstraint`,
+rendered without semver's own message, which echoes the input in a shape of
+its own. An inline table is held to a closed key set - `namespace`, `name`,
+`version`, `source`, `type` and `signatures` on a collection; `name`, `role`,
+`src`, `scm`, `version` and `include` on a role, the last kept so
+`parseRoleMap` refuses it as an include rather than as an unknown key - and
+each scalar key to a string, refused by key and Go type and never by value,
+since a TOML float `1.0` would render as `1` and read as a `1.x` range. Keys
+are visited in sorted order, so the first refusal of a table with several
+faults is deterministic. Where an unknown key on a `roles:` mapping only warns
+in YAML, the same key on a galaxy.toml table is refused: the YAML rule is
+ansible's, the TOML file is this tool's own. A role string is never split,
+since ansible's `src[,version[,name]]` form uses the comma as its field
+separator. A TOML syntax error is `ErrInvalidRequirementsTOML` rendered as
+its line and last key only: the library's `ParseError` is a value, matched
+with `errors.As` as one, and its message echoes string bodies and bare tokens
+from the file, which the output must not carry.
+
+The `[tool.go-galaxy]` table is `projectfile.Settings`, and `Decode` holds it
+to a closed key set by the same rule: `lock_file`, `cache_dir` and
+`metrics_file` are strings; `workers` and `download_workers` are TOML
+integers, so a quoted `"4"`, a float or a boolean is refused by key; `s3` is
+a table, `S3Settings`, of seven strings - `bucket`, `region`, `prefix`,
+`endpoint`, `access_key`, `secret_key`, `session_token` - and one TOML
+boolean, `path_style_disabled`; and `servers` is an array of tables,
+`[[tool.go-galaxy.servers]]` or the inline spelling, each a `ServerSetting`
+whose `id` and `url` are required and non-empty, `token` a string and
+`validate_certs` a boolean, every entry error prefixed with its ordinal, an
+exact duplicate `id` refused there because `--server=<id>` would otherwise
+pick one entry's place with another's keys (a case-folded duplicate is
+config's, on the server list path), and any other key - `username`,
+`password`, `auth_url`, `client_id` and `api_version` included - unknown.
+Every violation is `ErrUnsupportedRequirementsFormat` naming the table and
+the key, never a value, and a `[tool.other]` table is refused rather than
+skipped, since a galaxy.toml is nobody's file but this tool's and a foreign
+tool table would be silently half-read otherwise. `Decode` validates and
+expands nothing, and it is what `requirements.ParseTOML` calls, so every load
+for requirements - install's roots, cleanup's reload of a recorded project -
+checks the schema without consulting the environment. `LoadSettings(path)`
+is the settings reader: an absent file is zero `Settings` and no error, a
+directory or an unreadable file `ErrRequirementsUnreadable`, bytes that are
+not TOML `ErrInvalidRequirementsTOML` rendered as line and last key. It
+decodes, then expands `${VAR}` in every string value under
+`[tool.go-galaxy]` and nowhere else - never in a key, never under
+`[project]`, where a `${VAR}` stays a literal - by one regular expression,
+`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`: a bare `$VAR` is a literal, a variable
+exported empty expands to `""`, and every unset name across the whole table
+is collected and reported once, sorted, as `ErrProjectFileEnvUnset`, never a
+value, with no escaping and no recursion. `Settings.Path` is the path read,
+and `ServerSetting.TokenExpanded` records that the token string held a
+`${VAR}` reference before expansion, the one fact the pairing rule needs. A
+relative `LockFile`, `CacheDir` or `MetricsFile` is then joined under the
+file's directory, an absolute one kept and an empty one left empty so an
+unset key never becomes the project directory; there is no tilde expansion,
+so a home path is written `${HOME}`.
 
 `internal/galaxy/gitfetch` drives go-git at the upload-pack session level
 rather than through its `Remote`, and the advertisement decides everything: the
@@ -347,19 +446,20 @@ live run's in-flight temps would match.
 
 `internal/galaxy/lockfile` owns reading, validating and writing `galaxy.lock`.
 `Load` is its trust boundary, since a committed lockfile is repository
-content, and `Compare` is the drift contract `lock --frozen` gates on; both are
+content, and `Compare` is the drift contract `lock --check` gates on; both are
 described under [The lockfile](#the-lockfile).
 
 ## Configuration
 
 `config.BuildCollectionConfig` is the only place precedence between flags, the
-environment and ansible.cfg is decided, `discoverAnsibleConfigPath` the only
-place an ansible.cfg candidate is accepted or refused, and `resolveServers` the
-only place the server list and each server's credential and TLS policy are
-settled. Every credential the package produces is a `Secret`, redacted on every
-serialization path and readable only through `Reveal`. It makes no network
-request, opens no cache backend and runs before a printer exists, so it prints
-nothing: a non-fatal problem is queued on `Config.Warnings`, which every
+environment, galaxy.toml and ansible.cfg is decided,
+`discoverAnsibleConfigPath` the only place an ansible.cfg candidate is
+accepted or refused, and `resolveServers` the only place the server list and
+each server's credential and TLS policy are settled. Every credential the
+package produces is a `Secret`, redacted on every serialization path and
+readable only through `Reveal`. It makes no network request, opens no cache
+backend and runs before a printer exists, so it prints nothing: a non-fatal
+problem is queued on `Config.Warnings`, which every
 command prints through `Infra.WarnConfig`, or - for anything about
 `roles_path` - on `Config.RoleWarnings`, printed only once a requirements file
 with a `roles:` block has been read. `Config.Server` is always
@@ -367,15 +467,125 @@ with a `roles:` block has been read. `Config.Server` is always
 `GALAXY.yml`, the lockfile's `server`); anything that dispatches credentials or
 TLS per origin reads `Config.Servers`.
 
+`config.RequirementsPath` is the one place the default requirements path is
+decided, and `newConfigFromCLI` is where its answer becomes
+`Config.RequirementsFile`. A command that mounted no `--requirements-file`
+would get `""` and no file system access at all; every command mounts it now,
+`cleanup` included. A set flag - `-r`, `--role-file` or
+either variable, an exported-empty one included, since urfave counts that as
+set - is returned verbatim with no `Stat`, so discovery never outranks a
+source the operator chose. Only with the flag unset does it `Stat`
+`./galaxy.toml`, and take it when it is a regular file (`Stat` rather than
+`Lstat`, so a symlink to one counts), with a warning when `./requirements.yml`
+is a regular file too; a galaxy.toml that is something else - a directory, a
+fifo - is skipped with a warning naming it. Otherwise the answer is the
+relative name `requirements.yml` without a `Stat`, so a directory holding
+neither file opens it exactly as every earlier release did and every message,
+exit code and lockfile path there is unchanged. The candidate stays relative,
+like the ansible.cfg one, and resolves against the working directory at open
+time; a world-writable directory is deliberately no bar here, for the reasons
+[Security](security.md#loading-requirementsyml-and-the-lockfile) gives. The
+warning is a return value rather than a print, because the function runs
+before a printer exists: `newConfigFromCLI` queues it first on
+`Config.Warnings`, ahead of every later warning, since picking the file is the
+run's first event, while `hash`, `tree` and `explain`, which build no
+`Config`, call `RequirementsPath` themselves and print it through
+`progress.Warnf`, the one printer-less warning path.
+
+A `.toml` requirements path also supplies settings, and `BuildCollectionConfig`
+reads them before anything else. `newConfigWithProject` runs
+`newConfigFromCLI`, then `loadProjectSettings`, which returns the zero value
+without touching the file system for any path `projectfile.IsTOMLPath`
+declines and otherwise calls `projectfile.LoadSettings`, wrapping its error as
+`<path>: <err>`, and only then `applyTimeout`, `applyWorkers` and
+`applyDownloadWorkers`; so a galaxy.toml that does not decode, breaks the
+schema or names an unset variable is the first error a run reports, since
+every later layer may draw on it. What the unexported functions take is
+`projectSettings`, a type alias for `projectfile.Settings`, passed by value
+and kept nowhere: `Config` never carries the file's plaintext, and the S3
+`SecretKey` and `SessionToken` and a server's `Token` become `Secret` the
+moment they are read.
+
+The precedence per key is the flag or its variable when `c.IsSet` (an
+exported-empty variable counts as set), then `[tool.go-galaxy]`, then
+ansible.cfg - a layer two keys have: `cache_dir`, whose `[galaxy] cache_dir`
+the table outranks by value, and the servers, whose `[galaxy] server_list` and
+`[galaxy_server.<id>]` sections are read only when the table has no entries -
+then the flag's default. `applyWorkers` passes a file `workers` through the
+same `1..helpers.MaxAcceptedInstallWorkers(procs)` check as `--workers`, with
+one warning that names `[tool.go-galaxy] workers in <path>` where the flag's
+own names `--workers (or $GO_GALAXY_WORKERS)`, and the default in its place;
+`applyDownloadWorkers` takes `download_workers` when the flag is unset and the
+value is at least 1, passing a lower one over silently as the flag's own is.
+`applyProjectSettings`, run after `applyAnsibleConfig`, lays `cache_dir`
+over `[galaxy] cache_dir` and sets `AnsibleCacheDirUsed` back to false, so the
+debug line credits the file that won, and takes `lock_file` and
+`metrics_file` through `projectPicker`, which resolves a string key from its
+flag when set, else the file, else the flag's default. Every key the file
+supplied is appended to `Config.ProjectSettingsUsed` in apply order -
+`workers`, `download_workers`, `cache_dir`, `lock_file`, `metrics_file`,
+`servers`, then `s3.bucket`, `s3.prefix`, `s3.endpoint`, `s3.region`,
+`s3.access_key`, `s3.secret_key`, `s3.session_token`, the order the picker
+reads them, and `s3.path_style_disabled` - and that list feeds one
+`--verbose` line, `Galaxy.toml <file> supplied: <keys>`, printed by
+`Infra.DebugConfigSources` ahead of the ansible.cfg lines, and nothing else.
+
+`loadS3CacheConfig` picks each S3 key the same way, the flag or its variable
+over the file; the cache is enabled when the final bucket is non-empty, and a
+bucket from any source without both an access key and a secret key from any
+source is `ErrS3EmptyCreds`. `path_style_disabled` is the flag when set, else
+the file, and `PathStyle` its negation. `checkS3CacheOffline` then refuses
+`--offline` beside an enabled cache, a file-sourced bucket included
+(`ErrS3CacheOffline`).
+
+`resolveServers` takes the file's `servers` as its section source. When
+`project.Servers` is non-empty, `projectSections` shapes each entry into the
+`{url, token, validate_certs}` map an ansible.cfg `[galaxy_server.<id>]`
+section gives - `token` only when non-empty, `validate_certs` spelled `true`
+or `false` only when present - and the ansible.cfg sections are not read at
+all, so two files are never merged. The id list is `ANSIBLE_GALAXY_SERVER_LIST`
+when exported, even empty, else the file's entries in file order, else
+`[galaxy] server_list`. Each section then goes through the one `buildServer`,
+so `ANSIBLE_GALAXY_SERVER_<ID>_URL`, `_TOKEN` and `_VALIDATE_CERTS` override
+per key exactly as they do for ansible.cfg, the ids are held to
+`^[A-Za-z0-9_-]+$` and the case-insensitive duplicate rule,
+`checkOriginConflicts` and `tlsWarnings` apply, `--server=<id>` selects the
+file's entry and `--server=<url>` ignores the list, and `--token` with several
+servers is `ErrAmbiguousGalaxyToken`. The implicit single server still comes
+from `--server`, `GO_GALAXY_SERVER`, `ANSIBLE_GALAXY_SERVER` or `[galaxy]
+server`; the file has no single-server key. `buildSectionServer` stamps what a
+section alone cannot tell: `sourceFile`, the ansible.cfg path or the
+galaxy.toml path, read by the pairing rule's message alone, and, for a file
+token that was a `${VAR}` reference (`TokenExpanded`), the token's
+provenance cleared from the file to the operator, since the secret belongs to
+whoever set the variable rather than to the file's author.
+
+The pairing rule, `checkTokenPairing`, is unchanged in substance and covers
+both files. A URL or a `validate_certs=false` read from a file - ansible.cfg
+or galaxy.toml, a URL written as `${VAR}` included - is file-sourced. A token
+is the operator's when it came from `--token` or `GO_GALAXY_TOKEN`, from
+`ANSIBLE_GALAXY_SERVER_<ID>_TOKEN`, or from a galaxy.toml `token` holding a
+`${VAR}` reference; a literal token in either file is that file's own and
+exempt, allowed if not recommended. An operator token paired with a
+file-sourced URL is `ErrTokenDestinationFromFile`, one paired with a
+file-disabled TLS check `ErrTokenTLSPolicyFromFile`, each rendered as the
+sentinel's text followed by `server "<id>" (<origin>) in <sourceFile>`; the
+remedy is the one it always was, exporting `ANSIBLE_GALAXY_SERVER_<ID>_URL`
+(and `_VALIDATE_CERTS` when needed) with the same value, so the address is on
+the operator's channel too.
+
 `BuildCollectionConfig` reads the union of every flag a command on the
 `runCollectionCommand` path may register, and urfave returns the zero value
 for a flag the command did not register rather than failing. A command need
-not register them all - `cleanup` registers only the S3 flags beside the four
-global ones, and reads only the cache directory, `--dry-run` and the S3
-settings - but it must register every flag whose `Config` field it reads, or it
-silently sees a zero value. Each zero value is defused where it is consumed: an
-empty `--timeout` becomes the default no-progress budget, never an unbounded
-client; a zero worker count takes the derived default without a warning;
+not register them all - `cleanup` registers only `--requirements-file` and the
+S3 flags beside the four global ones, the requirements flag so a galaxy.toml
+can name the cache directory, the S3 settings and the servers of the cache to
+clean and never for roots, and reads only the requirements path, the cache
+directory, `--dry-run` and the S3 settings - but it must register every flag
+whose `Config` field it reads, or it silently sees a zero value. Each zero
+value is defused where it is consumed: an empty `--timeout` becomes the
+default no-progress budget, never an unbounded client; a zero worker count
+takes the derived default without a warning;
 `[galaxy] server_timeout` is not parsed at all for a command without
 `--timeout`; and an empty implicit server URL, which is what a command without
 `--server` reads when no `[galaxy] server` is configured, yields an empty
@@ -398,10 +608,11 @@ carries signature keys is returned to the verifying commands rather than
 queued on `Config.Warnings`, which every command prints.
 
 The order of the steps fixes which error a configuration broken in several
-places reports first: `--timeout`, loading ansible.cfg, the server list, git
-credentials, url credentials, the S3 cache, the signature surface,
-`[galaxy] server_timeout`, then `--offline` beside an enabled S3 cache. A new
-check goes after the existing ones, so their failures keep their precedence.
+places reports first: the galaxy.toml settings, `--timeout`, loading
+ansible.cfg, the server list, git credentials, url credentials, the S3 cache,
+the signature surface, `[galaxy] server_timeout`, then `--offline` beside an
+enabled S3 cache. A new check goes after the existing ones, so their failures
+keep their precedence.
 
 ## The version solver
 
@@ -863,13 +1074,13 @@ digest for every install sharing them. The record's `InstallPath` is absolute,
 whatever spelling `--roles-path` had, because cleanup finds a record by the
 path it scans.
 
-**Lock and frozen.** `lock` resolves roles in the same run and renders each as
+**Lock, check and frozen.** `lock` resolves roles in the same run and renders each as
 a `RoleEntry` pinned by commit, or a url role by its origin bytes' sha256;
 under `--frozen` an `install` or `warm` takes
 its roles from the lockfile with no network, checking each `roles:` entry as
 written against its locked line (same source - the Galaxy name or the
 repository - and same ref, and for a Galaxy role with a version asked for, that
-version), and `lock --frozen` diffs the fresh role list against the file.
+version), and `lock --check` diffs the fresh role list against the file.
 `outdated` asks the remote what a git role's ref points at now, and asks the
 v1 API which tag is highest for a Galaxy role, comparing by name.
 
@@ -896,14 +1107,16 @@ left alone, since the key needs the record.
 
 Order is load-bearing:
 
-1. Load `requirements.yml`: the `collections:` list and the `roles:` list,
+1. Load the requirements file: the `collections:` list and the `roles:` list,
    both judged at load, with the parse warnings (an unknown key on a role
    entry) printed.
 2. Build the verification context. This runs **ahead of the prefetcher**, so an
    unreadable keyring, or requirements declaring `signatures:` with none
    configured, fails the run before a single background download is scheduled.
 3. Resolve the collections - from the lockfile under `--frozen`, which touches
-   no network at all, otherwise through the solver.
+   no network at all, otherwise through the solver. A frozen Galaxy collection
+   carries its locked `download_url` into the run unless the run verifies
+   signatures (see [The lockfile](#the-lockfile)).
 4. Resolve the roles (see [Roles](#roles)) - from the lockfile under
    `--frozen`, otherwise through the dependency walk. This too runs ahead of
    the prefetcher, so a role no server knows, or a repository that refuses,
@@ -1224,7 +1437,11 @@ or a cache sidecar's - is refused there as `ErrMalformedArtifactSHA256` (exit
 `7`): let through to a cache-hit extraction, it would delete and refetch a good
 tarball on every run, since the poisoned party is the cached metadata, which
 eviction does not touch. The action arm, verify and extract, evicts on any
-failure but the classes below.
+failure but the classes below, and a collection fetched through its locked
+`download_url` is refetched without being evicted first: that download commits
+only bytes matching the lockfile's sha256, so the refetch replaces the cached
+copy when the copy was wrong and leaves it when the pin was, and a wrong pin
+cannot empty a shared slot.
 
 Three classes are excluded because refetching cannot repair them: a
 destination-side failure, where the fault is the tree rather than the artifact;
@@ -1517,6 +1734,17 @@ file, with each path resolved against that directory and an empty path left
 empty rather than becoming the project directory itself, so the local file and
 the S3 object keep one shape.
 
+A galaxy.toml project records the absolute path of its `.toml` file in that
+same `requirements_file` field, not in a new one, and that is the point: an
+older binary sharing the cache reloads the recorded path through its own
+`requirements.Load`, which reads the bytes as YAML, so its `cleanup` fails
+closed - exit `2`, nothing deleted - where a field it does not know would have
+read as no requirements file and a stale record to reap. A directory holding
+both files is one project: galaxy.toml and requirements.yml share one record,
+keyed by the directory, and one `galaxy.lock` beside them, and the record
+names whichever file the last run picked - discovery's galaxy.toml, or the one
+`--requirements-file` named.
+
 `--dry-run` skips registering the project, since that is the only persistent,
 non-cache, non-reconstructible write in the startup path, and it feeds a
 destructive command.
@@ -1794,9 +2022,10 @@ collections:
   - name: community.general
     version: "11.1.0"
     source: https://galaxy.ansible.com
+    download_url: https://galaxy.ansible.com/api/v3/plugin/ansible/content/published/collections/artifacts/community-general-11.1.0.tar.gz
     sha256: <hex>
     deps: [ansible.posix]
-schema_version: 1
+schema_version: 5
 ```
 
 Written canonically - two-space indent, collections sorted by name, each
@@ -1814,10 +2043,10 @@ Loading distinguishes exactly two outcomes - the file is not there, or it is
 invalid - and three consumers depend on that dichotomy being exhaustive.
 Absence is the bare `fs.ErrNotExist` (`lockfile.IsNotExist`); every other
 failure - a file that cannot be read, does not parse, has a `schema_version`
-missing or outside 1 through 4, or fails validation - wraps
+missing or outside 1 through 5, or fails validation - wraps
 `ErrLockfileInvalid`, and a new failure arm must wrap it too. Every caller that
 cannot proceed without a lockfile - `install` and `warm` under `--frozen`,
-`lock --frozen`, `tree` and `explain` - loads through `LoadRequired`, which
+`lock --check`, `tree` and `explain` - loads through `LoadRequired`, which
 turns absence into `ErrLockfileMissing` naming the path, exit `6`; a bare
 `fs.ErrNotExist` reaching the exit-code classifier would be claimed by the
 usage class and exit `2`. `hash` and `outdated` call `Load` directly and fall
@@ -1835,18 +2064,57 @@ version for every type, without which a lockfile carrying `"*"` would make a
 source, ref and subdir that come back unchanged from the git grammar, a
 lowercase forty-hex commit and no `sha256`; for a url entry a source that
 round-trips the url grammar, a lowercase 64-hex `sha256` and no ref, commit or
-subdir; and for a Galaxy entry none of those three. An entry type below its
-minimum `schema_version` (git `2`, role `3`, url `4`) is refused as hand-edited,
-while any `schema_version` from 1 through 4 at least as high as the content
-needs loads. `Save` does not validate: that a written file loads again rests on
-the builder, which checks every version with `helpers.IsExactVersion` and keys
-entries by fqdn so no name can repeat.
+subdir; for a Galaxy entry none of those three and a `download_url` of
+canonical shape (below); and no `download_url` on any other type. An entry
+type below its minimum `schema_version` (git `2`, role `3`, url `4`) is refused
+as hand-edited, a Galaxy entry below `5` as written by an older release, with a
+message naming `go-galaxy lock`, and any `schema_version` from 1 through 5 at
+least as high as the content needs loads. `Save` does not validate: that a
+written file loads again rests on the builder, which checks every version with
+`helpers.IsExactVersion` and keys entries by fqdn so no name can repeat.
 
 `lock` is the command that manufactures the pin every later `--frozen` install
 trusts, so it validates a server's declared digest for shape before writing it,
 and validates each version before spending a metadata fetch on it - failing
 closed under the whole-run exclusive lock rather than after buying work. An
 empty digest is left alone, which keeps servers that publish no digests usable.
+
+A Galaxy entry's `download_url` is what a frozen install fetches its artifact
+from. `lock` copies it from the version document the digest comes from, so it
+costs no request of its own, and a frozen install that misses the cache fetches
+it directly: no root metadata and no version document, only the artifact and
+whatever redirects the server answers with, which on galaxy.ansible.com halves
+the requests a cold collection costs. A verifying run is the exception, since
+a server's signatures ride on the version document: under `--keyring` a
+frozen install fetches the metadata as before and downloads from the URL that
+names. A `download_url` that fails fails that collection as any download does;
+nothing falls back to the metadata, and `lock` is what repairs it.
+
+The field is required on every Galaxy entry, so a Galaxy entry needs
+`schema_version: 5`, ranked over every other schema: every lockfile holding a
+Galaxy collection is written as `5`, which a release predating the field
+refuses, and a file an older release wrote is refused until `lock` rewrites
+it. On load the URL is judged as repository content: an absolute http(s) URL
+with no userinfo, query or fragment that `url.Parse` gives back unchanged.
+`lock` refuses to write one it could not: a query is the shape of a presigned
+capability, which would be committed and would expire, so `lock` fails with
+`ErrDownloadURLQuery` (exit `5`), and a fragment, which no request carries, is
+dropped.
+
+What the URL may name is narrower than its shape. The artifact it fetches is
+committed to the cache slot keyed by the entry's server and the artifact's file
+name - the slot every later install of that version reads, `--frozen` or not -
+so a URL the lockfile could aim at another host would let repository content
+fill that slot with bytes only its own sha256 vouches for. The URL must
+therefore sit on its server's origin, and its path must end in
+`/<namespace>-<name>-<version>.tar.gz`. `lock` refuses a server's answer that
+breaks this (`ErrDownloadURLNotServerArtifact`, exit `5`), so a server that
+serves its artifacts from a separate content origin cannot be locked, and
+`--frozen` refuses a lockfile that breaks it, as invalid (exit `6`) and before
+any request. That check runs in `checkLockedDownloadURLs` rather than in
+`Load`, because the server behind a `server_list` id is known only from the
+run's configuration. The residual is another path on the same origin ending in
+the same file name, which a server hosting several distributions might serve.
 
 A git entry pins a commit instead of a digest:
 
@@ -1863,11 +2131,10 @@ A git entry pins a commit instead of a digest:
 
 It carries no `sha256` because the artifact is rebuilt from the commit and the
 gzip bytes of a rebuild depend on the toolchain; a digest over them would fail
-a frozen install for nothing. A file holding at least one git entry is written
-as `schema_version: 2` and a file holding none stays at `1`, decided from the
-entries alone, so a project without git sources keeps producing a lockfile
-every release reads, and an older binary meeting a git entry refuses the file
-loudly instead of reading its repository URL as a Galaxy server. Under
+a frozen install for nothing. A file whose highest feature is a git entry is
+written as `schema_version: 2`, decided from the entries alone, so an older
+binary meeting a git entry refuses the file loudly instead of reading its
+repository URL as a Galaxy server. Under
 `--frozen` a git root is checked against the entries locked from its
 repository under its subdir (the root's own directory or an immediate child):
 zero such entries, or a different ref, is a mismatch. The ref is compared as
@@ -1890,8 +2157,9 @@ A url entry is the opposite case and its `sha256` is required:
 The artifact is the origin's own bytes rather than a rebuild, so the digest
 holds on every refetch, and a frozen cache miss re-downloads the URL and
 compares the fresh bytes to it. A file holding a url entry - a collection's
-or a role's - is written as `schema_version: 4`, ranked over the role and
-git schemas by the same content-decides rule. Under `--frozen` a url root needs
+or a role's - and no Galaxy entry is written as `schema_version: 4`, ranked
+over the role and git schemas by the same content-decides rule. Under
+`--frozen` a url root needs
 an entry locked from the same URL, and a `version:` it asserts must equal that
 entry's version exactly: for either kind of source, `--frozen` means that what
 was asked for has not changed.
@@ -1933,11 +2201,11 @@ never be fetched in its place; for a git role `source` is the repository
 and `ref` is the ref as the requirement spelled it. `deps` are the install names
 of the roles the run installed for its meta. No `sha256`, for the reason a
 git entry has none. Roles are sorted by name and each `deps` list sorted, like
-the collections. A file holding at least one role is `schema_version: 3`, one
-holding a git entry and no role stays `2`, one with neither stays `1`, decided
-from the entries alone, so a project without roles keeps producing a
-lockfile every release reads, and an older binary meeting a role refuses the
-file rather than installing the collections and silently skipping the roles.
+the collections. A file holding at least one role and neither a Galaxy nor a
+url entry is `schema_version: 3`, one holding a git entry and no role `2`, and
+one holding no entry at all `1`, decided from the entries alone, so an older
+binary meeting a role refuses the file rather than installing the collections
+and silently skipping the roles.
 Every role field is re-parsed on load rather than trusted - the repository
 through the git URL grammar, the ref through the ref grammar, the commit as
 forty hex digits, the names through the role alphabets - since a lockfile is
@@ -1945,21 +2213,21 @@ repository content. A url role's entry is `type: url` with the tarball URL as it
 source, the origin bytes' `sha256` as its pin (required, where a git or
 Galaxy role's is refused), no ref, commit, galaxy or repository, and the
 version as the label asked for or the sha's first twelve hex digits; a file
-holding one is `schema_version: 4`.
+holding one and no Galaxy collection is `schema_version: 4`.
 
-`lockfile.Compare` is what `lock --frozen` gates on and what `lock --dry-run`
+`lockfile.Compare` is what `lock --check` gates on and what `lock --dry-run`
 reports, and its contract is that `Compare(a, b).Empty()` holds exactly when
 `a.Hash() == b.Hash()`. That holds because it compares every field of an entry
 and of a role entry except the name it keys them by, plus the file-level
 `server`; `schema_version` needs no comparison, since the hash re-derives it
 from the entries. A field added to `Entry`, `RoleEntry` or `File` must
 therefore join those comparisons (and `comparedFieldCount` or
-`comparedRoleFieldCount`), or `lock --frozen` passes a lockfile `lock` would
+`comparedRoleFieldCount`), or `lock --check` passes a lockfile `lock` would
 rewrite. Deps compare as a multiset, ignoring order but not duplicates, to
 match the hash, which sorts them and never deduplicates; a deps-only change is
 drift, because a frozen install rebuilds its install graph from them. `Compare`
 reads a nil file as one with no entries, so a caller tells a missing lockfile
-apart itself - `lock --frozen` fails closed through `LoadRequired`, the dry
+apart itself - `lock --check` fails closed through `LoadRequired`, the dry
 run's baseline reports everything as added - and it passes entry values through
 verbatim, leaving hostile text to the printer to neutralize.
 
@@ -1979,9 +2247,11 @@ command layer reveals the Galaxy and url tokens into fetch's own types
 immediately before construction, the only place either is revealed.
 
 Under `--offline` the shared client is `NewOffline`'s, so an S3 backend handed
-it could never open. The configuration refuses `--offline` beside
-`--s3-bucket` (`ErrS3CacheOffline`, exit `2`) before any client or backend is
-built, rather than letting the pair fail at `Open` as an unreachable backend.
+it could never open. The configuration refuses `--offline` beside an enabled
+S3 cache, whose bucket may come from `--s3-bucket`, its variable or a
+galaxy.toml's `[tool.go-galaxy.s3]` (`ErrS3CacheOffline`, exit `2`), before
+any client or backend is built, rather than letting the pair fail at `Open` as
+an unreachable backend.
 
 A server's `validate_certs=false` builds a second transport with verification
 off, and the dispatcher sends a request there only when its origin is exactly

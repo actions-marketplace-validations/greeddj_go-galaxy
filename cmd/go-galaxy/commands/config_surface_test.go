@@ -66,16 +66,16 @@ func assertConfigField[T comparable](t *testing.T, field string, got, want T) {
 	}
 }
 
-// TestCleanupConfigSurface pins that cleanup, registering only S3Flags and the
-// globals, still builds a Config: unregistered flags read as zero values, safe
-// because cleanup consumes only DryRun, CacheDir and S3Cache.
+// TestCleanupConfigSurface pins that cleanup, registering only its own flag
+// set beside the globals, still builds a Config: unregistered flags read as
+// zero values, safe because cleanup consumes only DryRun, CacheDir and S3Cache.
 func TestCleanupConfigSurface(t *testing.T) {
 	neutralizeAnsibleDiscovery(t)
 	cacheDir := t.TempDir()
 
 	t.Run("local cache", func(t *testing.T) {
 		args := []string{"--cache-dir=" + cacheDir, "--dry-run"}
-		cfg, err := buildConfigFor(t, "cleanup", cliflags.S3Flags(), args)
+		cfg, err := buildConfigFor(t, "cleanup", Cleanup().Flags, args)
 		if err != nil {
 			t.Fatalf("BuildCollectionConfig() error = %v, want nil", err)
 		}
@@ -94,7 +94,7 @@ func TestCleanupConfigSurface(t *testing.T) {
 			"--s3-access-key=k",
 			"--s3-secret-key=s",
 		}
-		cfg, err := buildConfigFor(t, "cleanup", cliflags.S3Flags(), args)
+		cfg, err := buildConfigFor(t, "cleanup", Cleanup().Flags, args)
 		if err != nil {
 			t.Fatalf("BuildCollectionConfig() error = %v, want nil", err)
 		}
@@ -403,4 +403,69 @@ func TestRolesPathEnvAliases(t *testing.T) {
 
 		assertConfigField(t, "RolesPath", aliasCfg(t).RolesPath, pathC)
 	})
+}
+
+// requirementsDiscoveryRow is one working-directory shape for the unset
+// --requirements-file: the files planted there, the path the Config must
+// carry, and whether the both-present warning must be queued.
+type requirementsDiscoveryRow struct {
+	name     string
+	wantPath string
+	files    []string
+	wantWarn bool
+}
+
+// discoveryWarning returns the queued warning naming galaxy.toml, or "" when
+// none, so a row asserts on the discovery line and not on a slice position.
+func discoveryWarning(cfg *config.Config) string {
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "galaxy.toml") {
+			return w
+		}
+	}
+	return ""
+}
+
+// TestRequirementsFileDiscoveryConfigSurface pins that an unset
+// --requirements-file reaches cfg.RequirementsFile through discovery: a
+// regular ./galaxy.toml wins, warning only when ./requirements.yml sits beside it.
+func TestRequirementsFileDiscoveryConfigSurface(t *testing.T) {
+	const bothPresent = "galaxy.toml and requirements.yml are both present in the current directory; " +
+		"using galaxy.toml and ignoring requirements.yml (name one with --requirements-file to choose)"
+	rows := []requirementsDiscoveryRow{
+		{name: "galaxy.toml alone is picked silently", files: []string{"galaxy.toml"}, wantPath: "galaxy.toml"},
+		{name: "both present picks galaxy.toml with a warning", files: []string{"galaxy.toml", "requirements.yml"},
+			wantPath: "galaxy.toml", wantWarn: true},
+		{name: "neither present falls back to requirements.yml", wantPath: "requirements.yml"},
+	}
+
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			neutralizeAnsibleDiscovery(t)
+			for _, name := range row.files {
+				// Each file is valid in its own format: config now decodes a
+				// discovered galaxy.toml for its settings, not only its path.
+				body := "collections: []\n"
+				if name == "galaxy.toml" {
+					body = "[project]\ncollections = []\n"
+				}
+				if err := os.WriteFile(name, []byte(body), galaxyhelpers.FileMod); err != nil {
+					t.Fatalf("write %s: %v", name, err)
+				}
+			}
+
+			cfg, err := buildConfigFor(t, "install", cliflags.CollectionFlags(), nil)
+			if err != nil {
+				t.Fatalf("BuildCollectionConfig() error = %v, want nil", err)
+			}
+			assertConfigField(t, "RequirementsFile", cfg.RequirementsFile, row.wantPath)
+
+			warned := discoveryWarning(cfg)
+			if row.wantWarn {
+				assertConfigField(t, "discovery warning", warned, bothPresent)
+			} else if warned != "" {
+				t.Fatalf("queued a discovery warning %q, want none", warned)
+			}
+		})
+	}
 }
